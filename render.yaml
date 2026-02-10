@@ -3,7 +3,7 @@ services:
     name: gsheets-dashboard
     runtime: node
     plan: starter
-    buildCommand: npm install && npm run build
+    buildCommand: npm install && npm run build && cp -r public .next/standalone/public && cp -r .next/static .next/standalone/.next/static
     startCommand: node .next/standalone/server.js
     envVars:
       - key: NODE_ENV
