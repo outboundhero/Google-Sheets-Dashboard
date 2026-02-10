@@ -1,0 +1,22 @@
+services:
+  - type: web
+    name: gsheets-dashboard
+    runtime: node
+    plan: starter
+    buildCommand: npm install && npm run build
+    startCommand: node .next/standalone/server.js
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: DATA_DIR
+        value: /var/data
+      - key: GOOGLE_CLIENT_EMAIL
+        sync: false
+      - key: GOOGLE_PRIVATE_KEY
+        sync: false
+      - key: GOOGLE_PROJECT_ID
+        sync: false
+    disk:
+      name: dashboard-data
+      mountPath: /var/data
+      sizeGB: 1
