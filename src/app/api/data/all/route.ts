@@ -4,7 +4,7 @@ import { getConfig } from "@/lib/sheets-config";
 
 export async function GET() {
   try {
-    const config = getConfig();
+    const config = await getConfig();
 
     if (config.sheets.length === 0) {
       return NextResponse.json([]);

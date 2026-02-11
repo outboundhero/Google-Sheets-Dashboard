@@ -8,7 +8,7 @@ export async function GET(request: Request) {
     const { searchParams } = new URL(request.url);
     const client = searchParams.get("client") || undefined;
 
-    const config = getConfig();
+    const config = await getConfig();
 
     if (config.sheets.length === 0) {
       return NextResponse.json(

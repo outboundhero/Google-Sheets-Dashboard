@@ -9,7 +9,7 @@ import { getSheetMetadata } from "@/lib/google-sheets";
 
 export async function GET() {
   try {
-    const config = getConfig();
+    const config = await getConfig();
     return NextResponse.json(config.sheets);
   } catch (error) {
     return NextResponse.json(
@@ -43,7 +43,7 @@ export async function POST(request: Request) {
       addedAt: new Date().toISOString(),
     };
 
-    addSheet(sheet);
+    await addSheet(sheet);
     return NextResponse.json(sheet, { status: 201 });
   } catch (error) {
     const message =
@@ -64,7 +64,7 @@ export async function DELETE(request: Request) {
       );
     }
 
-    removeSheet(id);
+    await removeSheet(id);
     return NextResponse.json({ success: true });
   } catch (error) {
     return NextResponse.json(

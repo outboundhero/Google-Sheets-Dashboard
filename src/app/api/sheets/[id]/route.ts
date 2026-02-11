@@ -8,7 +8,7 @@ export async function GET(
 ) {
   try {
     const { id } = await params;
-    const config = getConfig();
+    const config = await getConfig();
     const sheet = config.sheets.find((s) => s.id === id);
 
     if (!sheet) {

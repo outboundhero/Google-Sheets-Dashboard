@@ -5,7 +5,7 @@ import { getConfig } from "@/lib/sheets-config";
 const SCOPES = ["https://www.googleapis.com/auth/spreadsheets.readonly"];
 
 export async function GET() {
-  const config = getConfig();
+  const config = await getConfig();
   if (config.sheets.length === 0) {
     return NextResponse.json({ error: "No sheets tracked" });
   }

@@ -13,7 +13,7 @@ export function useAnalytics(client?: string) {
   const { data, error, isLoading, mutate } = useSWR<DashboardAnalytics>(
     url,
     fetcher,
-    { revalidateOnFocus: false, refreshInterval: 5 * 60 * 1000 }
+    { revalidateOnFocus: false, refreshInterval: 30 * 60 * 1000 }
   );
 
   return {
