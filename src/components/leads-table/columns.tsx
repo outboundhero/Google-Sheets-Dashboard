@@ -94,25 +94,26 @@ export const columns: ColumnDef<Lead>[] = [
     ),
   },
   {
-    accessorKey: "attemptCount",
-    header: ({ column }) => (
-      <SortableHeader column={column} title="Attempts" />
-    ),
+    accessorKey: "notes",
+    header: ({ column }) => <SortableHeader column={column} title="Notes" />,
     cell: ({ row }) => (
-      <div className="text-center">{row.getValue("attemptCount")}</div>
+      <div className="max-w-[200px] truncate text-muted-foreground text-xs">
+        {row.getValue("notes")}
+      </div>
     ),
   },
   {
-    accessorKey: "timeWeGotReply",
+    id: "replyDate",
+    accessorFn: (row) => row.timeWeGotReply || row.replyTime || "",
     header: ({ column }) => (
       <SortableHeader column={column} title="Reply Date" />
     ),
-    cell: ({ row }) => {
-      const val = row.getValue("timeWeGotReply") as string;
+    cell: ({ getValue }) => {
+      const val = getValue() as string;
       if (!val) return null;
       try {
         return (
-          <div className="text-muted-foreground text-xs">
+          <div className="text-muted-foreground text-xs whitespace-nowrap">
             {new Date(val).toLocaleDateString()}
           </div>
         );

@@ -4,6 +4,7 @@ import { useState, useMemo } from "react";
 import {
   ColumnDef,
   ColumnFiltersState,
+  ColumnSizingState,
   SortingState,
   VisibilityState,
   flexRender,
@@ -47,17 +48,20 @@ export function DataTable({ columns, data, hideClientFilter }: DataTableProps) {
   const [sorting, setSorting] = useState<SortingState>([]);
   const [columnFilters, setColumnFilters] = useState<ColumnFiltersState>([]);
   const [columnVisibility, setColumnVisibility] = useState<VisibilityState>({});
+  const [columnSizing, setColumnSizing] = useState<ColumnSizingState>({});
   const [globalFilter, setGlobalFilter] = useState("");
   const [selectedLead, setSelectedLead] = useState<Lead | null>(null);
 
   const table = useReactTable({
     data,
     columns,
-    state: { sorting, columnFilters, columnVisibility, globalFilter },
+    state: { sorting, columnFilters, columnVisibility, columnSizing, globalFilter },
     onSortingChange: setSorting,
     onColumnFiltersChange: setColumnFilters,
     onColumnVisibilityChange: setColumnVisibility,
+    onColumnSizingChange: setColumnSizing,
     onGlobalFilterChange: setGlobalFilter,
+    columnResizeMode: "onChange",
     getCoreRowModel: getCoreRowModel(),
     getFilteredRowModel: getFilteredRowModel(),
     getPaginationRowModel: getPaginationRowModel(),
@@ -186,18 +190,31 @@ export function DataTable({ columns, data, hideClientFilter }: DataTableProps) {
 
       {/* Table */}
       <div className="rounded-md border">
-        <Table>
+        <Table style={{ width: table.getCenterTotalSize() }}>
           <TableHeader>
             {table.getHeaderGroups().map((headerGroup) => (
               <TableRow key={headerGroup.id}>
                 {headerGroup.headers.map((header) => (
-                  <TableHead key={header.id}>
+                  <TableHead
+                    key={header.id}
+                    style={{ width: header.getSize() }}
+                    className="relative"
+                  >
                     {header.isPlaceholder
                       ? null
                       : flexRender(
                           header.column.columnDef.header,
                           header.getContext()
                         )}
+                    {header.column.getCanResize() && (
+                      <div
+                        onMouseDown={header.getResizeHandler()}
+                        onTouchStart={header.getResizeHandler()}
+                        className={`absolute right-0 top-0 h-full w-1 cursor-col-resize select-none touch-none bg-transparent hover:bg-primary/50 ${
+                          header.column.getIsResizing() ? "bg-primary" : ""
+                        }`}
+                      />
+                    )}
                   </TableHead>
                 ))}
               </TableRow>
@@ -212,7 +229,7 @@ export function DataTable({ columns, data, hideClientFilter }: DataTableProps) {
                   onClick={() => setSelectedLead(row.original)}
                 >
                   {row.getVisibleCells().map((cell) => (
-                    <TableCell key={cell.id}>
+                    <TableCell key={cell.id} style={{ width: cell.column.getSize() }}>
                       {flexRender(
                         cell.column.columnDef.cell,
                         cell.getContext()
