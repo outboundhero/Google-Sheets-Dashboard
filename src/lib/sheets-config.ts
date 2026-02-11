@@ -1,18 +1,25 @@
-import { readFileSync, writeFileSync, mkdirSync, existsSync } from "fs";
+import { readFileSync, writeFileSync } from "fs";
 import { join } from "path";
 import type { SheetConfig, TrackedSheet } from "@/types/sheet";
 
-// Use DATA_DIR env var for persistent storage on Render, fallback to project root
-const DATA_DIR = process.env.DATA_DIR || process.cwd();
-const CONFIG_PATH = join(DATA_DIR, "sheets-config.json");
+const CONFIG_PATH = join(process.cwd(), "sheets-config.json");
+const REDIS_KEY = "sheets-config";
 
-function ensureDataDir(): void {
-  if (!existsSync(DATA_DIR)) {
-    mkdirSync(DATA_DIR, { recursive: true });
+// Lazy-init Redis client only when env vars are present (Vercel production)
+// Supports both Vercel KV (KV_REST_API_*) and Upstash Redis (UPSTASH_REDIS_REST_*)
+function getRedis() {
+  const url = process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_REST_URL;
+  const token = process.env.KV_REST_API_TOKEN || process.env.UPSTASH_REDIS_REST_TOKEN;
+  if (!url || !token) {
+    return null;
   }
+  const { Redis } = require("@upstash/redis") as typeof import("@upstash/redis");
+  return new Redis({ url, token });
 }
 
-export function getConfig(): SheetConfig {
+// --- File-based storage (local dev) ---
+
+function getConfigFromFile(): SheetConfig {
   try {
     const raw = readFileSync(CONFIG_PATH, "utf-8");
     return JSON.parse(raw) as SheetConfig;
@@ -21,33 +28,50 @@ export function getConfig(): SheetConfig {
   }
 }
 
-export function saveConfig(config: SheetConfig): void {
-  ensureDataDir();
+function saveConfigToFile(config: SheetConfig): void {
   writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2), "utf-8");
 }
 
-export function addSheet(sheet: TrackedSheet): SheetConfig {
-  const config = getConfig();
+// --- Public async API ---
+
+export async function getConfig(): Promise<SheetConfig> {
+  const redis = getRedis();
+  if (redis) {
+    const data = await redis.get<SheetConfig>(REDIS_KEY);
+    return data || { sheets: [] };
+  }
+  return getConfigFromFile();
+}
+
+export async function saveConfig(config: SheetConfig): Promise<void> {
+  const redis = getRedis();
+  if (redis) {
+    await redis.set(REDIS_KEY, config);
+  } else {
+    saveConfigToFile(config);
+  }
+}
+
+export async function addSheet(sheet: TrackedSheet): Promise<SheetConfig> {
+  const config = await getConfig();
   if (config.sheets.some((s) => s.id === sheet.id)) {
     throw new Error("Sheet already tracked");
   }
   config.sheets.push(sheet);
-  saveConfig(config);
+  await saveConfig(config);
   return config;
 }
 
-export function removeSheet(sheetId: string): SheetConfig {
-  const config = getConfig();
+export async function removeSheet(sheetId: string): Promise<SheetConfig> {
+  const config = await getConfig();
   config.sheets = config.sheets.filter((s) => s.id !== sheetId);
-  saveConfig(config);
+  await saveConfig(config);
   return config;
 }
 
 export function extractSheetId(input: string): string {
-  // Accept a full URL or just the ID
   const match = input.match(/\/spreadsheets\/d\/([a-zA-Z0-9_-]+)/);
   if (match) return match[1];
-  // If it looks like a bare ID (no slashes)
   if (/^[a-zA-Z0-9_-]+$/.test(input.trim())) return input.trim();
   throw new Error("Could not extract sheet ID from input");
 }
