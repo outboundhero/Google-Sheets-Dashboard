@@ -21,7 +21,7 @@ function computeTimeSeries(leads: Lead[]): { date: string; count: number }[] {
   const byMonth: Record<string, number> = {};
 
   for (const lead of leads) {
-    const d = parseDate(lead.timeWeGotReply);
+    const d = parseDate(lead.timeWeGotReply) || parseDate(lead.replyTime);
     if (!d) continue;
     const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
     byMonth[key] = (byMonth[key] || 0) + 1;

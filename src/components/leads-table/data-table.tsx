@@ -210,10 +210,12 @@ export function DataTable({ columns, data, hideClientFilter }: DataTableProps) {
                       <div
                         onMouseDown={header.getResizeHandler()}
                         onTouchStart={header.getResizeHandler()}
-                        className={`absolute right-0 top-0 h-full w-1 cursor-col-resize select-none touch-none bg-transparent hover:bg-primary/50 ${
-                          header.column.getIsResizing() ? "bg-primary" : ""
+                        className={`absolute right-0 top-0 h-full w-4 -mr-2 cursor-col-resize select-none touch-none flex items-center justify-center ${
+                          header.column.getIsResizing() ? "text-primary" : "text-muted-foreground/40 hover:text-muted-foreground"
                         }`}
-                      />
+                      >
+                        <div className="h-4 w-px bg-current" />
+                      </div>
                     )}
                   </TableHead>
                 ))}
