@@ -15,7 +15,9 @@ export async function GET(
       return NextResponse.json({ error: "Sheet not found" }, { status: 404 });
     }
 
-    const leads = await getLeadsFromSheet(id, sheet.sheetName);
+    // Fallback to "Leads" for existing sheets without sheetName
+    const sheetName = sheet.sheetName || "Leads";
+    const leads = await getLeadsFromSheet(id, sheetName);
     return NextResponse.json({ sheet, leads });
   } catch (error) {
     const message =

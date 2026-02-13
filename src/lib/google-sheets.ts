@@ -175,7 +175,7 @@ export async function getLeadsFromSheet(
 }
 
 export async function getAllLeads(
-  sheets: { id: string; name: string; sheetName: string }[]
+  sheets: { id: string; name: string; sheetName?: string }[]
 ): Promise<Lead[]> {
   const cacheKey = "all-leads";
   const cached = cache.get<Lead[]>(cacheKey);
@@ -188,7 +188,7 @@ export async function getAllLeads(
   for (let i = 0; i < sheets.length; i += batchSize) {
     const batch = sheets.slice(i, i + batchSize);
     const results = await Promise.allSettled(
-      batch.map((s) => getLeadsFromSheet(s.id, s.sheetName))
+      batch.map((s) => getLeadsFromSheet(s.id, s.sheetName || "Leads"))
     );
     for (const result of results) {
       if (result.status === "fulfilled") {
