@@ -50,7 +50,11 @@ const HEADER_TO_FIELD: Record<string, keyof Lead> = {
   "google maps": "googleMapsUrl",
   "phone": "phone",
   "current lead category": "currentCategory",
+  "current category": "currentCategory",
+  "category": "currentCategory",
   "client tag": "clientTag",
+  "client": "clientTag",
+  "client name": "clientTag",
   "sender email": "senderEmail",
   "reply we got": "replyContent",
   "prospect cc email": "prospectCcEmail",
@@ -158,7 +162,11 @@ export async function getLeadsFromSheet(
   const columnMap = buildColumnMap(headers);
   return rows
     .map((row) => mapRowToLead(row, columnMap, spreadsheetId, sheetName))
-    .filter((lead) => lead.email && lead.email.includes("@"));
+    .filter((lead) =>
+      lead.email &&
+      lead.email.includes("@") &&
+      lead.duplicateCheck.trim().toLowerCase() === "new"
+    );
 }
 
 export async function getAllLeads(

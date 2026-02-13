@@ -8,6 +8,10 @@ export interface DashboardAnalytics {
   qualityLeadPercentage: number;
   meetingReadyLeads: number;
   interestedLeads: number;
+  meetingReadyLast24h: number;
+  meetingReadyWithoutStatus: number;
+  meetingReadyWithoutStatusTotal: number;
+  clientsWithoutRecentMeetingReady: string[];
   leadsByClient: { client: string; count: number }[];
   leadsByStatus: { status: string; count: number }[];
   leadsByCategory: { category: string; count: number }[];

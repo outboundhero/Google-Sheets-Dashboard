@@ -7,6 +7,8 @@ import {
   CalendarCheck,
   Sparkles,
   RefreshCw,
+  Clock,
+  AlertTriangle,
 } from "lucide-react";
 import { useAnalytics } from "@/lib/hooks/use-analytics";
 import { useSheets } from "@/lib/hooks/use-sheets";
@@ -125,6 +127,7 @@ export default function DashboardPage() {
         <StatCard
           title="Meeting-Ready"
           value={analytics.meetingReadyLeads.toLocaleString()}
+          subtitle={`${analytics.meetingReadyLast24h} in last 24h`}
           icon={CalendarCheck}
         />
         <StatCard
@@ -132,6 +135,30 @@ export default function DashboardPage() {
           value={analytics.interestedLeads.toLocaleString()}
           icon={Sparkles}
         />
+      </div>
+
+      {/* Additional Metrics */}
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
+        <StatCard
+          title="Meeting-Ready (24h)"
+          value={analytics.meetingReadyLast24h.toLocaleString()}
+          subtitle="Delivered in past 24 hours (PST)"
+          icon={Clock}
+        />
+        <StatCard
+          title="Missing Status"
+          value={`${analytics.meetingReadyWithoutStatus}/${analytics.meetingReadyWithoutStatusTotal}`}
+          subtitle="Meeting-ready leads without status"
+          icon={AlertTriangle}
+        />
+        {analytics.clientsWithoutRecentMeetingReady.length > 0 && (
+          <StatCard
+            title="Stale Clients"
+            value={analytics.clientsWithoutRecentMeetingReady.length.toString()}
+            subtitle={`No meeting-ready for 2+ days: ${analytics.clientsWithoutRecentMeetingReady.join(", ")}`}
+            icon={AlertTriangle}
+          />
+        )}
       </div>
 
       {/* Charts */}

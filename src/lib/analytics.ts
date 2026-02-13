@@ -117,8 +117,15 @@ export function computeAnalytics(
     .sort((a, b) => b.count - a.count);
 
   const byStatus = groupBy(withNormalized, (l) => l._status);
+  const VALID_STATUSES = [
+    "Quality Lead",
+    "Not a Quality Lead",
+    "Lead not Received",
+    "Duplicated",
+    "Undetermined",
+  ];
   const leadsByStatus = Object.entries(byStatus)
-    .filter(([status]) => status !== "" && status !== "Unknown")
+    .filter(([status]) => VALID_STATUSES.includes(status))
     .map(([status, items]) => ({ status, count: items.length }))
     .sort((a, b) => b.count - a.count);
 
@@ -147,6 +154,47 @@ export function computeAnalytics(
     .sort((a, b) => b.totalLeads - a.totalLeads)
     .slice(0, 10);
 
+  // Meeting-ready leads delivered in past 24 hours (PST)
+  const now = new Date();
+  const pstOffset = -8 * 60; // PST is UTC-8
+  const nowPst = new Date(now.getTime() + (pstOffset + now.getTimezoneOffset()) * 60000);
+  const twentyFourHoursAgoPst = new Date(nowPst.getTime() - 24 * 60 * 60 * 1000);
+
+  const meetingReadyLast24h = filtered.filter((l) => {
+    if (!l.currentCategory.toLowerCase().includes("meeting")) return false;
+    const replyDate = parseDate(l.timeWeGotReply) || parseDate(l.replyTime);
+    if (!replyDate) return false;
+    const replyPst = new Date(replyDate.getTime() + (pstOffset + replyDate.getTimezoneOffset()) * 60000);
+    return replyPst >= twentyFourHoursAgoPst;
+  }).length;
+
+  // Meeting-ready leads without a status
+  const meetingReadyNoStatus = filtered.filter(
+    (l) =>
+      l.currentCategory.toLowerCase().includes("meeting") &&
+      !l.status.trim()
+  );
+  const meetingReadyWithoutStatus = meetingReadyNoStatus.length;
+  const meetingReadyWithoutStatusTotal = meetingReadyLeads;
+
+  // Clients without meeting-ready leads for 2+ days (PST)
+  const twoDaysAgoPst = new Date(nowPst.getTime() - 2 * 24 * 60 * 60 * 1000);
+  const clientsWithoutRecentMeetingReady: string[] = [];
+
+  for (const [client, clientLeads] of Object.entries(byClient)) {
+    if (client === "Unknown" || client === "") continue;
+    const recentMeetingReady = clientLeads.some((l) => {
+      if (!l.currentCategory.toLowerCase().includes("meeting")) return false;
+      const replyDate = parseDate(l.timeWeGotReply) || parseDate(l.replyTime);
+      if (!replyDate) return false;
+      const replyPst = new Date(replyDate.getTime() + (pstOffset + replyDate.getTimezoneOffset()) * 60000);
+      return replyPst >= twoDaysAgoPst;
+    });
+    if (!recentMeetingReady) {
+      clientsWithoutRecentMeetingReady.push(client);
+    }
+  }
+
   return {
     totalLeads,
     qualityLeads,
@@ -158,6 +206,10 @@ export function computeAnalytics(
       totalLeads > 0 ? Math.round((qualityLeads / totalLeads) * 100) : 0,
     meetingReadyLeads,
     interestedLeads,
+    meetingReadyLast24h,
+    meetingReadyWithoutStatus,
+    meetingReadyWithoutStatusTotal,
+    clientsWithoutRecentMeetingReady,
     leadsByClient,
     leadsByStatus,
     leadsByCategory,

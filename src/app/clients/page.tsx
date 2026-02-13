@@ -36,13 +36,22 @@ export default function ClientsPage() {
       }
     }
 
-    // Aggregate leads by clientTag (skip leads with no tag)
+    // Aggregate leads by clientTag (skip leads with no tag or invalid tags)
+    // Filter out common category values that might be in clientTag field
+    const invalidClientTags = [
+      "meeting-ready", "meeting ready", "interested", "not interested",
+      "lead", "quality lead", "not a quality lead", "undetermined",
+      "duplicated", "duplicate", "lead not received", ""
+    ];
+
     for (const lead of leads) {
-      if (!lead.clientTag) continue;
-      let entry = map.get(lead.clientTag);
+      const tag = lead.clientTag?.trim() || "";
+      if (!tag || invalidClientTags.includes(tag.toLowerCase())) continue;
+
+      let entry = map.get(tag);
       if (!entry) {
-        entry = { clientTag: lead.clientTag, totalLeads: 0, qualityLeads: 0 };
-        map.set(lead.clientTag, entry);
+        entry = { clientTag: tag, totalLeads: 0, qualityLeads: 0 };
+        map.set(tag, entry);
       }
       entry.totalLeads++;
       const status = lead.status.trim().toLowerCase();

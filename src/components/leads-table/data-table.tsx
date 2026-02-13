@@ -4,6 +4,7 @@ import { useState, useMemo } from "react";
 import {
   ColumnDef,
   ColumnFiltersState,
+  ColumnOrderState,
   ColumnSizingState,
   SortingState,
   VisibilityState,
@@ -15,9 +16,27 @@ import {
   getFacetedRowModel,
   getFacetedUniqueValues,
   useReactTable,
+  Header,
 } from "@tanstack/react-table";
-import { Search, SlidersHorizontal, X } from "lucide-react";
+import { Search, SlidersHorizontal, X, GripVertical } from "lucide-react";
 import type { Lead } from "@/types/lead";
+import {
+  DndContext,
+  DragEndEvent,
+  KeyboardSensor,
+  MouseSensor,
+  TouchSensor,
+  closestCenter,
+  useSensor,
+  useSensors,
+} from "@dnd-kit/core";
+import {
+  SortableContext,
+  arrayMove,
+  horizontalListSortingStrategy,
+  useSortable,
+} from "@dnd-kit/sortable";
+import { CSS } from "@dnd-kit/utilities";
 import {
   Table,
   TableBody,
@@ -44,22 +63,75 @@ interface DataTableProps {
   hideClientFilter?: boolean;
 }
 
+function DraggableTableHead({
+  header,
+}: {
+  header: Header<Lead, unknown>;
+}) {
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
+    id: header.column.id,
+  });
+
+  const style = {
+    transform: CSS.Transform.toString(transform),
+    transition,
+    width: header.getSize(),
+    opacity: isDragging ? 0.5 : 1,
+  };
+
+  return (
+    <TableHead ref={setNodeRef} style={style} className="relative">
+      <div className="flex items-center gap-1">
+        <button
+          {...attributes}
+          {...listeners}
+          className="cursor-grab active:cursor-grabbing p-1 hover:bg-muted rounded"
+        >
+          <GripVertical className="h-3 w-3 text-muted-foreground" />
+        </button>
+        <div className="flex-1">
+          {header.isPlaceholder
+            ? null
+            : flexRender(header.column.columnDef.header, header.getContext())}
+        </div>
+      </div>
+      {header.column.getCanResize() && (
+        <div
+          onMouseDown={header.getResizeHandler()}
+          onTouchStart={header.getResizeHandler()}
+          className={`absolute right-0 top-0 h-full w-4 -mr-2 cursor-col-resize select-none touch-none flex items-center justify-center ${
+            header.column.getIsResizing()
+              ? "text-primary"
+              : "text-muted-foreground/40 hover:text-muted-foreground"
+          }`}
+        >
+          <div className="h-4 w-px bg-current" />
+        </div>
+      )}
+    </TableHead>
+  );
+}
+
 export function DataTable({ columns, data, hideClientFilter }: DataTableProps) {
   const [sorting, setSorting] = useState<SortingState>([]);
   const [columnFilters, setColumnFilters] = useState<ColumnFiltersState>([]);
   const [columnVisibility, setColumnVisibility] = useState<VisibilityState>({});
   const [columnSizing, setColumnSizing] = useState<ColumnSizingState>({});
+  const [columnOrder, setColumnOrder] = useState<ColumnOrderState>(
+    columns.map((c) => (typeof c.id === "string" ? c.id : (c as { accessorKey?: string }).accessorKey || ""))
+  );
   const [globalFilter, setGlobalFilter] = useState("");
   const [selectedLead, setSelectedLead] = useState<Lead | null>(null);
 
   const table = useReactTable({
     data,
     columns,
-    state: { sorting, columnFilters, columnVisibility, columnSizing, globalFilter },
+    state: { sorting, columnFilters, columnVisibility, columnSizing, columnOrder, globalFilter },
     onSortingChange: setSorting,
     onColumnFiltersChange: setColumnFilters,
     onColumnVisibilityChange: setColumnVisibility,
     onColumnSizingChange: setColumnSizing,
+    onColumnOrderChange: setColumnOrder,
     onGlobalFilterChange: setGlobalFilter,
     columnResizeMode: "onChange",
     getCoreRowModel: getCoreRowModel(),
@@ -106,6 +178,24 @@ export function DataTable({ columns, data, hideClientFilter }: DataTableProps) {
 
   const isFiltered =
     columnFilters.length > 0 || globalFilter.length > 0;
+
+  // DnD sensors
+  const sensors = useSensors(
+    useSensor(MouseSensor, {}),
+    useSensor(TouchSensor, {}),
+    useSensor(KeyboardSensor, {})
+  );
+
+  function handleDragEnd(event: DragEndEvent) {
+    const { active, over } = event;
+    if (over && active.id !== over.id) {
+      setColumnOrder((columnOrder) => {
+        const oldIndex = columnOrder.indexOf(active.id as string);
+        const newIndex = columnOrder.indexOf(over.id as string);
+        return arrayMove(columnOrder, oldIndex, newIndex);
+      });
+    }
+  }
 
   return (
     <div className="space-y-4">
@@ -189,39 +279,27 @@ export function DataTable({ columns, data, hideClientFilter }: DataTableProps) {
       </div>
 
       {/* Table */}
-      <div className="rounded-md border">
-        <Table style={{ width: table.getCenterTotalSize() }}>
-          <TableHeader>
-            {table.getHeaderGroups().map((headerGroup) => (
-              <TableRow key={headerGroup.id}>
-                {headerGroup.headers.map((header) => (
-                  <TableHead
-                    key={header.id}
-                    style={{ width: header.getSize() }}
-                    className="relative"
+      <DndContext
+        sensors={sensors}
+        collisionDetection={closestCenter}
+        onDragEnd={handleDragEnd}
+      >
+        <div className="rounded-md border">
+          <Table style={{ width: table.getCenterTotalSize() }}>
+            <TableHeader>
+              {table.getHeaderGroups().map((headerGroup) => (
+                <TableRow key={headerGroup.id}>
+                  <SortableContext
+                    items={headerGroup.headers.map((h) => h.column.id)}
+                    strategy={horizontalListSortingStrategy}
                   >
-                    {header.isPlaceholder
-                      ? null
-                      : flexRender(
-                          header.column.columnDef.header,
-                          header.getContext()
-                        )}
-                    {header.column.getCanResize() && (
-                      <div
-                        onMouseDown={header.getResizeHandler()}
-                        onTouchStart={header.getResizeHandler()}
-                        className={`absolute right-0 top-0 h-full w-4 -mr-2 cursor-col-resize select-none touch-none flex items-center justify-center ${
-                          header.column.getIsResizing() ? "text-primary" : "text-muted-foreground/40 hover:text-muted-foreground"
-                        }`}
-                      >
-                        <div className="h-4 w-px bg-current" />
-                      </div>
-                    )}
-                  </TableHead>
-                ))}
-              </TableRow>
-            ))}
-          </TableHeader>
+                    {headerGroup.headers.map((header) => (
+                      <DraggableTableHead key={header.id} header={header} />
+                    ))}
+                  </SortableContext>
+                </TableRow>
+              ))}
+            </TableHeader>
           <TableBody>
             {table.getRowModel().rows?.length ? (
               table.getRowModel().rows.map((row) => (
@@ -253,6 +331,7 @@ export function DataTable({ columns, data, hideClientFilter }: DataTableProps) {
           </TableBody>
         </Table>
       </div>
+      </DndContext>
 
       <DataTablePagination table={table} />
 
