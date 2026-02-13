@@ -112,7 +112,7 @@ export function computeAnalytics(
   // Group by clientTag — this merges multiple sheets for the same client
   const byClient = groupBy(filtered, (l) => l.clientTag);
   const leadsByClient = Object.entries(byClient)
-    .filter(([client]) => client !== "Unknown" && client !== "")
+    .filter(([client]) => client !== "Unknown" && client !== "" && !client.includes("@"))
     .map(([client, items]) => ({ client, count: items.length }))
     .sort((a, b) => b.count - a.count);
 
@@ -151,8 +151,8 @@ export function computeAnalytics(
         percentage: count > 0 ? Math.round((quality / count) * 100) : 0,
       };
     })
-    .sort((a, b) => b.totalLeads - a.totalLeads)
-    .slice(0, 10);
+    .filter((c) => !c.client.includes("@")) // Filter out email addresses
+    .sort((a, b) => b.totalLeads - a.totalLeads);
 
   // Meeting-ready leads delivered in past 24 hours (PST)
   const now = new Date();

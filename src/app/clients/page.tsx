@@ -27,9 +27,13 @@ export default function ClientsPage() {
 
     // Initialize from sheets so we see clients even with 0 leads
     for (const sheet of sheets) {
-      if (!map.has(sheet.clientTag)) {
-        map.set(sheet.clientTag, {
-          clientTag: sheet.clientTag,
+      const tag = sheet.clientTag?.trim() || "";
+      // Skip emails and invalid tags
+      if (!tag || tag.includes("@")) continue;
+
+      if (!map.has(tag)) {
+        map.set(tag, {
+          clientTag: tag,
           totalLeads: 0,
           qualityLeads: 0,
         });
@@ -46,7 +50,11 @@ export default function ClientsPage() {
 
     for (const lead of leads) {
       const tag = lead.clientTag?.trim() || "";
-      if (!tag || invalidClientTags.includes(tag.toLowerCase())) continue;
+
+      // Skip if empty, invalid, or looks like an email address
+      if (!tag || invalidClientTags.includes(tag.toLowerCase()) || tag.includes("@")) {
+        continue;
+      }
 
       let entry = map.get(tag);
       if (!entry) {
