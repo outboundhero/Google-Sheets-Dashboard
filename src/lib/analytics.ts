@@ -109,10 +109,33 @@ export function computeAnalytics(
     (l) => l.currentCategory.toLowerCase() === "interested"
   ).length;
 
+  // Helper to check if a client tag is valid
+  const isValidClientTag = (tag: string): boolean => {
+    const lower = tag.toLowerCase().trim();
+    if (!lower || lower === "unknown") return false;
+    if (lower.includes("@")) return false;
+
+    const invalidPatterns = [
+      "meeting-ready", "meeting ready", "meeting",
+      "interested", "not interested",
+      "quality lead", "not a quality lead", "undetermined",
+      "duplicated", "duplicate", "lead not received"
+    ];
+
+    if (lower === "lead") return false;
+
+    return !invalidPatterns.some(pattern => {
+      if (pattern === "meeting") {
+        return lower === "meeting" || lower.startsWith("meeting-") || lower.startsWith("meeting ");
+      }
+      return lower.includes(pattern);
+    });
+  };
+
   // Group by clientTag — this merges multiple sheets for the same client
   const byClient = groupBy(filtered, (l) => l.clientTag);
   const leadsByClient = Object.entries(byClient)
-    .filter(([client]) => client !== "Unknown" && client !== "" && !client.includes("@"))
+    .filter(([client]) => isValidClientTag(client))
     .map(([client, items]) => ({ client, count: items.length }))
     .sort((a, b) => b.count - a.count);
 
@@ -151,7 +174,7 @@ export function computeAnalytics(
         percentage: count > 0 ? Math.round((quality / count) * 100) : 0,
       };
     })
-    .filter((c) => !c.client.includes("@")) // Filter out email addresses
+    .filter((c) => isValidClientTag(c.client))
     .sort((a, b) => b.totalLeads - a.totalLeads);
 
   // Meeting-ready leads delivered in past 24 hours (PST)
@@ -181,19 +204,12 @@ export function computeAnalytics(
   const fourDaysAgoPst = new Date(nowPst.getTime() - 4 * 24 * 60 * 60 * 1000);
   const clientsWithoutRecentMeetingReady: string[] = [];
 
-  // Invalid client tags to filter out
-  const invalidClientTags = [
-    "meeting-ready", "meeting ready", "meeting-ready lead",
-    "interested", "not interested",
-    "lead", "quality lead", "not a quality lead", "undetermined",
-    "duplicated", "duplicate", "lead not received"
-  ];
-
   for (const [client, clientLeads] of Object.entries(byClient)) {
-    if (client === "Unknown" || client === "" || client.includes("@") ||
-        invalidClientTags.some(invalid => client.toLowerCase() === invalid)) {
+    // Skip invalid client tags
+    if (!isValidClientTag(client)) {
       continue;
     }
+
     const recentMeetingReady = clientLeads.some((l) => {
       if (!l.currentCategory.toLowerCase().includes("meeting")) return false;
       const replyDate = parseDate(l.timeWeGotReply) || parseDate(l.replyTime);

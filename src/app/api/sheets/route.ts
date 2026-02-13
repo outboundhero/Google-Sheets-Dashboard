@@ -22,7 +22,11 @@ export async function GET() {
 export async function POST(request: Request) {
   try {
     const body = await request.json();
-    const { url, clientTag } = body as { url: string; clientTag: string };
+    const { url, clientTag, sheetName } = body as {
+      url: string;
+      clientTag: string;
+      sheetName?: string;
+    };
 
     if (!url || !clientTag) {
       return NextResponse.json(
@@ -36,10 +40,28 @@ export async function POST(request: Request) {
     // Verify access by fetching metadata
     const metadata = await getSheetMetadata(sheetId);
 
+    // If no sheet name provided, return available sheets for selection
+    if (!sheetName) {
+      return NextResponse.json({
+        sheetId,
+        title: metadata.title,
+        availableSheets: metadata.sheetNames,
+      });
+    }
+
+    // Validate that the selected sheet name exists
+    if (!metadata.sheetNames.includes(sheetName)) {
+      return NextResponse.json(
+        { error: "Selected sheet name not found in spreadsheet" },
+        { status: 400 }
+      );
+    }
+
     const sheet = {
       id: sheetId,
       name: metadata.title,
       clientTag,
+      sheetName,
       addedAt: new Date().toISOString(),
     };
 

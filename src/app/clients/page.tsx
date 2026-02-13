@@ -15,6 +15,33 @@ export default function ClientsPage() {
   const [search, setSearch] = useState("");
 
   const clientStats = useMemo(() => {
+    // Invalid patterns - check if client tag contains or equals these
+    const invalidPatterns = [
+      "meeting-ready", "meeting ready", "meeting",
+      "interested", "not interested",
+      "quality lead", "not a quality lead", "undetermined",
+      "duplicated", "duplicate", "lead not received"
+    ];
+
+    // Helper to check if a tag is invalid
+    const isInvalidTag = (tag: string): boolean => {
+      const lower = tag.toLowerCase().trim();
+      if (!lower) return true;
+      if (lower.includes("@")) return true;
+
+      // Check if tag is exactly "lead" or contains any invalid pattern
+      if (lower === "lead") return true;
+
+      // Check if tag contains any invalid pattern
+      return invalidPatterns.some(pattern => {
+        // For "meeting", only invalid if it's the whole word or at the start
+        if (pattern === "meeting") {
+          return lower === "meeting" || lower.startsWith("meeting-") || lower.startsWith("meeting ");
+        }
+        return lower.includes(pattern);
+      });
+    };
+
     // Group by clientTag — merges multiple sheets for the same client
     const map = new Map<
       string,
@@ -36,8 +63,8 @@ export default function ClientsPage() {
     // Initialize from sheets so we see clients even with 0 leads
     for (const sheet of sheets) {
       const tag = sheet.clientTag?.trim() || "";
-      // Skip emails and invalid tags
-      if (!tag || tag.includes("@")) continue;
+      // Skip invalid tags
+      if (isInvalidTag(tag)) continue;
 
       if (!map.has(tag)) {
         map.set(tag, {
@@ -50,14 +77,6 @@ export default function ClientsPage() {
       }
     }
 
-    // Aggregate leads by clientTag (skip leads with no tag or invalid tags)
-    // Filter out common category values that might be in clientTag field
-    const invalidClientTags = [
-      "meeting-ready", "meeting ready", "interested", "not interested",
-      "lead", "quality lead", "not a quality lead", "undetermined",
-      "duplicated", "duplicate", "lead not received", ""
-    ];
-
     // Helper to parse dates
     const parseDate = (dateStr: string): Date | null => {
       if (!dateStr) return null;
@@ -68,8 +87,8 @@ export default function ClientsPage() {
     for (const lead of leads) {
       const tag = lead.clientTag?.trim() || "";
 
-      // Skip if empty, invalid, or looks like an email address
-      if (!tag || invalidClientTags.includes(tag.toLowerCase()) || tag.includes("@")) {
+      // Skip if invalid tag
+      if (isInvalidTag(tag)) {
         continue;
       }
 

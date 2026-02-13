@@ -1,6 +1,5 @@
 import { google, sheets_v4 } from "googleapis";
 import type { Lead, LeadStatus } from "@/types/lead";
-import { SHEET_TAB_NAME } from "./constants";
 import { cache } from "./cache";
 
 const SCOPES = ["https://www.googleapis.com/auth/spreadsheets.readonly"];
@@ -77,8 +76,8 @@ interface SheetData {
   rows: string[][];
 }
 
-async function getSheetData(spreadsheetId: string): Promise<SheetData> {
-  const cacheKey = `sheet-data:${spreadsheetId}`;
+async function getSheetData(spreadsheetId: string, sheetName: string): Promise<SheetData> {
+  const cacheKey = `sheet-data:${spreadsheetId}:${sheetName}`;
   const cached = cache.get<SheetData>(cacheKey);
   if (cached) return cached;
 
@@ -87,7 +86,7 @@ async function getSheetData(spreadsheetId: string): Promise<SheetData> {
   // Fetch header row + all data rows
   const response = await sheets.spreadsheets.values.get({
     spreadsheetId,
-    range: `${SHEET_TAB_NAME}!A1:AZ`,
+    range: `${sheetName}!A1:AZ`,
   });
 
   const allRows = response.data.values || [];
@@ -158,7 +157,7 @@ export async function getLeadsFromSheet(
   spreadsheetId: string,
   sheetName: string
 ): Promise<Lead[]> {
-  const { headers, rows } = await getSheetData(spreadsheetId);
+  const { headers, rows } = await getSheetData(spreadsheetId, sheetName);
   const columnMap = buildColumnMap(headers);
   return rows
     .map((row) => mapRowToLead(row, columnMap, spreadsheetId, sheetName))
@@ -176,7 +175,7 @@ export async function getLeadsFromSheet(
 }
 
 export async function getAllLeads(
-  sheets: { id: string; name: string }[]
+  sheets: { id: string; name: string; sheetName: string }[]
 ): Promise<Lead[]> {
   const cacheKey = "all-leads";
   const cached = cache.get<Lead[]>(cacheKey);
@@ -189,7 +188,7 @@ export async function getAllLeads(
   for (let i = 0; i < sheets.length; i += batchSize) {
     const batch = sheets.slice(i, i + batchSize);
     const results = await Promise.allSettled(
-      batch.map((s) => getLeadsFromSheet(s.id, s.name))
+      batch.map((s) => getLeadsFromSheet(s.id, s.sheetName))
     );
     for (const result of results) {
       if (result.status === "fulfilled") {
