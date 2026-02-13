@@ -162,11 +162,17 @@ export async function getLeadsFromSheet(
   const columnMap = buildColumnMap(headers);
   return rows
     .map((row) => mapRowToLead(row, columnMap, spreadsheetId, sheetName))
-    .filter((lead) =>
-      lead.email &&
-      lead.email.includes("@") &&
-      lead.duplicateCheck.trim().toLowerCase() === "new"
-    );
+    .filter((lead) => {
+      // Must have valid email
+      if (!lead.email || !lead.email.includes("@")) return false;
+
+      // Filter by duplicate check - only show "New" or empty/missing
+      const dupCheck = (lead.duplicateCheck || "").trim().toLowerCase();
+      // If duplicate check exists and is NOT "new", exclude it
+      if (dupCheck && dupCheck !== "new") return false;
+
+      return true;
+    });
 }
 
 export async function getAllLeads(
