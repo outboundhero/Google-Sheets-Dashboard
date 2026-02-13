@@ -138,7 +138,7 @@ export default function DashboardPage() {
       </div>
 
       {/* Additional Metrics */}
-      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
         <StatCard
           title="Meeting-Ready (24h)"
           value={analytics.meetingReadyLast24h.toLocaleString()}
@@ -151,14 +151,6 @@ export default function DashboardPage() {
           subtitle="Meeting-ready leads without status"
           icon={AlertTriangle}
         />
-        {analytics.clientsWithoutRecentMeetingReady.length > 0 && (
-          <StatCard
-            title="Stale Clients"
-            value={analytics.clientsWithoutRecentMeetingReady.length.toString()}
-            subtitle={`No meeting-ready for 2+ days: ${analytics.clientsWithoutRecentMeetingReady.join(", ")}`}
-            icon={AlertTriangle}
-          />
-        )}
       </div>
 
       {/* Charts */}
@@ -166,6 +158,30 @@ export default function DashboardPage() {
         <LeadsByStatusChart data={analytics.leadsByStatus} />
         <LeadsOverTimeChart data={analytics.leadsOverTime} />
       </div>
+
+      {/* Stale Clients Alert */}
+      {analytics.clientsWithoutRecentMeetingReady.length > 0 && (
+        <div className="rounded-lg border border-amber-200 dark:border-amber-900 bg-amber-50 dark:bg-amber-950/20 p-4">
+          <div className="flex items-start gap-3">
+            <AlertTriangle className="h-5 w-5 text-amber-600 dark:text-amber-500 mt-0.5 shrink-0" />
+            <div className="flex-1 space-y-2">
+              <h3 className="font-semibold text-amber-900 dark:text-amber-100">
+                Clients without meeting-ready leads for the past 4 days
+              </h3>
+              <div className="flex flex-wrap gap-2">
+                {analytics.clientsWithoutRecentMeetingReady.map((client) => (
+                  <span
+                    key={client}
+                    className="inline-flex items-center rounded-md bg-amber-100 dark:bg-amber-900/40 px-2.5 py-0.5 text-sm font-medium text-amber-800 dark:text-amber-300"
+                  >
+                    {client}
+                  </span>
+                ))}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Client Performance */}
       <TopClientsTable data={analytics.topClients} />

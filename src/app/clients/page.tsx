@@ -22,8 +22,16 @@ export default function ClientsPage() {
         clientTag: string;
         totalLeads: number;
         qualityLeads: number;
+        meetingReadyLast24h: number;
+        meetingReadyWithoutStatus: number;
       }
     >();
+
+    // PST timezone calculation
+    const now = new Date();
+    const pstOffset = -8 * 60;
+    const nowPst = new Date(now.getTime() + (pstOffset + now.getTimezoneOffset()) * 60000);
+    const twentyFourHoursAgoPst = new Date(nowPst.getTime() - 24 * 60 * 60 * 1000);
 
     // Initialize from sheets so we see clients even with 0 leads
     for (const sheet of sheets) {
@@ -36,6 +44,8 @@ export default function ClientsPage() {
           clientTag: tag,
           totalLeads: 0,
           qualityLeads: 0,
+          meetingReadyLast24h: 0,
+          meetingReadyWithoutStatus: 0,
         });
       }
     }
@@ -48,6 +58,13 @@ export default function ClientsPage() {
       "duplicated", "duplicate", "lead not received", ""
     ];
 
+    // Helper to parse dates
+    const parseDate = (dateStr: string): Date | null => {
+      if (!dateStr) return null;
+      const d = new Date(dateStr);
+      return isNaN(d.getTime()) ? null : d;
+    };
+
     for (const lead of leads) {
       const tag = lead.clientTag?.trim() || "";
 
@@ -58,12 +75,35 @@ export default function ClientsPage() {
 
       let entry = map.get(tag);
       if (!entry) {
-        entry = { clientTag: tag, totalLeads: 0, qualityLeads: 0 };
+        entry = {
+          clientTag: tag,
+          totalLeads: 0,
+          qualityLeads: 0,
+          meetingReadyLast24h: 0,
+          meetingReadyWithoutStatus: 0,
+        };
         map.set(tag, entry);
       }
+
       entry.totalLeads++;
       const status = lead.status.trim().toLowerCase();
       if (status === "quality lead") entry.qualityLeads++;
+
+      // Check if meeting-ready in last 24h
+      if (lead.currentCategory.toLowerCase().includes("meeting")) {
+        const replyDate = parseDate(lead.timeWeGotReply) || parseDate(lead.replyTime);
+        if (replyDate) {
+          const replyPst = new Date(replyDate.getTime() + (pstOffset + replyDate.getTimezoneOffset()) * 60000);
+          if (replyPst >= twentyFourHoursAgoPst) {
+            entry.meetingReadyLast24h++;
+          }
+        }
+
+        // Check if meeting-ready without status
+        if (!lead.status.trim()) {
+          entry.meetingReadyWithoutStatus++;
+        }
+      }
     }
 
     return Array.from(map.values())

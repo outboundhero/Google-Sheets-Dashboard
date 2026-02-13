@@ -1,7 +1,7 @@
 "use client";
 
 import { use, useMemo } from "react";
-import { ArrowLeft, Users, CheckCircle2, CalendarCheck, Sparkles } from "lucide-react";
+import { ArrowLeft, Users, CheckCircle2, CalendarCheck, Sparkles, Clock, AlertTriangle } from "lucide-react";
 import Link from "next/link";
 import { useAllLeads } from "@/lib/hooks/use-leads";
 import { PageHeader } from "@/components/shared/page-header";
@@ -32,6 +32,46 @@ export default function ClientDetailPage({
   const analytics = useMemo(() => {
     if (!clientLeads.length) return null;
     return computeAnalytics(clientLeads);
+  }, [clientLeads]);
+
+  // Compute 24h meeting-ready and missing status metrics
+  const meetingReadyMetrics = useMemo(() => {
+    if (!clientLeads.length) return { last24h: 0, withoutStatus: 0 };
+
+    // PST timezone calculation
+    const now = new Date();
+    const pstOffset = -8 * 60;
+    const nowPst = new Date(now.getTime() + (pstOffset + now.getTimezoneOffset()) * 60000);
+    const twentyFourHoursAgoPst = new Date(nowPst.getTime() - 24 * 60 * 60 * 1000);
+
+    let last24h = 0;
+    let withoutStatus = 0;
+
+    for (const lead of clientLeads) {
+      if (lead.currentCategory.toLowerCase().includes("meeting")) {
+        // Parse date from either timeWeGotReply or replyTime
+        const parseDate = (dateStr: string) => {
+          if (!dateStr) return null;
+          const parsed = new Date(dateStr);
+          return isNaN(parsed.getTime()) ? null : parsed;
+        };
+
+        const replyDate = parseDate(lead.timeWeGotReply) || parseDate(lead.replyTime);
+        if (replyDate) {
+          const replyPst = new Date(replyDate.getTime() + (pstOffset + replyDate.getTimezoneOffset()) * 60000);
+          if (replyPst >= twentyFourHoursAgoPst) {
+            last24h++;
+          }
+        }
+
+        // Check if meeting-ready without status
+        if (!lead.status.trim()) {
+          withoutStatus++;
+        }
+      }
+    }
+
+    return { last24h, withoutStatus };
   }, [clientLeads]);
 
   if (isLoading) {
@@ -85,6 +125,21 @@ export default function ClientDetailPage({
               title="Interested"
               value={analytics.interestedLeads.toLocaleString()}
               icon={Sparkles}
+            />
+          </div>
+
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+            <StatCard
+              title="Meeting-Ready (24h)"
+              value={meetingReadyMetrics.last24h.toLocaleString()}
+              subtitle="Delivered in past 24 hours (PST)"
+              icon={Clock}
+            />
+            <StatCard
+              title="Missing Status"
+              value={meetingReadyMetrics.withoutStatus.toLocaleString()}
+              subtitle="Meeting-ready leads without status"
+              icon={AlertTriangle}
             />
           </div>
 

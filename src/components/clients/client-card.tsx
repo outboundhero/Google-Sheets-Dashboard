@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { Users, CheckCircle2, ArrowRight } from "lucide-react";
+import { Users, CheckCircle2, ArrowRight, Clock, AlertTriangle } from "lucide-react";
 import { Card, CardContent } from "@/components/ui/card";
 
 interface ClientCardProps {
@@ -9,6 +9,8 @@ interface ClientCardProps {
   totalLeads: number;
   qualityLeads: number;
   qualityPercentage: number;
+  meetingReadyLast24h: number;
+  meetingReadyWithoutStatus: number;
 }
 
 export function ClientCard({
@@ -16,6 +18,8 @@ export function ClientCard({
   totalLeads,
   qualityLeads,
   qualityPercentage,
+  meetingReadyLast24h,
+  meetingReadyWithoutStatus,
 }: ClientCardProps) {
   return (
     <Link href={`/clients/${encodeURIComponent(clientTag)}`}>
@@ -56,6 +60,24 @@ export function ClientCard({
               >
                 {qualityPercentage}%
               </p>
+            </div>
+          </div>
+
+          {/* Additional metrics */}
+          <div className="mt-3 grid grid-cols-2 gap-3 pt-3 border-t">
+            <div className="space-y-1">
+              <div className="flex items-center gap-1 text-muted-foreground">
+                <Clock className="h-3 w-3" />
+                <span className="text-xs">24h Ready</span>
+              </div>
+              <p className="text-sm font-semibold">{meetingReadyLast24h}</p>
+            </div>
+            <div className="space-y-1">
+              <div className="flex items-center gap-1 text-muted-foreground">
+                <AlertTriangle className="h-3 w-3" />
+                <span className="text-xs">Missing Status</span>
+              </div>
+              <p className="text-sm font-semibold">{meetingReadyWithoutStatus}</p>
             </div>
           </div>
 

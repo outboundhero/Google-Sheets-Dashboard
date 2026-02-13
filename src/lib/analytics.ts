@@ -177,18 +177,29 @@ export function computeAnalytics(
   const meetingReadyWithoutStatus = meetingReadyNoStatus.length;
   const meetingReadyWithoutStatusTotal = meetingReadyLeads;
 
-  // Clients without meeting-ready leads for 2+ days (PST)
-  const twoDaysAgoPst = new Date(nowPst.getTime() - 2 * 24 * 60 * 60 * 1000);
+  // Clients without meeting-ready leads for 4+ days (PST)
+  const fourDaysAgoPst = new Date(nowPst.getTime() - 4 * 24 * 60 * 60 * 1000);
   const clientsWithoutRecentMeetingReady: string[] = [];
 
+  // Invalid client tags to filter out
+  const invalidClientTags = [
+    "meeting-ready", "meeting ready", "meeting-ready lead",
+    "interested", "not interested",
+    "lead", "quality lead", "not a quality lead", "undetermined",
+    "duplicated", "duplicate", "lead not received"
+  ];
+
   for (const [client, clientLeads] of Object.entries(byClient)) {
-    if (client === "Unknown" || client === "") continue;
+    if (client === "Unknown" || client === "" || client.includes("@") ||
+        invalidClientTags.some(invalid => client.toLowerCase() === invalid)) {
+      continue;
+    }
     const recentMeetingReady = clientLeads.some((l) => {
       if (!l.currentCategory.toLowerCase().includes("meeting")) return false;
       const replyDate = parseDate(l.timeWeGotReply) || parseDate(l.replyTime);
       if (!replyDate) return false;
       const replyPst = new Date(replyDate.getTime() + (pstOffset + replyDate.getTimezoneOffset()) * 60000);
-      return replyPst >= twoDaysAgoPst;
+      return replyPst >= fourDaysAgoPst;
     });
     if (!recentMeetingReady) {
       clientsWithoutRecentMeetingReady.push(client);
