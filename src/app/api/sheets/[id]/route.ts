@@ -17,7 +17,7 @@ export async function GET(
 
     // Fallback to "Leads" for existing sheets without sheetName
     const sheetName = sheet.sheetName || "Leads";
-    const leads = await getLeadsFromSheet(id, sheetName);
+    const leads = await getLeadsFromSheet(id, sheetName, sheet.clientTag);
     return NextResponse.json({ sheet, leads });
   } catch (error) {
     const message =

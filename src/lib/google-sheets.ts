@@ -117,12 +117,16 @@ function mapRowToLead(
   row: string[],
   columnMap: Record<string, number>,
   sheetId: string,
-  sheetName: string
+  sheetName: string,
+  sheetClientTag?: string
 ): Lead {
   const get = (field: string) => {
     const idx = columnMap[field];
     return idx !== undefined ? (row[idx] || "") : "";
   };
+
+  // Use sheet's client tag if provided, otherwise fall back to lead's client tag column
+  const clientTag = sheetClientTag || get("clientTag");
 
   return {
     email: get("email"),
@@ -136,7 +140,7 @@ function mapRowToLead(
     state: get("state"),
     phone: get("phone"),
     currentCategory: get("currentCategory"),
-    clientTag: get("clientTag"),
+    clientTag,
     senderEmail: get("senderEmail"),
     replyContent: get("replyContent"),
     prospectCcEmail: get("prospectCcEmail"),
@@ -155,12 +159,13 @@ function mapRowToLead(
 
 export async function getLeadsFromSheet(
   spreadsheetId: string,
-  sheetName: string
+  sheetName: string,
+  sheetClientTag?: string
 ): Promise<Lead[]> {
   const { headers, rows } = await getSheetData(spreadsheetId, sheetName);
   const columnMap = buildColumnMap(headers);
   return rows
-    .map((row) => mapRowToLead(row, columnMap, spreadsheetId, sheetName))
+    .map((row) => mapRowToLead(row, columnMap, spreadsheetId, sheetName, sheetClientTag))
     .filter((lead) => {
       // Must have valid email
       if (!lead.email || !lead.email.includes("@")) return false;
@@ -175,7 +180,7 @@ export async function getLeadsFromSheet(
 }
 
 export async function getAllLeads(
-  sheets: { id: string; name: string; sheetName?: string }[]
+  sheets: { id: string; name: string; sheetName?: string; clientTag: string }[]
 ): Promise<Lead[]> {
   const cacheKey = "all-leads";
   const cached = cache.get<Lead[]>(cacheKey);
@@ -188,7 +193,7 @@ export async function getAllLeads(
   for (let i = 0; i < sheets.length; i += batchSize) {
     const batch = sheets.slice(i, i + batchSize);
     const results = await Promise.allSettled(
-      batch.map((s) => getLeadsFromSheet(s.id, s.sheetName || "Leads"))
+      batch.map((s) => getLeadsFromSheet(s.id, s.sheetName || "Leads", s.clientTag))
     );
     for (const result of results) {
       if (result.status === "fulfilled") {
