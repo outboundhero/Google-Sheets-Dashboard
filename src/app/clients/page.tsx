@@ -6,11 +6,12 @@ import { useAllLeads } from "@/lib/hooks/use-leads";
 import { useSheets } from "@/lib/hooks/use-sheets";
 import { PageHeader } from "@/components/shared/page-header";
 import { ClientCard } from "@/components/clients/client-card";
+import { RefreshButton } from "@/components/shared/refresh-button";
 import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
 
 export default function ClientsPage() {
-  const { leads, isLoading } = useAllLeads();
+  const { leads, isLoading, isValidating, refresh } = useAllLeads();
   const { sheets } = useSheets();
   const [search, setSearch] = useState("");
 
@@ -165,14 +166,17 @@ export default function ClientsPage() {
         title="Clients"
         description={`${uniqueClients} tracked client${uniqueClients !== 1 ? "s" : ""}`}
       >
-        <div className="relative w-64">
-          <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-          <Input
-            placeholder="Search clients..."
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            className="pl-9"
-          />
+        <div className="flex items-center gap-3">
+          <RefreshButton onRefresh={refresh} isRefreshing={isValidating} />
+          <div className="relative w-64">
+            <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+            <Input
+              placeholder="Search clients..."
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              className="pl-9"
+            />
+          </div>
         </div>
       </PageHeader>
 

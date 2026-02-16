@@ -12,10 +12,9 @@ export function useAllLeads() {
     {
       revalidateOnFocus: false,
       revalidateOnReconnect: false,
-      revalidateIfStale: false,
-      dedupingInterval: 60000, // Dedupe requests within 1 minute
-      refreshInterval: 0, // Disable auto-refresh
-      keepPreviousData: true, // Keep showing previous data during revalidation
+      dedupingInterval: 10000, // Dedupe requests within 10 seconds
+      refreshInterval: 5 * 60 * 1000, // Auto-refresh every 5 minutes
+      keepPreviousData: true, // Keep showing previous data during revalidation (prevents flickering!)
     }
   );
 
@@ -24,7 +23,7 @@ export function useAllLeads() {
     isLoading,
     isValidating,
     error,
-    mutate,
+    refresh: () => mutate(),
   };
 }
 
