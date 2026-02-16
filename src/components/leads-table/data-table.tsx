@@ -165,8 +165,42 @@ export function DataTable({ columns, data, hideClientFilter }: DataTableProps) {
   }, [data]);
 
   const clientOptions = useMemo(() => {
-    const values = new Set(data.map((d) => d.clientTag).filter(Boolean));
-    return Array.from(values).map((v) => ({ label: v, value: v }));
+    // Invalid patterns - check if client tag contains or equals these
+    const invalidPatterns = [
+      "meeting-ready", "meeting ready", "meeting",
+      "interested", "not interested",
+      "quality lead", "not a quality lead", "undetermined",
+      "duplicated", "duplicate", "lead not received"
+    ];
+
+    // Helper to check if a tag is invalid
+    const isInvalidTag = (tag: string): boolean => {
+      const lower = tag.toLowerCase().trim();
+      if (!lower) return true;
+      if (lower.includes("@")) return true; // Filter out emails
+
+      // Check if tag is exactly "lead" or contains any invalid pattern
+      if (lower === "lead") return true;
+
+      // Check if tag contains any invalid pattern
+      return invalidPatterns.some(pattern => {
+        // For "meeting", only invalid if it's the whole word or at the start
+        if (pattern === "meeting") {
+          return lower === "meeting" || lower.startsWith("meeting-") || lower.startsWith("meeting ");
+        }
+        return lower.includes(pattern);
+      });
+    };
+
+    const values = new Set(
+      data
+        .map((d) => d.clientTag)
+        .filter(Boolean)
+        .filter((tag) => !isInvalidTag(tag))
+    );
+    return Array.from(values)
+      .sort()
+      .map((v) => ({ label: v, value: v }));
   }, [data]);
 
   const stateOptions = useMemo(() => {
