@@ -168,6 +168,7 @@ export async function getLeadsFromSheet(
 ): Promise<Lead[]> {
   const { headers, rows } = await getSheetData(spreadsheetId, sheetName);
   const columnMap = buildColumnMap(headers);
+
   return rows
     .map((row) => mapRowToLead(row, columnMap, spreadsheetId, sheetName, sheetClientTag))
     .filter((lead) => {

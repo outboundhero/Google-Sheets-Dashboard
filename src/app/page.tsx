@@ -29,7 +29,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 
 export default function DashboardPage() {
   const [selectedClient, setSelectedClient] = useState<string>("");
-  const { analytics, isLoading, mutate } = useAnalytics(
+  const { analytics, isLoading, isValidating, mutate } = useAnalytics(
     selectedClient || undefined
   );
   const { sheets } = useSheets();
@@ -40,16 +40,9 @@ export default function DashboardPage() {
     return Array.from(tags).sort();
   }, [sheets]);
 
-  const [refreshing, setRefreshing] = useState(false);
-
   const handleRefresh = async () => {
-    setRefreshing(true);
-    try {
-      await fetch("/api/cache", { method: "DELETE" });
-      await mutate();
-    } finally {
-      setRefreshing(false);
-    }
+    await fetch("/api/cache", { method: "DELETE" });
+    await mutate();
   };
 
   if (isLoading) {
@@ -106,8 +99,8 @@ export default function DashboardPage() {
             ))}
           </SelectContent>
         </Select>
-        <Button variant="outline" size="icon" onClick={handleRefresh} disabled={refreshing} className="shrink-0">
-          <RefreshCw className={`h-4 w-4 ${refreshing ? "animate-spin" : ""}`} />
+        <Button variant="outline" size="icon" onClick={handleRefresh} disabled={isValidating} className="shrink-0">
+          <RefreshCw className={`h-4 w-4 ${isValidating ? "animate-spin" : ""}`} />
         </Button>
       </PageHeader>
 

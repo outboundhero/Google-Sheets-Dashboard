@@ -6,7 +6,7 @@ import type { TrackedSheet } from "@/types/sheet";
 const fetcher = (url: string) => fetch(url).then((r) => r.json());
 
 export function useSheets() {
-  const { data, error, isLoading, mutate } = useSWR<TrackedSheet[]>(
+  const { data, error, isLoading, isValidating, mutate } = useSWR<TrackedSheet[]>(
     "/api/sheets",
     fetcher,
     {
@@ -14,6 +14,7 @@ export function useSheets() {
       revalidateOnReconnect: false,
       revalidateIfStale: false,
       dedupingInterval: 60000, // Dedupe requests within 1 minute
+      refreshInterval: 5 * 60 * 1000, // Auto-refresh every 5 minutes
       keepPreviousData: true, // Keep showing previous data during revalidation
     }
   );
@@ -21,6 +22,7 @@ export function useSheets() {
   return {
     sheets: data || [],
     isLoading,
+    isValidating,
     error,
     mutate,
   };
