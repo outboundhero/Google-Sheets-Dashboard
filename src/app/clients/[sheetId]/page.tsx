@@ -1,9 +1,10 @@
 "use client";
 
-import { use, useMemo } from "react";
+import { use, useMemo, useState } from "react";
 import { ArrowLeft, Users, CheckCircle2, CalendarCheck, Sparkles, Clock, AlertTriangle } from "lucide-react";
 import Link from "next/link";
 import { useAllLeads } from "@/lib/hooks/use-leads";
+import { useSheets } from "@/lib/hooks/use-sheets";
 import { PageHeader } from "@/components/shared/page-header";
 import { StatCard } from "@/components/dashboard/stat-card";
 import { LeadsByStatusChart } from "@/components/dashboard/leads-by-status-chart";
@@ -12,6 +13,13 @@ import { DataTable } from "@/components/leads-table/data-table";
 import { columns } from "@/components/leads-table/columns";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { computeAnalytics } from "@/lib/analytics";
 
 export default function ClientDetailPage({
@@ -23,11 +31,26 @@ export default function ClientDetailPage({
   const { sheetId: rawClientTag } = use(params);
   const clientTag = decodeURIComponent(rawClientTag);
   const { leads: allLeads, isLoading } = useAllLeads();
+  const { sheets } = useSheets();
 
-  const clientLeads = useMemo(
-    () => allLeads.filter((l) => l.clientTag === clientTag),
-    [allLeads, clientTag]
+  const [selectedSheetFilter, setSelectedSheetFilter] = useState<string>("all");
+
+  // Get all sheets for this client tag
+  const clientSheets = useMemo(
+    () => sheets.filter((s) => s.clientTag === clientTag),
+    [sheets, clientTag]
   );
+
+  // Filter leads by client tag and optionally by sheet
+  const clientLeads = useMemo(() => {
+    const leadsForClient = allLeads.filter((l) => l.clientTag === clientTag);
+
+    if (selectedSheetFilter === "all") {
+      return leadsForClient;
+    }
+
+    return leadsForClient.filter((l) => l.sheetId === selectedSheetFilter);
+  }, [allLeads, clientTag, selectedSheetFilter]);
 
   const analytics = useMemo(() => {
     if (!clientLeads.length) return null;
@@ -90,16 +113,41 @@ export default function ClientDetailPage({
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center gap-3">
-        <Button variant="ghost" size="icon" asChild>
-          <Link href="/clients">
-            <ArrowLeft className="h-4 w-4" />
-          </Link>
-        </Button>
-        <PageHeader
-          title={clientTag}
-          description={`${clientLeads.length} leads`}
-        />
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-3">
+          <Button variant="ghost" size="icon" asChild>
+            <Link href="/clients">
+              <ArrowLeft className="h-4 w-4" />
+            </Link>
+          </Button>
+          <PageHeader
+            title={clientTag}
+            description={`${clientLeads.length} leads${
+              clientSheets.length > 1 ? ` across ${clientSheets.length} sheets` : ""
+            }`}
+          />
+        </div>
+
+        {clientSheets.length > 1 && (
+          <div className="flex items-center gap-2">
+            <span className="text-sm text-muted-foreground">Filter by sheet:</span>
+            <Select value={selectedSheetFilter} onValueChange={setSelectedSheetFilter}>
+              <SelectTrigger className="w-[280px]">
+                <SelectValue placeholder="Select a sheet" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">
+                  All Sheets ({clientSheets.length})
+                </SelectItem>
+                {clientSheets.map((sheet) => (
+                  <SelectItem key={sheet.id} value={sheet.id}>
+                    {sheet.name} {sheet.sheetName && `(${sheet.sheetName})`}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+        )}
       </div>
 
       {analytics && (
