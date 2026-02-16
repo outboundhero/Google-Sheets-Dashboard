@@ -132,8 +132,8 @@ export function computeAnalytics(
     });
   };
 
-  // Group by clientTag — this merges multiple sheets for the same client
-  const byClient = groupBy(filtered, (l) => l.clientTag);
+  // Group by sheetClientTag — this merges multiple sheets for the same client
+  const byClient = groupBy(filtered, (l) => l.sheetClientTag);
   const leadsByClient = Object.entries(byClient)
     .filter(([client]) => isValidClientTag(client))
     .map(([client, items]) => ({ client, count: items.length }))

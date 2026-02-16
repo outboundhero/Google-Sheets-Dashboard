@@ -18,7 +18,8 @@ export interface Lead {
   state: string;
   phone: string;
   currentCategory: string;
-  clientTag: string;
+  clientTag: string; // Original client tag from spreadsheet data
+  sheetClientTag: string; // Client tag from TrackedSheet config (used for grouping)
   senderEmail: string;
   replyContent: string;
   prospectCcEmail: string;

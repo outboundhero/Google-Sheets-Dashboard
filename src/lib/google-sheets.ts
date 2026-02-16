@@ -125,8 +125,11 @@ function mapRowToLead(
     return idx !== undefined ? (row[idx] || "") : "";
   };
 
-  // Use sheet's client tag if provided, otherwise fall back to lead's client tag column
-  const clientTag = sheetClientTag || get("clientTag");
+  // Keep original client tag from spreadsheet
+  const originalClientTag = get("clientTag");
+
+  // Use sheet's client tag for grouping, or fall back to original
+  const groupingClientTag = sheetClientTag || originalClientTag;
 
   return {
     email: get("email"),
@@ -140,7 +143,8 @@ function mapRowToLead(
     state: get("state"),
     phone: get("phone"),
     currentCategory: get("currentCategory"),
-    clientTag,
+    clientTag: originalClientTag, // Original from spreadsheet (for display)
+    sheetClientTag: groupingClientTag, // From config (for grouping)
     senderEmail: get("senderEmail"),
     replyContent: get("replyContent"),
     prospectCcEmail: get("prospectCcEmail"),

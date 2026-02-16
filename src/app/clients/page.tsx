@@ -85,7 +85,8 @@ export default function ClientsPage() {
     };
 
     for (const lead of leads) {
-      const tag = lead.clientTag?.trim() || "";
+      // Use sheetClientTag for grouping (from TrackedSheet config)
+      const tag = lead.sheetClientTag?.trim() || "";
 
       // Skip if invalid tag
       if (isInvalidTag(tag)) {

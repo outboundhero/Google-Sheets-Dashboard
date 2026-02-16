@@ -43,7 +43,8 @@ export default function ClientDetailPage({
 
   // Filter leads by client tag and optionally by sheet
   const clientLeads = useMemo(() => {
-    const leadsForClient = allLeads.filter((l) => l.clientTag === clientTag);
+    // Use sheetClientTag for grouping (from TrackedSheet config)
+    const leadsForClient = allLeads.filter((l) => l.sheetClientTag === clientTag);
 
     if (selectedSheetFilter === "all") {
       return leadsForClient;
