@@ -30,7 +30,7 @@ export function useAllLeads() {
 
   const refresh = useCallback(async () => {
     setIsSyncing(true);
-    setSyncProgress(null);
+    setSyncProgress({ synced: 0, total: 0, errors: 0 });
 
     try {
       let offset = 0;
@@ -38,28 +38,45 @@ export function useAllLeads() {
       let totalSynced = 0;
       let totalErrors = 0;
       let totalSheets = 0;
+      let retries = 0;
 
       while (!complete) {
-        const res = await fetch(`/api/sync?offset=${offset}`, { method: "POST" });
-        const result = await res.json();
-        totalSynced += result.sheetsSuccess || 0;
-        totalErrors += result.sheetsError || 0;
-        totalSheets = result.totalSheets || totalSheets;
-        complete = result.complete;
-        offset = result.nextOffset || 0;
+        try {
+          const res = await fetch(`/api/sync?offset=${offset}`, { method: "POST" });
 
-        setSyncProgress({
-          synced: totalSynced,
-          total: totalSheets,
-          errors: totalErrors,
-        });
+          if (!res.ok) {
+            // Server error (504 timeout, 500, etc.) — skip this chunk and continue
+            retries++;
+            if (retries > 3) break; // Give up after 3 consecutive failures
+            offset += 10; // Skip ahead to avoid stuck chunk
+            continue;
+          }
+
+          retries = 0; // Reset retry counter on success
+          const result = await res.json();
+          totalSynced += result.sheetsSuccess || 0;
+          totalErrors += result.sheetsError || 0;
+          totalSheets = result.totalSheets || totalSheets;
+          complete = result.complete;
+          offset = result.nextOffset || 0;
+
+          setSyncProgress({
+            synced: totalSynced,
+            total: totalSheets,
+            errors: totalErrors,
+          });
+        } catch {
+          // Network error or JSON parse failure — skip and continue
+          retries++;
+          if (retries > 3) break;
+          offset += 10;
+        }
       }
 
       await mutate();
     } finally {
       setIsSyncing(false);
-      // Clear progress after a short delay so user can see the final count
-      setTimeout(() => setSyncProgress(null), 3000);
+      setTimeout(() => setSyncProgress(null), 5000);
     }
   }, [mutate]);
 
