@@ -23,7 +23,12 @@ export function useAllLeads() {
     isLoading,
     isValidating,
     error,
-    refresh: () => mutate(),
+    refresh: () => {
+      // Force server-side cache clear, then revalidate SWR
+      return fetch("/api/data/all?refresh=1")
+        .then((r) => r.json())
+        .then((data) => mutate(data, false));
+    },
   };
 }
 

@@ -1,9 +1,18 @@
 import { NextResponse } from "next/server";
 import { getAllLeads } from "@/lib/google-sheets";
 import { getConfig } from "@/lib/sheets-config";
+import { cache } from "@/lib/cache";
 
-export async function GET() {
+export async function GET(request: Request) {
   try {
+    const { searchParams } = new URL(request.url);
+    const forceRefresh = searchParams.get("refresh");
+
+    // Allow cache busting from the same function instance
+    if (forceRefresh) {
+      cache.invalidateAll();
+    }
+
     const config = await getConfig();
 
     if (config.sheets.length === 0) {
