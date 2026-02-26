@@ -11,7 +11,7 @@ import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
 
 export default function ClientsPage() {
-  const { leads, isLoading, isValidating, refresh } = useAllLeads();
+  const { leads, isLoading, isSyncing, syncProgress, refresh } = useAllLeads();
   const { sheets } = useSheets();
   const [search, setSearch] = useState("");
 
@@ -167,7 +167,7 @@ export default function ClientsPage() {
         description={`${uniqueClients} tracked client${uniqueClients !== 1 ? "s" : ""}`}
       >
         <div className="flex items-center gap-3">
-          <RefreshButton onRefresh={refresh} isRefreshing={isValidating} />
+          <RefreshButton onRefresh={refresh} isRefreshing={isSyncing} syncProgress={syncProgress} />
           <div className="relative w-64">
             <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
             <Input

@@ -79,8 +79,8 @@ export default function SettingsPage() {
           </div>
           <div className="rounded-md bg-muted p-3">
             <p className="text-xs text-muted-foreground">
-              Data is cached for 5 minutes. The cache refreshes automatically,
-              but you can force a refresh here.
+              Data syncs from Google Sheets to Redis. Click Refresh to
+              trigger a full sync of all tracked sheets.
             </p>
           </div>
         </CardContent>

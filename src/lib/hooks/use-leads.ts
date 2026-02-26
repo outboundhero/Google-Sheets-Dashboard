@@ -1,9 +1,16 @@
 "use client";
 
+import { useState, useCallback } from "react";
 import useSWR from "swr";
 import type { Lead } from "@/types/lead";
 
 const fetcher = (url: string) => fetch(url).then((r) => r.json());
+
+export interface SyncProgress {
+  synced: number;
+  total: number;
+  errors: number;
+}
 
 export function useAllLeads() {
   const { data, error, isLoading, isValidating, mutate } = useSWR<Lead[]>(
@@ -12,29 +19,58 @@ export function useAllLeads() {
     {
       revalidateOnFocus: false,
       revalidateOnReconnect: false,
-      dedupingInterval: 10000, // Dedupe requests within 10 seconds
-      refreshInterval: 5 * 60 * 1000, // Auto-refresh every 5 minutes
-      keepPreviousData: true, // Keep showing previous data during revalidation (prevents flickering!)
+      dedupingInterval: 10000,
+      refreshInterval: 5 * 60 * 1000,
+      keepPreviousData: true,
     }
   );
+
+  const [isSyncing, setIsSyncing] = useState(false);
+  const [syncProgress, setSyncProgress] = useState<SyncProgress | null>(null);
+
+  const refresh = useCallback(async () => {
+    setIsSyncing(true);
+    setSyncProgress(null);
+
+    try {
+      let offset = 0;
+      let complete = false;
+      let totalSynced = 0;
+      let totalErrors = 0;
+      let totalSheets = 0;
+
+      while (!complete) {
+        const res = await fetch(`/api/sync?offset=${offset}`, { method: "POST" });
+        const result = await res.json();
+        totalSynced += result.sheetsSuccess || 0;
+        totalErrors += result.sheetsError || 0;
+        totalSheets = result.totalSheets || totalSheets;
+        complete = result.complete;
+        offset = result.nextOffset || 0;
+
+        setSyncProgress({
+          synced: totalSynced,
+          total: totalSheets,
+          errors: totalErrors,
+        });
+      }
+
+      await mutate();
+    } finally {
+      setIsSyncing(false);
+      // Clear progress after a short delay so user can see the final count
+      setTimeout(() => setSyncProgress(null), 3000);
+    }
+  }, [mutate]);
 
   return {
     leads: data || [],
     isLoading,
     isValidating,
     error,
-    refresh: async () => {
-      // Sync all sheets in chunks (20 per call) to respect Google API rate limits
-      let offset = 0;
-      let complete = false;
-      while (!complete) {
-        const res = await fetch(`/api/sync?offset=${offset}`, { method: "POST" });
-        const data = await res.json();
-        complete = data.complete;
-        offset = data.nextOffset || 0;
-      }
-      return mutate();
-    },
+    isSyncing,
+    syncProgress,
+    refresh,
   };
 }
 
@@ -46,8 +82,8 @@ export function useSheetLeads(sheetId: string | null) {
       revalidateOnFocus: false,
       revalidateOnReconnect: false,
       revalidateIfStale: false,
-      dedupingInterval: 60000, // Dedupe requests within 1 minute
-      keepPreviousData: true, // Keep showing previous data during revalidation
+      dedupingInterval: 60000,
+      keepPreviousData: true,
     }
   );
 
