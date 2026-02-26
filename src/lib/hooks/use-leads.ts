@@ -24,8 +24,13 @@ export function useAllLeads() {
     isValidating,
     error,
     refresh: async () => {
-      // Trigger full sync from Google Sheets → Redis, then revalidate
-      await fetch("/api/sync", { method: "POST" });
+      // Trigger full sync from Google Sheets → Redis
+      const res = await fetch("/api/sync", { method: "POST" });
+      if (res.status === 409) {
+        // Sync already in progress — wait for it to finish, then refresh
+        await new Promise((r) => setTimeout(r, 10000));
+      }
+      // Revalidate SWR with fresh data from Redis
       return mutate();
     },
   };
