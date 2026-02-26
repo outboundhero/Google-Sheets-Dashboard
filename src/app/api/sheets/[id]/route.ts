@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { getLeadsFromSheet } from "@/lib/google-sheets";
+import { getStoredSheetLeads } from "@/lib/leads-store";
 import { getConfig } from "@/lib/sheets-config";
 
 export async function GET(
@@ -15,9 +15,7 @@ export async function GET(
       return NextResponse.json({ error: "Sheet not found" }, { status: 404 });
     }
 
-    // Fallback to "Leads" for existing sheets without sheetName
-    const sheetName = sheet.sheetName || "Leads";
-    const leads = await getLeadsFromSheet(id, sheetName, sheet.clientTag);
+    const leads = await getStoredSheetLeads(id);
     return NextResponse.json({ sheet, leads });
   } catch (error) {
     const message =

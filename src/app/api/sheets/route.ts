@@ -6,6 +6,8 @@ import {
   extractSheetId,
 } from "@/lib/sheets-config";
 import { getSheetMetadata } from "@/lib/google-sheets";
+import { syncSingleSheet } from "@/lib/sync-leads";
+import { removeStoredSheet } from "@/lib/leads-store";
 
 export async function GET() {
   try {
@@ -66,6 +68,12 @@ export async function POST(request: Request) {
     };
 
     await addSheet(sheet);
+
+    // Fire-and-forget: sync this sheet's leads into Redis
+    syncSingleSheet(sheetId, sheetName, clientTag).catch((err) =>
+      console.error("[sheets/POST] Background sync failed:", err)
+    );
+
     return NextResponse.json(sheet, { status: 201 });
   } catch (error) {
     const message =
@@ -87,6 +95,7 @@ export async function DELETE(request: Request) {
     }
 
     await removeSheet(id);
+    await removeStoredSheet(id);
     return NextResponse.json({ success: true });
   } catch (error) {
     return NextResponse.json(

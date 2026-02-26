@@ -34,3 +34,5 @@ export interface Lead {
   sheetId: string;
   sheetName: string;
 }
+
+export type DashboardLead = Omit<Lead, "replyContent" | "ourLastReply">;

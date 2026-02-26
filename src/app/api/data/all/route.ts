@@ -1,30 +1,46 @@
 import { NextResponse } from "next/server";
-import { getAllLeads } from "@/lib/google-sheets";
-import { getConfig } from "@/lib/sheets-config";
-import { cache } from "@/lib/cache";
+import { getStoredLeads, getSyncMetadata, isSyncStale } from "@/lib/leads-store";
+import { syncAllLeads } from "@/lib/sync-leads";
+
+export const maxDuration = 60;
 
 export async function GET(request: Request) {
   try {
     const { searchParams } = new URL(request.url);
     const forceRefresh = searchParams.get("refresh");
 
-    // Only clear the aggregated leads cache, keep per-sheet data cached
-    // This avoids re-fetching all 75+ sheets from Google API on refresh
+    // If refresh requested, trigger a full sync first
     if (forceRefresh) {
-      cache.invalidate("all-leads");
+      await syncAllLeads();
+      const leads = await getStoredLeads();
+      return NextResponse.json(leads);
     }
 
-    const config = await getConfig();
+    // Check if we have any stored data
+    const meta = await getSyncMetadata();
 
-    if (config.sheets.length === 0) {
-      return NextResponse.json([]);
+    if (!meta.lastSyncAt) {
+      // First load ever — trigger initial sync
+      await syncAllLeads();
+      const leads = await getStoredLeads();
+      return NextResponse.json(leads);
     }
 
-    const leads = await getAllLeads(config.sheets);
+    // Serve stored data immediately
+    const leads = await getStoredLeads();
+
+    // If stale, trigger background sync for next request
+    if (isSyncStale(meta) && !meta.syncInProgress) {
+      // Fire-and-forget: sync in background, don't await
+      syncAllLeads().catch((err) =>
+        console.error("[data/all] Background sync failed:", err)
+      );
+    }
+
     return NextResponse.json(leads);
   } catch (error) {
     const message =
-      error instanceof Error ? error.message : "Failed to fetch all leads";
+      error instanceof Error ? error.message : "Failed to fetch leads";
     return NextResponse.json({ error: message }, { status: 500 });
   }
 }

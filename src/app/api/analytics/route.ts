@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
-import { getAllLeads } from "@/lib/google-sheets";
-import { getConfig } from "@/lib/sheets-config";
+import { getStoredLeads, getSyncMetadata } from "@/lib/leads-store";
+import { syncAllLeads } from "@/lib/sync-leads";
 import { computeAnalytics } from "@/lib/analytics";
 
 export async function GET(request: Request) {
@@ -8,15 +8,13 @@ export async function GET(request: Request) {
     const { searchParams } = new URL(request.url);
     const client = searchParams.get("client") || undefined;
 
-    const config = await getConfig();
-
-    if (config.sheets.length === 0) {
-      return NextResponse.json(
-        computeAnalytics([], client)
-      );
+    // If no data synced yet, trigger initial sync
+    const meta = await getSyncMetadata();
+    if (!meta.lastSyncAt) {
+      await syncAllLeads();
     }
 
-    const leads = await getAllLeads(config.sheets);
+    const leads = await getStoredLeads();
     const analytics = computeAnalytics(leads, client);
     return NextResponse.json(analytics);
   } catch (error) {
