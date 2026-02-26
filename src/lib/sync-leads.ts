@@ -3,6 +3,7 @@ import { getLeadsFromSheet } from "@/lib/google-sheets";
 import {
   getSyncMetadata,
   storeSyncMetadata,
+  storeMultipleSheetLeads,
   storeSheetLeads,
   trimLeadForStorage,
   type SyncMetadata,
@@ -14,8 +15,11 @@ export interface SyncResult {
   sheetsSuccess: number;
   sheetsError: number;
   durationMs: number;
+  complete: boolean;
   errors: { sheetId: string; name: string; error: string }[];
 }
+
+const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 export async function syncAllLeads(): Promise<SyncResult> {
   const startTime = Date.now();
@@ -30,9 +34,10 @@ export async function syncAllLeads(): Promise<SyncResult> {
       sheetsSuccess: 0,
       sheetsError: 0,
       sheetKeys: [],
+      errors: [],
     };
     await storeSyncMetadata(meta);
-    return { totalLeads: 0, sheetsSuccess: 0, sheetsError: 0, durationMs: 0, errors: [] };
+    return { totalLeads: 0, sheetsSuccess: 0, sheetsError: 0, durationMs: 0, complete: true, errors: [] };
   }
 
   // Mark sync as in progress
@@ -49,13 +54,31 @@ export async function syncAllLeads(): Promise<SyncResult> {
   const errors: { sheetId: string; name: string; error: string }[] = [];
   const sheetKeys: string[] = [];
 
-  // Process in batches of 25
-  const batchSize = 25;
+  // Google Sheets API: 60 reads/min per user (service account)
+  // Use batch of 10 with 2s delay to spread requests and avoid rate limiting
+  const batchSize = 10;
+  const batchDelay = 2000;
+
   for (let i = 0; i < config.sheets.length; i += batchSize) {
+    // Check if we're approaching the function timeout (leave 10s margin)
+    if (Date.now() - startTime > 48000) {
+      console.warn(`[syncAllLeads] Approaching timeout, stopping at sheet ${i}/${config.sheets.length}`);
+      break;
+    }
+
     const batch = config.sheets.slice(i, i + batchSize);
+
+    // Add delay between batches (not before the first one)
+    if (i > 0) {
+      await delay(batchDelay);
+    }
+
     const results = await Promise.allSettled(
       batch.map((s) => getLeadsFromSheet(s.id, s.sheetName || "Leads", s.clientTag))
     );
+
+    // Collect successful results for batch pipeline write
+    const toStore: { sheetId: string; data: StoredSheetData }[] = [];
 
     for (let j = 0; j < results.length; j++) {
       const result = results[j];
@@ -64,14 +87,16 @@ export async function syncAllLeads(): Promise<SyncResult> {
 
       if (result.status === "fulfilled") {
         const trimmedLeads = result.value.map(trimLeadForStorage);
-        const storedData: StoredSheetData = {
+        toStore.push({
           sheetId: sheetInfo.id,
-          clientTag: sheetInfo.clientTag,
-          sheetName: sheetInfo.sheetName || "Leads",
-          syncedAt: new Date().toISOString(),
-          leads: trimmedLeads,
-        };
-        await storeSheetLeads(sheetInfo.id, storedData);
+          data: {
+            sheetId: sheetInfo.id,
+            clientTag: sheetInfo.clientTag,
+            sheetName: sheetInfo.sheetName || "Leads",
+            syncedAt: new Date().toISOString(),
+            leads: trimmedLeads,
+          },
+        });
         sheetKeys.push(sheetKey);
         totalLeads += trimmedLeads.length;
         sheetsSuccess++;
@@ -85,9 +110,15 @@ export async function syncAllLeads(): Promise<SyncResult> {
         sheetsError++;
       }
     }
+
+    // Pipeline write all successful sheets from this batch
+    await storeMultipleSheetLeads(toStore);
   }
 
-  // Update metadata
+  // Merge with any previously stored sheet keys (from prior partial syncs)
+  const mergedSheetKeys = [...new Set([...existingMeta.sheetKeys, ...sheetKeys])];
+
+  // Update metadata with results and errors
   const meta: SyncMetadata = {
     lastSyncAt: new Date().toISOString(),
     syncInProgress: false,
@@ -95,7 +126,8 @@ export async function syncAllLeads(): Promise<SyncResult> {
     totalLeads,
     sheetsSuccess,
     sheetsError,
-    sheetKeys,
+    sheetKeys: mergedSheetKeys,
+    errors: errors.slice(0, 20), // Keep first 20 errors for visibility
   };
   await storeSyncMetadata(meta);
 
@@ -104,6 +136,7 @@ export async function syncAllLeads(): Promise<SyncResult> {
     sheetsSuccess,
     sheetsError,
     durationMs: Date.now() - startTime,
+    complete: sheetsSuccess + sheetsError === config.sheets.length,
     errors,
   };
 }

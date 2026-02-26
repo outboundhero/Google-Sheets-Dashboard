@@ -16,6 +16,7 @@ export interface SyncMetadata {
   sheetsSuccess: number;
   sheetsError: number;
   sheetKeys: string[]; // Redis keys for all stored sheets
+  errors?: { sheetId: string; name: string; error: string }[];
 }
 
 export interface StoredSheetData {
@@ -157,6 +158,27 @@ export async function storeSheetLeads(
   } else {
     const store = getLocalStore();
     store.sheets[sheetId] = data;
+    saveLocalStore(store);
+  }
+}
+
+// Batch store multiple sheets at once using Redis pipeline
+export async function storeMultipleSheetLeads(
+  entries: { sheetId: string; data: StoredSheetData }[]
+): Promise<void> {
+  if (entries.length === 0) return;
+  const redis = getRedis();
+  if (redis) {
+    const pipeline = redis.pipeline();
+    for (const { sheetId, data } of entries) {
+      pipeline.set(`${SHEET_KEY_PREFIX}:${sheetId}`, data);
+    }
+    await pipeline.exec();
+  } else {
+    const store = getLocalStore();
+    for (const { sheetId, data } of entries) {
+      store.sheets[sheetId] = data;
+    }
     saveLocalStore(store);
   }
 }

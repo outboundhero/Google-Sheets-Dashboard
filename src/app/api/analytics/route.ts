@@ -1,6 +1,5 @@
 import { NextResponse } from "next/server";
-import { getStoredLeads, getSyncMetadata } from "@/lib/leads-store";
-import { syncAllLeads } from "@/lib/sync-leads";
+import { getStoredLeads } from "@/lib/leads-store";
 import { computeAnalytics } from "@/lib/analytics";
 
 export async function GET(request: Request) {
@@ -8,12 +7,7 @@ export async function GET(request: Request) {
     const { searchParams } = new URL(request.url);
     const client = searchParams.get("client") || undefined;
 
-    // If no data synced yet, trigger initial sync
-    const meta = await getSyncMetadata();
-    if (!meta.lastSyncAt) {
-      await syncAllLeads();
-    }
-
+    // Always serve from Redis instantly
     const leads = await getStoredLeads();
     const analytics = computeAnalytics(leads, client);
     return NextResponse.json(analytics);

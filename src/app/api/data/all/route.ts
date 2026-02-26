@@ -2,36 +2,14 @@ import { NextResponse } from "next/server";
 import { getStoredLeads, getSyncMetadata, isSyncStale } from "@/lib/leads-store";
 import { syncAllLeads } from "@/lib/sync-leads";
 
-export const maxDuration = 60;
-
-export async function GET(request: Request) {
+export async function GET() {
   try {
-    const { searchParams } = new URL(request.url);
-    const forceRefresh = searchParams.get("refresh");
-
-    // If refresh requested, trigger a full sync first
-    if (forceRefresh) {
-      await syncAllLeads();
-      const leads = await getStoredLeads();
-      return NextResponse.json(leads);
-    }
-
-    // Check if we have any stored data
+    // Always serve from Redis instantly — never block on sync
     const meta = await getSyncMetadata();
-
-    if (!meta.lastSyncAt) {
-      // First load ever — trigger initial sync
-      await syncAllLeads();
-      const leads = await getStoredLeads();
-      return NextResponse.json(leads);
-    }
-
-    // Serve stored data immediately
     const leads = await getStoredLeads();
 
-    // If stale, trigger background sync for next request
-    if (isSyncStale(meta) && !meta.syncInProgress) {
-      // Fire-and-forget: sync in background, don't await
+    // If no data exists or data is stale, trigger background sync
+    if ((!meta.lastSyncAt || isSyncStale(meta)) && !meta.syncInProgress) {
       syncAllLeads().catch((err) =>
         console.error("[data/all] Background sync failed:", err)
       );
