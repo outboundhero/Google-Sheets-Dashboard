@@ -8,9 +8,10 @@ export async function GET(request: Request) {
     const { searchParams } = new URL(request.url);
     const forceRefresh = searchParams.get("refresh");
 
-    // Allow cache busting from the same function instance
+    // Only clear the aggregated leads cache, keep per-sheet data cached
+    // This avoids re-fetching all 75+ sheets from Google API on refresh
     if (forceRefresh) {
-      cache.invalidateAll();
+      cache.invalidate("all-leads");
     }
 
     const config = await getConfig();

@@ -200,8 +200,9 @@ export async function getAllLeads(
   const cached = cache.get<Lead[]>(cacheKey);
   if (cached) return cached;
 
-  // Fetch in batches of 10 to respect rate limits
-  const batchSize = 10;
+  // Fetch in batches — larger batches complete faster on Vercel
+  // Google Sheets API allows 300 req/min per project, so 25 concurrent is safe
+  const batchSize = 25;
   const allLeads: Lead[] = [];
 
   for (let i = 0; i < sheets.length; i += batchSize) {
