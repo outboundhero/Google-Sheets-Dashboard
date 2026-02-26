@@ -209,9 +209,16 @@ export async function getAllLeads(
     const results = await Promise.allSettled(
       batch.map((s) => getLeadsFromSheet(s.id, s.sheetName || "Leads", s.clientTag))
     );
-    for (const result of results) {
+    for (let j = 0; j < results.length; j++) {
+      const result = results[j];
+      const sheetInfo = batch[j];
       if (result.status === "fulfilled") {
         allLeads.push(...result.value);
+      } else {
+        console.error(
+          `[getAllLeads] Failed to fetch sheet "${sheetInfo.name}" (id: ${sheetInfo.id}, tab: ${sheetInfo.sheetName || "Leads"}, client: ${sheetInfo.clientTag}):`,
+          result.reason
+        );
       }
     }
   }
