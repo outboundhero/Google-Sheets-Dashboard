@@ -25,11 +25,11 @@ export interface SyncResult {
 const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 // Google Sheets API: 60 reads/min per service account
-// Process 10 sheets per function call (2 batches of 5 with 3s gap)
-// Each chunk takes ~10s, well within Vercel 60s timeout
+// Process 10 sheets per chunk, 2 at a time with 2.5s gaps
+// Rate: 10 sheets / ~14s = ~43/min (safely under 60/min limit)
 const CHUNK_SIZE = 10;
-const BATCH_SIZE = 5;
-const BATCH_DELAY_MS = 3000;
+const BATCH_SIZE = 2;
+const BATCH_DELAY_MS = 2500;
 
 /**
  * Sync a chunk of sheets starting from `offset`.

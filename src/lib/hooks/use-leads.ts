@@ -39,20 +39,26 @@ export function useAllLeads() {
       let totalErrors = 0;
       let totalSheets = 0;
       let retries = 0;
+      let isFirstChunk = true;
 
       while (!complete) {
         try {
+          // Wait between chunks to respect Google API rate limit (60/min)
+          if (!isFirstChunk) {
+            await new Promise((r) => setTimeout(r, 3000));
+          }
+          isFirstChunk = false;
+
           const res = await fetch(`/api/sync?offset=${offset}`, { method: "POST" });
 
           if (!res.ok) {
-            // Server error (504 timeout, 500, etc.) — skip this chunk and continue
             retries++;
-            if (retries > 3) break; // Give up after 3 consecutive failures
-            offset += 10; // Skip ahead to avoid stuck chunk
+            if (retries > 3) break;
+            offset += 10;
             continue;
           }
 
-          retries = 0; // Reset retry counter on success
+          retries = 0;
           const result = await res.json();
           totalSynced += result.sheetsSuccess || 0;
           totalErrors += result.sheetsError || 0;
@@ -66,7 +72,6 @@ export function useAllLeads() {
             errors: totalErrors,
           });
         } catch {
-          // Network error or JSON parse failure — skip and continue
           retries++;
           if (retries > 3) break;
           offset += 10;
