@@ -24,8 +24,15 @@ export function useAllLeads() {
     isValidating,
     error,
     refresh: async () => {
-      // Trigger sync from Google Sheets → Redis, then revalidate
-      await fetch("/api/sync", { method: "POST" });
+      // Sync all sheets in chunks (20 per call) to respect Google API rate limits
+      let offset = 0;
+      let complete = false;
+      while (!complete) {
+        const res = await fetch(`/api/sync?offset=${offset}`, { method: "POST" });
+        const data = await res.json();
+        complete = data.complete;
+        offset = data.nextOffset || 0;
+      }
       return mutate();
     },
   };

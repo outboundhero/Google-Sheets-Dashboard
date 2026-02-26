@@ -14,19 +14,33 @@ export interface SyncResult {
   totalLeads: number;
   sheetsSuccess: number;
   sheetsError: number;
+  sheetsProcessed: number;
+  totalSheets: number;
   durationMs: number;
   complete: boolean;
+  nextOffset: number;
   errors: { sheetId: string; name: string; error: string }[];
 }
 
 const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
-export async function syncAllLeads(): Promise<SyncResult> {
+// Google Sheets API: 60 reads/min per service account
+// Process 20 sheets per function call to stay safely under the limit
+// With ~5s gap between calls from frontend: 20 per ~25s = ~48/min (safe)
+const CHUNK_SIZE = 20;
+const BATCH_SIZE = 5;
+const BATCH_DELAY_MS = 2000;
+
+/**
+ * Sync a chunk of sheets starting from `offset`.
+ * Call repeatedly with increasing offsets until `complete` is true.
+ */
+export async function syncChunk(offset: number = 0): Promise<SyncResult> {
   const startTime = Date.now();
   const config = await getConfig();
 
   if (config.sheets.length === 0) {
-    const meta: SyncMetadata = {
+    await storeSyncMetadata({
       lastSyncAt: new Date().toISOString(),
       syncInProgress: false,
       syncStartedAt: null,
@@ -35,49 +49,46 @@ export async function syncAllLeads(): Promise<SyncResult> {
       sheetsError: 0,
       sheetKeys: [],
       errors: [],
+    });
+    return {
+      totalLeads: 0, sheetsSuccess: 0, sheetsError: 0,
+      sheetsProcessed: 0, totalSheets: 0,
+      durationMs: 0, complete: true, nextOffset: 0, errors: [],
     };
-    await storeSyncMetadata(meta);
-    return { totalLeads: 0, sheetsSuccess: 0, sheetsError: 0, durationMs: 0, complete: true, errors: [] };
   }
 
-  // Mark sync as in progress
-  const existingMeta = await getSyncMetadata();
-  await storeSyncMetadata({
-    ...existingMeta,
-    syncInProgress: true,
-    syncStartedAt: new Date().toISOString(),
-  });
+  const sheetsToProcess = config.sheets.slice(offset, offset + CHUNK_SIZE);
+  const nextOffset = offset + sheetsToProcess.length;
+  const complete = nextOffset >= config.sheets.length;
+
+  // Mark sync as in progress on first chunk
+  if (offset === 0) {
+    const existingMeta = await getSyncMetadata();
+    await storeSyncMetadata({
+      ...existingMeta,
+      syncInProgress: true,
+      syncStartedAt: new Date().toISOString(),
+    });
+  }
 
   let totalLeads = 0;
   let sheetsSuccess = 0;
   let sheetsError = 0;
   const errors: { sheetId: string; name: string; error: string }[] = [];
-  const sheetKeys: string[] = [];
+  const newSheetKeys: string[] = [];
 
-  // Google Sheets API: 60 reads/min per user (service account)
-  // Use batch of 10 with 2s delay to spread requests and avoid rate limiting
-  const batchSize = 10;
-  const batchDelay = 2000;
+  // Process in small batches with delay
+  for (let i = 0; i < sheetsToProcess.length; i += BATCH_SIZE) {
+    const batch = sheetsToProcess.slice(i, i + BATCH_SIZE);
 
-  for (let i = 0; i < config.sheets.length; i += batchSize) {
-    // Check if we're approaching the function timeout (leave 10s margin)
-    if (Date.now() - startTime > 48000) {
-      console.warn(`[syncAllLeads] Approaching timeout, stopping at sheet ${i}/${config.sheets.length}`);
-      break;
-    }
-
-    const batch = config.sheets.slice(i, i + batchSize);
-
-    // Add delay between batches (not before the first one)
     if (i > 0) {
-      await delay(batchDelay);
+      await delay(BATCH_DELAY_MS);
     }
 
     const results = await Promise.allSettled(
       batch.map((s) => getLeadsFromSheet(s.id, s.sheetName || "Leads", s.clientTag))
     );
 
-    // Collect successful results for batch pipeline write
     const toStore: { sheetId: string; data: StoredSheetData }[] = [];
 
     for (let j = 0; j < results.length; j++) {
@@ -97,13 +108,13 @@ export async function syncAllLeads(): Promise<SyncResult> {
             leads: trimmedLeads,
           },
         });
-        sheetKeys.push(sheetKey);
+        newSheetKeys.push(sheetKey);
         totalLeads += trimmedLeads.length;
         sheetsSuccess++;
       } else {
         const errorMsg = result.reason instanceof Error ? result.reason.message : String(result.reason);
         console.error(
-          `[syncAllLeads] Failed sheet "${sheetInfo.name}" (${sheetInfo.id}):`,
+          `[syncChunk] Failed sheet "${sheetInfo.name}" (${sheetInfo.id}):`,
           errorMsg
         );
         errors.push({ sheetId: sheetInfo.id, name: sheetInfo.name, error: errorMsg });
@@ -111,32 +122,44 @@ export async function syncAllLeads(): Promise<SyncResult> {
       }
     }
 
-    // Pipeline write all successful sheets from this batch
+    // Pipeline write successful sheets from this batch
     await storeMultipleSheetLeads(toStore);
   }
 
-  // Merge with any previously stored sheet keys (from prior partial syncs)
-  const mergedSheetKeys = [...new Set([...existingMeta.sheetKeys, ...sheetKeys])];
+  // Update metadata — merge new sheet keys with existing ones
+  const currentMeta = await getSyncMetadata();
+  const mergedSheetKeys = [...new Set([...currentMeta.sheetKeys, ...newSheetKeys])];
 
-  // Update metadata with results and errors
   const meta: SyncMetadata = {
     lastSyncAt: new Date().toISOString(),
-    syncInProgress: false,
-    syncStartedAt: null,
-    totalLeads,
-    sheetsSuccess,
-    sheetsError,
+    syncInProgress: !complete, // Stay "in progress" until all chunks done
+    syncStartedAt: complete ? null : currentMeta.syncStartedAt,
+    totalLeads: (currentMeta.totalLeads || 0) + totalLeads,
+    sheetsSuccess: (currentMeta.sheetsSuccess || 0) + sheetsSuccess,
+    sheetsError: (currentMeta.sheetsError || 0) + sheetsError,
     sheetKeys: mergedSheetKeys,
-    errors: errors.slice(0, 20), // Keep first 20 errors for visibility
+    errors: [...(currentMeta.errors || []), ...errors].slice(0, 20),
   };
+
+  // On first chunk, reset counters (don't accumulate from previous full sync)
+  if (offset === 0) {
+    meta.totalLeads = totalLeads;
+    meta.sheetsSuccess = sheetsSuccess;
+    meta.sheetsError = sheetsError;
+    meta.errors = errors.slice(0, 20);
+  }
+
   await storeSyncMetadata(meta);
 
   return {
     totalLeads,
     sheetsSuccess,
     sheetsError,
+    sheetsProcessed: sheetsToProcess.length,
+    totalSheets: config.sheets.length,
     durationMs: Date.now() - startTime,
-    complete: sheetsSuccess + sheetsError === config.sheets.length,
+    complete,
+    nextOffset: complete ? 0 : nextOffset,
     errors,
   };
 }
