@@ -76,6 +76,15 @@ interface SheetData {
   rows: string[][];
 }
 
+// Escape sheet names for Google Sheets A1 notation
+// Names with special characters must be wrapped in single quotes
+function escapeSheetName(name: string): string {
+  if (/[^a-zA-Z0-9_]/.test(name)) {
+    return `'${name.replace(/'/g, "''")}'`;
+  }
+  return name;
+}
+
 async function getSheetData(spreadsheetId: string, sheetName: string): Promise<SheetData> {
   const cacheKey = `sheet-data:${spreadsheetId}:${sheetName}`;
   const cached = cache.get<SheetData>(cacheKey);
@@ -86,7 +95,7 @@ async function getSheetData(spreadsheetId: string, sheetName: string): Promise<S
   // Fetch header row + all data rows
   const response = await sheets.spreadsheets.values.get({
     spreadsheetId,
-    range: `${sheetName}!A1:AZ`,
+    range: `${escapeSheetName(sheetName)}!A1:AZ`,
   });
 
   const allRows = response.data.values || [];
