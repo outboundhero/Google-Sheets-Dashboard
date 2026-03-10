@@ -76,6 +76,52 @@ interface SheetData {
   rows: string[][];
 }
 
+// Normalize any Google Sheets date string to ISO 8601.
+// Google Sheets returns dates in various locale-dependent formats depending on
+// the spreadsheet's region settings (e.g. "3/9/2026 2:30:00 PM", "09/03/2026",
+// "27/02/2026"). Node.js cannot parse AM/PM or DD/MM formats reliably, so we
+// convert to ISO here at ingest time so analytics always has a clean value.
+function normalizeGoogleDate(raw: string): string {
+  if (!raw) return "";
+
+  // 1. Standard JS parsing (handles ISO, "3/9/2026", "3/9/2026 14:30:00", etc.)
+  let d = new Date(raw);
+  if (!isNaN(d.getTime())) return d.toISOString();
+
+  // 2. "M/D/YYYY h:mm:ss AM/PM" or "M/D/YYYY h:mm AM/PM"
+  const amPm = raw.match(
+    /^(\d{1,2})\/(\d{1,2})\/(\d{4})\s+(\d{1,2}):(\d{2})(?::(\d{2}))?\s*(AM|PM)$/i
+  );
+  if (amPm) {
+    const [, month, day, year, hStr, min, sec, meridiem] = amPm;
+    let h = parseInt(hStr, 10);
+    if (meridiem.toUpperCase() === "PM" && h !== 12) h += 12;
+    if (meridiem.toUpperCase() === "AM" && h === 12) h = 0;
+    d = new Date(
+      `${year}-${month.padStart(2, "0")}-${day.padStart(2, "0")}T${String(h).padStart(2, "0")}:${min}:${sec ?? "00"}`
+    );
+    if (!isNaN(d.getTime())) return d.toISOString();
+  }
+
+  // 3. DD/MM/YYYY or DD/MM/YYYY HH:MM:SS where day > 12 (standard parsing fails
+  //    because it treats the first number as month, which > 12 is invalid).
+  const ddmm = raw.match(
+    /^(\d{1,2})\/(\d{1,2})\/(\d{4})(?:\s+(\d{1,2}):(\d{2})(?::(\d{2}))?)?$/
+  );
+  if (ddmm) {
+    const [, p1, p2, year, hour, min, sec] = ddmm;
+    if (parseInt(p1, 10) > 12 && parseInt(p2, 10) <= 12) {
+      const time = hour
+        ? `T${hour.padStart(2, "0")}:${min}:${sec ?? "00"}`
+        : "T00:00:00";
+      d = new Date(`${year}-${p2.padStart(2, "0")}-${p1.padStart(2, "0")}${time}`);
+      if (!isNaN(d.getTime())) return d.toISOString();
+    }
+  }
+
+  return raw; // Return original if nothing matched — analytics will skip it gracefully
+}
+
 // Escape sheet names for Google Sheets A1 notation
 // Names with special characters must be wrapped in single quotes
 function escapeSheetName(name: string): string {
@@ -144,8 +190,8 @@ function mapRowToLead(
     email: get("email"),
     name: get("name"),
     company: get("company"),
-    timeWeGotReply: get("timeWeGotReply"),
-    replyTime: get("replyTime"),
+    timeWeGotReply: normalizeGoogleDate(get("timeWeGotReply")),
+    replyTime: normalizeGoogleDate(get("replyTime")),
     city: get("city"),
     address: get("address"),
     googleMapsUrl: get("googleMapsUrl"),

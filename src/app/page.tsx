@@ -162,12 +162,22 @@ export default function DashboardPage() {
                 Clients without meeting-ready leads for the past 4 days
               </h3>
               <div className="flex flex-wrap gap-2">
-                {analytics.clientsWithoutRecentMeetingReady.map((client) => (
+                {analytics.clientsWithoutRecentMeetingReady.map(({ client, lastMeetingReadyDate }) => (
                   <span
                     key={client}
-                    className="inline-flex items-center rounded-md bg-amber-100 dark:bg-amber-900/40 px-2.5 py-0.5 text-sm font-medium text-amber-800 dark:text-amber-300"
+                    title={
+                      lastMeetingReadyDate
+                        ? `Last meeting-ready: ${new Date(lastMeetingReadyDate).toLocaleDateString()}`
+                        : "No meeting-ready leads found"
+                    }
+                    className="inline-flex items-center rounded-md bg-amber-100 dark:bg-amber-900/40 px-2.5 py-0.5 text-sm font-medium text-amber-800 dark:text-amber-300 cursor-default"
                   >
                     {client}
+                    {lastMeetingReadyDate && (
+                      <span className="ml-1.5 text-xs opacity-70">
+                        {new Date(lastMeetingReadyDate).toLocaleDateString()}
+                      </span>
+                    )}
                   </span>
                 ))}
               </div>

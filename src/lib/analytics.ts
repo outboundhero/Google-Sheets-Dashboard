@@ -222,7 +222,7 @@ export function computeAnalytics(
 
   // Clients without meeting-ready leads for 4+ days (PST)
   const fourDaysAgoPst = new Date(nowPst.getTime() - 4 * 24 * 60 * 60 * 1000);
-  const clientsWithoutRecentMeetingReady: string[] = [];
+  const clientsWithoutRecentMeetingReady: { client: string; lastMeetingReadyDate: string | null }[] = [];
 
   for (const [client, clientLeads] of Object.entries(byClient)) {
     // Skip invalid client tags
@@ -230,15 +230,30 @@ export function computeAnalytics(
       continue;
     }
 
-    const recentMeetingReady = clientLeads.some((l) => {
-      if (!l.currentCategory.toLowerCase().includes("meeting")) return false;
+    // Find the most recent meeting-ready lead date for this client
+    let lastMeetingReadyDate: Date | null = null;
+    let hasRecentMeetingReady = false;
+
+    for (const l of clientLeads) {
+      if (!l.currentCategory.toLowerCase().includes("meeting")) continue;
       const replyDate = parseDate(l.timeWeGotReply) || parseDate(l.replyTime);
-      if (!replyDate) return false;
+      if (!replyDate) continue;
+
+      if (!lastMeetingReadyDate || replyDate > lastMeetingReadyDate) {
+        lastMeetingReadyDate = replyDate;
+      }
+
       const replyPst = new Date(replyDate.getTime() + (pstOffset + replyDate.getTimezoneOffset()) * 60000);
-      return replyPst >= fourDaysAgoPst;
-    });
-    if (!recentMeetingReady) {
-      clientsWithoutRecentMeetingReady.push(client);
+      if (replyPst >= fourDaysAgoPst) {
+        hasRecentMeetingReady = true;
+      }
+    }
+
+    if (!hasRecentMeetingReady) {
+      clientsWithoutRecentMeetingReady.push({
+        client,
+        lastMeetingReadyDate: lastMeetingReadyDate ? lastMeetingReadyDate.toISOString() : null,
+      });
     }
   }
 

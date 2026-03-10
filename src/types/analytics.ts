@@ -11,7 +11,7 @@ export interface DashboardAnalytics {
   meetingReadyLast24h: number;
   meetingReadyWithoutStatus: number;
   meetingReadyWithoutStatusTotal: number;
-  clientsWithoutRecentMeetingReady: string[];
+  clientsWithoutRecentMeetingReady: { client: string; lastMeetingReadyDate: string | null }[];
   leadsByClient: { client: string; count: number }[];
   leadsByStatus: { status: string; count: number }[];
   leadsByCategory: { category: string; count: number }[];
