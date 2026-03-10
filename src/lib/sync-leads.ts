@@ -24,12 +24,14 @@ export interface SyncResult {
 
 const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
-// Google Sheets API: 60 reads/min per service account
-// Process 10 sheets per chunk, 2 at a time with 2.5s gaps
-// Rate: 10 sheets / ~14s = ~43/min (safely under 60/min limit)
+// Google Sheets API: 300 reads/min per project (service account)
+// Process 10 sheets per chunk, all 10 concurrently (1 batch per chunk)
+// Natural delay between chunks = API response time (~2-3s) + Redis write (~0.5s)
+// Rate: 10 sheets / ~3s per chunk = ~200/min (safely under 300/min limit)
+// Total for 70 sheets: 7 chunks × ~3s = ~21s (well within 45s cron timeout)
 const CHUNK_SIZE = 10;
-const BATCH_SIZE = 2;
-const BATCH_DELAY_MS = 2500;
+const BATCH_SIZE = 10;
+const BATCH_DELAY_MS = 2000;
 
 /**
  * Sync a chunk of sheets starting from `offset`.
