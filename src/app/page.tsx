@@ -10,6 +10,7 @@ import {
   Clock,
   AlertTriangle,
 } from "lucide-react";
+import Link from "next/link";
 import { useAnalytics } from "@/lib/hooks/use-analytics";
 import { useSheets } from "@/lib/hooks/use-sheets";
 import { PageHeader } from "@/components/shared/page-header";
@@ -104,6 +105,45 @@ export default function DashboardPage() {
         </Button>
       </PageHeader>
 
+      {/* Stale Clients Alert — most important, shown first */}
+      {analytics.clientsWithoutRecentMeetingReady.length > 0 && (
+        <div className="rounded-xl border-2 border-amber-400 dark:border-amber-600 bg-amber-50 dark:bg-amber-950/30 p-5">
+          <div className="flex items-start gap-4">
+            <AlertTriangle className="h-7 w-7 text-amber-500 dark:text-amber-400 mt-0.5 shrink-0" />
+            <div className="flex-1 space-y-3">
+              <div>
+                <h2 className="text-xl font-bold text-amber-900 dark:text-amber-100">
+                  Clients without meeting-ready leads for the past 4 days
+                </h2>
+                <p className="text-sm text-amber-700 dark:text-amber-400 mt-0.5">
+                  {analytics.clientsWithoutRecentMeetingReady.length} client{analytics.clientsWithoutRecentMeetingReady.length !== 1 ? "s" : ""} need attention — click to view their leads
+                </p>
+              </div>
+              <div className="flex flex-wrap gap-2">
+                {analytics.clientsWithoutRecentMeetingReady.map(({ client, lastMeetingReadyDate }) => (
+                  <Link
+                    key={client}
+                    href={`/clients/${encodeURIComponent(client)}`}
+                    className="inline-flex items-center gap-2 rounded-lg bg-amber-100 dark:bg-amber-900/50 border border-amber-300 dark:border-amber-700 px-3 py-1.5 text-sm font-semibold text-amber-900 dark:text-amber-200 hover:bg-amber-200 dark:hover:bg-amber-800/60 transition-colors"
+                  >
+                    {client}
+                    {lastMeetingReadyDate ? (
+                      <span className="text-xs font-normal text-amber-600 dark:text-amber-400 bg-amber-200 dark:bg-amber-800/60 rounded px-1.5 py-0.5">
+                        last: {new Date(lastMeetingReadyDate).toLocaleDateString()}
+                      </span>
+                    ) : (
+                      <span className="text-xs font-normal text-amber-600 dark:text-amber-400 bg-amber-200 dark:bg-amber-800/60 rounded px-1.5 py-0.5">
+                        no data
+                      </span>
+                    )}
+                  </Link>
+                ))}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Stat Cards */}
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
         <StatCard
@@ -151,40 +191,6 @@ export default function DashboardPage() {
         <LeadsByStatusChart data={analytics.leadsByStatus} />
         <LeadsOverTimeChart data={analytics.leadsOverTime} />
       </div>
-
-      {/* Stale Clients Alert */}
-      {analytics.clientsWithoutRecentMeetingReady.length > 0 && (
-        <div className="rounded-lg border border-amber-200 dark:border-amber-900 bg-amber-50 dark:bg-amber-950/20 p-4">
-          <div className="flex items-start gap-3">
-            <AlertTriangle className="h-5 w-5 text-amber-600 dark:text-amber-500 mt-0.5 shrink-0" />
-            <div className="flex-1 space-y-2">
-              <h3 className="font-semibold text-amber-900 dark:text-amber-100">
-                Clients without meeting-ready leads for the past 4 days
-              </h3>
-              <div className="flex flex-wrap gap-2">
-                {analytics.clientsWithoutRecentMeetingReady.map(({ client, lastMeetingReadyDate }) => (
-                  <span
-                    key={client}
-                    title={
-                      lastMeetingReadyDate
-                        ? `Last meeting-ready: ${new Date(lastMeetingReadyDate).toLocaleDateString()}`
-                        : "No meeting-ready leads found"
-                    }
-                    className="inline-flex items-center rounded-md bg-amber-100 dark:bg-amber-900/40 px-2.5 py-0.5 text-sm font-medium text-amber-800 dark:text-amber-300 cursor-default"
-                  >
-                    {client}
-                    {lastMeetingReadyDate && (
-                      <span className="ml-1.5 text-xs opacity-70">
-                        {new Date(lastMeetingReadyDate).toLocaleDateString()}
-                      </span>
-                    )}
-                  </span>
-                ))}
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
 
       {/* Client Performance */}
       <TopClientsTable data={analytics.topClients} />
