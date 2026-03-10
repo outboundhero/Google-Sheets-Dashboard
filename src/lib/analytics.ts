@@ -13,8 +13,28 @@ function groupBy<T>(items: T[], keyFn: (item: T) => string): Record<string, T[]>
 
 function parseDate(dateStr: string): Date | null {
   if (!dateStr) return null;
-  const d = new Date(dateStr);
-  return isNaN(d.getTime()) ? null : d;
+
+  // Try standard parsing first (handles ISO, "3/9/2026", "3/9/2026 14:30:00", etc.)
+  let d = new Date(dateStr);
+  if (!isNaN(d.getTime())) return d;
+
+  // Node.js cannot parse 12-hour AM/PM format that Google Sheets commonly returns
+  // e.g. "3/9/2026 2:30:00 PM" or "3/9/2026 2:30 PM"
+  const amPmMatch = dateStr.match(
+    /^(\d{1,2})\/(\d{1,2})\/(\d{4})\s+(\d{1,2}):(\d{2})(?::(\d{2}))?\s*(AM|PM)$/i
+  );
+  if (amPmMatch) {
+    const [, month, day, year, hourStr, min, sec, amPm] = amPmMatch;
+    let hour = parseInt(hourStr, 10);
+    if (amPm.toUpperCase() === "PM" && hour !== 12) hour += 12;
+    if (amPm.toUpperCase() === "AM" && hour === 12) hour = 0;
+    d = new Date(
+      `${year}-${month.padStart(2, "0")}-${day.padStart(2, "0")}T${String(hour).padStart(2, "0")}:${min}:${sec ?? "00"}`
+    );
+    return isNaN(d.getTime()) ? null : d;
+  }
+
+  return null;
 }
 
 function computeTimeSeries(leads: Lead[]): { date: string; count: number }[] {
