@@ -44,25 +44,32 @@ export default function DashboardPage() {
   const { sheets } = useSheets();
   const { clients: trackerClients } = useClientTracker();
 
-  // Clients going off soon: future churn date OR pause date set
+  // Set of tracked client tags for fast lookup
+  const trackedClientTags = useMemo(
+    () => new Set(sheets.map((s) => s.clientTag.trim().toLowerCase())),
+    [sheets]
+  );
+
+  // Clients going off soon: future churn OR future pause date, only for tracked clients
   const clientsGoingOff = useMemo(() => {
     const now = new Date();
     return trackerClients
       .filter((c) => {
+        // Only show clients that are actually tracked in this dashboard
+        if (!trackedClientTags.has(c.clientAbbr.trim().toLowerCase())) return false;
         const churnDate = c.churnDate ? new Date(c.churnDate) : null;
         const pauseDate = c.pauseDate ? new Date(c.pauseDate) : null;
-        // Show if churn is in the future, or if pause date is set
         const hasUpcomingChurn = churnDate && !isNaN(churnDate.getTime()) && churnDate > now;
-        const hasPause = pauseDate && !isNaN(pauseDate.getTime());
-        return hasUpcomingChurn || hasPause;
+        const hasUpcomingPause = pauseDate && !isNaN(pauseDate.getTime()) && pauseDate > now;
+        return hasUpcomingChurn || hasUpcomingPause;
       })
       .map((c) => {
         const churnDate = c.churnDate ? new Date(c.churnDate) : null;
         const pauseDate = c.pauseDate ? new Date(c.pauseDate) : null;
-        const offDate = churnDate && !isNaN(churnDate.getTime()) && churnDate > now
-          ? c.churnDate!
-          : c.pauseDate!;
-        const isPause = !(churnDate && !isNaN(churnDate.getTime()) && churnDate > now);
+        const now = new Date();
+        const hasUpcomingChurn = churnDate && !isNaN(churnDate.getTime()) && churnDate > now;
+        const offDate = hasUpcomingChurn ? c.churnDate! : c.pauseDate!;
+        const isPause = !hasUpcomingChurn;
         return { ...c, offDate, isPause };
       })
       .sort((a, b) => new Date(a.offDate).getTime() - new Date(b.offDate).getTime());
