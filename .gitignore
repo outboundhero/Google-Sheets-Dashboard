@@ -45,3 +45,4 @@ sheets-config.json
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+.vercel
