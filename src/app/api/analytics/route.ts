@@ -1,15 +1,29 @@
 import { NextResponse } from "next/server";
 import { getStoredLeads } from "@/lib/leads-store";
 import { computeAnalytics } from "@/lib/analytics";
+import { getClientTrackerData } from "@/lib/google-sheets";
 
 export async function GET(request: Request) {
   try {
     const { searchParams } = new URL(request.url);
     const client = searchParams.get("client") || undefined;
 
-    // Always serve from Redis instantly
-    const leads = await getStoredLeads();
-    const analytics = computeAnalytics(leads, client);
+    const [leads, trackerData] = await Promise.all([
+      getStoredLeads(),
+      getClientTrackerData().catch(() => []),
+    ]);
+
+    // Exclude clients whose churn date has already passed
+    const now = new Date();
+    const churnedClients = trackerData
+      .filter((c) => {
+        if (!c.churnDate) return false;
+        const d = new Date(c.churnDate);
+        return !isNaN(d.getTime()) && d <= now;
+      })
+      .map((c) => c.clientAbbr);
+
+    const analytics = computeAnalytics(leads, client, churnedClients);
     return NextResponse.json(analytics);
   } catch (error) {
     const message =

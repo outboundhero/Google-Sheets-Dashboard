@@ -2,6 +2,19 @@ import { google, sheets_v4 } from "googleapis";
 import type { Lead, LeadStatus } from "@/types/lead";
 import { cache } from "./cache";
 
+// Client Tracker spreadsheet (internal Outboundhero sheet with churn/pause/go-live dates)
+const CLIENT_TRACKER_SHEET_ID = "1MGqSgGNoeN6WgjZnT7_Ij_nZftyyj7Z9DT77rVYLKuQ";
+const CLIENT_TRACKER_TAB = "Client Tracker";
+
+export interface ClientTrackerRow {
+  companyName: string;
+  clientAbbr: string;
+  status: string;
+  goLiveDate: string | null;
+  churnDate: string | null;
+  pauseDate: string | null;
+}
+
 const SCOPES = ["https://www.googleapis.com/auth/spreadsheets.readonly"];
 
 let sheetsClient: sheets_v4.Sheets | null = null;
@@ -272,4 +285,45 @@ export async function getAllLeads(
 
   cache.set(cacheKey, allLeads);
   return allLeads;
+}
+
+export async function getClientTrackerData(): Promise<ClientTrackerRow[]> {
+  const cacheKey = "client-tracker-data";
+  const cached = cache.get<ClientTrackerRow[]>(cacheKey);
+  if (cached) return cached;
+
+  const sheets = await getSheetsClient();
+  const response = await sheets.spreadsheets.values.get({
+    spreadsheetId: CLIENT_TRACKER_SHEET_ID,
+    range: `'${CLIENT_TRACKER_TAB}'!A1:T`,
+    valueRenderOption: "FORMATTED_VALUE",
+  });
+
+  const allRows = response.data.values || [];
+  if (allRows.length < 2) return [];
+
+  const headers = allRows[0].map((h: string) => String(h).toLowerCase().trim());
+  const idx = (name: string) => headers.findIndex((h: string) => h.includes(name));
+
+  const companyIdx = idx("company name");
+  const abbrIdx = idx("client abbr");
+  const statusIdx = headers.findIndex((h: string) => h === "status");
+  const goLiveIdx = idx("go live date");
+  const churnIdx = idx("churn date");
+  const pauseIdx = idx("pause date");
+
+  const result: ClientTrackerRow[] = allRows
+    .slice(1)
+    .map((row: string[]) => ({
+      companyName: row[companyIdx] || "",
+      clientAbbr: row[abbrIdx] || "",
+      status: statusIdx >= 0 ? (row[statusIdx] || "") : "",
+      goLiveDate: goLiveIdx >= 0 ? (row[goLiveIdx] || null) : null,
+      churnDate: churnIdx >= 0 ? (row[churnIdx] || null) : null,
+      pauseDate: pauseIdx >= 0 ? (row[pauseIdx] || null) : null,
+    }))
+    .filter((r: ClientTrackerRow) => r.clientAbbr.trim() !== "");
+
+  cache.set(cacheKey, result);
+  return result;
 }

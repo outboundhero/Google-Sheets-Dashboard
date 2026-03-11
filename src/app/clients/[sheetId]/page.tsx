@@ -5,6 +5,7 @@ import { ArrowLeft, Users, CheckCircle2, CalendarCheck, Sparkles, Clock, AlertTr
 import Link from "next/link";
 import { useAllLeads } from "@/lib/hooks/use-leads";
 import { useSheets } from "@/lib/hooks/use-sheets";
+import { useClientTracker } from "@/lib/hooks/use-client-tracker";
 import { PageHeader } from "@/components/shared/page-header";
 import { StatCard } from "@/components/dashboard/stat-card";
 import { LeadsByStatusChart } from "@/components/dashboard/leads-by-status-chart";
@@ -22,6 +23,34 @@ import {
 } from "@/components/ui/select";
 import { computeAnalytics } from "@/lib/analytics";
 
+/**
+ * Convert calendar-month time series to "Month N" labels relative to goLiveDate.
+ * Months before go-live are shown as "Aug '25" style.
+ * Month of go-live = "Month 1", following months = "Month 2", etc.
+ */
+function toMonthLabels(
+  data: { date: string; count: number }[],
+  goLiveDate: Date
+): { date: string; count: number }[] {
+  const goLiveYear = goLiveDate.getFullYear();
+  const goLiveMonth = goLiveDate.getMonth() + 1; // 1-indexed
+
+  return data.map(({ date, count }) => {
+    const [yearStr, monthStr] = date.split("-");
+    const year = parseInt(yearStr, 10);
+    const month = parseInt(monthStr, 10);
+    const monthNum = (year - goLiveYear) * 12 + (month - goLiveMonth) + 1;
+
+    if (monthNum >= 1) {
+      return { date: `Month ${monthNum}`, count };
+    }
+    // Pre-launch: show short calendar label
+    const d = new Date(year, month - 1);
+    const label = d.toLocaleDateString("en-US", { month: "short", year: "2-digit" });
+    return { date: label, count };
+  });
+}
+
 export default function ClientDetailPage({
   params,
 }: {
@@ -32,6 +61,7 @@ export default function ClientDetailPage({
   const clientTag = decodeURIComponent(rawClientTag);
   const { leads: allLeads, isLoading } = useAllLeads();
   const { sheets } = useSheets();
+  const { clients: trackerClients } = useClientTracker();
 
   const [selectedSheetFilter, setSelectedSheetFilter] = useState<string>("all");
 
@@ -43,13 +73,8 @@ export default function ClientDetailPage({
 
   // Filter leads by client tag and optionally by sheet
   const clientLeads = useMemo(() => {
-    // Use sheetClientTag for grouping (from TrackedSheet config)
     const leadsForClient = allLeads.filter((l) => l.sheetClientTag === clientTag);
-
-    if (selectedSheetFilter === "all") {
-      return leadsForClient;
-    }
-
+    if (selectedSheetFilter === "all") return leadsForClient;
     return leadsForClient.filter((l) => l.sheetId === selectedSheetFilter);
   }, [allLeads, clientTag, selectedSheetFilter]);
 
@@ -58,11 +83,27 @@ export default function ClientDetailPage({
     return computeAnalytics(clientLeads);
   }, [clientLeads]);
 
+  // Go Live Date for this client from the tracker sheet
+  const goLiveDate = useMemo(() => {
+    const row = trackerClients.find(
+      (c) => c.clientAbbr.trim().toLowerCase() === clientTag.trim().toLowerCase()
+    );
+    if (!row?.goLiveDate) return null;
+    const d = new Date(row.goLiveDate);
+    return isNaN(d.getTime()) ? null : d;
+  }, [trackerClients, clientTag]);
+
+  // Transform leadsOverTime to "Month N" if we have a go-live date
+  const leadsOverTime = useMemo(() => {
+    if (!analytics) return [];
+    if (!goLiveDate) return analytics.leadsOverTime;
+    return toMonthLabels(analytics.leadsOverTime, goLiveDate);
+  }, [analytics, goLiveDate]);
+
   // Compute 24h meeting-ready and missing status metrics
   const meetingReadyMetrics = useMemo(() => {
     if (!clientLeads.length) return { last24h: 0, withoutStatus: 0 };
 
-    // PST timezone calculation
     const now = new Date();
     const pstOffset = -8 * 60;
     const nowPst = new Date(now.getTime() + (pstOffset + now.getTimezoneOffset()) * 60000);
@@ -73,7 +114,6 @@ export default function ClientDetailPage({
 
     for (const lead of clientLeads) {
       if (lead.currentCategory.toLowerCase().includes("meeting")) {
-        // Parse date from either timeWeGotReply or replyTime
         const parseDate = (dateStr: string) => {
           if (!dateStr) return null;
           const parsed = new Date(dateStr);
@@ -83,15 +123,10 @@ export default function ClientDetailPage({
         const replyDate = parseDate(lead.timeWeGotReply) || parseDate(lead.replyTime);
         if (replyDate) {
           const replyPst = new Date(replyDate.getTime() + (pstOffset + replyDate.getTimezoneOffset()) * 60000);
-          if (replyPst >= twentyFourHoursAgoPst) {
-            last24h++;
-          }
+          if (replyPst >= twentyFourHoursAgoPst) last24h++;
         }
 
-        // Check if meeting-ready without status
-        if (!lead.status.trim()) {
-          withoutStatus++;
-        }
+        if (!lead.status.trim()) withoutStatus++;
       }
     }
 
@@ -194,7 +229,7 @@ export default function ClientDetailPage({
 
           <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
             <LeadsByStatusChart data={analytics.leadsByStatus} />
-            <LeadsOverTimeChart data={analytics.leadsOverTime} />
+            <LeadsOverTimeChart data={leadsOverTime} />
           </div>
         </>
       )}

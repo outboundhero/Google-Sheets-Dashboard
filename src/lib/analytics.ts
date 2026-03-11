@@ -103,11 +103,16 @@ function normalizeStatus(raw: string): string {
 
 export function computeAnalytics(
   leads: Lead[],
-  filterClientTag?: string
+  filterClientTag?: string,
+  excludeClientTags?: string[]
 ): DashboardAnalytics {
-  const filtered = filterClientTag
-    ? leads.filter((l) => l.clientTag === filterClientTag)
+  const baseLeads = excludeClientTags?.length
+    ? leads.filter((l) => !excludeClientTags.includes(l.sheetClientTag))
     : leads;
+
+  const filtered = filterClientTag
+    ? baseLeads.filter((l) => l.clientTag === filterClientTag)
+    : baseLeads;
 
   const totalLeads = filtered.length;
 

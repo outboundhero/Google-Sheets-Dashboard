@@ -9,10 +9,12 @@ import {
   RefreshCw,
   Clock,
   AlertTriangle,
+  XCircle,
 } from "lucide-react";
 import Link from "next/link";
 import { useAnalytics } from "@/lib/hooks/use-analytics";
 import { useSheets } from "@/lib/hooks/use-sheets";
+import { useClientTracker } from "@/lib/hooks/use-client-tracker";
 import { PageHeader } from "@/components/shared/page-header";
 import { StatCard } from "@/components/dashboard/stat-card";
 import { LeadsByStatusChart } from "@/components/dashboard/leads-by-status-chart";
@@ -28,12 +30,43 @@ import {
 } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 
+function formatDate(dateStr: string): string {
+  const d = new Date(dateStr);
+  if (isNaN(d.getTime())) return dateStr;
+  return d.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
+}
+
 export default function DashboardPage() {
   const [selectedClient, setSelectedClient] = useState<string>("");
   const { analytics, isLoading, isValidating, mutate } = useAnalytics(
     selectedClient || undefined
   );
   const { sheets } = useSheets();
+  const { clients: trackerClients } = useClientTracker();
+
+  // Clients going off soon: future churn date OR pause date set
+  const clientsGoingOff = useMemo(() => {
+    const now = new Date();
+    return trackerClients
+      .filter((c) => {
+        const churnDate = c.churnDate ? new Date(c.churnDate) : null;
+        const pauseDate = c.pauseDate ? new Date(c.pauseDate) : null;
+        // Show if churn is in the future, or if pause date is set
+        const hasUpcomingChurn = churnDate && !isNaN(churnDate.getTime()) && churnDate > now;
+        const hasPause = pauseDate && !isNaN(pauseDate.getTime());
+        return hasUpcomingChurn || hasPause;
+      })
+      .map((c) => {
+        const churnDate = c.churnDate ? new Date(c.churnDate) : null;
+        const pauseDate = c.pauseDate ? new Date(c.pauseDate) : null;
+        const offDate = churnDate && !isNaN(churnDate.getTime()) && churnDate > now
+          ? c.churnDate!
+          : c.pauseDate!;
+        const isPause = !(churnDate && !isNaN(churnDate.getTime()) && churnDate > now);
+        return { ...c, offDate, isPause };
+      })
+      .sort((a, b) => new Date(a.offDate).getTime() - new Date(b.offDate).getTime());
+  }, [trackerClients]);
 
   // Unique client tags for the filter dropdown
   const clientTags = useMemo(() => {
@@ -105,7 +138,40 @@ export default function DashboardPage() {
         </Button>
       </PageHeader>
 
-      {/* Stale Clients Alert — most important, shown first */}
+      {/* Clients Going Off Alert — shown first, most urgent */}
+      {clientsGoingOff.length > 0 && (
+        <div className="rounded-xl border-2 border-red-400 dark:border-red-600 bg-red-50 dark:bg-red-950/30 p-5">
+          <div className="flex items-start gap-4">
+            <XCircle className="h-7 w-7 text-red-500 dark:text-red-400 mt-0.5 shrink-0" />
+            <div className="flex-1 space-y-3">
+              <div>
+                <h2 className="text-xl font-bold text-red-900 dark:text-red-100">
+                  Clients going off
+                </h2>
+                <p className="text-sm text-red-700 dark:text-red-400 mt-0.5">
+                  {clientsGoingOff.length} client{clientsGoingOff.length !== 1 ? "s" : ""} with an upcoming churn or pause date
+                </p>
+              </div>
+              <div className="flex flex-col gap-2">
+                {clientsGoingOff.map((c) => (
+                  <Link
+                    key={c.clientAbbr}
+                    href={`/clients/${encodeURIComponent(c.clientAbbr)}`}
+                    className="inline-flex items-center gap-3 rounded-lg bg-red-100 dark:bg-red-900/50 border border-red-300 dark:border-red-700 px-4 py-2 text-sm font-semibold text-red-900 dark:text-red-200 hover:bg-red-200 dark:hover:bg-red-800/60 transition-colors w-fit"
+                  >
+                    <span>{c.companyName} <span className="font-normal opacity-60">({c.clientAbbr})</span></span>
+                    <span className="text-xs font-normal text-red-600 dark:text-red-400 bg-red-200 dark:bg-red-800/60 rounded px-2 py-0.5">
+                      {c.isPause ? "paused" : "churns"} {formatDate(c.offDate)}
+                    </span>
+                  </Link>
+                ))}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Stale Clients Alert */}
       {analytics.clientsWithoutRecentMeetingReady.length > 0 && (
         <div className="rounded-xl border-2 border-amber-400 dark:border-amber-600 bg-amber-50 dark:bg-amber-950/30 p-5">
           <div className="flex items-start gap-4">
