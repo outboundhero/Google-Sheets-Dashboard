@@ -29,10 +29,6 @@ interface SyncProgress {
   lastPage: number | null;
 }
 
-const KNOWN_TAGS = [
-  "Outlook", "Gmail", "Cheap Inboxes", "Warming", "Inboxing", "Reserve",
-];
-
 export default function DeliverabilityPage() {
   const [domains, setDomains] = useState<DomainRow[]>([]);
   const [loading, setLoading] = useState(true);
@@ -42,6 +38,7 @@ export default function DeliverabilityPage() {
   const [tagFilter, setTagFilter] = useState<string>("");
   const [warmupFilter, setWarmupFilter] = useState<"all" | "open" | "done">("open");
   const [activeTab, setActiveTab] = useState<"inboxes" | "warmup">("inboxes");
+  const [allTags, setAllTags] = useState<string[]>([]);
 
   const loadDomains = useCallback(async () => {
     setLoading(true);
@@ -64,10 +61,19 @@ export default function DeliverabilityPage() {
     } catch {/* ignore */}
   }, []);
 
+  const loadTags = useCallback(async () => {
+    try {
+      const res = await fetch("/api/deliverability/tags");
+      const data = await res.json();
+      if (Array.isArray(data)) setAllTags(data);
+    } catch {/* ignore */}
+  }, []);
+
   useEffect(() => {
     loadDomains();
     loadStats();
-  }, [loadDomains, loadStats]);
+    loadTags();
+  }, [loadDomains, loadStats, loadTags]);
 
   const handleSync = async () => {
     setSyncing(true);
@@ -98,6 +104,7 @@ export default function DeliverabilityPage() {
       }
       await loadDomains();
       await loadStats();
+      await loadTags();
     } finally {
       setSyncing(false);
       setSyncProgress(null);
@@ -130,9 +137,6 @@ export default function DeliverabilityPage() {
         .filter((d) => warmupFilter === "all" || d.warmup_status === warmupFilter),
     [domains, warmupFilter, now]
   );
-
-  // Unique tags from all domains (we'll use known tags for filter)
-  const allTags = KNOWN_TAGS;
 
   const filteredDomains = tagFilter
     ? domains // tag filter is applied inside DomainAccordion via API
@@ -210,7 +214,7 @@ export default function DeliverabilityPage() {
           {/* Tag Filter */}
           <div className="flex items-center gap-2 flex-wrap">
             <Filter className="h-4 w-4 text-muted-foreground shrink-0" />
-            <span className="text-sm text-muted-foreground">Filter by tag:</span>
+            <span className="text-sm text-muted-foreground shrink-0">Filter by tag:</span>
             <button
               onClick={() => setTagFilter("")}
               className={`text-xs px-2.5 py-1 rounded-full border transition-colors ${
@@ -221,20 +225,24 @@ export default function DeliverabilityPage() {
             >
               All
             </button>
-            {allTags.map((tag) => (
-              <button
-                key={tag}
-                onClick={() => setTagFilter(tagFilter === tag ? "" : tag)}
-                className={`text-xs px-2.5 py-1 rounded-full border transition-colors ${
-                  tagFilter === tag
-                    ? "bg-primary text-primary-foreground border-primary"
-                    : "border-border text-muted-foreground hover:border-foreground hover:text-foreground"
-                }`}
-              >
-                {tag}
-                {tagFilter === tag && <X className="inline h-3 w-3 ml-1" />}
-              </button>
-            ))}
+            {allTags.length === 0 && !loading ? (
+              <span className="text-xs text-muted-foreground italic">No tags found — sync inboxes first</span>
+            ) : (
+              allTags.map((tag) => (
+                <button
+                  key={tag}
+                  onClick={() => setTagFilter(tagFilter === tag ? "" : tag)}
+                  className={`text-xs px-2.5 py-1 rounded-full border transition-colors ${
+                    tagFilter === tag
+                      ? "bg-primary text-primary-foreground border-primary"
+                      : "border-border text-muted-foreground hover:border-foreground hover:text-foreground"
+                  }`}
+                >
+                  {tag}
+                  {tagFilter === tag && <X className="inline h-3 w-3 ml-1" />}
+                </button>
+              ))
+            )}
           </div>
 
           {/* Domain Accordions */}
