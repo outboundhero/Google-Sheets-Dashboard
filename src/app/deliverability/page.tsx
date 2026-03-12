@@ -86,7 +86,7 @@ export default function DeliverabilityPage() {
     setSyncing(true);
     const resumePage = startFrom ?? savedPage ?? 1;
     setSyncProgress({ synced: 0, page: resumePage, lastPage: null });
-    let nextPage: number | null = resumePage;
+    let nextPage: number | null = resumePage as number | null;
     let totalSynced = 0;
 
     try {
