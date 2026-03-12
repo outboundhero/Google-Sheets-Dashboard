@@ -39,6 +39,13 @@ export default function DeliverabilityPage() {
   const [warmupFilter, setWarmupFilter] = useState<"all" | "open" | "done">("open");
   const [activeTab, setActiveTab] = useState<"inboxes" | "warmup">("inboxes");
   const [allTags, setAllTags] = useState<string[]>([]);
+  const [savedPage, setSavedPage] = useState<number | null>(null);
+
+  // Load saved sync progress from localStorage on mount
+  useEffect(() => {
+    const saved = localStorage.getItem("deliverability_next_page");
+    if (saved) setSavedPage(parseInt(saved, 10));
+  }, []);
 
   const loadDomains = useCallback(async () => {
     setLoading(true);
@@ -75,18 +82,23 @@ export default function DeliverabilityPage() {
     loadTags();
   }, [loadDomains, loadStats, loadTags]);
 
-  const handleSync = async () => {
+  const handleSync = async (startFrom?: number) => {
     setSyncing(true);
-    setSyncProgress({ synced: 0, page: 1, lastPage: null });
-    let nextPage: number | null = 1 as number | null;
+    const resumePage = startFrom ?? savedPage ?? 1;
+    setSyncProgress({ synced: 0, page: resumePage, lastPage: null });
+    let nextPage: number | null = resumePage;
     let totalSynced = 0;
 
     try {
       while (nextPage !== null) {
+        // Save progress so user can resume if they close/refresh
+        localStorage.setItem("deliverability_next_page", String(nextPage));
+        setSavedPage(nextPage);
+
         const res = await fetch("/api/deliverability/sync", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ startPage: nextPage, pagesPerChunk: 3 }),
+          body: JSON.stringify({ startPage: nextPage, pagesPerChunk: 20 }),
         });
         if (!res.ok) break;
         const result = await res.json();
@@ -98,10 +110,12 @@ export default function DeliverabilityPage() {
         });
         nextPage = result.complete ? null : result.nextPage;
         if (!result.complete) {
-          // Delay between chunks to respect rate limits
-          await new Promise((r) => setTimeout(r, 500));
+          await new Promise((r) => setTimeout(r, 300));
         }
       }
+      // Sync complete — clear saved progress
+      localStorage.removeItem("deliverability_next_page");
+      setSavedPage(null);
       await loadDomains();
       await loadStats();
       await loadTags();
@@ -152,16 +166,28 @@ export default function DeliverabilityPage() {
             : "Manage your sender inboxes and email warmup"
         }
       >
-        <Button
-          variant="outline"
-          size="sm"
-          onClick={handleSync}
-          disabled={syncing}
-          className="gap-2"
-        >
-          <RefreshCw className={`h-4 w-4 ${syncing ? "animate-spin" : ""}`} />
-          {syncing ? "Syncing…" : "Sync Inboxes"}
-        </Button>
+        <div className="flex items-center gap-2">
+          {savedPage && savedPage > 1 && !syncing && (
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => { localStorage.removeItem("deliverability_next_page"); setSavedPage(null); }}
+              className="text-xs text-muted-foreground gap-1"
+            >
+              <X className="h-3 w-3" /> Reset
+            </Button>
+          )}
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => handleSync()}
+            disabled={syncing}
+            className="gap-2"
+          >
+            <RefreshCw className={`h-4 w-4 ${syncing ? "animate-spin" : ""}`} />
+            {syncing ? "Syncing…" : savedPage && savedPage > 1 ? `Resume (page ${savedPage.toLocaleString()})` : "Sync Inboxes"}
+          </Button>
+        </div>
       </PageHeader>
 
       {/* Sync Progress */}
