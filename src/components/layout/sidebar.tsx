@@ -9,6 +9,7 @@ import {
   Settings,
   PanelLeftClose,
   PanelLeft,
+  Mailbox,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -23,6 +24,7 @@ const navItems = [
   { href: "/", label: "Dashboard", icon: LayoutDashboard },
   { href: "/clients", label: "Clients", icon: Users },
   { href: "/leads", label: "All Leads", icon: Table2 },
+  { href: "/deliverability", label: "Deliverability", icon: Mailbox },
   { href: "/settings", label: "Settings", icon: Settings },
 ];
 
