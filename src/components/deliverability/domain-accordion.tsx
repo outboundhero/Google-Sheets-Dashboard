@@ -11,6 +11,7 @@ interface DomainRow {
   inbox_count: number;
   domain_created_at: string | null;
   warmup_status: string;
+  tags?: string[];
 }
 
 interface Inbox {
@@ -32,10 +33,10 @@ interface Inbox {
 interface Props {
   domain: DomainRow;
   defaultOpen?: boolean;
-  tagFilter?: string;
+  tagFilters?: string[];
 }
 
-export function DomainAccordion({ domain, defaultOpen = false, tagFilter }: Props) {
+export function DomainAccordion({ domain, defaultOpen = false, tagFilters }: Props) {
   const [open, setOpen] = useState(defaultOpen);
   const [inboxes, setInboxes] = useState<Inbox[]>([]);
   const [loading, setLoading] = useState(false);
@@ -44,11 +45,11 @@ export function DomainAccordion({ domain, defaultOpen = false, tagFilter }: Prop
   const [dialogOpen, setDialogOpen] = useState(false);
 
   const loadInboxes = useCallback(async () => {
-    if (loaded && !tagFilter) return;
+    if (loaded && (!tagFilters || tagFilters.length === 0)) return;
     setLoading(true);
     try {
       const params = new URLSearchParams({ domain: domain.domain });
-      if (tagFilter) params.set("tag", tagFilter);
+      if (tagFilters && tagFilters.length > 0) params.set("tags", tagFilters.join(","));
       const res = await fetch(`/api/deliverability/inboxes?${params}`);
       const json = await res.json();
       setInboxes(json.inboxes || []);
@@ -58,19 +59,19 @@ export function DomainAccordion({ domain, defaultOpen = false, tagFilter }: Prop
     } finally {
       setLoading(false);
     }
-  }, [domain.domain, tagFilter, loaded]);
+  }, [domain.domain, tagFilters, loaded]);
 
   useEffect(() => {
     if (open) loadInboxes();
   }, [open, loadInboxes]);
 
-  // Reload when tag filter changes
+  // Reload when tag filters change
   useEffect(() => {
     if (open) {
       setLoaded(false);
       loadInboxes();
     }
-  }, [tagFilter]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [tagFilters]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleClickInbox = (inbox: Inbox) => {
     setSelectedInbox(inbox);
@@ -101,6 +102,19 @@ export function DomainAccordion({ domain, defaultOpen = false, tagFilter }: Prop
           </div>
           <Globe className="h-4 w-4 text-muted-foreground flex-shrink-0" />
           <span className="font-medium text-sm flex-1 text-left">{domain.domain}</span>
+          {/* Domain tags */}
+          {domain.tags && domain.tags.length > 0 && (
+            <div className="flex items-center gap-1 flex-wrap max-w-[240px]">
+              {domain.tags.slice(0, 4).map((t) => (
+                <span key={t} className="inline-flex text-[10px] bg-muted px-1.5 py-0.5 rounded text-muted-foreground leading-tight">
+                  {t}
+                </span>
+              ))}
+              {domain.tags.length > 4 && (
+                <span className="text-[10px] text-muted-foreground">+{domain.tags.length - 4}</span>
+              )}
+            </div>
+          )}
           <div className="flex items-center gap-2 flex-shrink-0">
             {warmupComplete ? (
               <span className="inline-flex items-center gap-1 text-xs bg-green-500/15 text-green-400 border border-green-500/30 rounded-full px-2 py-0.5">

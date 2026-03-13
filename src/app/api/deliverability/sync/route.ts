@@ -70,13 +70,22 @@ export async function POST(request: Request) {
       }
     }
 
-    // Upsert domains
-    const domainRows = Object.entries(domainMap).map(([domain, { inboxes, earliestCreatedAt }]) => ({
-      domain,
-      inbox_count: inboxes.length,
-      domain_created_at: earliestCreatedAt,
-      synced_at: new Date().toISOString(),
-    }));
+    // Upsert domains (include aggregated tag names from inboxes)
+    const domainRows = Object.entries(domainMap).map(([domain, { inboxes, earliestCreatedAt }]) => {
+      const tagSet = new Set<string>();
+      for (const inbox of inboxes) {
+        if (Array.isArray(inbox.tags)) {
+          for (const t of inbox.tags) { if (t.name) tagSet.add(t.name); }
+        }
+      }
+      return {
+        domain,
+        inbox_count: inboxes.length,
+        domain_created_at: earliestCreatedAt,
+        tags: Array.from(tagSet).sort(),
+        synced_at: new Date().toISOString(),
+      };
+    });
 
     if (domainRows.length > 0) {
       const { error: domainErr } = await supabase

@@ -1,14 +1,16 @@
 "use client";
 
-import { useState, useEffect, useCallback, useMemo } from "react";
+import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import {
   RefreshCw,
   Globe,
   Inbox,
   CheckCircle2,
   Clock,
-  Filter,
+  ChevronDown,
+  Search,
   X,
+  Check,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -21,6 +23,7 @@ interface DomainRow {
   inbox_count: number;
   domain_created_at: string | null;
   warmup_status: "open" | "done";
+  tags?: string[];
 }
 
 interface SyncProgress {
@@ -29,19 +32,127 @@ interface SyncProgress {
   lastPage: number | null;
 }
 
+// ---------- Tag Multi-Select Dropdown ----------
+function TagFilterDropdown({
+  allTags,
+  selected,
+  onChange,
+}: {
+  allTags: string[];
+  selected: string[];
+  onChange: (tags: string[]) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [search, setSearch] = useState("");
+  const ref = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const handler = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, []);
+
+  const filtered = useMemo(
+    () => allTags.filter((t) => t.toLowerCase().includes(search.toLowerCase())),
+    [allTags, search]
+  );
+
+  const toggle = (tag: string) => {
+    onChange(selected.includes(tag) ? selected.filter((t) => t !== tag) : [...selected, tag]);
+  };
+
+  return (
+    <div className="relative" ref={ref}>
+      <button
+        onClick={() => setOpen((v) => !v)}
+        className={`flex items-center gap-1.5 text-sm px-3 py-1.5 rounded-lg border transition-colors ${
+          selected.length > 0
+            ? "border-primary bg-primary/10 text-primary"
+            : "border-border text-muted-foreground hover:border-foreground hover:text-foreground"
+        }`}
+      >
+        <span>Tags</span>
+        {selected.length > 0 && (
+          <span className="bg-primary text-primary-foreground text-xs font-medium rounded-full w-5 h-5 flex items-center justify-center">
+            {selected.length}
+          </span>
+        )}
+        <ChevronDown className={`h-3.5 w-3.5 transition-transform ${open ? "rotate-180" : ""}`} />
+      </button>
+
+      {open && (
+        <div className="absolute top-full left-0 mt-1.5 z-50 w-64 rounded-xl border bg-popover shadow-lg overflow-hidden">
+          {/* Search */}
+          <div className="flex items-center gap-2 px-3 py-2 border-b">
+            <Search className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
+            <input
+              autoFocus
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder="Search tags…"
+              className="flex-1 text-sm bg-transparent outline-none placeholder:text-muted-foreground"
+            />
+            {search && (
+              <button onClick={() => setSearch("")}>
+                <X className="h-3 w-3 text-muted-foreground hover:text-foreground" />
+              </button>
+            )}
+          </div>
+
+          {/* Clear all */}
+          {selected.length > 0 && (
+            <button
+              onClick={() => { onChange([]); }}
+              className="w-full text-left px-3 py-1.5 text-xs text-muted-foreground hover:bg-accent border-b"
+            >
+              Clear all ({selected.length} selected)
+            </button>
+          )}
+
+          {/* Tag list */}
+          <div className="max-h-64 overflow-y-auto">
+            {filtered.length === 0 ? (
+              <div className="px-3 py-4 text-sm text-muted-foreground text-center">No tags found</div>
+            ) : (
+              filtered.map((tag) => (
+                <button
+                  key={tag}
+                  onClick={() => toggle(tag)}
+                  className="w-full flex items-center gap-2 px-3 py-2 text-sm hover:bg-accent text-left transition-colors"
+                >
+                  <div className={`h-4 w-4 rounded border flex items-center justify-center shrink-0 transition-colors ${
+                    selected.includes(tag) ? "bg-primary border-primary" : "border-border"
+                  }`}>
+                    {selected.includes(tag) && <Check className="h-2.5 w-2.5 text-primary-foreground" />}
+                  </div>
+                  <span className="truncate">{tag}</span>
+                </button>
+              ))
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+// ------------------------------------------------
+
 export default function DeliverabilityPage() {
   const [domains, setDomains] = useState<DomainRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [syncing, setSyncing] = useState(false);
   const [syncProgress, setSyncProgress] = useState<SyncProgress | null>(null);
   const [syncStats, setSyncStats] = useState<{ inboxCount: number; domainCount: number } | null>(null);
-  const [tagFilter, setTagFilter] = useState<string>("");
+  const [tagFilters, setTagFilters] = useState<string[]>([]);
   const [warmupFilter, setWarmupFilter] = useState<"all" | "open" | "done">("open");
   const [activeTab, setActiveTab] = useState<"inboxes" | "warmup">("inboxes");
   const [allTags, setAllTags] = useState<string[]>([]);
   const [savedPage, setSavedPage] = useState<number | null>(null);
+  const [domainSearch, setDomainSearch] = useState("");
+  const [warmupSearch, setWarmupSearch] = useState("");
 
-  // Load saved sync progress from localStorage on mount
   useEffect(() => {
     const saved = localStorage.getItem("deliverability_next_page");
     if (saved) setSavedPage(parseInt(saved, 10));
@@ -53,9 +164,7 @@ export default function DeliverabilityPage() {
       const res = await fetch("/api/deliverability/domains");
       const data = await res.json();
       setDomains(Array.isArray(data) ? data : []);
-    } catch {
-      /* ignore */
-    } finally {
+    } catch { /* ignore */ } finally {
       setLoading(false);
     }
   }, []);
@@ -82,16 +191,15 @@ export default function DeliverabilityPage() {
     loadTags();
   }, [loadDomains, loadStats, loadTags]);
 
-  const handleSync = async (startFrom?: number) => {
+  const handleSync = async () => {
     setSyncing(true);
-    const resumePage = startFrom ?? savedPage ?? 1;
+    const resumePage = savedPage ?? 1;
     setSyncProgress({ synced: 0, page: resumePage, lastPage: null });
     let nextPage: number | null = resumePage as number | null;
     let totalSynced = 0;
 
     try {
       while (nextPage !== null) {
-        // Save progress so user can resume if they close/refresh
         localStorage.setItem("deliverability_next_page", String(nextPage));
         setSavedPage(nextPage);
 
@@ -109,11 +217,8 @@ export default function DeliverabilityPage() {
           lastPage: result.lastPage,
         });
         nextPage = result.complete ? null : result.nextPage;
-        if (!result.complete) {
-          await new Promise((r) => setTimeout(r, 300));
-        }
+        if (!result.complete) await new Promise((r) => setTimeout(r, 300));
       }
-      // Sync complete — clear saved progress
       localStorage.removeItem("deliverability_next_page");
       setSavedPage(null);
       await loadDomains();
@@ -136,8 +241,8 @@ export default function DeliverabilityPage() {
     );
   };
 
-  // Compute warmup-eligible domains (21+ days old)
   const now = Date.now();
+
   const warmupDomains = useMemo(
     () =>
       domains
@@ -148,13 +253,28 @@ export default function DeliverabilityPage() {
           return { ...d, daysOld, warmupComplete: daysOld >= 21 };
         })
         .filter((d) => d.warmupComplete)
-        .filter((d) => warmupFilter === "all" || d.warmup_status === warmupFilter),
-    [domains, warmupFilter, now]
+        .filter((d) => warmupFilter === "all" || d.warmup_status === warmupFilter)
+        .filter((d) =>
+          warmupSearch ? d.domain.toLowerCase().includes(warmupSearch.toLowerCase()) : true
+        ),
+    [domains, warmupFilter, warmupSearch, now]
   );
 
-  const filteredDomains = tagFilter
-    ? domains // tag filter is applied inside DomainAccordion via API
-    : domains;
+  // Client-side filter: tag match (OR) + domain search
+  const filteredDomains = useMemo(() => {
+    let result = domains;
+    if (tagFilters.length > 0) {
+      result = result.filter((d) =>
+        d.tags && tagFilters.some((tag) => d.tags!.includes(tag))
+      );
+    }
+    if (domainSearch) {
+      result = result.filter((d) =>
+        d.domain.toLowerCase().includes(domainSearch.toLowerCase())
+      );
+    }
+    return result;
+  }, [domains, tagFilters, domainSearch]);
 
   return (
     <div className="space-y-6">
@@ -180,7 +300,7 @@ export default function DeliverabilityPage() {
           <Button
             variant="outline"
             size="sm"
-            onClick={() => handleSync()}
+            onClick={handleSync}
             disabled={syncing}
             className="gap-2"
           >
@@ -236,38 +356,49 @@ export default function DeliverabilityPage() {
 
       {/* INBOXES TAB */}
       {activeTab === "inboxes" && (
-        <div className="space-y-4">
-          {/* Tag Filter */}
+        <div className="space-y-3">
+          {/* Search + Tag Filter row */}
           <div className="flex items-center gap-2 flex-wrap">
-            <Filter className="h-4 w-4 text-muted-foreground shrink-0" />
-            <span className="text-sm text-muted-foreground shrink-0">Filter by tag:</span>
-            <button
-              onClick={() => setTagFilter("")}
-              className={`text-xs px-2.5 py-1 rounded-full border transition-colors ${
-                tagFilter === ""
-                  ? "bg-primary text-primary-foreground border-primary"
-                  : "border-border text-muted-foreground hover:border-foreground hover:text-foreground"
-              }`}
-            >
-              All
-            </button>
-            {allTags.length === 0 && !loading ? (
-              <span className="text-xs text-muted-foreground italic">No tags found — sync inboxes first</span>
-            ) : (
-              allTags.map((tag) => (
-                <button
-                  key={tag}
-                  onClick={() => setTagFilter(tagFilter === tag ? "" : tag)}
-                  className={`text-xs px-2.5 py-1 rounded-full border transition-colors ${
-                    tagFilter === tag
-                      ? "bg-primary text-primary-foreground border-primary"
-                      : "border-border text-muted-foreground hover:border-foreground hover:text-foreground"
-                  }`}
-                >
-                  {tag}
-                  {tagFilter === tag && <X className="inline h-3 w-3 ml-1" />}
+            {/* Search */}
+            <div className="flex items-center gap-2 rounded-lg border bg-background px-3 py-1.5 flex-1 min-w-[200px] max-w-xs">
+              <Search className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
+              <input
+                value={domainSearch}
+                onChange={(e) => setDomainSearch(e.target.value)}
+                placeholder="Search domains or inboxes…"
+                className="flex-1 text-sm bg-transparent outline-none placeholder:text-muted-foreground"
+              />
+              {domainSearch && (
+                <button onClick={() => setDomainSearch("")}>
+                  <X className="h-3 w-3 text-muted-foreground hover:text-foreground" />
                 </button>
-              ))
+              )}
+            </div>
+
+            {/* Tag multi-select */}
+            <TagFilterDropdown
+              allTags={allTags}
+              selected={tagFilters}
+              onChange={setTagFilters}
+            />
+
+            {/* Active tag chips */}
+            {tagFilters.map((tag) => (
+              <span
+                key={tag}
+                className="flex items-center gap-1 text-xs bg-primary/10 text-primary border border-primary/20 rounded-full px-2.5 py-1"
+              >
+                {tag}
+                <button onClick={() => setTagFilters((prev) => prev.filter((t) => t !== tag))}>
+                  <X className="h-3 w-3" />
+                </button>
+              </span>
+            ))}
+
+            {(tagFilters.length > 0 || domainSearch) && (
+              <span className="text-xs text-muted-foreground">
+                {filteredDomains.length} domain{filteredDomains.length !== 1 ? "s" : ""}
+              </span>
             )}
           </div>
 
@@ -281,9 +412,13 @@ export default function DeliverabilityPage() {
           ) : filteredDomains.length === 0 ? (
             <div className="flex flex-col items-center justify-center py-16 text-center">
               <Globe className="h-10 w-10 text-muted-foreground mb-3" />
-              <h3 className="font-medium">No inboxes synced yet</h3>
+              <h3 className="font-medium">
+                {domains.length === 0 ? "No inboxes synced yet" : "No domains match your filters"}
+              </h3>
               <p className="text-sm text-muted-foreground mt-1">
-                Click "Sync Inboxes" to fetch your sender emails
+                {domains.length === 0
+                  ? 'Click "Sync Inboxes" to fetch your sender emails'
+                  : "Try adjusting your search or tag filters"}
               </p>
             </div>
           ) : (
@@ -293,7 +428,7 @@ export default function DeliverabilityPage() {
                   key={domain.domain}
                   domain={domain}
                   defaultOpen={i < 3}
-                  tagFilter={tagFilter || undefined}
+                  tagFilters={tagFilters.length > 0 ? tagFilters : undefined}
                 />
               ))}
             </div>
@@ -303,10 +438,24 @@ export default function DeliverabilityPage() {
 
       {/* WARMUP TAB */}
       {activeTab === "warmup" && (
-        <div className="space-y-4">
-          {/* Warmup Filter */}
-          <div className="flex items-center gap-2">
-            <span className="text-sm text-muted-foreground">Show:</span>
+        <div className="space-y-3">
+          {/* Search + filter row */}
+          <div className="flex items-center gap-2 flex-wrap">
+            <div className="flex items-center gap-2 rounded-lg border bg-background px-3 py-1.5 flex-1 min-w-[200px] max-w-xs">
+              <Search className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
+              <input
+                value={warmupSearch}
+                onChange={(e) => setWarmupSearch(e.target.value)}
+                placeholder="Search domains…"
+                className="flex-1 text-sm bg-transparent outline-none placeholder:text-muted-foreground"
+              />
+              {warmupSearch && (
+                <button onClick={() => setWarmupSearch("")}>
+                  <X className="h-3 w-3 text-muted-foreground hover:text-foreground" />
+                </button>
+              )}
+            </div>
+
             {(["open", "done", "all"] as const).map((f) => (
               <button
                 key={f}
@@ -332,6 +481,8 @@ export default function DeliverabilityPage() {
               <h3 className="font-medium">
                 {warmupFilter === "done"
                   ? "No completed warmups marked as done"
+                  : warmupSearch
+                  ? "No domains match your search"
                   : "No domains have completed 3 weeks of warmup yet"}
               </h3>
               <p className="text-sm text-muted-foreground mt-1">
@@ -349,12 +500,23 @@ export default function DeliverabilityPage() {
                   <div className="flex-1 min-w-0">
                     <div className="font-medium text-sm">{d.domain}</div>
                     <div className="text-xs text-muted-foreground mt-0.5">
-                      Added {new Date(d.domain_created_at!).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })}
-                      {" · "}
-                      {d.daysOld} days old
-                      {" · "}
-                      {d.inbox_count} inbox{d.inbox_count !== 1 ? "es" : ""}
+                      Added{" "}
+                      {new Date(d.domain_created_at!).toLocaleDateString("en-US", {
+                        month: "short", day: "numeric", year: "numeric",
+                      })}
+                      {" · "}{d.daysOld} days old
+                      {" · "}{d.inbox_count} inbox{d.inbox_count !== 1 ? "es" : ""}
                     </div>
+                    {d.tags && d.tags.length > 0 && (
+                      <div className="flex gap-1 flex-wrap mt-1">
+                        {d.tags.slice(0, 5).map((t) => (
+                          <span key={t} className="text-[10px] bg-muted px-1.5 py-0.5 rounded text-muted-foreground">{t}</span>
+                        ))}
+                        {d.tags.length > 5 && (
+                          <span className="text-[10px] text-muted-foreground">+{d.tags.length - 5}</span>
+                        )}
+                      </div>
+                    )}
                   </div>
                   {/* Open / Done toggle */}
                   <div className="flex items-center gap-1 rounded-lg border bg-muted p-0.5 flex-shrink-0">

@@ -18,7 +18,19 @@ export async function GET(request: Request) {
       .range(offset, offset + limit - 1);
 
     if (domain) query = query.eq("domain", domain);
-    if (tag) query = query.contains("tags", JSON.stringify([{ name: tag }]));
+
+    // Support multiple tags (OR logic) via ?tags=tag1,tag2 or legacy ?tag=name
+    const tagsParam = searchParams.get("tags") || searchParams.get("tag");
+    if (tagsParam) {
+      const tagNames = tagsParam.split(",").map((t) => t.trim()).filter(Boolean);
+      if (tagNames.length === 1) {
+        query = query.contains("tags", JSON.stringify([{ name: tagNames[0] }]));
+      } else if (tagNames.length > 1) {
+        // OR: inbox must have at least one of the selected tags
+        const orFilter = tagNames.map((t) => `tags.cs.${JSON.stringify([{ name: t }])}`).join(",");
+        query = query.or(orFilter);
+      }
+    }
 
     const { data, error, count } = await query;
     if (error) throw error;
