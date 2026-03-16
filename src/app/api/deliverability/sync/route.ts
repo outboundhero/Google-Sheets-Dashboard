@@ -79,19 +79,33 @@ export async function POST(request: Request) {
       }
     }
 
-    // Upsert domains with aggregated tags
+    // Upsert domains with aggregated tags + stats
+    const isOutlook = (type: string) => /microsoft|outlook/i.test(type);
+    const isGoogle = (type: string) => /google|gmail/i.test(type);
+
     const domainRows = Object.entries(domainMap).map(([domain, { inboxes, earliestCreatedAt }]) => {
       const tagSet = new Set<string>();
+      let totalSent = 0, totalReplied = 0, totalBounced = 0, outlookCount = 0, googleCount = 0;
       for (const inbox of inboxes) {
         if (Array.isArray(inbox.tags)) {
           for (const t of inbox.tags) { if (t.name) tagSet.add(t.name); }
         }
+        totalSent += inbox.emails_sent_count || 0;
+        totalReplied += inbox.total_replied_count || 0;
+        totalBounced += inbox.bounced_count || 0;
+        if (isOutlook(inbox.type)) outlookCount++;
+        if (isGoogle(inbox.type)) googleCount++;
       }
       return {
         domain,
         inbox_count: inboxes.length,
         domain_created_at: earliestCreatedAt,
         tags: Array.from(tagSet).sort(),
+        total_sent: totalSent,
+        total_replied: totalReplied,
+        total_bounced: totalBounced,
+        outlook_count: outlookCount,
+        google_count: googleCount,
         synced_at: new Date().toISOString(),
       };
     });

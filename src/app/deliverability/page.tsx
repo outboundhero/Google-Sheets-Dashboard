@@ -12,11 +12,14 @@ import {
   X,
   Check,
   Link2,
+  Send,
+  Reply,
+  AlertTriangle,
+  Mail,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { PageHeader } from "@/components/shared/page-header";
-import { DomainAccordion } from "@/components/deliverability/domain-accordion";
 import { AttachCampaignsDialog } from "@/components/deliverability/attach-campaigns-dialog";
 import { Skeleton } from "@/components/ui/skeleton";
 
@@ -26,6 +29,11 @@ interface DomainRow {
   domain_created_at: string | null;
   warmup_status: "open" | "done";
   tags?: string[];
+  total_sent?: number;
+  total_replied?: number;
+  total_bounced?: number;
+  outlook_count?: number;
+  google_count?: number;
 }
 
 interface SyncProgress {
@@ -155,6 +163,7 @@ export default function DeliverabilityPage() {
   const [savedPage, setSavedPage] = useState<number | null>(null);
   const [domainSearch, setDomainSearch] = useState("");
   const [warmupSearch, setWarmupSearch] = useState("");
+  const [typeFilter, setTypeFilter] = useState<"all" | "outlook" | "google">("all");
   const [attachDialogOpen, setAttachDialogOpen] = useState(false);
 
   useEffect(() => {
@@ -311,7 +320,7 @@ export default function DeliverabilityPage() {
     [domains, warmupFilter, warmupSearch, now]
   );
 
-  // Client-side filter: tag match (OR) + domain search
+  // Client-side filter: tag match (OR) + domain search + type filter
   const filteredDomains = useMemo(() => {
     let result = domains;
     if (tagFilters.length > 0) {
@@ -324,8 +333,13 @@ export default function DeliverabilityPage() {
         d.domain.toLowerCase().includes(domainSearch.toLowerCase())
       );
     }
+    if (typeFilter === "outlook") {
+      result = result.filter((d) => (d.outlook_count || 0) > 0);
+    } else if (typeFilter === "google") {
+      result = result.filter((d) => (d.google_count || 0) > 0);
+    }
     return result;
-  }, [domains, tagFilters, domainSearch]);
+  }, [domains, tagFilters, domainSearch, typeFilter]);
 
   return (
     <div className="space-y-6">
@@ -437,7 +451,7 @@ export default function DeliverabilityPage() {
       {/* INBOXES TAB */}
       {activeTab === "inboxes" && (
         <div className="space-y-3">
-          {/* Search + Tag Filter row */}
+          {/* Search + Filters row */}
           <div className="flex items-center gap-2 flex-wrap">
             {/* Search */}
             <div className="flex items-center gap-2 rounded-lg border bg-background px-3 py-1.5 flex-1 min-w-[200px] max-w-xs">
@@ -445,7 +459,7 @@ export default function DeliverabilityPage() {
               <input
                 value={domainSearch}
                 onChange={(e) => setDomainSearch(e.target.value)}
-                placeholder="Search domains or inboxes…"
+                placeholder="Search domains…"
                 className="flex-1 text-sm bg-transparent outline-none placeholder:text-muted-foreground"
               />
               {domainSearch && (
@@ -462,6 +476,21 @@ export default function DeliverabilityPage() {
               onChange={setTagFilters}
             />
 
+            {/* Type filter */}
+            {(["all", "outlook", "google"] as const).map((t) => (
+              <button
+                key={t}
+                onClick={() => setTypeFilter(t)}
+                className={`text-xs px-3 py-1.5 rounded-full border capitalize transition-colors ${
+                  typeFilter === t
+                    ? "bg-primary text-primary-foreground border-primary"
+                    : "border-border text-muted-foreground hover:border-foreground hover:text-foreground"
+                }`}
+              >
+                {t === "all" ? "All Types" : t === "outlook" ? "Outlook" : "Google"}
+              </button>
+            ))}
+
             {/* Active tag chips */}
             {tagFilters.map((tag) => (
               <span
@@ -475,18 +504,18 @@ export default function DeliverabilityPage() {
               </span>
             ))}
 
-            {(tagFilters.length > 0 || domainSearch) && (
+            {(tagFilters.length > 0 || domainSearch || typeFilter !== "all") && (
               <span className="text-xs text-muted-foreground">
                 {filteredDomains.length} domain{filteredDomains.length !== 1 ? "s" : ""}
               </span>
             )}
           </div>
 
-          {/* Domain Accordions */}
+          {/* Domain Stats List */}
           {loading ? (
             <div className="space-y-2">
               {[...Array(5)].map((_, i) => (
-                <Skeleton key={i} className="h-14 rounded-xl" />
+                <Skeleton key={i} className="h-16 rounded-xl" />
               ))}
             </div>
           ) : filteredDomains.length === 0 ? (
@@ -502,15 +531,96 @@ export default function DeliverabilityPage() {
               </p>
             </div>
           ) : (
-            <div className="space-y-2">
-              {filteredDomains.map((domain, i) => (
-                <DomainAccordion
-                  key={domain.domain}
-                  domain={domain}
-                  defaultOpen={i < 3}
-                  tagFilters={tagFilters.length > 0 ? tagFilters : undefined}
-                />
-              ))}
+            <div className="space-y-1.5">
+              {/* Table header */}
+              <div className="grid grid-cols-[1fr_100px_80px_80px_80px_100px] gap-3 px-4 py-2 text-xs text-muted-foreground font-medium">
+                <span>Domain</span>
+                <span className="text-center">Inboxes</span>
+                <span className="text-center">Sent</span>
+                <span className="text-center">Replied</span>
+                <span className="text-center">Bounced</span>
+                <span className="text-center">Warmup</span>
+              </div>
+              {filteredDomains.map((d) => {
+                const daysOld = d.domain_created_at
+                  ? Math.floor((now - new Date(d.domain_created_at).getTime()) / (1000 * 60 * 60 * 24))
+                  : 0;
+                const warmupDaysLeft = Math.max(0, 21 - daysOld);
+                const replyRate = (d.total_sent || 0) > 0
+                  ? ((d.total_replied || 0) / (d.total_sent || 1) * 100).toFixed(1)
+                  : "0.0";
+
+                return (
+                  <div
+                    key={d.domain}
+                    className="grid grid-cols-[1fr_100px_80px_80px_80px_100px] gap-3 items-center rounded-xl border bg-card px-4 py-3 hover:bg-muted/30 transition-colors"
+                  >
+                    {/* Domain info */}
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-2">
+                        <Globe className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
+                        <span className="font-medium text-sm truncate">{d.domain}</span>
+                      </div>
+                      <div className="flex items-center gap-1.5 mt-1 ml-5">
+                        {d.tags && d.tags.slice(0, 3).map((t) => (
+                          <span key={t} className="text-[10px] bg-muted px-1.5 py-0.5 rounded text-muted-foreground">{t}</span>
+                        ))}
+                        {d.tags && d.tags.length > 3 && (
+                          <span className="text-[10px] text-muted-foreground">+{d.tags.length - 3}</span>
+                        )}
+                      </div>
+                    </div>
+
+                    {/* Inbox counts */}
+                    <div className="text-center text-sm">
+                      <span className="font-medium">{d.inbox_count}</span>
+                      {((d.outlook_count || 0) > 0 || (d.google_count || 0) > 0) && (
+                        <div className="flex items-center justify-center gap-1.5 mt-0.5">
+                          {(d.outlook_count || 0) > 0 && (
+                            <span className="text-[10px] text-blue-400">{d.outlook_count} OL</span>
+                          )}
+                          {(d.google_count || 0) > 0 && (
+                            <span className="text-[10px] text-red-400">{d.google_count} G</span>
+                          )}
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Sent */}
+                    <div className="text-center text-sm font-medium">
+                      {(d.total_sent || 0).toLocaleString()}
+                    </div>
+
+                    {/* Replied */}
+                    <div className="text-center">
+                      <div className="text-sm font-medium">{(d.total_replied || 0).toLocaleString()}</div>
+                      <div className="text-[10px] text-muted-foreground">{replyRate}%</div>
+                    </div>
+
+                    {/* Bounced */}
+                    <div className="text-center text-sm font-medium">
+                      {(d.total_bounced || 0).toLocaleString()}
+                    </div>
+
+                    {/* Warmup status */}
+                    <div className="text-center">
+                      {warmupDaysLeft > 0 ? (
+                        <Badge className="bg-amber-500/15 text-amber-400 border-amber-500/30 text-[10px]">
+                          {warmupDaysLeft}d left
+                        </Badge>
+                      ) : d.warmup_status === "done" ? (
+                        <Badge className="bg-emerald-500/15 text-emerald-400 border-emerald-500/30 text-[10px]">
+                          Done
+                        </Badge>
+                      ) : (
+                        <Badge className="bg-emerald-500/15 text-emerald-400 border-emerald-500/30 text-[10px]">
+                          Complete
+                        </Badge>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
             </div>
           )}
         </div>
