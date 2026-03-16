@@ -11,11 +11,13 @@ import {
   Search,
   X,
   Check,
+  Link2,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { PageHeader } from "@/components/shared/page-header";
 import { DomainAccordion } from "@/components/deliverability/domain-accordion";
+import { AttachCampaignsDialog } from "@/components/deliverability/attach-campaigns-dialog";
 import { Skeleton } from "@/components/ui/skeleton";
 
 interface DomainRow {
@@ -152,6 +154,7 @@ export default function DeliverabilityPage() {
   const [savedPage, setSavedPage] = useState<number | null>(null);
   const [domainSearch, setDomainSearch] = useState("");
   const [warmupSearch, setWarmupSearch] = useState("");
+  const [attachDialogOpen, setAttachDialogOpen] = useState(false);
 
   useEffect(() => {
     const saved = localStorage.getItem("deliverability_next_page");
@@ -206,7 +209,7 @@ export default function DeliverabilityPage() {
         const res = await fetch("/api/deliverability/sync", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ startPage: nextPage, pagesPerChunk: 20 }),
+          body: JSON.stringify({ startPage: nextPage, pagesPerChunk: 50 }),
         });
         if (!res.ok) break;
         const result = await res.json();
@@ -297,6 +300,15 @@ export default function DeliverabilityPage() {
               <X className="h-3 w-3" /> Reset
             </Button>
           )}
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => setAttachDialogOpen(true)}
+            className="gap-2"
+          >
+            <Link2 className="h-4 w-4" />
+            Attach to Campaigns
+          </Button>
           <Button
             variant="outline"
             size="sm"
@@ -547,6 +559,9 @@ export default function DeliverabilityPage() {
           )}
         </div>
       )}
+
+      {/* Attach Campaigns Dialog */}
+      <AttachCampaignsDialog open={attachDialogOpen} onOpenChange={setAttachDialogOpen} />
     </div>
   );
 }

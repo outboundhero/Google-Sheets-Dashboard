@@ -3,9 +3,9 @@ import { getSupabaseAdmin } from "@/lib/supabase";
 
 const API_BASE = "https://app.outboundhero.co/api";
 const API_KEY = process.env.OUTBOUNDHERO_API_KEY!;
-// 15 per page is the API max — delay between requests to avoid rate limiting
 const PER_PAGE = 15;
-const REQUEST_DELAY_MS = 300;
+const CONCURRENT = 5; // fetch 5 pages at once
+const BATCH_DELAY_MS = 150; // delay between concurrent batches
 
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -43,19 +43,28 @@ async function fetchPage(page: number): Promise<{ data: SenderEmail[]; lastPage:
 
 export async function POST(request: Request) {
   try {
-    const { startPage = 1, pagesPerChunk = 5 } = await request.json().catch(() => ({}));
+    const { startPage = 1, pagesPerChunk = 50 } = await request.json().catch(() => ({}));
     const supabase = getSupabaseAdmin();
 
-    // Fetch the first page to know total pages
+    // Fetch first page to get lastPage
     const first = await fetchPage(startPage);
     const { lastPage } = first;
     let allInboxes: SenderEmail[] = [...first.data];
 
-    // Fetch remaining pages in this chunk (with delay between each)
-    for (let p = startPage + 1; p < startPage + pagesPerChunk && p <= lastPage; p++) {
-      await delay(REQUEST_DELAY_MS);
-      const { data } = await fetchPage(p);
-      allInboxes = allInboxes.concat(data);
+    // Fetch remaining pages in concurrent batches of CONCURRENT
+    const endPage = Math.min(startPage + pagesPerChunk - 1, lastPage);
+    const remainingPages: number[] = [];
+    for (let p = startPage + 1; p <= endPage; p++) {
+      remainingPages.push(p);
+    }
+
+    for (let i = 0; i < remainingPages.length; i += CONCURRENT) {
+      const batch = remainingPages.slice(i, i + CONCURRENT);
+      const results = await Promise.allSettled(batch.map((p) => fetchPage(p)));
+      for (const r of results) {
+        if (r.status === "fulfilled") allInboxes = allInboxes.concat(r.value.data);
+      }
+      if (i + CONCURRENT < remainingPages.length) await delay(BATCH_DELAY_MS);
     }
 
     // Group by domain
@@ -70,7 +79,7 @@ export async function POST(request: Request) {
       }
     }
 
-    // Upsert domains (include aggregated tag names from inboxes)
+    // Upsert domains with aggregated tags
     const domainRows = Object.entries(domainMap).map(([domain, { inboxes, earliestCreatedAt }]) => {
       const tagSet = new Set<string>();
       for (const inbox of inboxes) {
@@ -119,22 +128,6 @@ export async function POST(request: Request) {
         .from("deliverability_inboxes")
         .upsert(inboxRows, { onConflict: "id", ignoreDuplicates: false });
       if (inboxErr) throw inboxErr;
-    }
-
-    // Update domain inbox_count to reflect total in DB (accumulate across chunks)
-    // Re-aggregate from DB for touched domains
-    const touchedDomains = [...new Set(inboxRows.map((r) => r.domain))];
-    for (const domain of touchedDomains) {
-      const { count } = await supabase
-        .from("deliverability_inboxes")
-        .select("*", { count: "exact", head: true })
-        .eq("domain", domain);
-      if (count !== null) {
-        await supabase
-          .from("deliverability_domains")
-          .update({ inbox_count: count })
-          .eq("domain", domain);
-      }
     }
 
     const nextPage = startPage + pagesPerChunk;
