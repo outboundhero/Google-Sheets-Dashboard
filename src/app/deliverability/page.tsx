@@ -235,10 +235,11 @@ export default function DeliverabilityPage() {
 
     try {
       // First fetch to discover lastPage
+      const resumeFrom = savedPage ?? 1;
       const firstRes = await fetch("/api/deliverability/sync", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ startPage: 1, pagesPerChunk: CHUNK }),
+        body: JSON.stringify({ startPage: resumeFrom, pagesPerChunk: CHUNK }),
       });
       if (!firstRes.ok) { setSyncing(false); return; }
       const firstResult = await firstRes.json();
@@ -246,11 +247,13 @@ export default function DeliverabilityPage() {
       progressRef.current = {
         synced: firstResult.synced || 0,
         pagesProcessed: CHUNK,
-        lastPage,
+        lastPage: lastPage - resumeFrom + 1,
       };
       flushProgress();
 
-      const startAfterFirst = 1 + CHUNK;
+      const startAfterFirst = resumeFrom + CHUNK;
+      const totalPages = lastPage - resumeFrom + 1;
+      progressRef.current.lastPage = totalPages;
       const remaining = lastPage - startAfterFirst + 1;
 
       if (remaining > 0) {
@@ -259,6 +262,10 @@ export default function DeliverabilityPage() {
           start: startAfterFirst + i * perStream,
           end: Math.min(startAfterFirst + (i + 1) * perStream - 1, lastPage),
         })).filter((r) => r.start <= lastPage);
+
+        // Save progress for resume
+        localStorage.setItem("deliverability_next_page", String(startAfterFirst));
+        setSavedPage(startAfterFirst);
 
         await Promise.all(ranges.map((r) => runStream(r.start, r.end)));
       }
