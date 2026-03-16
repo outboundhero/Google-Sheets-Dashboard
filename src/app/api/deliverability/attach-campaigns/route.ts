@@ -105,7 +105,16 @@ export async function GET() {
         has_tag: !!tagId,
         campaign_status: c.status,
       };
-    }).filter((c) => c.has_tag); // Only show campaigns with a matching tag
+    }).filter((c) => c.has_tag);
+
+    // Sort: Active first, then by name
+    const statusOrder: Record<string, number> = { Active: 0, Launching: 1, Queued: 2, Draft: 3, Paused: 4, Completed: 5 };
+    preview.sort((a, b) => {
+      const oa = statusOrder[a.campaign_status] ?? 99;
+      const ob = statusOrder[b.campaign_status] ?? 99;
+      if (oa !== ob) return oa - ob;
+      return a.campaign_name.localeCompare(b.campaign_name);
+    });
 
     return NextResponse.json(preview);
   } catch (error) {
