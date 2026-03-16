@@ -164,6 +164,7 @@ export default function DeliverabilityPage() {
   const [domainSearch, setDomainSearch] = useState("");
   const [warmupSearch, setWarmupSearch] = useState("");
   const [typeFilter, setTypeFilter] = useState<"all" | "outlook" | "google">("all");
+  const [showFlagged, setShowFlagged] = useState(false);
   const [attachDialogOpen, setAttachDialogOpen] = useState(false);
 
   useEffect(() => {
@@ -320,7 +321,17 @@ export default function DeliverabilityPage() {
     [domains, warmupFilter, warmupSearch, now]
   );
 
-  // Client-side filter: tag match (OR) + domain search + type filter
+  // Flag computation helper
+  const isDomainFlagged = useCallback((d: DomainRow) => {
+    const isGoogle = (d.google_count || 0) > 0 && (d.outlook_count || 0) === 0;
+    const isOutlook = (d.outlook_count || 0) > 0 && (d.google_count || 0) === 0;
+    const hasSent = (d.total_sent || 0) > 100;
+    const gFlag = isGoogle && hasSent && ((d.total_replied || 0) <= 2 || (d.total_bounced || 0) > 20);
+    const oFlag = isOutlook && hasSent && ((d.total_replied || 0) <= 16 || (d.total_bounced || 0) > 170);
+    return gFlag || oFlag;
+  }, []);
+
+  // Client-side filter: tag match (OR) + domain search + type filter + flagged
   const filteredDomains = useMemo(() => {
     let result = domains;
     if (tagFilters.length > 0) {
@@ -338,8 +349,13 @@ export default function DeliverabilityPage() {
     } else if (typeFilter === "google") {
       result = result.filter((d) => (d.google_count || 0) > 0);
     }
+    if (showFlagged) {
+      result = result.filter((d) => isDomainFlagged(d));
+    }
     return result;
-  }, [domains, tagFilters, domainSearch, typeFilter]);
+  }, [domains, tagFilters, domainSearch, typeFilter, showFlagged, isDomainFlagged]);
+
+  const flaggedCount = useMemo(() => domains.filter(isDomainFlagged).length, [domains, isDomainFlagged]);
 
   return (
     <div className="space-y-6">
@@ -491,6 +507,26 @@ export default function DeliverabilityPage() {
               </button>
             ))}
 
+            {/* Flagged filter */}
+            <button
+              onClick={() => setShowFlagged((v) => !v)}
+              className={`text-xs px-3 py-1.5 rounded-full border transition-colors flex items-center gap-1.5 ${
+                showFlagged
+                  ? "bg-destructive text-destructive-foreground border-destructive"
+                  : "border-border text-muted-foreground hover:border-foreground hover:text-foreground"
+              }`}
+            >
+              <AlertTriangle className="h-3 w-3" />
+              Flagged
+              {flaggedCount > 0 && (
+                <span className={`text-[10px] font-medium rounded-full px-1.5 ${
+                  showFlagged ? "bg-destructive-foreground/20" : "bg-destructive/15 text-destructive"
+                }`}>
+                  {flaggedCount}
+                </span>
+              )}
+            </button>
+
             {/* Active tag chips */}
             {tagFilters.map((tag) => (
               <span
@@ -553,8 +589,9 @@ export default function DeliverabilityPage() {
                 // Flagging rules
                 const isGoogleDomain = (d.google_count || 0) > 0 && (d.outlook_count || 0) === 0;
                 const isOutlookDomain = (d.outlook_count || 0) > 0 && (d.google_count || 0) === 0;
-                const googleFlagged = isGoogleDomain && ((d.total_replied || 0) <= 2 || (d.total_bounced || 0) > 20);
-                const outlookFlagged = isOutlookDomain && ((d.total_replied || 0) <= 16 || (d.total_bounced || 0) > 170);
+                const hasSentEnough = (d.total_sent || 0) > 100;
+                const googleFlagged = isGoogleDomain && hasSentEnough && ((d.total_replied || 0) <= 2 || (d.total_bounced || 0) > 20);
+                const outlookFlagged = isOutlookDomain && hasSentEnough && ((d.total_replied || 0) <= 16 || (d.total_bounced || 0) > 170);
                 const flagged = googleFlagged || outlookFlagged;
 
                 return (
