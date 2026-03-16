@@ -220,7 +220,6 @@ export default function DeliverabilityPage() {
           lastPage: result.lastPage,
         });
         nextPage = result.complete ? null : result.nextPage;
-        if (!result.complete) await new Promise((r) => setTimeout(r, 300));
       }
       localStorage.removeItem("deliverability_next_page");
       setSavedPage(null);

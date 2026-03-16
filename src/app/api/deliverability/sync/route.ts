@@ -4,8 +4,8 @@ import { getSupabaseAdmin } from "@/lib/supabase";
 const API_BASE = "https://app.outboundhero.co/api";
 const API_KEY = process.env.OUTBOUNDHERO_API_KEY!;
 const PER_PAGE = 15;
-const CONCURRENT = 5; // fetch 5 pages at once
-const BATCH_DELAY_MS = 150; // delay between concurrent batches
+const CONCURRENT = 10; // fetch 10 pages at once
+const BATCH_DELAY_MS = 50; // minimal delay between concurrent batches
 
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
