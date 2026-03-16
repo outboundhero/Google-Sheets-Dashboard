@@ -144,6 +144,33 @@ export async function POST(request: Request) {
       if (inboxErr) throw inboxErr;
     }
 
+    // Re-aggregate domain stats from DB (fixes counts across chunks)
+    const touchedDomains = [...new Set(inboxRows.map((r) => r.domain))];
+    for (const dom of touchedDomains) {
+      const { data: domInboxes } = await supabase
+        .from("deliverability_inboxes")
+        .select("emails_sent_count,total_replied_count,bounced_count,type")
+        .eq("domain", dom);
+      if (domInboxes) {
+        let sent = 0, replied = 0, bounced = 0, ol = 0, g = 0;
+        for (const i of domInboxes) {
+          sent += i.emails_sent_count || 0;
+          replied += i.total_replied_count || 0;
+          bounced += i.bounced_count || 0;
+          if (isOutlook(i.type || "")) ol++;
+          if (isGoogle(i.type || "")) g++;
+        }
+        await supabase.from("deliverability_domains").update({
+          inbox_count: domInboxes.length,
+          total_sent: sent,
+          total_replied: replied,
+          total_bounced: bounced,
+          outlook_count: ol,
+          google_count: g,
+        }).eq("domain", dom);
+      }
+    }
+
     const nextPage = startPage + pagesPerChunk;
     const complete = nextPage > lastPage;
 

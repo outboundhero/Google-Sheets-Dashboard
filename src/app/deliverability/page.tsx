@@ -550,16 +550,30 @@ export default function DeliverabilityPage() {
                   ? ((d.total_replied || 0) / (d.total_sent || 1) * 100).toFixed(1)
                   : "0.0";
 
+                // Flagging rules
+                const isGoogleDomain = (d.google_count || 0) > 0 && (d.outlook_count || 0) === 0;
+                const isOutlookDomain = (d.outlook_count || 0) > 0 && (d.google_count || 0) === 0;
+                const googleFlagged = isGoogleDomain && ((d.total_replied || 0) <= 2 || (d.total_bounced || 0) > 20);
+                const outlookFlagged = isOutlookDomain && ((d.total_replied || 0) <= 16 || (d.total_bounced || 0) > 170);
+                const flagged = googleFlagged || outlookFlagged;
+
                 return (
                   <div
                     key={d.domain}
-                    className="grid grid-cols-[1fr_100px_80px_80px_80px_100px] gap-3 items-center rounded-xl border bg-card px-4 py-3 hover:bg-muted/30 transition-colors"
+                    className={`grid grid-cols-[1fr_100px_80px_80px_80px_100px] gap-3 items-center rounded-xl border px-4 py-3 transition-colors ${
+                      flagged
+                        ? "bg-destructive/5 border-destructive/30 hover:bg-destructive/10"
+                        : "bg-card hover:bg-muted/30"
+                    }`}
                   >
                     {/* Domain info */}
                     <div className="min-w-0">
                       <div className="flex items-center gap-2">
                         <Globe className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
                         <span className="font-medium text-sm truncate">{d.domain}</span>
+                        {flagged && (
+                          <AlertTriangle className="h-3.5 w-3.5 text-destructive shrink-0" />
+                        )}
                       </div>
                       <div className="flex items-center gap-1.5 mt-1 ml-5">
                         {d.tags && d.tags.slice(0, 3).map((t) => (
@@ -593,12 +607,18 @@ export default function DeliverabilityPage() {
 
                     {/* Replied */}
                     <div className="text-center">
-                      <div className="text-sm font-medium">{(d.total_replied || 0).toLocaleString()}</div>
+                      <div className={`text-sm font-medium ${
+                        (isGoogleDomain && (d.total_replied || 0) <= 2) || (isOutlookDomain && (d.total_replied || 0) <= 16)
+                          ? "text-destructive" : ""
+                      }`}>{(d.total_replied || 0).toLocaleString()}</div>
                       <div className="text-[10px] text-muted-foreground">{replyRate}%</div>
                     </div>
 
                     {/* Bounced */}
-                    <div className="text-center text-sm font-medium">
+                    <div className={`text-center text-sm font-medium ${
+                      (isGoogleDomain && (d.total_bounced || 0) > 20) || (isOutlookDomain && (d.total_bounced || 0) > 170)
+                        ? "text-destructive" : ""
+                    }`}>
                       {(d.total_bounced || 0).toLocaleString()}
                     </div>
 
