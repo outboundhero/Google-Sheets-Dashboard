@@ -12,7 +12,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 
 interface Props {
   data: { date: string; count: number }[];
-  billingStartDay?: number | null;
+  billingStartDate?: Date | null;
 }
 
 const CustomTooltip = ({ active, payload, label }: { active?: boolean; payload?: Array<{ value: number }>; label?: string }) => {
@@ -25,13 +25,16 @@ const CustomTooltip = ({ active, payload, label }: { active?: boolean; payload?:
   );
 };
 
-export function LeadsOverTimeChart({ data, billingStartDay }: Props) {
+export function LeadsOverTimeChart({ data, billingStartDate }: Props) {
   if (!data.length) return null;
 
-  const ordinal = (n: number) => {
+  const formatBillingDate = (d: Date) => {
+    const day = d.getDate();
     const s = ["th", "st", "nd", "rd"];
-    const v = n % 100;
-    return n + (s[(v - 20) % 10] || s[v] || s[0]);
+    const v = day % 100;
+    const ordinal = day + (s[(v - 20) % 10] || s[v] || s[0]);
+    const month = d.toLocaleDateString("en-US", { month: "short" });
+    return `${ordinal} ${month}`;
   };
 
   return (
@@ -41,9 +44,9 @@ export function LeadsOverTimeChart({ data, billingStartDay }: Props) {
           <CardTitle className="text-sm font-medium text-muted-foreground">
             Leads Over Time
           </CardTitle>
-          {billingStartDay && (
+          {billingStartDate && (
             <span className="text-xs text-muted-foreground">
-              Billing Start Date: <span className="font-medium text-foreground">{ordinal(billingStartDay)}</span>
+              Billing Start Date: <span className="font-medium text-foreground">{formatBillingDate(billingStartDate)}</span>
             </span>
           )}
         </div>
