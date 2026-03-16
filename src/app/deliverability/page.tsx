@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback, useMemo, useRef } from "react";
+import { useState, useEffect, useCallback, useMemo, useRef, type MutableRefObject } from "react";
 import {
   RefreshCw,
   Globe,
@@ -195,66 +195,72 @@ export default function DeliverabilityPage() {
     loadTags();
   }, [loadDomains, loadStats, loadTags]);
 
+  // Use ref for progress so parallel stream closures always see latest values
+  const progressRef = useRef({ synced: 0, pagesProcessed: 0, lastPage: 0 });
+
   const handleSync = async () => {
     setSyncing(true);
     const CHUNK = 50;
     const STREAMS = 4;
+    progressRef.current = { synced: 0, pagesProcessed: 0, lastPage: 0 };
+
+    const flushProgress = () => {
+      const p = progressRef.current;
+      setSyncProgress({
+        synced: p.synced,
+        page: p.pagesProcessed,
+        lastPage: p.lastPage,
+        streams: STREAMS,
+      });
+    };
+
+    // Single stream worker
+    const runStream = async (start: number, end: number) => {
+      let page = start;
+      while (page <= end) {
+        const res = await fetch("/api/deliverability/sync", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ startPage: page, pagesPerChunk: CHUNK }),
+        });
+        if (!res.ok) break;
+        const result = await res.json();
+        const pagesInChunk = Math.min(CHUNK, end - page + 1);
+        progressRef.current.synced += result.synced || 0;
+        progressRef.current.pagesProcessed += pagesInChunk;
+        flushProgress();
+        page += CHUNK;
+      }
+    };
 
     try {
       // First fetch to discover lastPage
       const firstRes = await fetch("/api/deliverability/sync", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ startPage: savedPage ?? 1, pagesPerChunk: CHUNK }),
+        body: JSON.stringify({ startPage: 1, pagesPerChunk: CHUNK }),
       });
       if (!firstRes.ok) { setSyncing(false); return; }
       const firstResult = await firstRes.json();
       const lastPage = firstResult.lastPage || 1;
-      const resumeFrom = savedPage ?? 1;
-      const startAfterFirst = resumeFrom + CHUNK;
-
-      // Track progress across all streams
-      const streamSynced = [firstResult.synced || 0, 0, 0, 0];
-      const streamPage = [Math.min(startAfterFirst, lastPage), 0, 0, 0];
-      const updateProgress = () => {
-        const totalSynced = streamSynced.reduce((a, b) => a + b, 0);
-        const maxPage = Math.max(...streamPage);
-        setSyncProgress({ synced: totalSynced, page: maxPage, lastPage, streams: STREAMS });
+      progressRef.current = {
+        synced: firstResult.synced || 0,
+        pagesProcessed: CHUNK,
+        lastPage,
       };
-      updateProgress();
+      flushProgress();
 
-      // Split remaining pages across STREAMS parallel workers
+      const startAfterFirst = 1 + CHUNK;
       const remaining = lastPage - startAfterFirst + 1;
+
       if (remaining > 0) {
         const perStream = Math.ceil(remaining / STREAMS);
-        const streamRanges = Array.from({ length: STREAMS }, (_, i) => ({
+        const ranges = Array.from({ length: STREAMS }, (_, i) => ({
           start: startAfterFirst + i * perStream,
           end: Math.min(startAfterFirst + (i + 1) * perStream - 1, lastPage),
         })).filter((r) => r.start <= lastPage);
 
-        // Run all streams in parallel
-        await Promise.all(
-          streamRanges.map(async (range, idx) => {
-            let page = range.start;
-            while (page <= range.end) {
-              const res = await fetch("/api/deliverability/sync", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ startPage: page, pagesPerChunk: CHUNK }),
-              });
-              if (!res.ok) break;
-              const result = await res.json();
-              streamSynced[idx] += result.synced || 0;
-              streamPage[idx] = Math.min(page + CHUNK, range.end);
-              updateProgress();
-              // Save highest page for resume
-              const maxProcessed = Math.max(...streamPage);
-              localStorage.setItem("deliverability_next_page", String(maxProcessed));
-              setSavedPage(maxProcessed);
-              page += CHUNK;
-            }
-          })
-        );
+        await Promise.all(ranges.map((r) => runStream(r.start, r.end)));
       }
 
       localStorage.removeItem("deliverability_next_page");
@@ -360,16 +366,24 @@ export default function DeliverabilityPage() {
       {/* Sync Progress */}
       {syncProgress && (
         <div className="rounded-lg border bg-muted/30 px-4 py-3 space-y-2">
-          <div className="flex items-center gap-3 text-sm">
-            <RefreshCw className="h-4 w-4 animate-spin text-primary" />
-            <span>
-              {syncProgress.synced.toLocaleString()} inboxes synced
-              {syncProgress.streams && syncProgress.streams > 1
-                ? ` (${syncProgress.streams} parallel streams)`
-                : ""}
-            </span>
+          <div className="flex items-center justify-between text-sm">
+            <div className="flex items-center gap-3">
+              <RefreshCw className="h-4 w-4 animate-spin text-primary" />
+              <span>
+                {syncProgress.synced.toLocaleString()} inboxes synced
+                {syncProgress.streams && syncProgress.streams > 1
+                  ? ` — ${syncProgress.streams} parallel streams`
+                  : ""}
+              </span>
+            </div>
+            {syncProgress.lastPage && syncProgress.lastPage > 0 && (
+              <span className="text-muted-foreground">
+                {syncProgress.page.toLocaleString()} / {syncProgress.lastPage.toLocaleString()} pages
+                {" "}({Math.round((syncProgress.page / syncProgress.lastPage) * 100)}%)
+              </span>
+            )}
           </div>
-          {syncProgress.lastPage && (
+          {syncProgress.lastPage && syncProgress.lastPage > 0 && (
             <div className="h-1.5 rounded-full bg-muted overflow-hidden">
               <div
                 className="h-full rounded-full bg-primary transition-all duration-300"
