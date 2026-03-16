@@ -16,7 +16,8 @@ interface CampaignPreview {
   campaign_id: number;
   campaign_name: string;
   client_tag: string;
-  matching_count: number;
+  tag_id: number | null;
+  has_tag: boolean;
   campaign_status: string;
 }
 
@@ -52,7 +53,7 @@ export function AttachCampaignsDialog({ open, onOpenChange }: Props) {
       const res = await fetch("/api/deliverability/attach-campaigns");
       if (!res.ok) throw new Error("Failed to load campaigns");
       const data: CampaignPreview[] = await res.json();
-      setCampaigns(data.filter((c) => c.matching_count > 0));
+      setCampaigns(data.filter((c) => c.has_tag));
       setPhase("preview");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to load");
@@ -80,6 +81,7 @@ export function AttachCampaignsDialog({ open, onOpenChange }: Props) {
             campaign_id: c.campaign_id,
             campaign_name: c.campaign_name,
             client_tag: c.client_tag,
+            tag_id: c.tag_id,
           }),
         });
         const result = await res.json();
@@ -89,7 +91,7 @@ export function AttachCampaignsDialog({ open, onOpenChange }: Props) {
             {
               campaign_id: c.campaign_id,
               campaign_name: c.campaign_name,
-              total_matched: c.matching_count,
+              total_matched: 0,
               already_attached: 0,
               newly_attached: 0,
               error: result.error || "Failed",
@@ -104,7 +106,7 @@ export function AttachCampaignsDialog({ open, onOpenChange }: Props) {
           {
             campaign_id: c.campaign_id,
             campaign_name: c.campaign_name,
-            total_matched: c.matching_count,
+            total_matched: 0,
             already_attached: 0,
             newly_attached: 0,
             error: "Network error",
@@ -162,7 +164,7 @@ export function AttachCampaignsDialog({ open, onOpenChange }: Props) {
         {phase === "preview" && !error && (
           <>
             <p className="text-sm text-muted-foreground">
-              Found {campaigns.length} campaign{campaigns.length !== 1 ? "s" : ""} with matching inboxes.
+              Found {campaigns.length} campaign{campaigns.length !== 1 ? "s" : ""} with matching tags.
               Inboxes already attached will be skipped.
             </p>
 
@@ -172,20 +174,18 @@ export function AttachCampaignsDialog({ open, onOpenChange }: Props) {
                   <tr className="border-b text-muted-foreground text-left">
                     <th className="py-2 font-medium">Campaign</th>
                     <th className="py-2 font-medium text-center w-20">Tag</th>
-                    <th className="py-2 font-medium text-center w-20">Inboxes</th>
                     <th className="py-2 font-medium text-center w-20">Status</th>
                   </tr>
                 </thead>
                 <tbody>
                   {campaigns.map((c) => (
                     <tr key={c.campaign_id} className="border-b border-border/50 hover:bg-muted/30 transition-colors">
-                      <td className="py-2.5 pr-2 truncate max-w-[280px]">{c.campaign_name}</td>
+                      <td className="py-2.5 pr-2 truncate max-w-[320px]">{c.campaign_name}</td>
                       <td className="py-2.5 text-center">
                         <span className="inline-flex text-[10px] bg-muted px-1.5 py-0.5 rounded text-muted-foreground">
                           {c.client_tag}
                         </span>
                       </td>
-                      <td className="py-2.5 text-center font-medium">{c.matching_count}</td>
                       <td className="py-2.5 text-center">{statusBadge(c.campaign_status)}</td>
                     </tr>
                   ))}
@@ -195,7 +195,7 @@ export function AttachCampaignsDialog({ open, onOpenChange }: Props) {
 
             <div className="flex items-center justify-between pt-3 border-t">
               <span className="text-xs text-muted-foreground">
-                {campaigns.reduce((s, c) => s + c.matching_count, 0).toLocaleString()} total inbox matches
+                {campaigns.length} campaigns with matching tags
               </span>
               <Button onClick={handleAttachAll} disabled={campaigns.length === 0} className="gap-2">
                 <Link2 className="h-4 w-4" />
