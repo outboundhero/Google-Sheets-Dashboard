@@ -32,6 +32,7 @@ interface SyncProgress {
   synced: number;
   page: number;
   lastPage: number | null;
+  streams?: number;
 }
 
 // ---------- Tag Multi-Select Dropdown ----------
@@ -196,31 +197,66 @@ export default function DeliverabilityPage() {
 
   const handleSync = async () => {
     setSyncing(true);
-    const resumePage = savedPage ?? 1;
-    setSyncProgress({ synced: 0, page: resumePage, lastPage: null });
-    let nextPage: number | null = resumePage as number | null;
-    let totalSynced = 0;
+    const CHUNK = 50;
+    const STREAMS = 4;
 
     try {
-      while (nextPage !== null) {
-        localStorage.setItem("deliverability_next_page", String(nextPage));
-        setSavedPage(nextPage);
+      // First fetch to discover lastPage
+      const firstRes = await fetch("/api/deliverability/sync", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ startPage: savedPage ?? 1, pagesPerChunk: CHUNK }),
+      });
+      if (!firstRes.ok) { setSyncing(false); return; }
+      const firstResult = await firstRes.json();
+      const lastPage = firstResult.lastPage || 1;
+      const resumeFrom = savedPage ?? 1;
+      const startAfterFirst = resumeFrom + CHUNK;
 
-        const res = await fetch("/api/deliverability/sync", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ startPage: nextPage, pagesPerChunk: 50 }),
-        });
-        if (!res.ok) break;
-        const result = await res.json();
-        totalSynced += result.synced || 0;
-        setSyncProgress({
-          synced: totalSynced,
-          page: result.nextPage || result.lastPage,
-          lastPage: result.lastPage,
-        });
-        nextPage = result.complete ? null : result.nextPage;
+      // Track progress across all streams
+      const streamSynced = [firstResult.synced || 0, 0, 0, 0];
+      const streamPage = [Math.min(startAfterFirst, lastPage), 0, 0, 0];
+      const updateProgress = () => {
+        const totalSynced = streamSynced.reduce((a, b) => a + b, 0);
+        const maxPage = Math.max(...streamPage);
+        setSyncProgress({ synced: totalSynced, page: maxPage, lastPage, streams: STREAMS });
+      };
+      updateProgress();
+
+      // Split remaining pages across STREAMS parallel workers
+      const remaining = lastPage - startAfterFirst + 1;
+      if (remaining > 0) {
+        const perStream = Math.ceil(remaining / STREAMS);
+        const streamRanges = Array.from({ length: STREAMS }, (_, i) => ({
+          start: startAfterFirst + i * perStream,
+          end: Math.min(startAfterFirst + (i + 1) * perStream - 1, lastPage),
+        })).filter((r) => r.start <= lastPage);
+
+        // Run all streams in parallel
+        await Promise.all(
+          streamRanges.map(async (range, idx) => {
+            let page = range.start;
+            while (page <= range.end) {
+              const res = await fetch("/api/deliverability/sync", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ startPage: page, pagesPerChunk: CHUNK }),
+              });
+              if (!res.ok) break;
+              const result = await res.json();
+              streamSynced[idx] += result.synced || 0;
+              streamPage[idx] = Math.min(page + CHUNK, range.end);
+              updateProgress();
+              // Save highest page for resume
+              const maxProcessed = Math.max(...streamPage);
+              localStorage.setItem("deliverability_next_page", String(maxProcessed));
+              setSavedPage(maxProcessed);
+              page += CHUNK;
+            }
+          })
+        );
       }
+
       localStorage.removeItem("deliverability_next_page");
       setSavedPage(null);
       await loadDomains();
@@ -323,14 +359,26 @@ export default function DeliverabilityPage() {
 
       {/* Sync Progress */}
       {syncProgress && (
-        <div className="rounded-lg border bg-muted/30 px-4 py-3 flex items-center gap-3 text-sm">
-          <RefreshCw className="h-4 w-4 animate-spin text-primary" />
-          <span>
-            Syncing page {syncProgress.page}
-            {syncProgress.lastPage ? ` of ${syncProgress.lastPage}` : ""}
-            {" — "}
-            {syncProgress.synced.toLocaleString()} inboxes synced so far
-          </span>
+        <div className="rounded-lg border bg-muted/30 px-4 py-3 space-y-2">
+          <div className="flex items-center gap-3 text-sm">
+            <RefreshCw className="h-4 w-4 animate-spin text-primary" />
+            <span>
+              {syncProgress.synced.toLocaleString()} inboxes synced
+              {syncProgress.streams && syncProgress.streams > 1
+                ? ` (${syncProgress.streams} parallel streams)`
+                : ""}
+            </span>
+          </div>
+          {syncProgress.lastPage && (
+            <div className="h-1.5 rounded-full bg-muted overflow-hidden">
+              <div
+                className="h-full rounded-full bg-primary transition-all duration-300"
+                style={{
+                  width: `${Math.min(100, (syncProgress.page / syncProgress.lastPage) * 100)}%`,
+                }}
+              />
+            </div>
+          )}
         </div>
       )}
 
