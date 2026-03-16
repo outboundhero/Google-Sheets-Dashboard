@@ -51,9 +51,10 @@ export function AttachCampaignsDialog({ open, onOpenChange }: Props) {
     setCurrentIndex(0);
     try {
       const res = await fetch("/api/deliverability/attach-campaigns");
-      if (!res.ok) throw new Error("Failed to load campaigns");
-      const data: CampaignPreview[] = await res.json();
-      setCampaigns(data.filter((c) => c.has_tag));
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Failed to load campaigns");
+      const campaigns: CampaignPreview[] = Array.isArray(data) ? data : [];
+      setCampaigns(campaigns.filter((c) => c.has_tag));
       setPhase("preview");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to load");

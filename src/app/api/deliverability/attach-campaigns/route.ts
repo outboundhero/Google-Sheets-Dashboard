@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 
 const API_BASE = "https://app.outboundhero.co/api";
 const API_KEY = process.env.OUTBOUNDHERO_API_KEY!;
-const DELAY_MS = 300;
+const DELAY_MS = 150;
 
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const headers = { Authorization: `Bearer ${API_KEY}` };
@@ -110,9 +110,11 @@ export async function GET() {
     return NextResponse.json(preview);
   } catch (error) {
     const message = error instanceof Error ? error.message : "Failed to load campaigns";
+    console.error("Attach campaigns GET error:", message);
     return NextResponse.json({ error: message }, { status: 500 });
   }
 }
+
 
 // POST: execute attachment for a single campaign
 export async function POST(request: Request) {
