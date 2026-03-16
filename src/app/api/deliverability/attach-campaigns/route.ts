@@ -14,7 +14,7 @@ interface Campaign {
   type: string;
 }
 
-// Fetch all campaigns (paginated if needed)
+// Fetch all campaigns (paginated)
 async function fetchAllCampaigns(): Promise<Campaign[]> {
   const all: Campaign[] = [];
   let page = 1;
@@ -34,6 +34,47 @@ async function fetchAllCampaigns(): Promise<Campaign[]> {
     await delay(DELAY_MS);
   }
   return all;
+}
+
+// Fetch ALL sender emails for a campaign (paginated)
+async function fetchCampaignSenderEmails(campaignId: number): Promise<number[]> {
+  const allIds: number[] = [];
+  let page = 1;
+  // eslint-disable-next-line no-constant-condition
+  while (true) {
+    const res = await fetch(
+      `${API_BASE}/campaigns/${campaignId}/sender-emails?page=${page}&per_page=100`,
+      { headers: { Authorization: `Bearer ${API_KEY}` }, cache: "no-store" }
+    );
+    if (!res.ok) break;
+    const json = await res.json();
+    const data = json.data || [];
+    if (data.length === 0) break;
+    allIds.push(...data.map((e: { id: number }) => e.id));
+    const lastPage = json.meta?.last_page || 1;
+    if (page >= lastPage) break;
+    page++;
+    await delay(150);
+  }
+  return allIds;
+}
+
+// Extract invalid IDs from a 422 error response
+function extractInvalidIds(errorBody: string, ids: number[]): Set<number> {
+  const invalid = new Set<number>();
+  try {
+    const parsed = JSON.parse(errorBody);
+    const errors = parsed?.data?.errors || parsed?.errors || {};
+    for (const key of Object.keys(errors)) {
+      // key is like "sender_email_ids.23" — extract the index
+      const match = key.match(/sender_email_ids\.(\d+)/);
+      if (match) {
+        const idx = parseInt(match[1], 10);
+        if (idx < ids.length) invalid.add(ids[idx]);
+      }
+    }
+  } catch { /* ignore parse errors */ }
+  return invalid;
 }
 
 // GET: preview — list campaigns with matching inbox counts
@@ -95,18 +136,8 @@ export async function POST(request: Request) {
       });
     }
 
-    // 2. Get already-attached sender emails for this campaign
-    const existingRes = await fetch(`${API_BASE}/campaigns/${campaign_id}/sender-emails`, {
-      headers: { Authorization: `Bearer ${API_KEY}` },
-      cache: "no-store",
-    });
-
-    let alreadyAttachedIds: number[] = [];
-    if (existingRes.ok) {
-      const existingJson = await existingRes.json();
-      const existingData = existingJson.data || [];
-      alreadyAttachedIds = existingData.map((e: { id: number }) => e.id);
-    }
+    // 2. Get ALL already-attached sender emails (paginated)
+    const alreadyAttachedIds = await fetchCampaignSenderEmails(campaign_id);
 
     // 3. Compute new IDs to attach
     const alreadySet = new Set(alreadyAttachedIds);
@@ -122,10 +153,14 @@ export async function POST(request: Request) {
       });
     }
 
-    // 4. Attach new inboxes (batch in groups of 100)
+    // 4. Attach new inboxes (batch in groups of 100, retry on 422 with invalid IDs removed)
     let totalAttached = 0;
+    const allInvalidIds = new Set<number>();
+
     for (let i = 0; i < newIds.length; i += 100) {
-      const batch = newIds.slice(i, i + 100);
+      let batch = newIds.slice(i, i + 100).filter((id) => !allInvalidIds.has(id));
+      if (batch.length === 0) continue;
+
       const attachRes = await fetch(`${API_BASE}/campaigns/${campaign_id}/attach-sender-emails`, {
         method: "POST",
         headers: {
@@ -134,11 +169,29 @@ export async function POST(request: Request) {
         },
         body: JSON.stringify({ sender_email_ids: batch }),
       });
-      if (!attachRes.ok) {
+
+      if (attachRes.status === 422) {
+        // Extract invalid IDs, remove them, and retry
         const errText = await attachRes.text().catch(() => "");
-        throw new Error(`Attach failed for campaign ${campaign_id}: ${attachRes.status} ${errText}`);
+        const invalidInBatch = extractInvalidIds(errText, batch);
+        for (const id of invalidInBatch) allInvalidIds.add(id);
+        batch = batch.filter((id) => !invalidInBatch.has(id));
+
+        if (batch.length > 0) {
+          const retryRes = await fetch(`${API_BASE}/campaigns/${campaign_id}/attach-sender-emails`, {
+            method: "POST",
+            headers: {
+              Authorization: `Bearer ${API_KEY}`,
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({ sender_email_ids: batch }),
+          });
+          if (retryRes.ok) totalAttached += batch.length;
+        }
+      } else if (attachRes.ok) {
+        totalAttached += batch.length;
       }
-      totalAttached += batch.length;
+
       if (i + 100 < newIds.length) await delay(DELAY_MS);
     }
 
@@ -148,6 +201,7 @@ export async function POST(request: Request) {
       total_matched: matchedIds.length,
       already_attached: alreadyAttachedIds.length,
       newly_attached: totalAttached,
+      skipped_invalid: allInvalidIds.size,
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Attachment failed";
