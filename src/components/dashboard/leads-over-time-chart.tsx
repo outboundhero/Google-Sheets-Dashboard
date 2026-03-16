@@ -12,6 +12,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 
 interface Props {
   data: { date: string; count: number }[];
+  billingStartDay?: number | null;
 }
 
 const CustomTooltip = ({ active, payload, label }: { active?: boolean; payload?: Array<{ value: number }>; label?: string }) => {
@@ -24,15 +25,28 @@ const CustomTooltip = ({ active, payload, label }: { active?: boolean; payload?:
   );
 };
 
-export function LeadsOverTimeChart({ data }: Props) {
+export function LeadsOverTimeChart({ data, billingStartDay }: Props) {
   if (!data.length) return null;
+
+  const ordinal = (n: number) => {
+    const s = ["th", "st", "nd", "rd"];
+    const v = n % 100;
+    return n + (s[(v - 20) % 10] || s[v] || s[0]);
+  };
 
   return (
     <Card>
       <CardHeader className="pb-2">
-        <CardTitle className="text-sm font-medium text-muted-foreground">
-          Leads Over Time
-        </CardTitle>
+        <div className="flex items-center justify-between">
+          <CardTitle className="text-sm font-medium text-muted-foreground">
+            Leads Over Time
+          </CardTitle>
+          {billingStartDay && (
+            <span className="text-xs text-muted-foreground">
+              Billing Start Date: <span className="font-medium text-foreground">{ordinal(billingStartDay)}</span>
+            </span>
+          )}
+        </div>
       </CardHeader>
       <CardContent>
         <ResponsiveContainer width="100%" height={280}>
