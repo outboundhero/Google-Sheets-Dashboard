@@ -11,6 +11,7 @@ interface ClientCardProps {
   qualityPercentage: number;
   meetingReadyLast24h: number;
   meetingReadyWithoutStatus: number;
+  flaggedDomains?: number;
 }
 
 export function ClientCard({
@@ -20,6 +21,7 @@ export function ClientCard({
   qualityPercentage,
   meetingReadyLast24h,
   meetingReadyWithoutStatus,
+  flaggedDomains,
 }: ClientCardProps) {
   return (
     <Link href={`/clients/${encodeURIComponent(clientTag)}`}>
@@ -64,7 +66,7 @@ export function ClientCard({
           </div>
 
           {/* Additional metrics */}
-          <div className="mt-3 grid grid-cols-2 gap-3 pt-3 border-t">
+          <div className="mt-3 grid grid-cols-3 gap-3 pt-3 border-t">
             <div className="space-y-1">
               <div className="flex items-center gap-1 text-muted-foreground">
                 <Clock className="h-3 w-3" />
@@ -79,6 +81,21 @@ export function ClientCard({
               </div>
               <p className="text-sm font-semibold">{meetingReadyWithoutStatus}</p>
             </div>
+            {flaggedDomains !== undefined && (
+              <Link
+                href={`/deliverability?tags=${encodeURIComponent(clientTag)}&flagged=true`}
+                onClick={(e) => e.stopPropagation()}
+                className="space-y-1 group/flag"
+              >
+                <div className="flex items-center gap-1 text-muted-foreground">
+                  <AlertTriangle className="h-3 w-3 text-destructive" />
+                  <span className="text-xs group-hover/flag:text-destructive transition-colors">Flagged</span>
+                </div>
+                <p className={`text-sm font-semibold ${flaggedDomains > 0 ? "text-destructive" : ""}`}>
+                  {flaggedDomains}
+                </p>
+              </Link>
+            )}
           </div>
 
           {/* Quality bar */}

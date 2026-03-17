@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useMemo } from "react";
+import { useState, useMemo, useEffect } from "react";
 import { Search } from "lucide-react";
 import { useAllLeads } from "@/lib/hooks/use-leads";
 import { useSheets } from "@/lib/hooks/use-sheets";
@@ -10,10 +10,53 @@ import { RefreshButton } from "@/components/shared/refresh-button";
 import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
 
+interface DomainRow {
+  domain: string;
+  inbox_count: number;
+  tags?: string[];
+  total_sent?: number;
+  total_replied?: number;
+  total_bounced?: number;
+  outlook_count?: number;
+  google_count?: number;
+}
+
+function isDomainFlagged(d: DomainRow): boolean {
+  const isGoogle = (d.google_count || 0) > 0 && (d.outlook_count || 0) === 0;
+  const isOutlook = (d.outlook_count || 0) > 0 && (d.google_count || 0) === 0;
+  if (!(isGoogle || isOutlook) || (d.total_sent || 0) <= 100) return false;
+  const replied = d.total_replied || 0;
+  const bounced = d.total_bounced || 0;
+  const lowReply = isGoogle ? 2 : 16;
+  const highBounce = isGoogle ? 20 : 170;
+  return replied <= lowReply || bounced > highBounce;
+}
+
 export default function ClientsPage() {
   const { leads, isLoading, isSyncing, syncProgress, refresh } = useAllLeads();
   const { sheets } = useSheets();
   const [search, setSearch] = useState("");
+  const [deliverabilityDomains, setDeliverabilityDomains] = useState<DomainRow[]>([]);
+
+  useEffect(() => {
+    fetch("/api/deliverability/domains")
+      .then((r) => r.json())
+      .then((data) => { if (Array.isArray(data)) setDeliverabilityDomains(data); })
+      .catch(() => {});
+  }, []);
+
+  // Compute flagged domain counts per client tag
+  const flaggedByTag = useMemo(() => {
+    const map = new Map<string, number>();
+    for (const d of deliverabilityDomains) {
+      if (!isDomainFlagged(d)) continue;
+      if (!d.tags || d.tags.length === 0) continue;
+      for (const tag of d.tags) {
+        map.set(tag, (map.get(tag) || 0) + 1);
+      }
+    }
+    return map;
+  }, [deliverabilityDomains]);
 
   const clientStats = useMemo(() => {
     // Invalid patterns - check if client tag contains or equals these
@@ -191,7 +234,7 @@ export default function ClientsPage() {
       ) : (
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
           {filtered.map((client) => (
-            <ClientCard key={client.clientTag} {...client} />
+            <ClientCard key={client.clientTag} {...client} flaggedDomains={flaggedByTag.get(client.clientTag) ?? 0} />
           ))}
         </div>
       )}

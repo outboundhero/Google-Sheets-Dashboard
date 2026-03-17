@@ -1,6 +1,7 @@
 "use client";
 
-import { useState, useEffect, useCallback, useMemo, useRef, type MutableRefObject } from "react";
+import { useState, useEffect, useCallback, useMemo, useRef, Suspense } from "react";
+import { useSearchParams } from "next/navigation";
 import {
   RefreshCw,
   Globe,
@@ -152,12 +153,24 @@ function TagFilterDropdown({
 // ------------------------------------------------
 
 export default function DeliverabilityPage() {
+  return (
+    <Suspense>
+      <DeliverabilityPageInner />
+    </Suspense>
+  );
+}
+
+function DeliverabilityPageInner() {
+  const searchParams = useSearchParams();
   const [domains, setDomains] = useState<DomainRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [syncing, setSyncing] = useState(false);
   const [syncProgress, setSyncProgress] = useState<SyncProgress | null>(null);
   const [syncStats, setSyncStats] = useState<{ inboxCount: number; domainCount: number } | null>(null);
-  const [tagFilters, setTagFilters] = useState<string[]>([]);
+  const [tagFilters, setTagFilters] = useState<string[]>(() => {
+    const t = searchParams.get("tags");
+    return t ? t.split(",").map((s) => s.trim()).filter(Boolean) : [];
+  });
   const [warmupFilter, setWarmupFilter] = useState<"all" | "open" | "done">("open");
   const [activeTab, setActiveTab] = useState<"inboxes" | "warmup">("inboxes");
   const [allTags, setAllTags] = useState<string[]>([]);
@@ -165,7 +178,8 @@ export default function DeliverabilityPage() {
   const [domainSearch, setDomainSearch] = useState("");
   const [warmupSearch, setWarmupSearch] = useState("");
   const [typeFilter, setTypeFilter] = useState<"all" | "outlook" | "google">("all");
-  const [showFlagged, setShowFlagged] = useState(false);
+  const [showFlagged, setShowFlagged] = useState(() => searchParams.get("flagged") === "true");
+  const [showReserve, setShowReserve] = useState(false);
   const [attachDialogOpen, setAttachDialogOpen] = useState(false);
 
   useEffect(() => {
@@ -318,8 +332,9 @@ export default function DeliverabilityPage() {
         .filter((d) => warmupFilter === "all" || d.warmup_status === warmupFilter)
         .filter((d) =>
           warmupSearch ? d.domain.toLowerCase().includes(warmupSearch.toLowerCase()) : true
-        ),
-    [domains, warmupFilter, warmupSearch, now]
+        )
+        .filter((d) => showReserve ? !d.tags || d.tags.length === 0 : true),
+    [domains, warmupFilter, warmupSearch, showReserve, now]
   );
 
   // Flag computation helper — returns human-readable reason strings
@@ -367,10 +382,14 @@ export default function DeliverabilityPage() {
     if (showFlagged) {
       result = result.filter((d) => isDomainFlagged(d));
     }
+    if (showReserve) {
+      result = result.filter((d) => !d.tags || d.tags.length === 0);
+    }
     return result;
-  }, [domains, tagFilters, domainSearch, typeFilter, showFlagged, isDomainFlagged]);
+  }, [domains, tagFilters, domainSearch, typeFilter, showFlagged, showReserve, isDomainFlagged]);
 
   const flaggedCount = useMemo(() => domains.filter(isDomainFlagged).length, [domains, isDomainFlagged]);
+  const reserveCount = useMemo(() => domains.filter((d) => !d.tags || d.tags.length === 0).length, [domains]);
 
   return (
     <div className="space-y-6">
@@ -542,6 +561,26 @@ export default function DeliverabilityPage() {
               )}
             </button>
 
+            {/* Reserve filter */}
+            <button
+              onClick={() => setShowReserve((v) => !v)}
+              className={`text-xs px-3 py-1.5 rounded-full border transition-colors flex items-center gap-1.5 ${
+                showReserve
+                  ? "bg-amber-500 text-white border-amber-500"
+                  : "border-border text-muted-foreground hover:border-foreground hover:text-foreground"
+              }`}
+            >
+              <Inbox className="h-3 w-3" />
+              Reserve
+              {reserveCount > 0 && (
+                <span className={`text-[10px] font-medium rounded-full px-1.5 ${
+                  showReserve ? "bg-white/20" : "bg-amber-500/15 text-amber-600"
+                }`}>
+                  {reserveCount}
+                </span>
+              )}
+            </button>
+
             {/* Active tag chips */}
             {tagFilters.map((tag) => (
               <span
@@ -555,7 +594,7 @@ export default function DeliverabilityPage() {
               </span>
             ))}
 
-            {(tagFilters.length > 0 || domainSearch || typeFilter !== "all") && (
+            {(tagFilters.length > 0 || domainSearch || typeFilter !== "all" || showReserve) && (
               <span className="text-xs text-muted-foreground">
                 {filteredDomains.length} domain{filteredDomains.length !== 1 ? "s" : ""}
               </span>
@@ -746,6 +785,26 @@ export default function DeliverabilityPage() {
                 {f === "open" ? "🔵 Open" : f === "done" ? "✅ Done" : "All"}
               </button>
             ))}
+
+            {/* Reserve filter */}
+            <button
+              onClick={() => setShowReserve((v) => !v)}
+              className={`text-xs px-3 py-1.5 rounded-full border transition-colors flex items-center gap-1.5 ${
+                showReserve
+                  ? "bg-amber-500 text-white border-amber-500"
+                  : "border-border text-muted-foreground hover:border-foreground hover:text-foreground"
+              }`}
+            >
+              <Inbox className="h-3 w-3" />
+              Reserve
+              {reserveCount > 0 && (
+                <span className={`text-[10px] font-medium rounded-full px-1.5 ${
+                  showReserve ? "bg-white/20" : "bg-amber-500/15 text-amber-600"
+                }`}>
+                  {reserveCount}
+                </span>
+              )}
+            </button>
           </div>
 
           {loading ? (
