@@ -22,6 +22,7 @@ import { Badge } from "@/components/ui/badge";
 import { PageHeader } from "@/components/shared/page-header";
 import { AttachCampaignsDialog } from "@/components/deliverability/attach-campaigns-dialog";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip";
 
 interface DomainRow {
   domain: string;
@@ -321,15 +322,29 @@ export default function DeliverabilityPage() {
     [domains, warmupFilter, warmupSearch, now]
   );
 
-  // Flag computation helper
-  const isDomainFlagged = useCallback((d: DomainRow) => {
+  // Flag computation helper — returns human-readable reason strings
+  const getFlagReasons = useCallback((d: DomainRow): string[] => {
+    const reasons: string[] = [];
     const isGoogle = (d.google_count || 0) > 0 && (d.outlook_count || 0) === 0;
     const isOutlook = (d.outlook_count || 0) > 0 && (d.google_count || 0) === 0;
-    const hasSent = (d.total_sent || 0) > 100;
-    const gFlag = isGoogle && hasSent && ((d.total_replied || 0) <= 2 || (d.total_bounced || 0) > 20);
-    const oFlag = isOutlook && hasSent && ((d.total_replied || 0) <= 16 || (d.total_bounced || 0) > 170);
-    return gFlag || oFlag;
+    if (!(isGoogle || isOutlook) || (d.total_sent || 0) <= 100) return reasons;
+
+    const replied = d.total_replied || 0;
+    const bounced = d.total_bounced || 0;
+    const sent = (d.total_sent || 0).toLocaleString();
+    const lowReplyThreshold = isGoogle ? 2 : 16;
+    const highBounceThreshold = isGoogle ? 20 : 170;
+
+    if (replied <= lowReplyThreshold) {
+      reasons.push(`Low replies (${replied} with ${sent} sent)`);
+    }
+    if (bounced > highBounceThreshold) {
+      reasons.push(`High bounces (${bounced.toLocaleString()} with ${sent} sent)`);
+    }
+    return reasons;
   }, []);
+
+  const isDomainFlagged = useCallback((d: DomainRow) => getFlagReasons(d).length > 0, [getFlagReasons]);
 
   // Client-side filter: tag match (OR) + domain search + type filter + flagged
   const filteredDomains = useMemo(() => {
@@ -589,10 +604,8 @@ export default function DeliverabilityPage() {
                 // Flagging rules
                 const isGoogleDomain = (d.google_count || 0) > 0 && (d.outlook_count || 0) === 0;
                 const isOutlookDomain = (d.outlook_count || 0) > 0 && (d.google_count || 0) === 0;
-                const hasSentEnough = (d.total_sent || 0) > 100;
-                const googleFlagged = isGoogleDomain && hasSentEnough && ((d.total_replied || 0) <= 2 || (d.total_bounced || 0) > 20);
-                const outlookFlagged = isOutlookDomain && hasSentEnough && ((d.total_replied || 0) <= 16 || (d.total_bounced || 0) > 170);
-                const flagged = googleFlagged || outlookFlagged;
+                const flagReasons = getFlagReasons(d);
+                const flagged = flagReasons.length > 0;
 
                 return (
                   <div
@@ -609,7 +622,22 @@ export default function DeliverabilityPage() {
                         <Globe className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
                         <span className="font-medium text-sm truncate">{d.domain}</span>
                         {flagged && (
-                          <AlertTriangle className="h-3.5 w-3.5 text-destructive shrink-0" />
+                          <Tooltip>
+                            <TooltipTrigger asChild>
+                              <AlertTriangle className="h-3.5 w-3.5 text-destructive shrink-0 cursor-help" />
+                            </TooltipTrigger>
+                            <TooltipContent
+                              side="right"
+                              sideOffset={6}
+                              className="bg-destructive/95 text-destructive-foreground border-destructive/50 max-w-xs"
+                            >
+                              <div className="space-y-0.5">
+                                {flagReasons.map((reason, i) => (
+                                  <div key={i} className="text-xs">{reason}</div>
+                                ))}
+                              </div>
+                            </TooltipContent>
+                          </Tooltip>
                         )}
                       </div>
                       <div className="flex items-center gap-1.5 mt-1 ml-5">
