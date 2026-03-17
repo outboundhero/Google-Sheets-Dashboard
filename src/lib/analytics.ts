@@ -67,14 +67,14 @@ function computeTimeSeries(
   }
 
   if (goLiveDate) {
-    // Sort by month number
-    return Object.entries(byMonth)
-      .sort(([a], [b]) => {
-        const na = parseInt(a.replace("Month ", ""), 10);
-        const nb = parseInt(b.replace("Month ", ""), 10);
-        return na - nb;
-      })
-      .map(([date, count]) => ({ date, count }));
+    // Find the max billing month and fill gaps (so Month 1 always shows even if 0)
+    const monthNums = Object.keys(byMonth).map((k) => parseInt(k.replace("Month ", ""), 10));
+    const maxMonth = monthNums.length > 0 ? Math.max(...monthNums) : 0;
+    const result: { date: string; count: number }[] = [];
+    for (let m = 1; m <= Math.max(maxMonth, 1); m++) {
+      result.push({ date: `Month ${m}`, count: byMonth[`Month ${m}`] || 0 });
+    }
+    return result;
   }
 
   return Object.entries(byMonth)
