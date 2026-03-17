@@ -354,9 +354,10 @@ export async function getAllClientTags(): Promise<string[]> {
 
   const tags = new Set<string>();
 
-  // Split "DBSM & DBSA & DBSF" into individual tags
+  // Split "DBSM & DBSA & DBSF" into individual tags (space-delimited &)
+  // but keep "TM&VC", "JPC&A", "K&LCS" intact (no spaces around &)
   const addCell = (cell: string) => {
-    for (const part of cell.split("&")) {
+    for (const part of cell.split(" & ")) {
       const v = part.trim();
       if (v) tags.add(v);
     }
