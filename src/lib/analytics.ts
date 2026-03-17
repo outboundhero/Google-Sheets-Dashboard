@@ -37,14 +37,42 @@ function parseDate(dateStr: string): Date | null {
   return null;
 }
 
-function computeTimeSeries(leads: Lead[]): { date: string; count: number }[] {
+function computeTimeSeries(
+  leads: Lead[],
+  goLiveDate?: Date | null
+): { date: string; count: number }[] {
   const byMonth: Record<string, number> = {};
 
   for (const lead of leads) {
     const d = parseDate(lead.timeWeGotReply) || parseDate(lead.replyTime);
     if (!d) continue;
-    const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
-    byMonth[key] = (byMonth[key] || 0) + 1;
+
+    if (goLiveDate) {
+      // Group by billing cycle: goLiveDate.day → next month's goLiveDate.day
+      if (d < goLiveDate) continue; // skip pre-launch leads
+      const startDay = goLiveDate.getDate();
+      // Compute billing month number
+      let monthDiff = (d.getFullYear() - goLiveDate.getFullYear()) * 12 + (d.getMonth() - goLiveDate.getMonth());
+      if (d.getDate() < startDay) monthDiff--;
+      const billingMonth = monthDiff + 1;
+      if (billingMonth < 1) continue;
+      const key = `Month ${billingMonth}`;
+      byMonth[key] = (byMonth[key] || 0) + 1;
+    } else {
+      const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+      byMonth[key] = (byMonth[key] || 0) + 1;
+    }
+  }
+
+  if (goLiveDate) {
+    // Sort by month number
+    return Object.entries(byMonth)
+      .sort(([a], [b]) => {
+        const na = parseInt(a.replace("Month ", ""), 10);
+        const nb = parseInt(b.replace("Month ", ""), 10);
+        return na - nb;
+      })
+      .map(([date, count]) => ({ date, count }));
   }
 
   return Object.entries(byMonth)
@@ -104,7 +132,8 @@ function normalizeStatus(raw: string): string {
 export function computeAnalytics(
   leads: Lead[],
   filterClientTag?: string,
-  excludeClientTags?: string[]
+  excludeClientTags?: string[],
+  goLiveDate?: Date | null
 ): DashboardAnalytics {
   const baseLeads = excludeClientTags?.length
     ? leads.filter((l) => !excludeClientTags.includes(l.sheetClientTag))
@@ -183,7 +212,7 @@ export function computeAnalytics(
     .map(([category, items]) => ({ category, count: items.length }))
     .sort((a, b) => b.count - a.count);
 
-  const leadsOverTime = computeTimeSeries(filtered);
+  const leadsOverTime = computeTimeSeries(filtered, goLiveDate);
 
   const topClients = leadsByClient
     .map(({ client, count }) => {
