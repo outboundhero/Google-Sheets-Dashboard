@@ -624,7 +624,9 @@ export default function DeliverabilityPage() {
                         {flagged && (
                           <Tooltip>
                             <TooltipTrigger asChild>
-                              <AlertTriangle className="h-3.5 w-3.5 text-destructive shrink-0 cursor-help" />
+                              <span className="shrink-0 cursor-help">
+                                <AlertTriangle className="h-3.5 w-3.5 text-destructive" />
+                              </span>
                             </TooltipTrigger>
                             <TooltipContent
                               side="right"
