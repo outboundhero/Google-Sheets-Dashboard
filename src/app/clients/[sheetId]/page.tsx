@@ -50,11 +50,6 @@ export default function ClientDetailPage({
     return leadsForClient.filter((l) => l.sheetId === selectedSheetFilter);
   }, [allLeads, clientTag, selectedSheetFilter]);
 
-  const analytics = useMemo(() => {
-    if (!clientLeads.length) return null;
-    return computeAnalytics(clientLeads);
-  }, [clientLeads]);
-
   // Go Live Date for this client from the tracker sheet
   const goLiveDate = useMemo(() => {
     const row = trackerClients.find(
@@ -65,7 +60,11 @@ export default function ClientDetailPage({
     return isNaN(d.getTime()) ? null : d;
   }, [trackerClients, clientTag]);
 
-  // leadsOverTime is already grouped by billing cycle from the API when goLiveDate exists
+  const analytics = useMemo(() => {
+    if (!clientLeads.length) return null;
+    return computeAnalytics(clientLeads, undefined, undefined, goLiveDate);
+  }, [clientLeads, goLiveDate]);
+
   const leadsOverTime = analytics?.leadsOverTime || [];
 
   // Compute 24h meeting-ready and missing status metrics

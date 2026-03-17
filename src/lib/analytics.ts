@@ -44,6 +44,9 @@ function computeTimeSeries(
   const byMonth: Record<string, number> = {};
 
   for (const lead of leads) {
+    // When billing cycle is active, only count Meeting-Ready leads
+    if (goLiveDate && !lead.currentCategory.toLowerCase().includes("meeting")) continue;
+
     const d = parseDate(lead.timeWeGotReply) || parseDate(lead.replyTime);
     if (!d) continue;
 
@@ -51,7 +54,6 @@ function computeTimeSeries(
       // Group by billing cycle: goLiveDate.day → next month's goLiveDate.day
       if (d < goLiveDate) continue; // skip pre-launch leads
       const startDay = goLiveDate.getDate();
-      // Compute billing month number
       let monthDiff = (d.getFullYear() - goLiveDate.getFullYear()) * 12 + (d.getMonth() - goLiveDate.getMonth());
       if (d.getDate() < startDay) monthDiff--;
       const billingMonth = monthDiff + 1;
