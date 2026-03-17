@@ -181,10 +181,28 @@ function DeliverabilityPageInner() {
   const [showFlagged, setShowFlagged] = useState(() => searchParams.get("flagged") === "true");
   const [showReserve, setShowReserve] = useState(false);
   const [attachDialogOpen, setAttachDialogOpen] = useState(false);
+  const [clientTags, setClientTags] = useState<Set<string>>(new Set());
 
   useEffect(() => {
     const saved = localStorage.getItem("deliverability_next_page");
     if (saved) setSavedPage(parseInt(saved, 10));
+  }, []);
+
+  // Fetch client abbreviations from the Client Tracker spreadsheet
+  useEffect(() => {
+    fetch("/api/client-tracker")
+      .then((r) => r.json())
+      .then((data) => {
+        if (Array.isArray(data)) {
+          const tags = new Set<string>();
+          for (const row of data) {
+            const abbr = row.clientAbbr?.trim();
+            if (abbr) tags.add(abbr);
+          }
+          setClientTags(tags);
+        }
+      })
+      .catch(() => {});
   }, []);
 
   const loadDomains = useCallback(async () => {
@@ -317,6 +335,15 @@ function DeliverabilityPageInner() {
     );
   };
 
+  // Reserve = domain has no client tags (may have other tags like "Cheap Inboxes", "JPTUC", etc.)
+  const isDomainReserve = useCallback((d: DomainRow) => {
+    if (clientTags.size === 0) return false; // not loaded yet
+    if (!d.tags || d.tags.length === 0) return true;
+    return !d.tags.some((t) => clientTags.has(t));
+  }, [clientTags]);
+
+  const reserveCount = useMemo(() => domains.filter(isDomainReserve).length, [domains, isDomainReserve]);
+
   const now = Date.now();
 
   const warmupDomains = useMemo(
@@ -333,8 +360,8 @@ function DeliverabilityPageInner() {
         .filter((d) =>
           warmupSearch ? d.domain.toLowerCase().includes(warmupSearch.toLowerCase()) : true
         )
-        .filter((d) => showReserve ? !d.tags || d.tags.length === 0 : true),
-    [domains, warmupFilter, warmupSearch, showReserve, now]
+        .filter((d) => showReserve ? isDomainReserve(d) : true),
+    [domains, warmupFilter, warmupSearch, showReserve, isDomainReserve, now]
   );
 
   // Flag computation helper — returns human-readable reason strings
@@ -383,13 +410,12 @@ function DeliverabilityPageInner() {
       result = result.filter((d) => isDomainFlagged(d));
     }
     if (showReserve) {
-      result = result.filter((d) => !d.tags || d.tags.length === 0);
+      result = result.filter(isDomainReserve);
     }
     return result;
-  }, [domains, tagFilters, domainSearch, typeFilter, showFlagged, showReserve, isDomainFlagged]);
+  }, [domains, tagFilters, domainSearch, typeFilter, showFlagged, showReserve, isDomainFlagged, isDomainReserve]);
 
   const flaggedCount = useMemo(() => domains.filter(isDomainFlagged).length, [domains, isDomainFlagged]);
-  const reserveCount = useMemo(() => domains.filter((d) => !d.tags || d.tags.length === 0).length, [domains]);
 
   return (
     <div className="space-y-6">
