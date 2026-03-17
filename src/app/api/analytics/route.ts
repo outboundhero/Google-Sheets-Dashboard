@@ -23,19 +23,20 @@ export async function GET(request: Request) {
       })
       .map((c) => c.clientAbbr);
 
-    // Find Go Live Date for this client (for billing cycle grouping)
-    let goLiveDate: Date | null = null;
+    // Find Start Date for this client (for billing cycle grouping), fall back to Go Live Date
+    let billingStartDate: Date | null = null;
     if (client) {
       const row = trackerData.find(
         (c) => c.clientAbbr.trim().toLowerCase() === client.trim().toLowerCase()
       );
-      if (row?.goLiveDate) {
-        const d = new Date(row.goLiveDate);
-        if (!isNaN(d.getTime())) goLiveDate = d;
+      const dateStr = row?.startDate || row?.goLiveDate;
+      if (dateStr) {
+        const d = new Date(dateStr);
+        if (!isNaN(d.getTime())) billingStartDate = d;
       }
     }
 
-    const analytics = computeAnalytics(leads, client, churnedClients, goLiveDate);
+    const analytics = computeAnalytics(leads, client, churnedClients, billingStartDate);
     return NextResponse.json(analytics);
   } catch (error) {
     const message =

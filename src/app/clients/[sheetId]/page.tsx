@@ -50,20 +50,22 @@ export default function ClientDetailPage({
     return leadsForClient.filter((l) => l.sheetId === selectedSheetFilter);
   }, [allLeads, clientTag, selectedSheetFilter]);
 
-  // Go Live Date for this client from the tracker sheet
-  const goLiveDate = useMemo(() => {
+  // Billing Start Date for this client (Start Date from the tracker sheet)
+  const billingStartDate = useMemo(() => {
     const row = trackerClients.find(
       (c) => c.clientAbbr.trim().toLowerCase() === clientTag.trim().toLowerCase()
     );
-    if (!row?.goLiveDate) return null;
-    const d = new Date(row.goLiveDate);
+    // Use startDate for billing; fall back to goLiveDate if not available
+    const dateStr = row?.startDate || row?.goLiveDate;
+    if (!dateStr) return null;
+    const d = new Date(dateStr);
     return isNaN(d.getTime()) ? null : d;
   }, [trackerClients, clientTag]);
 
   const analytics = useMemo(() => {
     if (!clientLeads.length) return null;
-    return computeAnalytics(clientLeads, undefined, undefined, goLiveDate);
-  }, [clientLeads, goLiveDate]);
+    return computeAnalytics(clientLeads, undefined, undefined, billingStartDate);
+  }, [clientLeads, billingStartDate]);
 
   const leadsOverTime = analytics?.leadsOverTime || [];
 
@@ -196,7 +198,7 @@ export default function ClientDetailPage({
 
           <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
             <LeadsByStatusChart data={analytics.leadsByStatus} />
-            <LeadsOverTimeChart data={leadsOverTime} billingStartDate={goLiveDate} />
+            <LeadsOverTimeChart data={leadsOverTime} billingStartDate={billingStartDate} />
           </div>
         </>
       )}

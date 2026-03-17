@@ -10,6 +10,7 @@ export interface ClientTrackerRow {
   companyName: string;
   clientAbbr: string;
   status: string;
+  startDate: string | null;
   goLiveDate: string | null;
   churnDate: string | null;
   pauseDate: string | null;
@@ -308,6 +309,7 @@ export async function getClientTrackerData(): Promise<ClientTrackerRow[]> {
   const companyIdx = idx("company name");
   const abbrIdx = idx("client abbr");
   const statusIdx = headers.findIndex((h: string) => h === "status");
+  const startDateIdx = idx("start date");
   const goLiveIdx = idx("go live date");
   const churnIdx = idx("churn date");
   const pauseIdx = idx("pause date");
@@ -318,6 +320,7 @@ export async function getClientTrackerData(): Promise<ClientTrackerRow[]> {
       companyName: row[companyIdx] || "",
       clientAbbr: row[abbrIdx] || "",
       status: statusIdx >= 0 ? (row[statusIdx] || "") : "",
+      startDate: startDateIdx >= 0 ? (row[startDateIdx] || null) : null,
       goLiveDate: goLiveIdx >= 0 ? (row[goLiveIdx] || null) : null,
       churnDate: churnIdx >= 0 ? (row[churnIdx] || null) : null,
       pauseDate: pauseIdx >= 0 ? (row[pauseIdx] || null) : null,
