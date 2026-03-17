@@ -188,19 +188,12 @@ function DeliverabilityPageInner() {
     if (saved) setSavedPage(parseInt(saved, 10));
   }, []);
 
-  // Fetch client abbreviations from the Client Tracker spreadsheet
+  // Fetch client tags from Client Tracker + Sheet6
   useEffect(() => {
-    fetch("/api/client-tracker")
+    fetch("/api/client-tags")
       .then((r) => r.json())
       .then((data) => {
-        if (Array.isArray(data)) {
-          const tags = new Set<string>();
-          for (const row of data) {
-            const abbr = row.clientAbbr?.trim();
-            if (abbr) tags.add(abbr);
-          }
-          setClientTags(tags);
-        }
+        if (Array.isArray(data)) setClientTags(new Set(data));
       })
       .catch(() => {});
   }, []);

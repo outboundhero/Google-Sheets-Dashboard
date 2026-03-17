@@ -327,3 +327,54 @@ export async function getClientTrackerData(): Promise<ClientTrackerRow[]> {
   cache.set(cacheKey, result);
   return result;
 }
+
+/**
+ * Fetch all client tags from both "Client Tracker" (Client Abbreviation) and "Sheet6" (Client Tag).
+ * Returns a deduplicated array of tag strings.
+ */
+export async function getAllClientTags(): Promise<string[]> {
+  const cacheKey = "all-client-tags";
+  const cached = cache.get<string[]>(cacheKey);
+  if (cached) return cached;
+
+  const sheets = await getSheetsClient();
+
+  const [trackerRes, sheet6Res] = await Promise.all([
+    sheets.spreadsheets.values.get({
+      spreadsheetId: CLIENT_TRACKER_SHEET_ID,
+      range: `'${CLIENT_TRACKER_TAB}'!A1:T`,
+      valueRenderOption: "FORMATTED_VALUE",
+    }),
+    sheets.spreadsheets.values.get({
+      spreadsheetId: CLIENT_TRACKER_SHEET_ID,
+      range: "'Sheet6'!A1:A",
+      valueRenderOption: "FORMATTED_VALUE",
+    }),
+  ]);
+
+  const tags = new Set<string>();
+
+  // Extract from Client Tracker tab (Client Abbreviation column)
+  const trackerRows = trackerRes.data.values || [];
+  if (trackerRows.length >= 2) {
+    const headers = trackerRows[0].map((h: string) => String(h).toLowerCase().trim());
+    const abbrIdx = headers.findIndex((h: string) => h.includes("client abbr"));
+    if (abbrIdx >= 0) {
+      for (const row of trackerRows.slice(1)) {
+        const val = (row[abbrIdx] || "").trim();
+        if (val) tags.add(val);
+      }
+    }
+  }
+
+  // Extract from Sheet6 (Client Tag column A)
+  const sheet6Rows = sheet6Res.data.values || [];
+  for (const row of sheet6Rows.slice(1)) {
+    const val = (row[0] || "").trim();
+    if (val) tags.add(val);
+  }
+
+  const result = Array.from(tags).sort();
+  cache.set(cacheKey, result);
+  return result;
+}
