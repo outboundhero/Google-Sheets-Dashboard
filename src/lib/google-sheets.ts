@@ -354,6 +354,14 @@ export async function getAllClientTags(): Promise<string[]> {
 
   const tags = new Set<string>();
 
+  // Split "DBSM & DBSA & DBSF" into individual tags
+  const addCell = (cell: string) => {
+    for (const part of cell.split("&")) {
+      const v = part.trim();
+      if (v) tags.add(v);
+    }
+  };
+
   // Extract from Client Tracker tab (Client Abbreviation column)
   const trackerRows = trackerRes.data.values || [];
   if (trackerRows.length >= 2) {
@@ -362,7 +370,7 @@ export async function getAllClientTags(): Promise<string[]> {
     if (abbrIdx >= 0) {
       for (const row of trackerRows.slice(1)) {
         const val = (row[abbrIdx] || "").trim();
-        if (val) tags.add(val);
+        if (val) addCell(val);
       }
     }
   }
@@ -371,7 +379,7 @@ export async function getAllClientTags(): Promise<string[]> {
   const sheet6Rows = sheet6Res.data.values || [];
   for (const row of sheet6Rows.slice(1)) {
     const val = (row[0] || "").trim();
-    if (val) tags.add(val);
+    if (val) addCell(val);
   }
 
   const result = Array.from(tags).sort();
