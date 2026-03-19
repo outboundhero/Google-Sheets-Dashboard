@@ -23,6 +23,7 @@ import { Badge } from "@/components/ui/badge";
 import { PageHeader } from "@/components/shared/page-header";
 import { AttachCampaignsDialog } from "@/components/deliverability/attach-campaigns-dialog";
 import { BulkTagDialog } from "@/components/deliverability/bulk-tag-dialog";
+import { BulkDeleteDialog } from "@/components/deliverability/bulk-delete-dialog";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip";
 
@@ -185,6 +186,7 @@ function DeliverabilityPageInner() {
   const [clientTags, setClientTags] = useState<Set<string>>(new Set());
   const [selectedDomains, setSelectedDomains] = useState<Set<string>>(new Set());
   const [bulkTagMode, setBulkTagMode] = useState<"add" | "remove" | null>(null);
+  const [showBulkDelete, setShowBulkDelete] = useState(false);
 
   useEffect(() => {
     const saved = localStorage.getItem("deliverability_next_page");
@@ -669,6 +671,14 @@ function DeliverabilityPageInner() {
                     </Button>
                     <Button
                       size="sm"
+                      variant="destructive"
+                      className="h-7 text-xs gap-1.5"
+                      onClick={() => setShowBulkDelete(true)}
+                    >
+                      Delete
+                    </Button>
+                    <Button
+                      size="sm"
                       variant="ghost"
                       className="h-7 text-xs"
                       onClick={() => setSelectedDomains(new Set())}
@@ -1020,6 +1030,21 @@ function DeliverabilityPageInner() {
           }}
         />
       )}
+
+      {/* Bulk Delete Dialog */}
+      <BulkDeleteDialog
+        open={showBulkDelete}
+        onOpenChange={setShowBulkDelete}
+        selectedDomains={domains
+          .filter((d) => selectedDomains.has(d.domain))
+          .map((d) => ({ domain: d.domain, inbox_count: d.inbox_count }))}
+        onSuccess={() => {
+          loadDomains();
+          loadStats();
+          loadTags();
+          setSelectedDomains(new Set());
+        }}
+      />
     </div>
   );
 }
