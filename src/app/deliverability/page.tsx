@@ -243,7 +243,6 @@ function DeliverabilityPageInner() {
     setSyncing(true);
     const CHUNK = 50;
     const STREAMS = 4;
-    const syncStartedAt = new Date().toISOString();
     progressRef.current = { synced: 0, pagesProcessed: 0, lastPage: 0 };
 
     const flushProgress = () => {
@@ -314,13 +313,6 @@ function DeliverabilityPageInner() {
 
       localStorage.removeItem("deliverability_next_page");
       setSavedPage(null);
-
-      // Cleanup: remove stale inboxes/domains that no longer exist in EmailBison
-      await fetch("/api/deliverability/sync", {
-        method: "DELETE",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ syncStartedAt }),
-      });
 
       await loadDomains();
       await loadStats();
