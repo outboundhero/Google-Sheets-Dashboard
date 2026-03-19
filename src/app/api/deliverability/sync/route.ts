@@ -188,6 +188,92 @@ export async function POST(request: Request) {
   }
 }
 
+// DELETE — cleanup stale records after a full sync
+// Removes inboxes/domains from Supabase that no longer exist in EmailBison
+export async function DELETE(request: Request) {
+  try {
+    const { syncStartedAt } = await request.json().catch(() => ({}));
+    if (!syncStartedAt) {
+      return NextResponse.json({ error: "syncStartedAt required" }, { status: 400 });
+    }
+
+    const supabase = getSupabaseAdmin();
+    const isOutlook = (type: string) => /microsoft|outlook/i.test(type);
+    const isGoogle = (type: string) => /google|gmail/i.test(type);
+
+    // 1. Delete inboxes not touched during this sync
+    const { data: staleInboxes } = await supabase
+      .from("deliverability_inboxes")
+      .select("id, domain")
+      .lt("synced_at", syncStartedAt);
+
+    const staleCount = staleInboxes?.length || 0;
+
+    if (staleCount > 0) {
+      const staleIds = staleInboxes!.map((i) => i.id);
+      // Delete in batches of 500 (Supabase limit)
+      for (let i = 0; i < staleIds.length; i += 500) {
+        await supabase
+          .from("deliverability_inboxes")
+          .delete()
+          .in("id", staleIds.slice(i, i + 500));
+      }
+    }
+
+    // 2. Re-aggregate ALL domain stats from remaining inboxes
+    const { data: allDomains } = await supabase
+      .from("deliverability_domains")
+      .select("domain");
+
+    let domainsRemoved = 0;
+
+    for (const d of allDomains || []) {
+      const { data: remaining } = await supabase
+        .from("deliverability_inboxes")
+        .select("tags, type, emails_sent_count, total_replied_count, bounced_count")
+        .eq("domain", d.domain);
+
+      if (!remaining || remaining.length === 0) {
+        // No inboxes left — delete domain
+        await supabase.from("deliverability_domains").delete().eq("domain", d.domain);
+        domainsRemoved++;
+      } else {
+        // Re-aggregate stats
+        const tagSet = new Set<string>();
+        let sent = 0, replied = 0, bounced = 0, ol = 0, g = 0;
+        for (const inbox of remaining) {
+          if (Array.isArray(inbox.tags)) {
+            for (const t of inbox.tags) { if (t.name) tagSet.add(t.name); }
+          }
+          sent += inbox.emails_sent_count || 0;
+          replied += inbox.total_replied_count || 0;
+          bounced += inbox.bounced_count || 0;
+          if (isOutlook(inbox.type || "")) ol++;
+          if (isGoogle(inbox.type || "")) g++;
+        }
+
+        await supabase.from("deliverability_domains").update({
+          inbox_count: remaining.length,
+          tags: Array.from(tagSet).sort(),
+          total_sent: sent,
+          total_replied: replied,
+          total_bounced: bounced,
+          outlook_count: ol,
+          google_count: g,
+        }).eq("domain", d.domain);
+      }
+    }
+
+    return NextResponse.json({
+      staleInboxesRemoved: staleCount,
+      domainsRemoved,
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Cleanup failed";
+    return NextResponse.json({ error: message }, { status: 500 });
+  }
+}
+
 export async function GET() {
   try {
     const supabase = getSupabaseAdmin();
