@@ -22,6 +22,7 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { PageHeader } from "@/components/shared/page-header";
 import { AttachCampaignsDialog } from "@/components/deliverability/attach-campaigns-dialog";
+import { BulkTagDialog } from "@/components/deliverability/bulk-tag-dialog";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip";
 
@@ -182,6 +183,8 @@ function DeliverabilityPageInner() {
   const [showReserve, setShowReserve] = useState(false);
   const [attachDialogOpen, setAttachDialogOpen] = useState(false);
   const [clientTags, setClientTags] = useState<Set<string>>(new Set());
+  const [selectedDomains, setSelectedDomains] = useState<Set<string>>(new Set());
+  const [bulkTagMode, setBulkTagMode] = useState<"add" | "remove" | null>(null);
 
   useEffect(() => {
     const saved = localStorage.getItem("deliverability_next_page");
@@ -641,8 +644,63 @@ function DeliverabilityPageInner() {
             </div>
           ) : (
             <div className="space-y-1.5">
+              {/* Bulk action bar */}
+              {selectedDomains.size > 0 && (
+                <div className="flex items-center gap-3 rounded-xl border bg-muted/50 px-4 py-2.5">
+                  <span className="text-xs font-medium">
+                    {selectedDomains.size} domain{selectedDomains.size !== 1 ? "s" : ""} selected
+                  </span>
+                  <div className="flex items-center gap-2 ml-auto">
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="h-7 text-xs gap-1.5"
+                      onClick={() => setBulkTagMode("add")}
+                    >
+                      + Add Tags
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="h-7 text-xs gap-1.5 text-destructive hover:text-destructive"
+                      onClick={() => setBulkTagMode("remove")}
+                    >
+                      − Remove Tags
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      className="h-7 text-xs"
+                      onClick={() => setSelectedDomains(new Set())}
+                    >
+                      Clear
+                    </Button>
+                  </div>
+                </div>
+              )}
+
               {/* Table header */}
-              <div className="grid grid-cols-[1fr_100px_80px_80px_80px_100px] gap-3 px-4 py-2 text-xs text-muted-foreground font-medium">
+              <div className="grid grid-cols-[28px_1fr_100px_80px_80px_80px_100px] gap-3 px-4 py-2 text-xs text-muted-foreground font-medium">
+                <button
+                  onClick={() => {
+                    const allVisible = filteredDomains.map((d) => d.domain);
+                    const allSelected = allVisible.every((d) => selectedDomains.has(d));
+                    if (allSelected) {
+                      setSelectedDomains(new Set());
+                    } else {
+                      setSelectedDomains(new Set(allVisible));
+                    }
+                  }}
+                  className={`h-4 w-4 rounded border flex items-center justify-center transition-colors ${
+                    filteredDomains.length > 0 && filteredDomains.every((d) => selectedDomains.has(d.domain))
+                      ? "bg-primary border-primary text-primary-foreground"
+                      : "border-muted-foreground/30 hover:border-foreground"
+                  }`}
+                >
+                  {filteredDomains.length > 0 && filteredDomains.every((d) => selectedDomains.has(d.domain)) && (
+                    <Check className="h-3 w-3" />
+                  )}
+                </button>
                 <span>Domain</span>
                 <span className="text-center">Inboxes</span>
                 <span className="text-center">Sent</span>
@@ -665,15 +723,38 @@ function DeliverabilityPageInner() {
                 const flagReasons = getFlagReasons(d);
                 const flagged = flagReasons.length > 0;
 
+                const isSelected = selectedDomains.has(d.domain);
+
                 return (
                   <div
                     key={d.domain}
-                    className={`grid grid-cols-[1fr_100px_80px_80px_80px_100px] gap-3 items-center rounded-xl border px-4 py-3 transition-colors ${
-                      flagged
-                        ? "bg-destructive/5 border-destructive/30 hover:bg-destructive/10"
-                        : "bg-card hover:bg-muted/30"
+                    className={`grid grid-cols-[28px_1fr_100px_80px_80px_80px_100px] gap-3 items-center rounded-xl border px-4 py-3 transition-colors ${
+                      isSelected
+                        ? "bg-primary/5 border-primary/30"
+                        : flagged
+                          ? "bg-destructive/5 border-destructive/30 hover:bg-destructive/10"
+                          : "bg-card hover:bg-muted/30"
                     }`}
                   >
+                    {/* Checkbox */}
+                    <button
+                      onClick={() => {
+                        setSelectedDomains((prev) => {
+                          const next = new Set(prev);
+                          if (next.has(d.domain)) next.delete(d.domain);
+                          else next.add(d.domain);
+                          return next;
+                        });
+                      }}
+                      className={`h-4 w-4 rounded border flex items-center justify-center shrink-0 transition-colors ${
+                        isSelected
+                          ? "bg-primary border-primary text-primary-foreground"
+                          : "border-muted-foreground/30 hover:border-foreground"
+                      }`}
+                    >
+                      {isSelected && <Check className="h-3 w-3" />}
+                    </button>
+
                     {/* Domain info */}
                     <div className="min-w-0">
                       <div className="flex items-center gap-2">
@@ -905,6 +986,40 @@ function DeliverabilityPageInner() {
 
       {/* Attach Campaigns Dialog */}
       <AttachCampaignsDialog open={attachDialogOpen} onOpenChange={setAttachDialogOpen} />
+
+      {/* Bulk Tag Dialog */}
+      {bulkTagMode && (
+        <BulkTagDialog
+          mode={bulkTagMode}
+          open={!!bulkTagMode}
+          onOpenChange={(open) => { if (!open) setBulkTagMode(null); }}
+          selectedDomains={Array.from(selectedDomains)}
+          availableTags={
+            bulkTagMode === "remove"
+              ? (() => {
+                  // Collect all unique tags from selected domains
+                  const tagMap = new Map<string, { id: number; name: string }>();
+                  for (const domain of selectedDomains) {
+                    const d = domains.find((dd) => dd.domain === domain);
+                    if (d?.tags) {
+                      for (const tagName of d.tags) {
+                        if (!tagMap.has(tagName)) {
+                          tagMap.set(tagName, { id: 0, name: tagName });
+                        }
+                      }
+                    }
+                  }
+                  return Array.from(tagMap.values());
+                })()
+              : undefined
+          }
+          onSuccess={() => {
+            loadDomains();
+            loadTags();
+            setSelectedDomains(new Set());
+          }}
+        />
+      )}
     </div>
   );
 }
