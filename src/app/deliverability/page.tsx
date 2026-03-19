@@ -241,8 +241,8 @@ function DeliverabilityPageInner() {
 
   const handleSync = async () => {
     setSyncing(true);
-    const CHUNK = 100;
-    const STREAMS = 8;
+    const CHUNK = 30;
+    const STREAMS = 10;
     progressRef.current = { synced: 0, pagesProcessed: 0, lastPage: 0 };
 
     const flushProgress = () => {
@@ -256,35 +256,46 @@ function DeliverabilityPageInner() {
     };
 
     // Single stream worker
-    const runStream = async (start: number, end: number) => {
+    const runStream = async (streamId: number, start: number, end: number) => {
       let page = start;
+      console.log(`[STREAM ${streamId}] Starting pages ${start}-${end}`);
       while (page <= end) {
+        const t0 = performance.now();
         const res = await fetch("/api/deliverability/sync", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ startPage: page, pagesPerChunk: CHUNK }),
         });
-        if (!res.ok) break;
+        if (!res.ok) {
+          console.error(`[STREAM ${streamId}] FAILED at page ${page}: ${res.status}`);
+          break;
+        }
         const result = await res.json();
+        const ms = Math.round(performance.now() - t0);
         const pagesInChunk = Math.min(CHUNK, end - page + 1);
         progressRef.current.synced += result.synced || 0;
         progressRef.current.pagesProcessed += pagesInChunk;
         flushProgress();
+        console.log(`[STREAM ${streamId}] Pages ${page}-${page + pagesInChunk - 1}: ${result.synced} inboxes, ${result.domains} domains in ${ms}ms`);
         page += CHUNK;
       }
+      console.log(`[STREAM ${streamId}] Done`);
     };
 
     try {
       // First fetch to discover lastPage
+      const syncStart = performance.now();
       const resumeFrom = savedPage ?? 1;
+      console.log(`[SYNC] Starting from page ${resumeFrom}, chunk=${CHUNK}, streams=${STREAMS}`);
       const firstRes = await fetch("/api/deliverability/sync", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ startPage: resumeFrom, pagesPerChunk: CHUNK }),
       });
-      if (!firstRes.ok) { setSyncing(false); return; }
+      if (!firstRes.ok) { console.error("[SYNC] First chunk failed"); setSyncing(false); return; }
       const firstResult = await firstRes.json();
       const lastPage = firstResult.lastPage || 1;
+      console.log(`[SYNC] First chunk done: ${firstResult.synced} inboxes, lastPage=${lastPage}, total pages=${lastPage - resumeFrom + 1}`);
       progressRef.current = {
         synced: firstResult.synced || 0,
         pagesProcessed: CHUNK,
@@ -308,11 +319,15 @@ function DeliverabilityPageInner() {
         localStorage.setItem("deliverability_next_page", String(startAfterFirst));
         setSavedPage(startAfterFirst);
 
-        await Promise.all(ranges.map((r) => runStream(r.start, r.end)));
+        console.log(`[SYNC] Launching ${ranges.length} streams:`, ranges.map((r) => `${r.start}-${r.end}`).join(", "));
+        await Promise.all(ranges.map((r, i) => runStream(i + 1, r.start, r.end)));
       }
 
       localStorage.removeItem("deliverability_next_page");
       setSavedPage(null);
+
+      const totalSec = ((performance.now() - syncStart) / 1000).toFixed(1);
+      console.log(`[SYNC] COMPLETE in ${totalSec}s — ${progressRef.current.synced} total inboxes`);
 
       await loadDomains();
       await loadStats();

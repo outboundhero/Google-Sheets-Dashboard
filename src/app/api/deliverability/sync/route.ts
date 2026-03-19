@@ -4,10 +4,7 @@ import { getSupabaseAdmin } from "@/lib/supabase";
 const API_BASE = "https://app.outboundhero.co/api";
 const API_KEY = process.env.OUTBOUNDHERO_API_KEY!;
 const PER_PAGE = 15;
-const CONCURRENT = 50; // fetch 50 pages at once
-const BATCH_DELAY_MS = 0; // no delay
-
-const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
+const CONCURRENT = 30;
 
 interface SenderEmail {
   id: number;
@@ -42,32 +39,46 @@ async function fetchPage(page: number): Promise<{ data: SenderEmail[]; lastPage:
 }
 
 export async function POST(request: Request) {
+  const t0 = Date.now();
   try {
-    const { startPage = 1, pagesPerChunk = 50 } = await request.json().catch(() => ({}));
+    const { startPage = 1, pagesPerChunk = 30 } = await request.json().catch(() => ({}));
     const supabase = getSupabaseAdmin();
 
-    // Fetch first page to get lastPage
+    // 1. Fetch first page to get lastPage
+    const tFetch0 = Date.now();
     const first = await fetchPage(startPage);
     const { lastPage } = first;
     let allInboxes: SenderEmail[] = [...first.data];
+    console.log(`[SYNC] Page ${startPage} fetched in ${Date.now() - tFetch0}ms — lastPage=${lastPage}, got ${first.data.length} inboxes`);
 
-    // Fetch remaining pages in concurrent batches of CONCURRENT
+    // 2. Fetch remaining pages concurrently
     const endPage = Math.min(startPage + pagesPerChunk - 1, lastPage);
     const remainingPages: number[] = [];
-    for (let p = startPage + 1; p <= endPage; p++) {
-      remainingPages.push(p);
-    }
+    for (let p = startPage + 1; p <= endPage; p++) remainingPages.push(p);
 
+    const tFetchAll = Date.now();
     for (let i = 0; i < remainingPages.length; i += CONCURRENT) {
       const batch = remainingPages.slice(i, i + CONCURRENT);
+      const tBatch = Date.now();
       const results = await Promise.allSettled(batch.map((p) => fetchPage(p)));
+      let batchInboxes = 0;
+      let failed = 0;
       for (const r of results) {
-        if (r.status === "fulfilled") allInboxes = allInboxes.concat(r.value.data);
+        if (r.status === "fulfilled") {
+          allInboxes = allInboxes.concat(r.value.data);
+          batchInboxes += r.value.data.length;
+        } else {
+          failed++;
+        }
       }
-      if (i + CONCURRENT < remainingPages.length) await delay(BATCH_DELAY_MS);
+      console.log(`[SYNC] Batch pages ${batch[0]}-${batch[batch.length - 1]}: ${batchInboxes} inboxes in ${Date.now() - tBatch}ms${failed ? ` (${failed} failed)` : ""}`);
     }
+    console.log(`[SYNC] All ${endPage - startPage + 1} pages fetched: ${allInboxes.length} inboxes in ${Date.now() - tFetchAll}ms`);
 
-    // Group by domain
+    // 3. Group by domain
+    const tGroup = Date.now();
+    const isOutlook = (type: string) => /microsoft|outlook/i.test(type);
+    const isGoogle = (type: string) => /google|gmail/i.test(type);
     const domainMap: Record<string, { inboxes: SenderEmail[]; earliestCreatedAt: string }> = {};
     for (const inbox of allInboxes) {
       const domain = inbox.email.split("@")[1]?.toLowerCase();
@@ -78,10 +89,6 @@ export async function POST(request: Request) {
         domainMap[domain].earliestCreatedAt = inbox.created_at;
       }
     }
-
-    // Upsert domains with aggregated tags + stats
-    const isOutlook = (type: string) => /microsoft|outlook/i.test(type);
-    const isGoogle = (type: string) => /google|gmail/i.test(type);
 
     const domainRows = Object.entries(domainMap).map(([domain, { inboxes, earliestCreatedAt }]) => {
       const tagSet = new Set<string>();
@@ -109,15 +116,20 @@ export async function POST(request: Request) {
         synced_at: new Date().toISOString(),
       };
     });
+    console.log(`[SYNC] Grouped into ${domainRows.length} domains in ${Date.now() - tGroup}ms`);
 
+    // 4. Upsert domains
+    const tDomainUpsert = Date.now();
     if (domainRows.length > 0) {
       const { error: domainErr } = await supabase
         .from("deliverability_domains")
         .upsert(domainRows, { onConflict: "domain", ignoreDuplicates: false });
       if (domainErr) throw domainErr;
     }
+    console.log(`[SYNC] Domain upsert: ${domainRows.length} rows in ${Date.now() - tDomainUpsert}ms`);
 
-    // Upsert inboxes
+    // 5. Upsert inboxes
+    const tInboxUpsert = Date.now();
     const inboxRows = allInboxes.map((inbox) => ({
       id: inbox.id,
       name: inbox.name,
@@ -137,42 +149,21 @@ export async function POST(request: Request) {
       synced_at: new Date().toISOString(),
     })).filter((r) => r.domain);
 
-    if (inboxRows.length > 0) {
+    // Upsert in batches of 500 to avoid payload limits
+    for (let i = 0; i < inboxRows.length; i += 500) {
+      const batch = inboxRows.slice(i, i + 500);
       const { error: inboxErr } = await supabase
         .from("deliverability_inboxes")
-        .upsert(inboxRows, { onConflict: "id", ignoreDuplicates: false });
+        .upsert(batch, { onConflict: "id", ignoreDuplicates: false });
       if (inboxErr) throw inboxErr;
     }
-
-    // Re-aggregate domain stats from DB (fixes counts across chunks)
-    const touchedDomains = [...new Set(inboxRows.map((r) => r.domain))];
-    for (const dom of touchedDomains) {
-      const { data: domInboxes } = await supabase
-        .from("deliverability_inboxes")
-        .select("emails_sent_count,total_replied_count,bounced_count,type")
-        .eq("domain", dom);
-      if (domInboxes) {
-        let sent = 0, replied = 0, bounced = 0, ol = 0, g = 0;
-        for (const i of domInboxes) {
-          sent += i.emails_sent_count || 0;
-          replied += i.total_replied_count || 0;
-          bounced += i.bounced_count || 0;
-          if (isOutlook(i.type || "")) ol++;
-          if (isGoogle(i.type || "")) g++;
-        }
-        await supabase.from("deliverability_domains").update({
-          inbox_count: domInboxes.length,
-          total_sent: sent,
-          total_replied: replied,
-          total_bounced: bounced,
-          outlook_count: ol,
-          google_count: g,
-        }).eq("domain", dom);
-      }
-    }
+    console.log(`[SYNC] Inbox upsert: ${inboxRows.length} rows in ${Date.now() - tInboxUpsert}ms`);
 
     const nextPage = startPage + pagesPerChunk;
     const complete = nextPage > lastPage;
+
+    const totalMs = Date.now() - t0;
+    console.log(`[SYNC] DONE chunk pages ${startPage}-${endPage}: ${allInboxes.length} inboxes, ${domainRows.length} domains in ${totalMs}ms (${(totalMs / 1000).toFixed(1)}s)`);
 
     return NextResponse.json({
       synced: allInboxes.length,
@@ -183,11 +174,11 @@ export async function POST(request: Request) {
       domains: domainRows.length,
     });
   } catch (error) {
+    console.error(`[SYNC] ERROR after ${Date.now() - t0}ms:`, error);
     const message = error instanceof Error ? error.message : "Sync failed";
     return NextResponse.json({ error: message }, { status: 500 });
   }
 }
-
 
 export async function GET() {
   try {
