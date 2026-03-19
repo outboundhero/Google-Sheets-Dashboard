@@ -241,8 +241,8 @@ function DeliverabilityPageInner() {
 
   const handleSync = async () => {
     setSyncing(true);
-    const CHUNK = 50;
-    const STREAMS = 4;
+    const CHUNK = 100;
+    const STREAMS = 8;
     progressRef.current = { synced: 0, pagesProcessed: 0, lastPage: 0 };
 
     const flushProgress = () => {
