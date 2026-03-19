@@ -4,7 +4,7 @@ import { getSupabaseAdmin } from "@/lib/supabase";
 const API_BASE = "https://app.outboundhero.co/api";
 const API_KEY = process.env.OUTBOUNDHERO_API_KEY!;
 const PER_PAGE = 15;
-const CONCURRENT = 30;
+const CONCURRENT = 5;
 
 interface SenderEmail {
   id: number;

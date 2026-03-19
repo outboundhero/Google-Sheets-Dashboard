@@ -241,8 +241,8 @@ function DeliverabilityPageInner() {
 
   const handleSync = async () => {
     setSyncing(true);
-    const CHUNK = 30;
-    const STREAMS = 10;
+    const CHUNK = 50;
+    const STREAMS = 3;
     progressRef.current = { synced: 0, pagesProcessed: 0, lastPage: 0 };
 
     const flushProgress = () => {
@@ -255,28 +255,42 @@ function DeliverabilityPageInner() {
       });
     };
 
-    // Single stream worker
+    // Single stream worker with retry
     const runStream = async (streamId: number, start: number, end: number) => {
       let page = start;
       console.log(`[STREAM ${streamId}] Starting pages ${start}-${end}`);
       while (page <= end) {
-        const t0 = performance.now();
-        const res = await fetch("/api/deliverability/sync", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ startPage: page, pagesPerChunk: CHUNK }),
-        });
-        if (!res.ok) {
-          console.error(`[STREAM ${streamId}] FAILED at page ${page}: ${res.status}`);
-          break;
+        let success = false;
+        for (let attempt = 1; attempt <= 3; attempt++) {
+          const t0 = performance.now();
+          try {
+            const res = await fetch("/api/deliverability/sync", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ startPage: page, pagesPerChunk: CHUNK }),
+            });
+            if (!res.ok) {
+              console.warn(`[STREAM ${streamId}] Page ${page} attempt ${attempt}: ${res.status}`);
+              if (attempt < 3) await new Promise((r) => setTimeout(r, 2000 * attempt));
+              continue;
+            }
+            const result = await res.json();
+            const ms = Math.round(performance.now() - t0);
+            const pagesInChunk = Math.min(CHUNK, end - page + 1);
+            progressRef.current.synced += result.synced || 0;
+            progressRef.current.pagesProcessed += pagesInChunk;
+            flushProgress();
+            console.log(`[STREAM ${streamId}] Pages ${page}-${page + pagesInChunk - 1}: ${result.synced} inboxes, ${result.domains} domains in ${ms}ms`);
+            success = true;
+            break;
+          } catch (e) {
+            console.warn(`[STREAM ${streamId}] Page ${page} attempt ${attempt} error:`, e);
+            if (attempt < 3) await new Promise((r) => setTimeout(r, 2000 * attempt));
+          }
         }
-        const result = await res.json();
-        const ms = Math.round(performance.now() - t0);
-        const pagesInChunk = Math.min(CHUNK, end - page + 1);
-        progressRef.current.synced += result.synced || 0;
-        progressRef.current.pagesProcessed += pagesInChunk;
-        flushProgress();
-        console.log(`[STREAM ${streamId}] Pages ${page}-${page + pagesInChunk - 1}: ${result.synced} inboxes, ${result.domains} domains in ${ms}ms`);
+        if (!success) {
+          console.error(`[STREAM ${streamId}] FAILED at page ${page} after 3 attempts, skipping chunk`);
+        }
         page += CHUNK;
       }
       console.log(`[STREAM ${streamId}] Done`);
