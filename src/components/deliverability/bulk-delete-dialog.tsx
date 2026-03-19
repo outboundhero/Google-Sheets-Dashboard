@@ -33,6 +33,7 @@ export function BulkDeleteDialog({
   const [result, setResult] = useState<{
     inboxesDeleted: number;
     domainsDeleted: number;
+    errors?: string[];
   } | null>(null);
 
   const totalInboxes = selectedDomains.reduce((sum, d) => sum + d.inbox_count, 0);
@@ -53,6 +54,7 @@ export function BulkDeleteDialog({
       setResult({
         inboxesDeleted: data.inboxesDeleted,
         domainsDeleted: data.domainsDeleted,
+        errors: data.errors,
       });
       onSuccess();
     } catch (e) {
@@ -82,9 +84,14 @@ export function BulkDeleteDialog({
           <div className="py-6 text-center space-y-2">
             <div className="text-emerald-500 font-medium">Deleted successfully</div>
             <div className="text-sm text-muted-foreground">
-              {result.inboxesDeleted} inbox{result.inboxesDeleted !== 1 ? "es" : ""} and{" "}
-              {result.domainsDeleted} domain{result.domainsDeleted !== 1 ? "s" : ""} removed
+              {result.inboxesDeleted} inbox{result.inboxesDeleted !== 1 ? "es" : ""} deleted from EmailBison,{" "}
+              {result.domainsDeleted} domain{result.domainsDeleted !== 1 ? "s" : ""} removed locally
             </div>
+            {result.errors && result.errors.length > 0 && (
+              <div className="text-xs text-amber-500 mt-2">
+                {result.errors.length} inbox{result.errors.length !== 1 ? "es" : ""} had API errors (still removed locally)
+              </div>
+            )}
             <Button variant="outline" size="sm" className="mt-3" onClick={handleClose}>
               Close
             </Button>

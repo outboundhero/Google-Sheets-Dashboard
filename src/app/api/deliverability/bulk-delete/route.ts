@@ -3,10 +3,26 @@ import { getSupabaseAdmin } from "@/lib/supabase";
 
 const API_BASE = "https://app.outboundhero.co/api";
 const API_KEY = process.env.OUTBOUNDHERO_API_KEY!;
-const headers = { Authorization: `Bearer ${API_KEY}` };
-const BATCH_DELAY = 100;
+const apiHeaders = {
+  Authorization: `Bearer ${API_KEY}`,
+  "Content-Type": "application/json",
+};
 
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+// Delete a single sender email, returns true if successful
+async function deleteSenderEmail(id: number): Promise<{ ok: boolean; status: number; body: string }> {
+  try {
+    const res = await fetch(`${API_BASE}/sender-emails/${id}`, {
+      method: "DELETE",
+      headers: apiHeaders,
+    });
+    const body = await res.text();
+    return { ok: res.ok || res.status === 404, status: res.status, body };
+  } catch (e) {
+    return { ok: false, status: 0, body: e instanceof Error ? e.message : "failed" };
+  }
+}
 
 export async function POST(request: Request) {
   try {
@@ -27,36 +43,35 @@ export async function POST(request: Request) {
 
     const inboxIds = inboxes?.map((i) => i.id) || [];
 
-    // 2. Delete each inbox from OutboundHero API
+    // 2. Delete inboxes from OutboundHero API in concurrent batches
+    const BATCH_SIZE = 10;
+    const BATCH_DELAY = 200;
     let deleted = 0;
     const errors: string[] = [];
 
-    for (let i = 0; i < inboxIds.length; i++) {
-      try {
-        const res = await fetch(`${API_BASE}/sender-emails/${inboxIds[i]}`, {
-          method: "DELETE",
-          headers,
-        });
-        if (res.ok || res.status === 404) {
+    for (let i = 0; i < inboxIds.length; i += BATCH_SIZE) {
+      const batch = inboxIds.slice(i, i + BATCH_SIZE);
+      const results = await Promise.all(batch.map((id) => deleteSenderEmail(id)));
+
+      for (let j = 0; j < results.length; j++) {
+        if (results[j].ok) {
           deleted++;
         } else {
-          errors.push(`Inbox ${inboxIds[i]}: ${res.status}`);
+          errors.push(`Inbox ${batch[j]}: ${results[j].status} ${results[j].body}`);
         }
-      } catch (e) {
-        errors.push(`Inbox ${inboxIds[i]}: ${e instanceof Error ? e.message : "failed"}`);
       }
-      if (i < inboxIds.length - 1) await delay(BATCH_DELAY);
+
+      if (i + BATCH_SIZE < inboxIds.length) await delay(BATCH_DELAY);
     }
 
-    // 3. Delete from Supabase inboxes
-    if (inboxIds.length > 0) {
-      await supabase
-        .from("deliverability_inboxes")
-        .delete()
-        .in("domain", domains);
-    }
+    // 3. Delete from Supabase — always clean up local records regardless of API errors
+    // Delete inboxes first (FK constraint)
+    await supabase
+      .from("deliverability_inboxes")
+      .delete()
+      .in("domain", domains);
 
-    // 4. Delete from Supabase domains
+    // Then delete domains
     await supabase
       .from("deliverability_domains")
       .delete()
@@ -66,7 +81,8 @@ export async function POST(request: Request) {
       success: true,
       inboxesDeleted: deleted,
       domainsDeleted: domains.length,
-      errors: errors.length > 0 ? errors : undefined,
+      totalInboxes: inboxIds.length,
+      errors: errors.length > 0 ? errors.slice(0, 5) : undefined, // first 5 errors for debugging
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Failed";
