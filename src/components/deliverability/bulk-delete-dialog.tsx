@@ -33,7 +33,7 @@ export function BulkDeleteDialog({
   const [result, setResult] = useState<{
     inboxesDeleted: number;
     domainsDeleted: number;
-    errors?: string[];
+    failed: number;
   } | null>(null);
 
   const totalInboxes = selectedDomains.reduce((sum, d) => sum + d.inbox_count, 0);
@@ -54,7 +54,7 @@ export function BulkDeleteDialog({
       setResult({
         inboxesDeleted: data.inboxesDeleted,
         domainsDeleted: data.domainsDeleted,
-        errors: data.errors,
+        failed: data.failed || 0,
       });
       onSuccess();
     } catch (e) {
@@ -82,14 +82,16 @@ export function BulkDeleteDialog({
 
         {result ? (
           <div className="py-6 text-center space-y-2">
-            <div className="text-emerald-500 font-medium">Deleted successfully</div>
-            <div className="text-sm text-muted-foreground">
-              {result.inboxesDeleted} inbox{result.inboxesDeleted !== 1 ? "es" : ""} deleted from EmailBison,{" "}
-              {result.domainsDeleted} domain{result.domainsDeleted !== 1 ? "s" : ""} removed locally
+            <div className={`font-medium ${result.failed > 0 ? "text-amber-500" : "text-emerald-500"}`}>
+              {result.failed > 0 ? "Partially deleted" : "Deleted successfully"}
             </div>
-            {result.errors && result.errors.length > 0 && (
-              <div className="text-xs text-amber-500 mt-2">
-                {result.errors.length} inbox{result.errors.length !== 1 ? "es" : ""} had API errors (still removed locally)
+            <div className="text-sm text-muted-foreground">
+              {result.inboxesDeleted} inbox{result.inboxesDeleted !== 1 ? "es" : ""} deleted,{" "}
+              {result.domainsDeleted} domain{result.domainsDeleted !== 1 ? "s" : ""} removed
+            </div>
+            {result.failed > 0 && (
+              <div className="text-xs text-destructive mt-1">
+                {result.failed} inbox{result.failed !== 1 ? "es" : ""} failed to delete from EmailBison and remain in the dashboard
               </div>
             )}
             <Button variant="outline" size="sm" className="mt-3" onClick={handleClose}>
