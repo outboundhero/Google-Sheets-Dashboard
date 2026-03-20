@@ -141,7 +141,10 @@ export async function PUT() {
   try {
     const supabase = getSupabaseAdmin();
     const { data, error } = await supabase.rpc("rebuild_domain_stats");
-    if (error) throw error;
+    if (error) {
+      console.error(`[SYNC] RPC error:`, error);
+      return NextResponse.json({ error: error.message, details: error }, { status: 500 });
+    }
     console.log(`[SYNC] Domain rebuild via SQL: ${JSON.stringify(data)} in ${Date.now() - t0}ms`);
     return NextResponse.json(data);
   } catch (error) {
