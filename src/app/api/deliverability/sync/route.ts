@@ -143,14 +143,26 @@ export async function PUT() {
     const isOutlook = (type: string) => /microsoft|outlook/i.test(type);
     const isGoogle = (type: string) => /google|gmail/i.test(type);
 
-    // Get all inboxes grouped by domain
-    const { data: allInboxes, error } = await supabase
-      .from("deliverability_inboxes")
-      .select("domain, tags, type, emails_sent_count, total_replied_count, bounced_count");
-    if (error) throw error;
+    // Get ALL inboxes (paginate past Supabase 1000-row limit)
+    type InboxRow = { domain: string; tags: { id: number; name: string }[] | null; type: string; emails_sent_count: number; total_replied_count: number; bounced_count: number };
+    const allInboxes: InboxRow[] = [];
+    const PAGE_SIZE = 5000;
+    let offset = 0;
+    while (true) {
+      const { data, error } = await supabase
+        .from("deliverability_inboxes")
+        .select("domain, tags, type, emails_sent_count, total_replied_count, bounced_count")
+        .range(offset, offset + PAGE_SIZE - 1);
+      if (error) throw error;
+      if (!data || data.length === 0) break;
+      allInboxes.push(...data);
+      console.log(`[SYNC] Domain rebuild: fetched ${allInboxes.length} inboxes so far...`);
+      if (data.length < PAGE_SIZE) break;
+      offset += PAGE_SIZE;
+    }
 
-    const domainMap = new Map<string, typeof allInboxes>();
-    for (const inbox of allInboxes || []) {
+    const domainMap = new Map<string, InboxRow[]>();
+    for (const inbox of allInboxes) {
       if (!domainMap.has(inbox.domain)) domainMap.set(inbox.domain, []);
       domainMap.get(inbox.domain)!.push(inbox);
     }
