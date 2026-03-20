@@ -241,8 +241,8 @@ function DeliverabilityPageInner() {
 
   const handleSync = async () => {
     setSyncing(true);
-    const CHUNK = 50;
-    const STREAMS = 3;
+    const CHUNK = 20;
+    const STREAMS = 4;
     progressRef.current = { synced: 0, pagesProcessed: 0, lastPage: 0 };
 
     const flushProgress = () => {
@@ -339,6 +339,12 @@ function DeliverabilityPageInner() {
 
       localStorage.removeItem("deliverability_next_page");
       setSavedPage(null);
+
+      // Rebuild domain stats from all inboxes
+      console.log("[SYNC] Rebuilding domain stats...");
+      const rebuildRes = await fetch("/api/deliverability/sync", { method: "PUT" });
+      const rebuildData = await rebuildRes.json();
+      console.log(`[SYNC] Domain rebuild: ${rebuildData.domains} domains from ${rebuildData.inboxes} inboxes`);
 
       const totalSec = ((performance.now() - syncStart) / 1000).toFixed(1);
       console.log(`[SYNC] COMPLETE in ${totalSec}s — ${progressRef.current.synced} total inboxes`);
