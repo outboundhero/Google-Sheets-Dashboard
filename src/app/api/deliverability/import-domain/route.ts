@@ -33,25 +33,39 @@ export async function POST(request: Request) {
     const supabase = getSupabaseAdmin();
     const allInboxes: SenderEmail[] = [];
 
-    // Search EmailBison for each domain
+    // Search EmailBison for each domain — try multiple search terms
     for (const domain of domains) {
-      let page = 1;
-      while (true) {
-        const res = await fetch(
-          `${API_BASE}/sender-emails?search=${encodeURIComponent(domain)}&page=${page}&per_page=15`,
-          { headers, cache: "no-store" }
-        );
-        if (!res.ok) break;
-        const json = await res.json();
-        const payload = Array.isArray(json) ? json[0] : json;
-        const data: SenderEmail[] = payload.data || [];
-        // Only keep inboxes that actually match this domain
-        const matching = data.filter((i) => i.email.split("@")[1]?.toLowerCase() === domain.toLowerCase());
-        allInboxes.push(...matching);
-        const lastPage = payload.meta?.last_page || 1;
-        if (page >= lastPage) break;
-        page++;
+      const found = new Map<number, SenderEmail>();
+
+      // Search by full domain and by domain parts
+      const searchTerms = [domain];
+      const parts = domain.split(".");
+      if (parts.length >= 2) searchTerms.push(parts[0]); // e.g., "getbtsb" from "getbtsb.info"
+
+      for (const term of searchTerms) {
+        let page = 1;
+        while (true) {
+          const res = await fetch(
+            `${API_BASE}/sender-emails?search=${encodeURIComponent(term)}&page=${page}&per_page=15`,
+            { headers, cache: "no-store" }
+          );
+          if (!res.ok) break;
+          const json = await res.json();
+          const payload = Array.isArray(json) ? json[0] : json;
+          const data: SenderEmail[] = payload.data || [];
+          for (const inbox of data) {
+            if (inbox.email.split("@")[1]?.toLowerCase() === domain.toLowerCase()) {
+              found.set(inbox.id, inbox);
+            }
+          }
+          const lastPage = payload.meta?.last_page || 1;
+          if (page >= lastPage || page >= 20) break; // cap at 20 pages per search
+          page++;
+        }
       }
+
+      console.log(`[IMPORT] ${domain}: found ${found.size} inboxes`);
+      allInboxes.push(...found.values());
     }
 
     if (allInboxes.length === 0) {
