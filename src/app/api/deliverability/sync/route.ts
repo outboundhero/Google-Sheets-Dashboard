@@ -96,12 +96,16 @@ export async function POST(request: Request) {
     const minimalDomains = Array.from(domainSet.entries()).map(([domain, created_at]) => ({
       domain,
       domain_created_at: created_at,
+      warmup_status: "open",
       synced_at: new Date().toISOString(),
     }));
-    if (minimalDomains.length > 0) {
-      await supabase
+    // Insert domains that don't exist yet (don't update existing ones)
+    for (let i = 0; i < minimalDomains.length; i += 500) {
+      const batch = minimalDomains.slice(i, i + 500);
+      const { error: domErr } = await supabase
         .from("deliverability_domains")
-        .upsert(minimalDomains, { onConflict: "domain", ignoreDuplicates: true });
+        .upsert(batch, { onConflict: "domain", ignoreDuplicates: true });
+      if (domErr) console.error(`[SYNC] Domain insert error:`, domErr);
     }
 
     // Upsert inboxes in batches of 500
@@ -110,7 +114,16 @@ export async function POST(request: Request) {
       const { error: inboxErr } = await supabase
         .from("deliverability_inboxes")
         .upsert(batch, { onConflict: "id", ignoreDuplicates: false });
-      if (inboxErr) throw inboxErr;
+      if (inboxErr) {
+        console.error(`[SYNC] Inbox upsert error (batch ${i}-${i + batch.length}):`, inboxErr);
+        // Try one by one to find the failing row
+        for (const row of batch) {
+          const { error: singleErr } = await supabase
+            .from("deliverability_inboxes")
+            .upsert(row, { onConflict: "id", ignoreDuplicates: false });
+          if (singleErr) console.error(`[SYNC] Failed inbox ${row.id} (${row.email}):`, singleErr.message);
+        }
+      }
     }
     const dbMs = Date.now() - tDb;
 
