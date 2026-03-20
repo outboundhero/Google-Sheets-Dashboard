@@ -29,6 +29,7 @@ export function BulkDeleteDialog({
   onSuccess,
 }: BulkDeleteDialogProps) {
   const [deleting, setDeleting] = useState(false);
+  const [progress, setProgress] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<{
     inboxesDeleted: number;
@@ -41,26 +42,36 @@ export function BulkDeleteDialog({
   const handleDelete = async () => {
     setDeleting(true);
     setError(null);
+    let totalDeleted = 0;
+    let totalFailed = 0;
+    let domainsDeleted = 0;
+
     try {
-      const res = await fetch("/api/deliverability/bulk-delete", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          domains: selectedDomains.map((d) => d.domain),
-        }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || "Failed to delete");
-      setResult({
-        inboxesDeleted: data.inboxesDeleted,
-        domainsDeleted: data.domainsDeleted,
-        failed: data.failed || 0,
-      });
+      // Delete one domain at a time to avoid Vercel timeout
+      for (let i = 0; i < selectedDomains.length; i++) {
+        const d = selectedDomains[i];
+        setProgress(`Deleting ${d.domain} (${i + 1}/${selectedDomains.length})...`);
+        const res = await fetch("/api/deliverability/bulk-delete", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ domains: [d.domain] }),
+        });
+        const data = await res.json();
+        if (res.ok) {
+          totalDeleted += data.inboxesDeleted || 0;
+          totalFailed += data.failed || 0;
+          domainsDeleted += data.domainsDeleted || 0;
+        } else {
+          totalFailed += d.inbox_count;
+        }
+      }
+      setResult({ inboxesDeleted: totalDeleted, domainsDeleted, failed: totalFailed });
       onSuccess();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to delete");
     } finally {
       setDeleting(false);
+      setProgress("");
     }
   };
 
@@ -124,6 +135,7 @@ export function BulkDeleteDialog({
               ))}
             </div>
 
+            {progress && <div className="text-xs text-muted-foreground">{progress}</div>}
             {error && <div className="text-xs text-destructive">{error}</div>}
 
             <div className="flex items-center justify-end gap-2 pt-1">

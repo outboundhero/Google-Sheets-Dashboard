@@ -44,9 +44,8 @@ export async function POST(request: Request) {
       return NextResponse.json({ success: true, inboxesDeleted: 0, domainsDeleted: domains.length });
     }
 
-    // 2. Delete from EmailBison first — track which ones succeeded
-    const BATCH_SIZE = 10;
-    const BATCH_DELAY = 200;
+    // 2. Delete from EmailBison first — 20 concurrent for speed
+    const BATCH_SIZE = 20;
     const deletedIds: number[] = [];
     const failedIds: number[] = [];
 
@@ -63,8 +62,6 @@ export async function POST(request: Request) {
         if (r.ok) deletedIds.push(r.id);
         else failedIds.push(r.id);
       }
-
-      if (i + BATCH_SIZE < inboxes.length) await delay(BATCH_DELAY);
     }
 
     // 3. Only delete from Supabase the inboxes that were successfully deleted from EmailBison
