@@ -135,79 +135,15 @@ export async function POST(request: Request) {
   }
 }
 
-// PUT — rebuild all domain stats from inboxes (call after full sync)
+// PUT — rebuild all domain stats from inboxes via SQL (call after full sync)
 export async function PUT() {
   const t0 = Date.now();
   try {
     const supabase = getSupabaseAdmin();
-    const isOutlook = (type: string) => /microsoft|outlook/i.test(type);
-    const isGoogle = (type: string) => /google|gmail/i.test(type);
-
-    // Get ALL inboxes — use RPC to bypass Supabase 1000-row default limit
-    type InboxRow = { domain: string; tags: { id: number; name: string }[] | null; type: string; emails_sent_count: number; total_replied_count: number; bounced_count: number };
-
-    // First get total count
-    const { count: totalCount } = await supabase
-      .from("deliverability_inboxes")
-      .select("id", { count: "exact", head: true });
-    console.log(`[SYNC] Domain rebuild: total inboxes in DB = ${totalCount}`);
-
-    // Fetch all in chunks of 10000 using range()
-    const allInboxes: InboxRow[] = [];
-    const CHUNK = 10000;
-    for (let offset = 0; offset < (totalCount || 0); offset += CHUNK) {
-      const { data, error } = await supabase
-        .from("deliverability_inboxes")
-        .select("domain, tags, type, emails_sent_count, total_replied_count, bounced_count")
-        .range(offset, offset + CHUNK - 1)
-        .limit(CHUNK);
-      if (error) throw error;
-      if (data) allInboxes.push(...data);
-      console.log(`[SYNC] Domain rebuild: fetched ${allInboxes.length}/${totalCount} inboxes`);
-    }
-
-    const domainMap = new Map<string, InboxRow[]>();
-    for (const inbox of allInboxes) {
-      if (!domainMap.has(inbox.domain)) domainMap.set(inbox.domain, []);
-      domainMap.get(inbox.domain)!.push(inbox);
-    }
-
-    // Build domain rows
-    const domainRows = Array.from(domainMap.entries()).map(([domain, inboxes]) => {
-      const tagSet = new Set<string>();
-      let sent = 0, replied = 0, bounced = 0, ol = 0, g = 0;
-      for (const i of inboxes) {
-        if (Array.isArray(i.tags)) {
-          for (const t of i.tags) { if (t.name) tagSet.add(t.name); }
-        }
-        sent += i.emails_sent_count || 0;
-        replied += i.total_replied_count || 0;
-        bounced += i.bounced_count || 0;
-        if (isOutlook(i.type || "")) ol++;
-        if (isGoogle(i.type || "")) g++;
-      }
-      return {
-        domain,
-        inbox_count: inboxes.length,
-        tags: Array.from(tagSet).sort(),
-        total_sent: sent,
-        total_replied: replied,
-        total_bounced: bounced,
-        outlook_count: ol,
-        google_count: g,
-        synced_at: new Date().toISOString(),
-      };
-    });
-
-    // Upsert in batches
-    for (let i = 0; i < domainRows.length; i += 500) {
-      await supabase
-        .from("deliverability_domains")
-        .upsert(domainRows.slice(i, i + 500), { onConflict: "domain", ignoreDuplicates: false });
-    }
-
-    console.log(`[SYNC] Domain rebuild: ${domainRows.length} domains from ${allInboxes?.length} inboxes in ${Date.now() - t0}ms`);
-    return NextResponse.json({ domains: domainRows.length, inboxes: allInboxes?.length });
+    const { data, error } = await supabase.rpc("rebuild_domain_stats");
+    if (error) throw error;
+    console.log(`[SYNC] Domain rebuild via SQL: ${JSON.stringify(data)} in ${Date.now() - t0}ms`);
+    return NextResponse.json(data);
   } catch (error) {
     console.error(`[SYNC] Domain rebuild ERROR:`, error);
     const message = error instanceof Error ? error.message : "Failed";
