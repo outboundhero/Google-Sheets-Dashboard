@@ -143,22 +143,27 @@ export async function PUT() {
     const isOutlook = (type: string) => /microsoft|outlook/i.test(type);
     const isGoogle = (type: string) => /google|gmail/i.test(type);
 
-    // Get ALL inboxes (paginate past Supabase 1000-row limit)
+    // Get ALL inboxes — use RPC to bypass Supabase 1000-row default limit
     type InboxRow = { domain: string; tags: { id: number; name: string }[] | null; type: string; emails_sent_count: number; total_replied_count: number; bounced_count: number };
+
+    // First get total count
+    const { count: totalCount } = await supabase
+      .from("deliverability_inboxes")
+      .select("id", { count: "exact", head: true });
+    console.log(`[SYNC] Domain rebuild: total inboxes in DB = ${totalCount}`);
+
+    // Fetch all in chunks of 10000 using range()
     const allInboxes: InboxRow[] = [];
-    const PAGE_SIZE = 5000;
-    let offset = 0;
-    while (true) {
+    const CHUNK = 10000;
+    for (let offset = 0; offset < (totalCount || 0); offset += CHUNK) {
       const { data, error } = await supabase
         .from("deliverability_inboxes")
         .select("domain, tags, type, emails_sent_count, total_replied_count, bounced_count")
-        .range(offset, offset + PAGE_SIZE - 1);
+        .range(offset, offset + CHUNK - 1)
+        .limit(CHUNK);
       if (error) throw error;
-      if (!data || data.length === 0) break;
-      allInboxes.push(...data);
-      console.log(`[SYNC] Domain rebuild: fetched ${allInboxes.length} inboxes so far...`);
-      if (data.length < PAGE_SIZE) break;
-      offset += PAGE_SIZE;
+      if (data) allInboxes.push(...data);
+      console.log(`[SYNC] Domain rebuild: fetched ${allInboxes.length}/${totalCount} inboxes`);
     }
 
     const domainMap = new Map<string, InboxRow[]>();
