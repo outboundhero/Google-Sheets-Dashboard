@@ -10,7 +10,8 @@ export async function GET(request: Request) {
     let query = supabase
       .from("deliverability_domains")
       .select("*")
-      .order("domain_created_at", { ascending: false, nullsFirst: false });
+      .order("domain_created_at", { ascending: false, nullsFirst: false })
+      .limit(10000);
 
     if (tagsParam) {
       const tagNames = tagsParam.split(",").map((t) => t.trim()).filter(Boolean);
