@@ -18,7 +18,11 @@ export async function GET() {
         .select("*")
         .order("created_at", { ascending: false })
         .range(offset, offset + PAGE - 1);
-      if (error) throw error;
+      if (error) {
+        console.error("[CAMPAIGNS] GET error:", error);
+        // If table doesn't exist, return empty — user needs to sync first
+        return NextResponse.json([]);
+      }
       if (!data || data.length === 0) break;
       allCampaigns.push(...data);
       if (data.length < PAGE) break;
@@ -26,6 +30,7 @@ export async function GET() {
     }
     return NextResponse.json(allCampaigns);
   } catch (error) {
+    console.error("[CAMPAIGNS] GET exception:", error);
     const message = error instanceof Error ? error.message : "Failed";
     return NextResponse.json({ error: message }, { status: 500 });
   }
@@ -83,7 +88,10 @@ export async function POST() {
       const { error } = await supabase
         .from("campaigns")
         .upsert(rows, { onConflict: "id", ignoreDuplicates: false });
-      if (error) throw error;
+      if (error) {
+        console.error("[CAMPAIGNS] Upsert error:", error);
+        throw new Error(error.message);
+      }
 
       total += campaigns.length;
       const lastPage = json.meta?.last_page || 1;
@@ -96,6 +104,6 @@ export async function POST() {
   } catch (error) {
     console.error(`[CAMPAIGNS] Sync error:`, error);
     const message = error instanceof Error ? error.message : "Failed";
-    return NextResponse.json({ error: message }, { status: 500 });
+    return NextResponse.json({ error: message, details: String(error) }, { status: 500 });
   }
 }
