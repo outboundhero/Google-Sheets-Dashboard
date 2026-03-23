@@ -1,36 +1,44 @@
 import { NextResponse } from "next/server";
+import { getSupabaseAdmin } from "@/lib/supabase";
 
 const API_BASE = "https://app.outboundhero.co/api";
 const API_KEY = process.env.OUTBOUNDHERO_API_KEY!;
 const headers = { Authorization: `Bearer ${API_KEY}` };
 
-export interface CampaignData {
-  id: number;
-  name: string;
-  status: string;
-  client_tag: string;
-  total_leads: number;
-  total_leads_contacted: number;
-  remaining_leads: number;
-  emails_sent: number;
-  replied: number;
-  unique_replies: number;
-  bounced: number;
-  opened: number;
-  unique_opens: number;
-  interested: number;
-  unsubscribed: number;
-  completion_percentage: number;
-  created_at: string;
-  updated_at: string;
-}
-
+// GET — fetch campaigns from Supabase (fast)
 export async function GET() {
   try {
-    const allCampaigns: CampaignData[] = [];
-    let page = 1;
+    const supabase = getSupabaseAdmin();
+    const allCampaigns: Record<string, unknown>[] = [];
+    const PAGE = 1000;
+    let offset = 0;
+    while (true) {
+      const { data, error } = await supabase
+        .from("campaigns")
+        .select("*")
+        .order("created_at", { ascending: false })
+        .range(offset, offset + PAGE - 1);
+      if (error) throw error;
+      if (!data || data.length === 0) break;
+      allCampaigns.push(...data);
+      if (data.length < PAGE) break;
+      offset += PAGE;
+    }
+    return NextResponse.json(allCampaigns);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Failed";
+    return NextResponse.json({ error: message }, { status: 500 });
+  }
+}
 
-    // Fetch all pages
+// POST — sync campaigns from EmailBison to Supabase
+export async function POST() {
+  const t0 = Date.now();
+  try {
+    const supabase = getSupabaseAdmin();
+    let page = 1;
+    let total = 0;
+
     while (true) {
       const res = await fetch(
         `${API_BASE}/campaigns?page=${page}&per_page=100`,
@@ -40,19 +48,23 @@ export async function GET() {
       const json = await res.json();
       const campaigns = json.data || [];
 
-      for (const c of campaigns) {
-        // Extract client tag from campaign name: "CLIENT_TAG: Campaign Name"
-        const colonIdx = c.name.indexOf(":");
-        const clientTag = colonIdx > 0 ? c.name.substring(0, colonIdx).trim() : "";
+      if (campaigns.length === 0) break;
 
-        allCampaigns.push({
+      const rows = campaigns.map((c: Record<string, unknown>) => {
+        const name = c.name as string;
+        const colonIdx = name.indexOf(":");
+        const clientTag = colonIdx > 0 ? name.substring(0, colonIdx).trim() : "";
+        const totalLeads = (c.total_leads as number) || 0;
+        const contacted = (c.total_leads_contacted as number) || 0;
+
+        return {
           id: c.id,
-          name: c.name,
+          name,
           status: c.status,
           client_tag: clientTag,
-          total_leads: c.total_leads || 0,
-          total_leads_contacted: c.total_leads_contacted || 0,
-          remaining_leads: (c.total_leads || 0) - (c.total_leads_contacted || 0),
+          total_leads: totalLeads,
+          total_leads_contacted: contacted,
+          remaining_leads: totalLeads - contacted,
           emails_sent: c.emails_sent || 0,
           replied: c.replied || 0,
           unique_replies: c.unique_replies || 0,
@@ -64,19 +76,25 @@ export async function GET() {
           completion_percentage: c.completion_percentage || 0,
           created_at: c.created_at,
           updated_at: c.updated_at,
-        });
-      }
+          synced_at: new Date().toISOString(),
+        };
+      });
 
+      const { error } = await supabase
+        .from("campaigns")
+        .upsert(rows, { onConflict: "id", ignoreDuplicates: false });
+      if (error) throw error;
+
+      total += campaigns.length;
       const lastPage = json.meta?.last_page || 1;
       if (page >= lastPage) break;
       page++;
     }
 
-    // Sort by created_at descending
-    allCampaigns.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
-
-    return NextResponse.json(allCampaigns);
+    console.log(`[CAMPAIGNS] Synced ${total} campaigns in ${Date.now() - t0}ms`);
+    return NextResponse.json({ synced: total });
   } catch (error) {
+    console.error(`[CAMPAIGNS] Sync error:`, error);
     const message = error instanceof Error ? error.message : "Failed";
     return NextResponse.json({ error: message }, { status: 500 });
   }

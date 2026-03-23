@@ -103,12 +103,61 @@ export async function GET() {
     const deliverabilityBudget = startTime + 50000;
     const deliverabilityInboxes = await runDeliverabilitySync(deliverabilityBudget).catch(() => 0);
 
+    // Sync campaigns (fast — just fetches campaign list)
+    let campaignsSynced = 0;
+    try {
+      const campRes = await fetch(`${DELIVERABILITY_API.replace('/api', '')}/api/campaigns?page=1&per_page=100`, {
+        headers: { Authorization: `Bearer ${DELIVERABILITY_KEY}` },
+        cache: "no-store",
+      });
+      if (campRes.ok) {
+        const campJson = await campRes.json();
+        const lastPage = campJson.meta?.last_page || 1;
+        const allCampaigns: Record<string, unknown>[] = [...(campJson.data || [])];
+        for (let p = 2; p <= lastPage && Date.now() - startTime < 55000; p++) {
+          const r = await fetch(`${DELIVERABILITY_API.replace('/api', '')}/api/campaigns?page=${p}&per_page=100`, {
+            headers: { Authorization: `Bearer ${DELIVERABILITY_KEY}` },
+            cache: "no-store",
+          });
+          if (r.ok) {
+            const j = await r.json();
+            allCampaigns.push(...(j.data || []));
+          }
+        }
+        const supabase = getSupabaseAdmin();
+        const rows = allCampaigns.map((c) => {
+          const name = c.name as string;
+          const colonIdx = name.indexOf(":");
+          const totalLeads = (c.total_leads as number) || 0;
+          const contacted = (c.total_leads_contacted as number) || 0;
+          return {
+            id: c.id, name, status: c.status,
+            client_tag: colonIdx > 0 ? name.substring(0, colonIdx).trim() : "",
+            total_leads: totalLeads, total_leads_contacted: contacted,
+            remaining_leads: totalLeads - contacted,
+            emails_sent: c.emails_sent || 0, replied: c.replied || 0,
+            unique_replies: c.unique_replies || 0, bounced: c.bounced || 0,
+            opened: c.opened || 0, unique_opens: c.unique_opens || 0,
+            interested: c.interested || 0, unsubscribed: c.unsubscribed || 0,
+            completion_percentage: c.completion_percentage || 0,
+            created_at: c.created_at, updated_at: c.updated_at,
+            synced_at: new Date().toISOString(),
+          };
+        });
+        for (let i = 0; i < rows.length; i += 500) {
+          await supabase.from("campaigns").upsert(rows.slice(i, i + 500), { onConflict: "id", ignoreDuplicates: false });
+        }
+        campaignsSynced = rows.length;
+      }
+    } catch { /* ignore campaign sync errors in cron */ }
+
     return NextResponse.json({
       totalSynced,
       totalErrors,
       totalSheets,
       complete: offset >= totalSheets,
       deliverabilityInboxes,
+      campaignsSynced,
       durationMs: Date.now() - startTime,
     });
   } catch (error) {

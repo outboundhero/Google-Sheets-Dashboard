@@ -1,22 +1,7 @@
 "use client";
 
-import {
-  Dialog,
-  DialogContent,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Badge } from "@/components/ui/badge";
-import {
-  Mail,
-  Reply,
-  Eye,
-  AlertTriangle,
-  Users,
-  Send,
-  UserMinus,
-  ThumbsUp,
-} from "lucide-react";
 
 interface Campaign {
   id: number;
@@ -39,113 +24,90 @@ interface Campaign {
   updated_at: string;
 }
 
-interface Props {
-  campaign: Campaign;
-  open: boolean;
-  onOpenChange: (open: boolean) => void;
-}
-
-const STATUS_BADGE: Record<string, string> = {
-  active: "bg-emerald-500/15 text-emerald-400 border-emerald-500/30",
-  paused: "bg-amber-500/15 text-amber-400 border-amber-500/30",
-  completed: "bg-blue-500/15 text-blue-400 border-blue-500/30",
-  draft: "bg-gray-500/15 text-gray-400 border-gray-500/30",
-  archived: "bg-gray-500/15 text-gray-400 border-gray-500/30",
-  failed: "bg-destructive/15 text-destructive border-destructive/30",
+const STATUS_COLORS: Record<string, string> = {
+  active: "bg-emerald-500/10 text-emerald-500 border-emerald-500/20",
+  paused: "bg-amber-500/10 text-amber-500 border-amber-500/20",
+  completed: "bg-blue-500/10 text-blue-400 border-blue-500/20",
+  draft: "bg-zinc-500/10 text-zinc-400 border-zinc-500/20",
+  archived: "bg-zinc-500/10 text-zinc-400 border-zinc-500/20",
+  failed: "bg-red-500/10 text-red-400 border-red-500/20",
 };
 
-function StatItem({ icon: Icon, label, value, sub, color }: {
-  icon: React.ElementType;
-  label: string;
-  value: string | number;
-  sub?: string;
-  color?: string;
-}) {
+function Stat({ label, value, sub, warn }: { label: string; value: string | number; sub?: string; warn?: boolean }) {
   return (
-    <div className="space-y-1">
-      <div className="flex items-center gap-1.5 text-muted-foreground">
-        <Icon className="h-3.5 w-3.5" />
-        <span className="text-xs">{label}</span>
-      </div>
-      <p className={`text-lg font-bold ${color || ""}`}>
+    <div className="text-center">
+      <p className="text-[11px] text-muted-foreground mb-1">{label}</p>
+      <p className={`text-lg font-semibold tabular-nums ${warn ? "text-red-400" : ""}`}>
         {typeof value === "number" ? value.toLocaleString() : value}
       </p>
-      {sub && <p className="text-[10px] text-muted-foreground">{sub}</p>}
+      {sub && <p className="text-[10px] text-muted-foreground mt-0.5">{sub}</p>}
     </div>
   );
 }
 
-export function CampaignDetailDialog({ campaign: c, open, onOpenChange }: Props) {
-  const replyRate = c.emails_sent > 0 ? ((c.replied / c.emails_sent) * 100).toFixed(1) : "0.0";
-  const openRate = c.emails_sent > 0 ? ((c.unique_opens / c.emails_sent) * 100).toFixed(1) : "0.0";
-  const bounceRate = c.emails_sent > 0 ? ((c.bounced / c.emails_sent) * 100).toFixed(1) : "0.0";
-  const contactRate = c.total_leads > 0 ? ((c.total_leads_contacted / c.total_leads) * 100).toFixed(1) : "0.0";
+export function CampaignDetailDialog({ campaign: c, open, onOpenChange }: {
+  campaign: Campaign;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+}) {
+  const rate = (n: number) => c.emails_sent > 0 ? ((n / c.emails_sent) * 100).toFixed(1) + "%" : "0%";
+  const contactPct = c.total_leads > 0 ? ((c.total_leads_contacted / c.total_leads) * 100).toFixed(1) : "0";
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-2xl">
+      <DialogContent className="max-w-lg">
         <DialogHeader>
-          <div className="flex items-start justify-between gap-4">
-            <div className="min-w-0">
-              <DialogTitle className="text-lg truncate">{c.name}</DialogTitle>
-              <div className="flex items-center gap-2 mt-1">
-                {c.client_tag && (
-                  <span className="text-xs bg-muted px-2 py-0.5 rounded text-muted-foreground">{c.client_tag}</span>
-                )}
-                <Badge className={`text-[10px] ${STATUS_BADGE[c.status] || STATUS_BADGE.draft}`}>
-                  {c.status}
-                </Badge>
-                <span className="text-xs text-muted-foreground">
-                  Created {new Date(c.created_at).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })}
-                </span>
-              </div>
-            </div>
+          <DialogTitle className="text-base leading-tight">{c.name}</DialogTitle>
+          <div className="flex items-center gap-2 mt-1.5">
+            {c.client_tag && <span className="text-[11px] bg-muted px-2 py-0.5 rounded">{c.client_tag}</span>}
+            <Badge variant="outline" className={`text-[10px] px-1.5 py-0 ${STATUS_COLORS[c.status] || ""}`}>{c.status}</Badge>
+            <span className="text-[11px] text-muted-foreground">
+              {new Date(c.created_at).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })}
+            </span>
           </div>
         </DialogHeader>
 
-        <div className="space-y-5 mt-2">
-          {/* Lead Progress */}
+        <div className="space-y-4 mt-3">
+          {/* Progress */}
           <div>
-            <div className="flex items-center justify-between text-sm mb-2">
-              <span className="text-muted-foreground">Lead Progress</span>
-              <span className="font-medium">{c.total_leads_contacted.toLocaleString()} / {c.total_leads.toLocaleString()} contacted ({contactRate}%)</span>
+            <div className="flex justify-between text-xs mb-1.5">
+              <span className="text-muted-foreground">Progress</span>
+              <span className="tabular-nums">{c.total_leads_contacted.toLocaleString()} / {c.total_leads.toLocaleString()} ({contactPct}%)</span>
             </div>
-            <div className="h-2 rounded-full bg-muted overflow-hidden">
-              <div
-                className="h-full rounded-full bg-primary transition-all"
-                style={{ width: `${Math.min(parseFloat(contactRate), 100)}%` }}
-              />
+            <div className="h-1.5 rounded-full bg-muted overflow-hidden">
+              <div className="h-full rounded-full bg-emerald-500 transition-all" style={{ width: `${Math.min(Number(contactPct), 100)}%` }} />
             </div>
-            <div className="flex justify-between text-xs text-muted-foreground mt-1">
+            <div className="flex justify-between text-[10px] text-muted-foreground mt-1">
               <span>{c.remaining_leads.toLocaleString()} remaining</span>
               <span>{c.completion_percentage}% complete</span>
             </div>
           </div>
 
-          {/* Stats Grid */}
-          <div className="grid grid-cols-4 gap-4">
-            <StatItem icon={Mail} label="Emails Sent" value={c.emails_sent} />
-            <StatItem icon={Reply} label="Replies" value={c.replied} sub={`${replyRate}% rate`} />
-            <StatItem icon={Eye} label="Opens" value={c.unique_opens} sub={`${openRate}% rate`} />
-            <StatItem icon={AlertTriangle} label="Bounced" value={c.bounced} sub={`${bounceRate}% rate`} color={c.bounced > 0 ? "text-destructive" : ""} />
+          {/* Main Stats */}
+          <div className="grid grid-cols-4 gap-3 rounded-lg bg-muted/30 p-3">
+            <Stat label="Sent" value={c.emails_sent} />
+            <Stat label="Replies" value={c.replied} sub={rate(c.replied)} />
+            <Stat label="Opens" value={c.unique_opens} sub={rate(c.unique_opens)} />
+            <Stat label="Bounced" value={c.bounced} sub={rate(c.bounced)} warn={c.bounced > 0} />
           </div>
 
-          <div className="grid grid-cols-4 gap-4 pt-3 border-t">
-            <StatItem icon={Users} label="Total Leads" value={c.total_leads} />
-            <StatItem icon={Send} label="Contacted" value={c.total_leads_contacted} />
-            <StatItem icon={ThumbsUp} label="Interested" value={c.interested} />
-            <StatItem icon={UserMinus} label="Unsubscribed" value={c.unsubscribed} />
+          {/* Secondary Stats */}
+          <div className="grid grid-cols-4 gap-3">
+            <Stat label="Total Leads" value={c.total_leads} />
+            <Stat label="Contacted" value={c.total_leads_contacted} />
+            <Stat label="Interested" value={c.interested} />
+            <Stat label="Unsubscribed" value={c.unsubscribed} />
           </div>
 
-          {/* Unique Stats */}
-          <div className="grid grid-cols-2 gap-4 pt-3 border-t">
-            <div className="rounded-lg bg-muted/50 p-3">
-              <span className="text-xs text-muted-foreground">Unique Replies</span>
-              <p className="text-lg font-bold mt-0.5">{c.unique_replies.toLocaleString()}</p>
+          {/* Unique */}
+          <div className="grid grid-cols-2 gap-3">
+            <div className="rounded-lg border p-3 text-center">
+              <p className="text-[11px] text-muted-foreground">Unique Replies</p>
+              <p className="text-xl font-semibold mt-0.5 tabular-nums">{c.unique_replies.toLocaleString()}</p>
             </div>
-            <div className="rounded-lg bg-muted/50 p-3">
-              <span className="text-xs text-muted-foreground">Unique Opens</span>
-              <p className="text-lg font-bold mt-0.5">{c.unique_opens.toLocaleString()}</p>
+            <div className="rounded-lg border p-3 text-center">
+              <p className="text-[11px] text-muted-foreground">Unique Opens</p>
+              <p className="text-xl font-semibold mt-0.5 tabular-nums">{c.unique_opens.toLocaleString()}</p>
             </div>
           </div>
         </div>
