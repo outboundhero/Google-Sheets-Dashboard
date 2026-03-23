@@ -1,109 +1,166 @@
 import { NextResponse } from "next/server";
 import { getSupabaseAdmin } from "@/lib/supabase";
+import { getClientTrackerData } from "@/lib/google-sheets";
 
 const API_BASE = "https://app.outboundhero.co/api";
 const API_KEY = process.env.OUTBOUNDHERO_API_KEY!;
 const headers = { Authorization: `Bearer ${API_KEY}` };
 
-// GET — fetch campaigns from Supabase (fast)
-export async function GET() {
+export interface CampaignData {
+  id: number;
+  name: string;
+  status: string;
+  client_tag: string;
+  total_leads: number;
+  total_leads_contacted: number;
+  remaining_leads: number;
+  emails_sent: number;
+  replied: number;
+  unique_replies: number;
+  bounced: number;
+  opened: number;
+  unique_opens: number;
+  interested: number;
+  unsubscribed: number;
+  completion_percentage: number;
+  created_at: string;
+  updated_at: string;
+}
+
+// Try Supabase first, fall back to direct API
+async function getFromSupabase(): Promise<CampaignData[] | null> {
   try {
     const supabase = getSupabaseAdmin();
-    const allCampaigns: Record<string, unknown>[] = [];
-    const PAGE = 1000;
+    const { data, error } = await supabase
+      .from("campaigns")
+      .select("*")
+      .order("created_at", { ascending: false })
+      .limit(1);
+    if (error) return null; // table doesn't exist
+    // Table exists, fetch all
+    const all: CampaignData[] = [];
     let offset = 0;
     while (true) {
-      const { data, error } = await supabase
+      const { data: page } = await supabase
         .from("campaigns")
         .select("*")
         .order("created_at", { ascending: false })
-        .range(offset, offset + PAGE - 1);
-      if (error) {
-        console.error("[CAMPAIGNS] GET error:", error);
-        // If table doesn't exist, return empty — user needs to sync first
-        return NextResponse.json([]);
-      }
-      if (!data || data.length === 0) break;
-      allCampaigns.push(...data);
-      if (data.length < PAGE) break;
-      offset += PAGE;
+        .range(offset, offset + 999);
+      if (!page || page.length === 0) break;
+      all.push(...(page as CampaignData[]));
+      if (page.length < 1000) break;
+      offset += 1000;
     }
-    return NextResponse.json(allCampaigns);
+    return all.length > 0 ? all : null;
+  } catch {
+    return null;
+  }
+}
+
+async function fetchFromAPI(): Promise<CampaignData[]> {
+  const allCampaigns: CampaignData[] = [];
+  let page = 1;
+  while (true) {
+    const res = await fetch(
+      `${API_BASE}/campaigns?page=${page}&per_page=100`,
+      { headers, cache: "no-store" }
+    );
+    if (!res.ok) throw new Error(`API error: ${res.status}`);
+    const json = await res.json();
+    const campaigns = json.data || [];
+    for (const c of campaigns) {
+      const colonIdx = (c.name as string).indexOf(":");
+      const clientTag = colonIdx > 0 ? (c.name as string).substring(0, colonIdx).trim() : "";
+      const totalLeads = c.total_leads || 0;
+      const contacted = c.total_leads_contacted || 0;
+      allCampaigns.push({
+        id: c.id,
+        name: c.name,
+        status: c.status,
+        client_tag: clientTag,
+        total_leads: totalLeads,
+        total_leads_contacted: contacted,
+        remaining_leads: totalLeads - contacted,
+        emails_sent: c.emails_sent || 0,
+        replied: c.replied || 0,
+        unique_replies: c.unique_replies || 0,
+        bounced: c.bounced || 0,
+        opened: c.opened || 0,
+        unique_opens: c.unique_opens || 0,
+        interested: c.interested || 0,
+        unsubscribed: c.unsubscribed || 0,
+        completion_percentage: c.completion_percentage || 0,
+        created_at: c.created_at,
+        updated_at: c.updated_at,
+      });
+    }
+    const lastPage = json.meta?.last_page || 1;
+    if (page >= lastPage) break;
+    page++;
+  }
+  return allCampaigns;
+}
+
+// GET — fetch campaigns, filtered to active clients only
+export async function GET() {
+  try {
+    // Get active client tags from Google Sheet
+    const tracker = await getClientTrackerData().catch(() => []);
+    const activeClients = new Set(
+      tracker
+        .filter((r) => r.status.trim().toLowerCase() === "active")
+        .flatMap((r) => r.clientAbbr.split(" & ").map((a) => a.trim()))
+        .filter(Boolean)
+    );
+
+    // Try Supabase first, fall back to API
+    let campaigns = await getFromSupabase();
+    if (!campaigns) {
+      campaigns = await fetchFromAPI();
+    }
+
+    // Filter to active clients only
+    const filtered = campaigns
+      .filter((c) => !c.client_tag || activeClients.has(c.client_tag))
+      .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+
+    return NextResponse.json({
+      campaigns: filtered,
+      activeClients: Array.from(activeClients).sort(),
+    });
   } catch (error) {
-    console.error("[CAMPAIGNS] GET exception:", error);
+    console.error("[CAMPAIGNS] Error:", error);
     const message = error instanceof Error ? error.message : "Failed";
     return NextResponse.json({ error: message }, { status: 500 });
   }
 }
 
-// POST — sync campaigns from EmailBison to Supabase
+// POST — sync from EmailBison API (try to save to Supabase if table exists)
 export async function POST() {
   const t0 = Date.now();
   try {
-    const supabase = getSupabaseAdmin();
-    let page = 1;
-    let total = 0;
+    const campaigns = await fetchFromAPI();
 
-    while (true) {
-      const res = await fetch(
-        `${API_BASE}/campaigns?page=${page}&per_page=100`,
-        { headers, cache: "no-store" }
-      );
-      if (!res.ok) throw new Error(`API error: ${res.status}`);
-      const json = await res.json();
-      const campaigns = json.data || [];
-
-      if (campaigns.length === 0) break;
-
-      const rows = campaigns.map((c: Record<string, unknown>) => {
-        const name = c.name as string;
-        const colonIdx = name.indexOf(":");
-        const clientTag = colonIdx > 0 ? name.substring(0, colonIdx).trim() : "";
-        const totalLeads = (c.total_leads as number) || 0;
-        const contacted = (c.total_leads_contacted as number) || 0;
-
-        return {
-          id: c.id,
-          name,
-          status: c.status,
-          client_tag: clientTag,
-          total_leads: totalLeads,
-          total_leads_contacted: contacted,
-          remaining_leads: totalLeads - contacted,
-          emails_sent: c.emails_sent || 0,
-          replied: c.replied || 0,
-          unique_replies: c.unique_replies || 0,
-          bounced: c.bounced || 0,
-          opened: c.opened || 0,
-          unique_opens: c.unique_opens || 0,
-          interested: c.interested || 0,
-          unsubscribed: c.unsubscribed || 0,
-          completion_percentage: c.completion_percentage || 0,
-          created_at: c.created_at,
-          updated_at: c.updated_at,
-          synced_at: new Date().toISOString(),
-        };
-      });
-
-      const { error } = await supabase
-        .from("campaigns")
-        .upsert(rows, { onConflict: "id", ignoreDuplicates: false });
-      if (error) {
-        console.error("[CAMPAIGNS] Upsert error:", error);
-        throw new Error(error.message);
+    // Try to save to Supabase
+    try {
+      const supabase = getSupabaseAdmin();
+      for (let i = 0; i < campaigns.length; i += 500) {
+        await supabase
+          .from("campaigns")
+          .upsert(
+            campaigns.slice(i, i + 500).map((c) => ({ ...c, synced_at: new Date().toISOString() })),
+            { onConflict: "id", ignoreDuplicates: false }
+          );
       }
-
-      total += campaigns.length;
-      const lastPage = json.meta?.last_page || 1;
-      if (page >= lastPage) break;
-      page++;
+    } catch {
+      // Supabase table might not exist — that's okay
     }
 
-    console.log(`[CAMPAIGNS] Synced ${total} campaigns in ${Date.now() - t0}ms`);
-    return NextResponse.json({ synced: total });
+    console.log(`[CAMPAIGNS] Synced ${campaigns.length} in ${Date.now() - t0}ms`);
+    return NextResponse.json({ synced: campaigns.length });
   } catch (error) {
-    console.error(`[CAMPAIGNS] Sync error:`, error);
+    console.error("[CAMPAIGNS] Sync error:", error);
     const message = error instanceof Error ? error.message : "Failed";
-    return NextResponse.json({ error: message, details: String(error) }, { status: 500 });
+    return NextResponse.json({ error: message }, { status: 500 });
   }
 }

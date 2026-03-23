@@ -71,7 +71,11 @@ export default function CampaignsPage() {
     try {
       const res = await fetch("/api/campaigns");
       const data = await res.json();
-      if (Array.isArray(data)) setCampaigns(data);
+      if (data.campaigns && Array.isArray(data.campaigns)) {
+        setCampaigns(data.campaigns);
+      } else if (Array.isArray(data)) {
+        setCampaigns(data);
+      }
     } catch { /* ignore */ }
   }, []);
 
