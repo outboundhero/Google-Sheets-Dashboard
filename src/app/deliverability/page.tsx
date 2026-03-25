@@ -174,6 +174,7 @@ function DeliverabilityPageInner() {
     return t ? t.split(",").map((s) => s.trim()).filter(Boolean) : [];
   });
   const [warmupFilter, setWarmupFilter] = useState<"all" | "open" | "done">("open");
+  const [warmupTypeFilter, setWarmupTypeFilter] = useState<"all" | "outlook" | "google">("all");
   const [activeTab, setActiveTab] = useState<"inboxes" | "warmup">("inboxes");
   const [allTags, setAllTags] = useState<string[]>([]);
   const [savedPage, setSavedPage] = useState<number | null>(null);
@@ -395,8 +396,13 @@ function DeliverabilityPageInner() {
         .filter((d) =>
           warmupSearch ? d.domain.toLowerCase().includes(warmupSearch.toLowerCase()) : true
         )
-        .filter((d) => showReserve ? isDomainReserve(d) : true),
-    [domains, warmupFilter, warmupSearch, showReserve, isDomainReserve, now]
+        .filter((d) => showReserve ? isDomainReserve(d) : true)
+        .filter((d) => {
+          if (warmupTypeFilter === "outlook") return (d.outlook_count || 0) > 0;
+          if (warmupTypeFilter === "google") return (d.google_count || 0) > 0;
+          return true;
+        }),
+    [domains, warmupFilter, warmupSearch, showReserve, warmupTypeFilter, isDomainReserve, now]
   );
 
   // Flag computation helper — returns human-readable reason strings
@@ -977,6 +983,21 @@ function DeliverabilityPageInner() {
               </button>
             ))}
 
+            {/* Type filter */}
+            {(["all", "outlook", "google"] as const).map((t) => (
+              <button
+                key={t}
+                onClick={() => setWarmupTypeFilter(t)}
+                className={`text-xs px-3 py-1.5 rounded-full border capitalize transition-colors ${
+                  warmupTypeFilter === t
+                    ? "bg-primary text-primary-foreground border-primary"
+                    : "border-border text-muted-foreground hover:border-foreground hover:text-foreground"
+                }`}
+              >
+                {t === "all" ? "All Types" : t === "outlook" ? "Outlook" : "Google"}
+              </button>
+            ))}
+
             {/* Reserve filter */}
             <button
               onClick={() => setShowReserve((v) => !v)}
@@ -998,6 +1019,29 @@ function DeliverabilityPageInner() {
             </button>
           </div>
 
+          {/* Bulk action bar for warmup */}
+          {selectedDomains.size > 0 && (
+            <div className="flex items-center gap-3 rounded-xl border bg-muted/50 px-4 py-2.5">
+              <span className="text-xs font-medium">
+                {selectedDomains.size} domain{selectedDomains.size !== 1 ? "s" : ""} selected
+              </span>
+              <div className="flex items-center gap-2 ml-auto">
+                <Button size="sm" variant="outline" className="h-7 text-xs gap-1.5" onClick={() => setBulkTagMode("add")}>
+                  + Add Tags
+                </Button>
+                <Button size="sm" variant="outline" className="h-7 text-xs gap-1.5 text-destructive hover:text-destructive" onClick={() => setBulkTagMode("remove")}>
+                  − Remove Tags
+                </Button>
+                <Button size="sm" variant="destructive" className="h-7 text-xs gap-1.5" onClick={() => setShowBulkDelete(true)}>
+                  Delete
+                </Button>
+                <Button size="sm" variant="ghost" className="h-7 text-xs" onClick={() => setSelectedDomains(new Set())}>
+                  Clear
+                </Button>
+              </div>
+            </div>
+          )}
+
           {loading ? (
             <div className="space-y-2">
               {[...Array(4)].map((_, i) => <Skeleton key={i} className="h-16 rounded-xl" />)}
@@ -1017,59 +1061,110 @@ function DeliverabilityPageInner() {
               </p>
             </div>
           ) : (
-            <div className="space-y-2">
-              {warmupDomains.map((d) => (
-                <div
-                  key={d.domain}
-                  className="flex items-center gap-4 rounded-xl border bg-card px-4 py-3.5"
+            <div className="space-y-1.5">
+              {/* Select all header */}
+              <div className="flex items-center gap-3 px-4 py-1.5">
+                <button
+                  onClick={() => {
+                    const allVisible = warmupDomains.map((d) => d.domain);
+                    const allSelected = allVisible.every((d) => selectedDomains.has(d));
+                    if (allSelected) setSelectedDomains(new Set());
+                    else setSelectedDomains(new Set(allVisible));
+                  }}
+                  className={`h-4 w-4 rounded border flex items-center justify-center transition-colors ${
+                    warmupDomains.length > 0 && warmupDomains.every((d) => selectedDomains.has(d.domain))
+                      ? "bg-primary border-primary text-primary-foreground"
+                      : "border-muted-foreground/30 hover:border-foreground"
+                  }`}
                 >
-                  <CheckCircle2 className="h-5 w-5 text-green-400 flex-shrink-0" />
-                  <div className="flex-1 min-w-0">
-                    <div className="font-medium text-sm">{d.domain}</div>
-                    <div className="text-xs text-muted-foreground mt-0.5">
-                      Added{" "}
-                      {new Date(d.domain_created_at!).toLocaleDateString("en-US", {
-                        month: "short", day: "numeric", year: "numeric",
-                      })}
-                      {" · "}{d.daysOld} days old
-                      {" · "}{d.inbox_count} inbox{d.inbox_count !== 1 ? "es" : ""}
-                    </div>
-                    {d.tags && d.tags.length > 0 && (
-                      <div className="flex gap-1 flex-wrap mt-1">
-                        {d.tags.slice(0, 5).map((t) => (
-                          <span key={t} className="text-[10px] bg-muted px-1.5 py-0.5 rounded text-muted-foreground">{t}</span>
-                        ))}
-                        {d.tags.length > 5 && (
-                          <span className="text-[10px] text-muted-foreground">+{d.tags.length - 5}</span>
-                        )}
+                  {warmupDomains.length > 0 && warmupDomains.every((d) => selectedDomains.has(d.domain)) && (
+                    <Check className="h-3 w-3" />
+                  )}
+                </button>
+                <span className="text-xs text-muted-foreground">{warmupDomains.length} domains</span>
+              </div>
+
+              {warmupDomains.map((d) => {
+                const isSelected = selectedDomains.has(d.domain);
+                return (
+                  <div
+                    key={d.domain}
+                    className={`flex items-center gap-3 rounded-xl border px-4 py-3 transition-colors ${
+                      isSelected ? "bg-primary/5 border-primary/30" : "bg-card hover:bg-muted/30"
+                    }`}
+                  >
+                    {/* Checkbox */}
+                    <button
+                      onClick={() => {
+                        setSelectedDomains((prev) => {
+                          const next = new Set(prev);
+                          if (next.has(d.domain)) next.delete(d.domain);
+                          else next.add(d.domain);
+                          return next;
+                        });
+                      }}
+                      className={`h-4 w-4 rounded border flex items-center justify-center shrink-0 transition-colors ${
+                        isSelected
+                          ? "bg-primary border-primary text-primary-foreground"
+                          : "border-muted-foreground/30 hover:border-foreground"
+                      }`}
+                    >
+                      {isSelected && <Check className="h-3 w-3" />}
+                    </button>
+
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-2">
+                        <Globe className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
+                        <span className="font-medium text-sm">{d.domain}</span>
                       </div>
-                    )}
+                      <div className="text-xs text-muted-foreground mt-0.5 ml-5">
+                        Added{" "}
+                        {new Date(d.domain_created_at!).toLocaleDateString("en-US", {
+                          month: "short", day: "numeric", year: "numeric",
+                        })}
+                        {" · "}{d.daysOld} days old
+                        {" · "}{d.inbox_count} inbox{d.inbox_count !== 1 ? "es" : ""}
+                        {(d.outlook_count || 0) > 0 && <span className="text-blue-400 ml-1">{d.outlook_count} OL</span>}
+                        {(d.google_count || 0) > 0 && <span className="text-red-400 ml-1">{d.google_count} G</span>}
+                      </div>
+                      {d.tags && d.tags.length > 0 && (
+                        <div className="flex gap-1 flex-wrap mt-1 ml-5">
+                          {d.tags.slice(0, 5).map((t) => (
+                            <span key={t} className="text-[10px] bg-muted px-1.5 py-0.5 rounded text-muted-foreground">{t}</span>
+                          ))}
+                          {d.tags.length > 5 && (
+                            <span className="text-[10px] text-muted-foreground">+{d.tags.length - 5}</span>
+                          )}
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Open / Done toggle */}
+                    <div className="flex items-center gap-1 rounded-lg border bg-muted p-0.5 flex-shrink-0">
+                      <button
+                        onClick={() => handleWarmupStatusChange(d.domain, "open")}
+                        className={`text-xs px-2.5 py-1 rounded-md transition-colors ${
+                          d.warmup_status === "open"
+                            ? "bg-background shadow text-foreground font-medium"
+                            : "text-muted-foreground hover:text-foreground"
+                        }`}
+                      >
+                        Open
+                      </button>
+                      <button
+                        onClick={() => handleWarmupStatusChange(d.domain, "done")}
+                        className={`text-xs px-2.5 py-1 rounded-md transition-colors ${
+                          d.warmup_status === "done"
+                            ? "bg-background shadow text-foreground font-medium"
+                            : "text-muted-foreground hover:text-foreground"
+                        }`}
+                      >
+                        Done
+                      </button>
+                    </div>
                   </div>
-                  {/* Open / Done toggle */}
-                  <div className="flex items-center gap-1 rounded-lg border bg-muted p-0.5 flex-shrink-0">
-                    <button
-                      onClick={() => handleWarmupStatusChange(d.domain, "open")}
-                      className={`text-xs px-2.5 py-1 rounded-md transition-colors ${
-                        d.warmup_status === "open"
-                          ? "bg-background shadow text-foreground font-medium"
-                          : "text-muted-foreground hover:text-foreground"
-                      }`}
-                    >
-                      Open
-                    </button>
-                    <button
-                      onClick={() => handleWarmupStatusChange(d.domain, "done")}
-                      className={`text-xs px-2.5 py-1 rounded-md transition-colors ${
-                        d.warmup_status === "done"
-                          ? "bg-background shadow text-foreground font-medium"
-                          : "text-muted-foreground hover:text-foreground"
-                      }`}
-                    >
-                      Done
-                    </button>
-                  </div>
-                </div>
-              ))}
+                );
+              })}
             </div>
           )}
         </div>
