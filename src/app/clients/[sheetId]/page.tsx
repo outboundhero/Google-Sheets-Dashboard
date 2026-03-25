@@ -290,94 +290,111 @@ export default function ClientDetailPage({
 
       {/* Domains Dialog */}
       <Dialog open={showDomainsDialog} onOpenChange={setShowDomainsDialog}>
-        <DialogContent className="max-w-3xl max-h-[80vh] overflow-y-auto">
-          <DialogHeader>
-            <DialogTitle>{clientTag} — {domainStats.total} Domains</DialogTitle>
-            <div className="flex gap-3 mt-1 text-xs text-muted-foreground">
-              {domainStats.outlook > 0 && <span className="text-blue-400">{domainStats.outlook} Outlook inboxes</span>}
-              {domainStats.google > 0 && <span className="text-red-400">{domainStats.google} Google inboxes</span>}
-              {domainStats.flagged > 0 && <span className="text-destructive">{domainStats.flagged} Flagged</span>}
+        <DialogContent className="max-w-5xl max-h-[85vh] flex flex-col">
+          <DialogHeader className="shrink-0">
+            <DialogTitle className="text-lg">{clientTag} — {domainStats.total} Domains</DialogTitle>
+            <div className="flex gap-4 mt-2">
+              {domainStats.outlook > 0 && (
+                <div className="flex items-center gap-1.5">
+                  <div className="h-2 w-2 rounded-full bg-blue-400" />
+                  <span className="text-xs text-muted-foreground">{domainStats.outlook} Outlook</span>
+                </div>
+              )}
+              {domainStats.google > 0 && (
+                <div className="flex items-center gap-1.5">
+                  <div className="h-2 w-2 rounded-full bg-red-400" />
+                  <span className="text-xs text-muted-foreground">{domainStats.google} Google</span>
+                </div>
+              )}
+              {domainStats.flagged > 0 && (
+                <div className="flex items-center gap-1.5">
+                  <AlertTriangle className="h-3 w-3 text-destructive" />
+                  <span className="text-xs text-destructive">{domainStats.flagged} Flagged</span>
+                </div>
+              )}
             </div>
           </DialogHeader>
 
-          <div className="rounded-lg border overflow-hidden mt-2">
-            <div className="grid grid-cols-[1fr_70px_80px_80px_70px] gap-2 px-4 py-2 text-[10px] text-muted-foreground font-medium bg-muted/30 border-b">
-              <span>Domain</span>
-              <span className="text-center">Inboxes</span>
-              <span className="text-center">Sent</span>
-              <span className="text-center">Replied</span>
-              <span className="text-center">Bounced</span>
-            </div>
-            <div className="divide-y">
-              {domains.map((d) => {
-                const isG = (d.google_count || 0) > 0 && (d.outlook_count || 0) === 0;
-                const isO = (d.outlook_count || 0) > 0 && (d.google_count || 0) === 0;
-                const hasSent = (d.total_sent || 0) > 100;
-                const lowReply = isG ? 2 : 16;
-                const highBounce = isG ? 20 : 170;
-                const isFlagged = (isG || isO) && hasSent && ((d.total_replied || 0) <= lowReply || (d.total_bounced || 0) > highBounce);
-                const replyRate = (d.total_sent || 0) > 0 ? ((d.total_replied || 0) / (d.total_sent || 1) * 100).toFixed(1) : "0";
-                const bounceRate = (d.total_sent || 0) > 0 ? ((d.total_bounced || 0) / (d.total_sent || 1) * 100).toFixed(1) : "0";
+          <div className="flex-1 overflow-y-auto rounded-lg border mt-3">
+            <table className="w-full">
+              <thead className="sticky top-0 z-10">
+                <tr className="bg-muted/50 border-b text-[11px] text-muted-foreground">
+                  <th className="text-left font-medium px-5 py-2.5">Domain</th>
+                  <th className="text-left font-medium px-3 py-2.5">Tags</th>
+                  <th className="text-center font-medium px-3 py-2.5 w-20">Inboxes</th>
+                  <th className="text-center font-medium px-3 py-2.5 w-24">Sent</th>
+                  <th className="text-center font-medium px-3 py-2.5 w-24">Replied</th>
+                  <th className="text-center font-medium px-3 py-2.5 w-24">Bounced</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y">
+                {domains.map((d) => {
+                  const isG = (d.google_count || 0) > 0 && (d.outlook_count || 0) === 0;
+                  const isO = (d.outlook_count || 0) > 0 && (d.google_count || 0) === 0;
+                  const hasSent = (d.total_sent || 0) > 100;
+                  const lowReply = isG ? 2 : 16;
+                  const highBounce = isG ? 20 : 170;
+                  const isFlagged = (isG || isO) && hasSent && ((d.total_replied || 0) <= lowReply || (d.total_bounced || 0) > highBounce);
+                  const replyRate = (d.total_sent || 0) > 0 ? ((d.total_replied || 0) / (d.total_sent || 1) * 100).toFixed(1) : "0";
+                  const bounceRate = (d.total_sent || 0) > 0 ? ((d.total_bounced || 0) / (d.total_sent || 1) * 100).toFixed(1) : "0";
+                  const flagReasons: string[] = [];
+                  if ((isG || isO) && hasSent) {
+                    if ((d.total_replied || 0) <= lowReply) flagReasons.push("Low replies");
+                    if ((d.total_bounced || 0) > highBounce) flagReasons.push("High bounces");
+                  }
 
-                const flagReasons: string[] = [];
-                if ((isG || isO) && hasSent) {
-                  if ((d.total_replied || 0) <= lowReply) flagReasons.push("Low replies");
-                  if ((d.total_bounced || 0) > highBounce) flagReasons.push("High bounces");
-                }
-
-                return (
-                  <div
-                    key={d.domain}
-                    className={`grid grid-cols-[1fr_70px_80px_80px_70px] gap-2 items-center px-4 py-2 ${isFlagged ? "bg-destructive/5" : ""}`}
-                  >
-                    <div className="min-w-0">
-                      <div className="flex items-center gap-1.5">
-                        <span className="text-sm truncate">{d.domain}</span>
-                        {isFlagged && (
-                          <Tooltip>
-                            <TooltipTrigger asChild>
-                              <span className="shrink-0 cursor-help">
-                                <AlertTriangle className="h-3 w-3 text-destructive" />
-                              </span>
-                            </TooltipTrigger>
-                            <TooltipContent side="right" className="bg-destructive/95 text-destructive-foreground border-destructive/50 text-xs">
-                              {flagReasons.join(" · ")}
-                            </TooltipContent>
-                          </Tooltip>
-                        )}
-                      </div>
-                      {d.tags && d.tags.length > 0 && (
-                        <div className="flex gap-1 flex-wrap mt-0.5">
-                          {d.tags.map((t) => (
-                            <span key={t} className="text-[9px] bg-muted px-1 py-0.5 rounded text-muted-foreground">{t}</span>
+                  return (
+                    <tr key={d.domain} className={`${isFlagged ? "bg-destructive/5" : "hover:bg-muted/30"} transition-colors`}>
+                      <td className="px-5 py-3">
+                        <div className="flex items-center gap-2">
+                          <Globe className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
+                          <span className="text-sm font-medium">{d.domain}</span>
+                          {isFlagged && (
+                            <Tooltip>
+                              <TooltipTrigger asChild>
+                                <span className="shrink-0 cursor-help">
+                                  <AlertTriangle className="h-3.5 w-3.5 text-destructive" />
+                                </span>
+                              </TooltipTrigger>
+                              <TooltipContent side="right" className="bg-destructive/95 text-destructive-foreground border-destructive/50 text-xs">
+                                {flagReasons.join(" · ")}
+                              </TooltipContent>
+                            </Tooltip>
+                          )}
+                        </div>
+                      </td>
+                      <td className="px-3 py-3">
+                        <div className="flex gap-1 flex-wrap">
+                          {d.tags?.map((t) => (
+                            <span key={t} className="text-[10px] bg-muted px-1.5 py-0.5 rounded text-muted-foreground">{t}</span>
                           ))}
                         </div>
-                      )}
-                    </div>
-                    <div className="text-center text-xs">
-                      <span className="font-medium">{d.inbox_count}</span>
-                      <div className="flex justify-center gap-1 mt-0.5">
-                        {(d.outlook_count || 0) > 0 && <span className="text-[9px] text-blue-400">{d.outlook_count} OL</span>}
-                        {(d.google_count || 0) > 0 && <span className="text-[9px] text-red-400">{d.google_count} G</span>}
-                      </div>
-                    </div>
-                    <div className="text-center text-xs tabular-nums">{(d.total_sent || 0).toLocaleString()}</div>
-                    <div className="text-center">
-                      <p className={`text-xs tabular-nums ${isFlagged && flagReasons.includes("Low replies") ? "text-destructive" : ""}`}>
-                        {(d.total_replied || 0).toLocaleString()}
-                      </p>
-                      <p className="text-[9px] text-muted-foreground">{replyRate}%</p>
-                    </div>
-                    <div className="text-center">
-                      <p className={`text-xs tabular-nums ${isFlagged && flagReasons.includes("High bounces") ? "text-destructive" : ""}`}>
-                        {(d.total_bounced || 0).toLocaleString()}
-                      </p>
-                      <p className="text-[9px] text-muted-foreground">{bounceRate}%</p>
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
+                      </td>
+                      <td className="text-center px-3 py-3">
+                        <span className="text-sm font-medium">{d.inbox_count}</span>
+                        <div className="flex justify-center gap-1.5 mt-0.5">
+                          {(d.outlook_count || 0) > 0 && <span className="text-[10px] text-blue-400">{d.outlook_count} OL</span>}
+                          {(d.google_count || 0) > 0 && <span className="text-[10px] text-red-400">{d.google_count} G</span>}
+                        </div>
+                      </td>
+                      <td className="text-center px-3 py-3 text-sm tabular-nums">{(d.total_sent || 0).toLocaleString()}</td>
+                      <td className="text-center px-3 py-3">
+                        <span className={`text-sm tabular-nums ${isFlagged && flagReasons.includes("Low replies") ? "text-destructive font-medium" : ""}`}>
+                          {(d.total_replied || 0).toLocaleString()}
+                        </span>
+                        <p className="text-[10px] text-muted-foreground">{replyRate}%</p>
+                      </td>
+                      <td className="text-center px-3 py-3">
+                        <span className={`text-sm tabular-nums ${isFlagged && flagReasons.includes("High bounces") ? "text-destructive font-medium" : ""}`}>
+                          {(d.total_bounced || 0).toLocaleString()}
+                        </span>
+                        <p className="text-[10px] text-muted-foreground">{bounceRate}%</p>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
           </div>
         </DialogContent>
       </Dialog>
