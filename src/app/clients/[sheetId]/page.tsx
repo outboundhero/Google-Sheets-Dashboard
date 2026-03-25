@@ -290,7 +290,7 @@ export default function ClientDetailPage({
 
       {/* Domains Dialog */}
       <Dialog open={showDomainsDialog} onOpenChange={setShowDomainsDialog}>
-        <DialogContent className="max-w-5xl max-h-[85vh] flex flex-col">
+        <DialogContent className="sm:!max-w-[90vw] lg:!max-w-[80vw] max-h-[85vh] flex flex-col">
           <DialogHeader className="shrink-0">
             <DialogTitle className="text-lg">{clientTag} — {domainStats.total} Domains</DialogTitle>
             <div className="flex gap-4 mt-2">
@@ -316,15 +316,15 @@ export default function ClientDetailPage({
           </DialogHeader>
 
           <div className="flex-1 overflow-y-auto rounded-lg border mt-3">
-            <table className="w-full">
+            <table className="w-full table-fixed">
               <thead className="sticky top-0 z-10">
                 <tr className="bg-muted/50 border-b text-[11px] text-muted-foreground">
-                  <th className="text-left font-medium px-5 py-2.5">Domain</th>
-                  <th className="text-left font-medium px-3 py-2.5">Tags</th>
-                  <th className="text-center font-medium px-3 py-2.5 w-20">Inboxes</th>
-                  <th className="text-center font-medium px-3 py-2.5 w-24">Sent</th>
-                  <th className="text-center font-medium px-3 py-2.5 w-24">Replied</th>
-                  <th className="text-center font-medium px-3 py-2.5 w-24">Bounced</th>
+                  <th className="text-left font-medium px-5 py-2.5 w-[30%]">Domain</th>
+                  <th className="text-left font-medium px-3 py-2.5 w-[30%]">Tags</th>
+                  <th className="text-center font-medium px-3 py-2.5 w-[10%]">Inboxes</th>
+                  <th className="text-center font-medium px-3 py-2.5 w-[10%]">Sent</th>
+                  <th className="text-center font-medium px-3 py-2.5 w-[10%]">Replied</th>
+                  <th className="text-center font-medium px-3 py-2.5 w-[10%]">Bounced</th>
                 </tr>
               </thead>
               <tbody className="divide-y">
