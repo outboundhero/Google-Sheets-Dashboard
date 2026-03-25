@@ -475,6 +475,18 @@ function DeliverabilityPageInner() {
   }, [domains, tagFilters, domainSearch, typeFilter, showFlagged, flagSubFilter, showReserve, isDomainFlagged, hasReplyIssue, hasBounceIssue, isDomainReserve]);
 
   const flaggedCount = useMemo(() => domains.filter(isDomainFlagged).length, [domains, isDomainFlagged]);
+
+  // Warmup-specific reserve count (only warmup-complete domains)
+  const warmupReserveCount = useMemo(() => {
+    return domains
+      .filter((d) => {
+        const daysOld = d.domain_created_at
+          ? Math.floor((now - new Date(d.domain_created_at).getTime()) / (1000 * 60 * 60 * 24))
+          : 0;
+        return daysOld >= 21;
+      })
+      .filter(isDomainReserve).length;
+  }, [domains, isDomainReserve, now]);
   const replyIssueCount = useMemo(() => domains.filter(hasReplyIssue).length, [domains, hasReplyIssue]);
   const bounceIssueCount = useMemo(() => domains.filter(hasBounceIssue).length, [domains, hasBounceIssue]);
 
@@ -1009,7 +1021,7 @@ function DeliverabilityPageInner() {
               </button>
             ))}
 
-            {/* Reserve filter */}
+            {/* Reserve filter (warmup-specific count) */}
             <button
               onClick={() => setShowReserve((v) => !v)}
               className={`text-xs px-3 py-1.5 rounded-full border transition-colors flex items-center gap-1.5 ${
@@ -1020,11 +1032,11 @@ function DeliverabilityPageInner() {
             >
               <Inbox className="h-3 w-3" />
               Reserve
-              {reserveCount > 0 && (
+              {warmupReserveCount > 0 && (
                 <span className={`text-[10px] font-medium rounded-full px-1.5 ${
                   showReserve ? "bg-white/20" : "bg-amber-500/15 text-amber-600"
                 }`}>
-                  {reserveCount}
+                  {warmupReserveCount}
                 </span>
               )}
             </button>
