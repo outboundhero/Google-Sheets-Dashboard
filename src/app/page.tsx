@@ -75,6 +75,18 @@ export default function DashboardPage() {
       .sort((a, b) => new Date(a.offDate).getTime() - new Date(b.offDate).getTime());
   }, [trackerClients]);
 
+  // Already churned clients (churn date in the past)
+  const churnedClients = useMemo(() => {
+    const now = new Date();
+    return trackerClients
+      .filter((c) => {
+        if (!c.churnDate) return false;
+        const d = new Date(c.churnDate);
+        return !isNaN(d.getTime()) && d <= now;
+      })
+      .sort((a, b) => new Date(b.churnDate!).getTime() - new Date(a.churnDate!).getTime());
+  }, [trackerClients]);
+
   // Unique client tags for the filter dropdown
   const clientTags = useMemo(() => {
     const tags = new Set(sheets.map((s) => s.clientTag));
@@ -145,36 +157,65 @@ export default function DashboardPage() {
         </Button>
       </PageHeader>
 
-      {/* Clients Going Off Alert — shown first, most urgent */}
-      {clientsGoingOff.length > 0 && (
-        <div className="rounded-xl border-2 border-red-400 dark:border-red-600 bg-red-50 dark:bg-red-950/30 p-5">
-          <div className="flex items-start gap-4">
-            <XCircle className="h-7 w-7 text-red-500 dark:text-red-400 mt-0.5 shrink-0" />
-            <div className="flex-1 space-y-3">
-              <div>
-                <h2 className="text-xl font-bold text-red-900 dark:text-red-100">
-                  Clients going off
-                </h2>
-                <p className="text-sm text-red-700 dark:text-red-400 mt-0.5">
-                  {clientsGoingOff.length} client{clientsGoingOff.length !== 1 ? "s" : ""} with an upcoming churn or pause date
-                </p>
+      {/* Clients Going Off + Churned — side by side */}
+      {(clientsGoingOff.length > 0 || churnedClients.length > 0) && (
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+          {/* Going Off — left */}
+          {clientsGoingOff.length > 0 && (
+            <div className="rounded-xl border border-red-500/30 bg-red-950/20 p-4">
+              <div className="flex items-center gap-2 mb-3">
+                <XCircle className="h-4.5 w-4.5 text-red-400 shrink-0" />
+                <div>
+                  <h3 className="text-sm font-semibold text-red-200">Clients going off</h3>
+                  <p className="text-[11px] text-red-400/70">{clientsGoingOff.length} upcoming</p>
+                </div>
               </div>
-              <div className="flex flex-col gap-2">
+              <div className="flex flex-col gap-1.5">
                 {clientsGoingOff.map((c) => (
                   <Link
                     key={c.clientAbbr}
                     href={`/clients/${encodeURIComponent(c.clientAbbr)}`}
-                    className="inline-flex items-center gap-3 rounded-lg bg-red-100 dark:bg-red-900/50 border border-red-300 dark:border-red-700 px-4 py-2 text-sm font-semibold text-red-900 dark:text-red-200 hover:bg-red-200 dark:hover:bg-red-800/60 transition-colors w-fit"
+                    className="flex items-center justify-between rounded-lg bg-red-900/30 border border-red-800/40 px-3 py-2 text-sm hover:bg-red-900/50 transition-colors"
                   >
-                    <span>{c.companyName} <span className="font-normal opacity-60">({c.clientAbbr})</span></span>
-                    <span className="text-xs font-normal text-red-600 dark:text-red-400 bg-red-200 dark:bg-red-800/60 rounded px-2 py-0.5">
-                      {c.isPause ? "paused" : "churns"} {formatDate(c.offDate)}
+                    <span className="font-medium text-red-100 truncate">
+                      {c.companyName} <span className="font-normal text-red-400/60">({c.clientAbbr})</span>
+                    </span>
+                    <span className="text-[10px] text-red-400 bg-red-900/60 rounded px-1.5 py-0.5 shrink-0 ml-2">
+                      {c.isPause ? "pauses" : "churns"} {formatDate(c.offDate)}
                     </span>
                   </Link>
                 ))}
               </div>
             </div>
-          </div>
+          )}
+
+          {/* Churned — right */}
+          {churnedClients.length > 0 && (
+            <div className="rounded-xl border border-zinc-700/50 bg-zinc-900/30 p-4">
+              <div className="flex items-center gap-2 mb-3">
+                <XCircle className="h-4.5 w-4.5 text-zinc-400 shrink-0" />
+                <div>
+                  <h3 className="text-sm font-semibold text-zinc-200">Churned clients</h3>
+                  <p className="text-[11px] text-zinc-500">{churnedClients.length} total</p>
+                </div>
+              </div>
+              <div className="max-h-52 overflow-y-auto space-y-1 pr-1">
+                {churnedClients.map((c) => (
+                  <div
+                    key={c.clientAbbr}
+                    className="flex items-center justify-between rounded-lg px-3 py-1.5 text-sm hover:bg-zinc-800/50 transition-colors"
+                  >
+                    <span className="text-zinc-300 truncate">
+                      {c.companyName} <span className="text-zinc-600">({c.clientAbbr})</span>
+                    </span>
+                    <span className="text-[10px] text-zinc-500 shrink-0 ml-2">
+                      {formatDate(c.churnDate!)}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
         </div>
       )}
 
