@@ -181,6 +181,7 @@ function DeliverabilityPageInner() {
   const [warmupSearch, setWarmupSearch] = useState("");
   const [typeFilter, setTypeFilter] = useState<"all" | "outlook" | "google">("all");
   const [showFlagged, setShowFlagged] = useState(() => searchParams.get("flagged") === "true");
+  const [flagSubFilter, setFlagSubFilter] = useState<"all" | "reply" | "bounce">("all");
   const [showReserve, setShowReserve] = useState(false);
   const [attachDialogOpen, setAttachDialogOpen] = useState(false);
   const [clientTags, setClientTags] = useState<Set<string>>(new Set());
@@ -422,6 +423,14 @@ function DeliverabilityPageInner() {
 
   const isDomainFlagged = useCallback((d: DomainRow) => getFlagReasons(d).length > 0, [getFlagReasons]);
 
+  const hasReplyIssue = useCallback((d: DomainRow) => {
+    return getFlagReasons(d).some((r) => r.startsWith("Low replies"));
+  }, [getFlagReasons]);
+
+  const hasBounceIssue = useCallback((d: DomainRow) => {
+    return getFlagReasons(d).some((r) => r.startsWith("High bounces"));
+  }, [getFlagReasons]);
+
   // Client-side filter: tag match (OR) + domain search + type filter + flagged
   const filteredDomains = useMemo(() => {
     let result = domains;
@@ -441,15 +450,23 @@ function DeliverabilityPageInner() {
       result = result.filter((d) => (d.google_count || 0) > 0);
     }
     if (showFlagged) {
-      result = result.filter((d) => isDomainFlagged(d));
+      if (flagSubFilter === "reply") {
+        result = result.filter(hasReplyIssue);
+      } else if (flagSubFilter === "bounce") {
+        result = result.filter(hasBounceIssue);
+      } else {
+        result = result.filter(isDomainFlagged);
+      }
     }
     if (showReserve) {
       result = result.filter(isDomainReserve);
     }
     return result;
-  }, [domains, tagFilters, domainSearch, typeFilter, showFlagged, showReserve, isDomainFlagged, isDomainReserve]);
+  }, [domains, tagFilters, domainSearch, typeFilter, showFlagged, flagSubFilter, showReserve, isDomainFlagged, hasReplyIssue, hasBounceIssue, isDomainReserve]);
 
   const flaggedCount = useMemo(() => domains.filter(isDomainFlagged).length, [domains, isDomainFlagged]);
+  const replyIssueCount = useMemo(() => domains.filter(hasReplyIssue).length, [domains, hasReplyIssue]);
+  const bounceIssueCount = useMemo(() => domains.filter(hasBounceIssue).length, [domains, hasBounceIssue]);
 
   return (
     <div className="space-y-6">
@@ -603,7 +620,7 @@ function DeliverabilityPageInner() {
 
             {/* Flagged filter */}
             <button
-              onClick={() => setShowFlagged((v) => !v)}
+              onClick={() => { setShowFlagged((v) => !v); setFlagSubFilter("all"); }}
               className={`text-xs px-3 py-1.5 rounded-full border transition-colors flex items-center gap-1.5 ${
                 showFlagged
                   ? "bg-destructive text-destructive-foreground border-destructive"
@@ -620,6 +637,34 @@ function DeliverabilityPageInner() {
                 </span>
               )}
             </button>
+
+            {/* Flag sub-filters — only visible when flagged is active */}
+            {showFlagged && (
+              <>
+                <button
+                  onClick={() => setFlagSubFilter(flagSubFilter === "reply" ? "all" : "reply")}
+                  className={`text-[11px] px-2.5 py-1 rounded-full border transition-colors ${
+                    flagSubFilter === "reply"
+                      ? "bg-amber-500/15 text-amber-500 border-amber-500/30"
+                      : "border-border text-muted-foreground hover:border-foreground hover:text-foreground"
+                  }`}
+                >
+                  Low Replies
+                  <span className="ml-1 opacity-60">{replyIssueCount}</span>
+                </button>
+                <button
+                  onClick={() => setFlagSubFilter(flagSubFilter === "bounce" ? "all" : "bounce")}
+                  className={`text-[11px] px-2.5 py-1 rounded-full border transition-colors ${
+                    flagSubFilter === "bounce"
+                      ? "bg-red-500/15 text-red-400 border-red-500/30"
+                      : "border-border text-muted-foreground hover:border-foreground hover:text-foreground"
+                  }`}
+                >
+                  High Bounces
+                  <span className="ml-1 opacity-60">{bounceIssueCount}</span>
+                </button>
+              </>
+            )}
 
             {/* Reserve filter */}
             <button
