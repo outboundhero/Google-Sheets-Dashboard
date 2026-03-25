@@ -401,8 +401,12 @@ function DeliverabilityPageInner() {
           if (warmupTypeFilter === "outlook") return (d.outlook_count || 0) > 0;
           if (warmupTypeFilter === "google") return (d.google_count || 0) > 0;
           return true;
+        })
+        .filter((d) => {
+          if (tagFilters.length === 0) return true;
+          return d.tags && tagFilters.some((tag) => d.tags!.includes(tag));
         }),
-    [domains, warmupFilter, warmupSearch, showReserve, warmupTypeFilter, isDomainReserve, now]
+    [domains, warmupFilter, warmupSearch, showReserve, warmupTypeFilter, tagFilters, isDomainReserve, now]
   );
 
   // Flag computation helper — returns human-readable reason strings
@@ -983,6 +987,13 @@ function DeliverabilityPageInner() {
               </button>
             ))}
 
+            {/* Tag filter */}
+            <TagFilterDropdown
+              allTags={allTags}
+              selected={tagFilters}
+              onChange={setTagFilters}
+            />
+
             {/* Type filter */}
             {(["all", "outlook", "google"] as const).map((t) => (
               <button
@@ -1017,6 +1028,25 @@ function DeliverabilityPageInner() {
                 </span>
               )}
             </button>
+
+            {/* Active tag chips */}
+            {tagFilters.map((tag) => (
+              <span
+                key={tag}
+                className="flex items-center gap-1 text-xs bg-primary/10 text-primary border border-primary/20 rounded-full px-2.5 py-1"
+              >
+                {tag}
+                <button onClick={() => setTagFilters((prev) => prev.filter((t) => t !== tag))}>
+                  <X className="h-3 w-3" />
+                </button>
+              </span>
+            ))}
+
+            {warmupDomains.length !== domains.length && (
+              <span className="text-xs text-muted-foreground">
+                {warmupDomains.length} domain{warmupDomains.length !== 1 ? "s" : ""}
+              </span>
+            )}
           </div>
 
           {/* Bulk action bar for warmup */}
