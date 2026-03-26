@@ -54,6 +54,29 @@ export default function ClientDetailPage({
   const [domains, setDomains] = useState<DomainRow[]>([]);
   const [domainsLoading, setDomainsLoading] = useState(false);
 
+  // Campaign remaining leads for this client
+  interface CampaignInfo { id: number; name: string; remaining_leads: number; status: string }
+  const [clientCampaigns, setClientCampaigns] = useState<CampaignInfo[]>([]);
+  const [totalRemaining, setTotalRemaining] = useState(0);
+
+  useEffect(() => {
+    fetch("/api/campaigns")
+      .then((r) => r.json())
+      .then((data) => {
+        const campaigns = data.campaigns || data;
+        if (!Array.isArray(campaigns)) return;
+        const matching = campaigns
+          .filter((c: CampaignInfo) => c.status === "active")
+          .filter((c: Record<string, string>) => {
+            const tag = c.client_tag || (c.name?.indexOf(":") > 0 ? c.name.substring(0, c.name.indexOf(":")).trim() : "");
+            return tag === clientTag;
+          });
+        setClientCampaigns(matching);
+        setTotalRemaining(matching.reduce((sum: number, c: CampaignInfo) => sum + (c.remaining_leads || 0), 0));
+      })
+      .catch(() => {});
+  }, [clientTag]);
+
   const loadDomains = useCallback(async () => {
     if (!clientTag) return;
     setDomainsLoading(true);
@@ -199,6 +222,25 @@ export default function ClientDetailPage({
           </div>
         )}
       </div>
+
+      {/* Low Remaining Leads Alert */}
+      {totalRemaining > 0 && totalRemaining < 1500 && clientCampaigns.length > 0 && (
+        <div className="rounded-xl border border-amber-500/30 bg-amber-950/20 p-4">
+          <div className="flex items-center gap-2 mb-2">
+            <AlertTriangle className="h-4 w-4 text-amber-500 shrink-0" />
+            <span className="text-sm font-medium text-amber-200">Low Remaining Leads</span>
+            <span className="text-xs text-amber-500 font-semibold ml-auto">{totalRemaining.toLocaleString()} remaining</span>
+          </div>
+          <div className="space-y-1">
+            {clientCampaigns.map((c) => (
+              <div key={c.id} className="flex items-center justify-between text-xs px-2 py-1 rounded hover:bg-amber-900/20">
+                <span className="text-amber-100/70 truncate">{c.name}</span>
+                <span className="text-amber-500 shrink-0 ml-2 tabular-nums">{c.remaining_leads.toLocaleString()} left</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {analytics && (
         <>

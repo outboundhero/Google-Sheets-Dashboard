@@ -104,11 +104,20 @@ async function fetchFromAPI(): Promise<CampaignData[]> {
 // GET — fetch campaigns, filtered to active clients only
 export async function GET() {
   try {
-    // Get active client tags from Google Sheet
+    // Get active client tags from Google Sheet (exclude churned clients with past churn date)
     const tracker = await getClientTrackerData().catch(() => []);
+    const now = new Date();
     const activeClients = new Set(
       tracker
-        .filter((r) => r.status.trim().toLowerCase() === "active")
+        .filter((r) => {
+          if (r.status.trim().toLowerCase() !== "active") return false;
+          // Exclude if churn date is in the past
+          if (r.churnDate) {
+            const d = new Date(r.churnDate);
+            if (!isNaN(d.getTime()) && d <= now) return false;
+          }
+          return true;
+        })
         .flatMap((r) => r.clientAbbr.split(" & ").map((a) => a.trim()))
         .filter(Boolean)
     );
