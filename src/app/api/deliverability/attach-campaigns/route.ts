@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { getSupabaseAdmin } from "@/lib/supabase";
 
 const API_BASE = "https://app.outboundhero.co/api";
 const API_KEY = process.env.OUTBOUNDHERO_API_KEY!;
@@ -134,7 +135,44 @@ export async function POST(request: Request) {
     }
 
     // 1. Get all sender email IDs with this tag from OutboundHero
-    const matchedIds = await fetchSenderEmailIdsByTag(tag_id);
+    const allMatchedIds = await fetchSenderEmailIdsByTag(tag_id);
+
+    // Filter to only warmed-up inboxes (domain 21+ days old)
+    const supabase = getSupabaseAdmin();
+    const warmupCutoff = new Date(Date.now() - 21 * 24 * 60 * 60 * 1000).toISOString();
+
+    // Get all warmed-up domains (created 21+ days ago)
+    const warmedUpDomains = new Set<string>();
+    let offset = 0;
+    while (true) {
+      const { data } = await supabase
+        .from("deliverability_domains")
+        .select("domain")
+        .lte("domain_created_at", warmupCutoff)
+        .range(offset, offset + 999);
+      if (!data || data.length === 0) break;
+      for (const d of data) warmedUpDomains.add(d.domain);
+      if (data.length < 1000) break;
+      offset += 1000;
+    }
+
+    // Get inbox IDs that belong to warmed-up domains
+    const warmedUpIds = new Set<number>();
+    for (let i = 0; i < allMatchedIds.length; i += 500) {
+      const batch = allMatchedIds.slice(i, i + 500);
+      const { data } = await supabase
+        .from("deliverability_inboxes")
+        .select("id, domain")
+        .in("id", batch);
+      if (data) {
+        for (const inbox of data) {
+          if (warmedUpDomains.has(inbox.domain)) warmedUpIds.add(inbox.id);
+        }
+      }
+    }
+
+    const matchedIds = allMatchedIds.filter((id) => warmedUpIds.has(id));
+    console.log(`[ATTACH] Tag ${client_tag}: ${allMatchedIds.length} total → ${matchedIds.length} warmed-up`);
 
     if (matchedIds.length === 0) {
       return NextResponse.json({
