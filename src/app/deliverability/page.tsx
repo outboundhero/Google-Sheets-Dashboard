@@ -24,6 +24,7 @@ import { PageHeader } from "@/components/shared/page-header";
 import { AttachCampaignsDialog } from "@/components/deliverability/attach-campaigns-dialog";
 import { BulkTagDialog } from "@/components/deliverability/bulk-tag-dialog";
 import { BulkDeleteDialog } from "@/components/deliverability/bulk-delete-dialog";
+import { AttachToCampaignsDialog } from "@/components/deliverability/attach-to-campaigns-dialog";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip";
 
@@ -189,6 +190,7 @@ function DeliverabilityPageInner() {
   const [selectedDomains, setSelectedDomains] = useState<Set<string>>(new Set());
   const [bulkTagMode, setBulkTagMode] = useState<"add" | "remove" | null>(null);
   const [showBulkDelete, setShowBulkDelete] = useState(false);
+  const [showAttachCampaigns, setShowAttachCampaigns] = useState(false);
 
   useEffect(() => {
     const saved = localStorage.getItem("deliverability_next_page");
@@ -767,6 +769,14 @@ function DeliverabilityPageInner() {
                     <Button
                       size="sm"
                       variant="outline"
+                      className="h-7 text-xs gap-1.5"
+                      onClick={() => setShowAttachCampaigns(true)}
+                    >
+                      Attach to Campaigns
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="outline"
                       className="h-7 text-xs gap-1.5 text-destructive hover:text-destructive"
                       onClick={() => setBulkTagMode("remove")}
                     >
@@ -1071,6 +1081,9 @@ function DeliverabilityPageInner() {
                 <Button size="sm" variant="outline" className="h-7 text-xs gap-1.5" onClick={() => setBulkTagMode("add")}>
                   + Add Tags
                 </Button>
+                <Button size="sm" variant="outline" className="h-7 text-xs gap-1.5" onClick={() => setShowAttachCampaigns(true)}>
+                  Attach to Campaigns
+                </Button>
                 <Button size="sm" variant="outline" className="h-7 text-xs gap-1.5 text-destructive hover:text-destructive" onClick={() => setBulkTagMode("remove")}>
                   − Remove Tags
                 </Button>
@@ -1262,6 +1275,14 @@ function DeliverabilityPageInner() {
           loadTags();
           setSelectedDomains(new Set());
         }}
+      />
+
+      {/* Attach to Campaigns Dialog */}
+      <AttachToCampaignsDialog
+        open={showAttachCampaigns}
+        onOpenChange={setShowAttachCampaigns}
+        selectedDomains={Array.from(selectedDomains)}
+        onSuccess={() => setSelectedDomains(new Set())}
       />
     </div>
   );
