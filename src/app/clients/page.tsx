@@ -24,12 +24,11 @@ interface DomainRow {
 function isDomainFlagged(d: DomainRow): boolean {
   const isGoogle = (d.google_count || 0) > 0 && (d.outlook_count || 0) === 0;
   const isOutlook = (d.outlook_count || 0) > 0 && (d.google_count || 0) === 0;
-  if (!(isGoogle || isOutlook) || (d.total_sent || 0) <= 100) return false;
-  const replied = d.total_replied || 0;
-  const bounced = d.total_bounced || 0;
-  const lowReply = isGoogle ? 2 : 16;
-  const highBounce = isGoogle ? 20 : 170;
-  return replied <= lowReply || bounced > highBounce;
+  const sent = d.total_sent || 0;
+  if (!(isGoogle || isOutlook) || sent <= 100) return false;
+  const replyRate = (d.total_replied || 0) / sent;
+  const bounceRate = (d.total_bounced || 0) / sent;
+  return replyRate < 0.01 || bounceRate > 0.03;
 }
 
 export default function ClientsPage() {

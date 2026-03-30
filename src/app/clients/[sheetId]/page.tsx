@@ -98,9 +98,12 @@ export default function ClientDetailPage({
       // Flagging logic
       const isG = (d.google_count || 0) > 0 && (d.outlook_count || 0) === 0;
       const isO = (d.outlook_count || 0) > 0 && (d.google_count || 0) === 0;
-      const hasSent = (d.total_sent || 0) > 100;
-      if (isG && hasSent && ((d.total_replied || 0) <= 2 || (d.total_bounced || 0) > 20)) flagged++;
-      else if (isO && hasSent && ((d.total_replied || 0) <= 16 || (d.total_bounced || 0) > 170)) flagged++;
+      const sent = d.total_sent || 0;
+      if ((isG || isO) && sent > 100) {
+        const rr = (d.total_replied || 0) / sent;
+        const br = (d.total_bounced || 0) / sent;
+        if (rr < 0.01 || br > 0.03) flagged++;
+      }
     }
     return { total: domains.length, outlook, google, flagged };
   }, [domains]);
@@ -373,17 +376,18 @@ export default function ClientDetailPage({
                 {domains.map((d) => {
                   const isG = (d.google_count || 0) > 0 && (d.outlook_count || 0) === 0;
                   const isO = (d.outlook_count || 0) > 0 && (d.google_count || 0) === 0;
-                  const hasSent = (d.total_sent || 0) > 100;
-                  const lowReply = isG ? 2 : 16;
-                  const highBounce = isG ? 20 : 170;
-                  const isFlagged = (isG || isO) && hasSent && ((d.total_replied || 0) <= lowReply || (d.total_bounced || 0) > highBounce);
-                  const replyRate = (d.total_sent || 0) > 0 ? ((d.total_replied || 0) / (d.total_sent || 1) * 100).toFixed(1) : "0";
-                  const bounceRate = (d.total_sent || 0) > 0 ? ((d.total_bounced || 0) / (d.total_sent || 1) * 100).toFixed(1) : "0";
+                  const totalSent = d.total_sent || 0;
+                  const hasSent = totalSent > 100;
+                  const replyRate = totalSent > 0 ? ((d.total_replied || 0) / totalSent * 100).toFixed(1) : "0";
+                  const bounceRate = totalSent > 0 ? ((d.total_bounced || 0) / totalSent * 100).toFixed(1) : "0";
+                  const replyRateNum = totalSent > 0 ? (d.total_replied || 0) / totalSent : 0;
+                  const bounceRateNum = totalSent > 0 ? (d.total_bounced || 0) / totalSent : 0;
                   const flagReasons: string[] = [];
                   if ((isG || isO) && hasSent) {
-                    if ((d.total_replied || 0) <= lowReply) flagReasons.push("Low replies");
-                    if ((d.total_bounced || 0) > highBounce) flagReasons.push("High bounces");
+                    if (replyRateNum < 0.01) flagReasons.push("Low replies");
+                    if (bounceRateNum > 0.03) flagReasons.push("High bounces");
                   }
+                  const isFlagged = flagReasons.length > 0;
 
                   return (
                     <tr key={d.domain} className={`${isFlagged ? "bg-destructive/5" : "hover:bg-muted/30"} transition-colors`}>

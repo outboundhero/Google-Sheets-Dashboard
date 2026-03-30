@@ -412,23 +412,24 @@ function DeliverabilityPageInner() {
   );
 
   // Flag computation helper — returns human-readable reason strings
+  // Uses rate-based thresholds: reply rate < 1%, bounce rate > 3%, min 100 sent
   const getFlagReasons = useCallback((d: DomainRow): string[] => {
     const reasons: string[] = [];
     const isGoogle = (d.google_count || 0) > 0 && (d.outlook_count || 0) === 0;
     const isOutlook = (d.outlook_count || 0) > 0 && (d.google_count || 0) === 0;
-    if (!(isGoogle || isOutlook) || (d.total_sent || 0) <= 100) return reasons;
+    const totalSent = d.total_sent || 0;
+    if (!(isGoogle || isOutlook) || totalSent <= 100) return reasons;
 
     const replied = d.total_replied || 0;
     const bounced = d.total_bounced || 0;
-    const sent = (d.total_sent || 0).toLocaleString();
-    const lowReplyThreshold = isGoogle ? 2 : 16;
-    const highBounceThreshold = isGoogle ? 20 : 170;
+    const replyRate = totalSent > 0 ? replied / totalSent : 0;
+    const bounceRate = totalSent > 0 ? bounced / totalSent : 0;
 
-    if (replied <= lowReplyThreshold) {
-      reasons.push(`Low replies (${replied} with ${sent} sent)`);
+    if (replyRate < 0.01) {
+      reasons.push(`Low replies (${(replyRate * 100).toFixed(1)}% with ${totalSent.toLocaleString()} sent)`);
     }
-    if (bounced > highBounceThreshold) {
-      reasons.push(`High bounces (${bounced.toLocaleString()} with ${sent} sent)`);
+    if (bounceRate > 0.03) {
+      reasons.push(`High bounces (${(bounceRate * 100).toFixed(1)}% with ${totalSent.toLocaleString()} sent)`);
     }
     return reasons;
   }, []);
@@ -937,7 +938,7 @@ function DeliverabilityPageInner() {
                     {/* Replied */}
                     <div className="text-center">
                       <div className={`text-sm font-medium ${
-                        (isGoogleDomain && (d.total_replied || 0) <= 2) || (isOutlookDomain && (d.total_replied || 0) <= 16)
+                        (d.total_sent || 0) > 100 && (d.total_replied || 0) / (d.total_sent || 1) < 0.01
                           ? "text-destructive" : ""
                       }`}>{(d.total_replied || 0).toLocaleString()}</div>
                       <div className="text-[10px] text-muted-foreground">{replyRate}%</div>
@@ -945,7 +946,7 @@ function DeliverabilityPageInner() {
 
                     {/* Bounced */}
                     <div className={`text-center text-sm font-medium ${
-                      (isGoogleDomain && (d.total_bounced || 0) > 20) || (isOutlookDomain && (d.total_bounced || 0) > 170)
+                      (d.total_sent || 0) > 100 && (d.total_bounced || 0) / (d.total_sent || 1) > 0.03
                         ? "text-destructive" : ""
                     }`}>
                       {(d.total_bounced || 0).toLocaleString()}
