@@ -17,6 +17,7 @@ import {
   Reply,
   AlertTriangle,
   Mail,
+  Loader2,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -191,6 +192,51 @@ function DeliverabilityPageInner() {
   const [bulkTagMode, setBulkTagMode] = useState<"add" | "remove" | null>(null);
   const [showBulkDelete, setShowBulkDelete] = useState(false);
   const [showAttachCampaigns, setShowAttachCampaigns] = useState(false);
+
+  // Background attach state
+  interface AttachJob { campaign: string; status: "pending" | "running" | "done" | "error"; newly: number; existing: number; error?: string }
+  const [attachJobs, setAttachJobs] = useState<AttachJob[]>([]);
+  const [attachRunning, setAttachRunning] = useState(false);
+  const attachDomainsRef = useRef<string[]>([]);
+
+  const startBackgroundAttach = useCallback(async (campaigns: { id: number; name: string }[], domains: string[]) => {
+    attachDomainsRef.current = domains;
+    const jobs: AttachJob[] = campaigns.map((c) => ({ campaign: c.name, status: "pending" as const, newly: 0, existing: 0 }));
+    setAttachJobs(jobs);
+    setAttachRunning(true);
+    setSelectedDomains(new Set());
+
+    for (let i = 0; i < campaigns.length; i++) {
+      const campaign = campaigns[i];
+      setAttachJobs((prev) => prev.map((j, idx) => idx === i ? { ...j, status: "running" } : j));
+
+      let success = false;
+      let lastError = "";
+      for (let attempt = 1; attempt <= 3; attempt++) {
+        try {
+          const res = await fetch("/api/deliverability/attach-domains-to-campaign", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ campaign_id: campaign.id, domains: attachDomainsRef.current }),
+          });
+          const data = await res.json();
+          if (res.ok) {
+            setAttachJobs((prev) => prev.map((j, idx) => idx === i ? { ...j, status: "done", newly: data.newly_attached || 0, existing: data.already_attached || 0 } : j));
+            success = true;
+            break;
+          }
+          lastError = data.error || `HTTP ${res.status}`;
+        } catch (e) {
+          lastError = e instanceof Error ? e.message : "Network error";
+        }
+        if (attempt < 3) await new Promise((r) => setTimeout(r, 3000));
+      }
+      if (!success) {
+        setAttachJobs((prev) => prev.map((j, idx) => idx === i ? { ...j, status: "error", error: lastError } : j));
+      }
+    }
+    setAttachRunning(false);
+  }, []);
 
   useEffect(() => {
     const saved = localStorage.getItem("deliverability_next_page");
@@ -566,6 +612,45 @@ function DeliverabilityPageInner() {
               />
             </div>
           )}
+        </div>
+      )}
+
+      {/* Background Attach Progress */}
+      {attachJobs.length > 0 && (
+        <div className="rounded-lg border bg-muted/30 px-4 py-3">
+          <div className="flex items-center justify-between mb-2">
+            <div className="flex items-center gap-2 text-sm">
+              {attachRunning && <Loader2 className="h-3.5 w-3.5 animate-spin text-primary" />}
+              <span className="font-medium">
+                {attachRunning ? "Attaching to campaigns..." : "Attachment complete"}
+              </span>
+              <span className="text-xs text-muted-foreground">
+                {attachJobs.filter((j) => j.status === "done").length}/{attachJobs.length} campaigns
+              </span>
+            </div>
+            {!attachRunning && (
+              <button onClick={() => setAttachJobs([])} className="text-xs text-muted-foreground hover:text-foreground">
+                Dismiss
+              </button>
+            )}
+          </div>
+          <div className="space-y-1 max-h-40 overflow-y-auto">
+            {attachJobs.map((job, i) => (
+              <div key={i} className="flex items-center gap-2 text-xs">
+                {job.status === "running" && <Loader2 className="h-3 w-3 animate-spin text-primary shrink-0" />}
+                {job.status === "done" && <CheckCircle2 className="h-3 w-3 text-emerald-500 shrink-0" />}
+                {job.status === "error" && <AlertTriangle className="h-3 w-3 text-destructive shrink-0" />}
+                {job.status === "pending" && <div className="h-3 w-3 rounded-full border border-muted-foreground/30 shrink-0" />}
+                <span className="truncate text-muted-foreground">{job.campaign}</span>
+                {job.status === "done" && (
+                  <span className="shrink-0 ml-auto text-emerald-500">+{job.newly} · {job.existing} existing</span>
+                )}
+                {job.status === "error" && (
+                  <span className="shrink-0 ml-auto text-destructive">{job.error}</span>
+                )}
+              </div>
+            ))}
+          </div>
         </div>
       )}
 
@@ -1283,7 +1368,7 @@ function DeliverabilityPageInner() {
         open={showAttachCampaigns}
         onOpenChange={setShowAttachCampaigns}
         selectedDomains={Array.from(selectedDomains)}
-        onSuccess={() => setSelectedDomains(new Set())}
+        onAttach={startBackgroundAttach}
       />
     </div>
   );

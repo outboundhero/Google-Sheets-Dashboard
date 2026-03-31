@@ -32,6 +32,8 @@ export async function POST(request: Request) {
       if (data) allInboxIds.push(...data.map((d) => d.id));
     }
 
+    console.log(`[ATTACH-DOMAIN] Campaign ${campaign_id}: found ${allInboxIds.length} inboxes for ${domains.length} domains`);
+
     if (allInboxIds.length === 0) {
       return NextResponse.json({ total_matched: 0, already_attached: 0, newly_attached: 0 });
     }
@@ -68,8 +70,10 @@ export async function POST(request: Request) {
       });
       if (res.ok) {
         attached += batch.length;
+      } else {
+        console.error(`[ATTACH-DOMAIN] Campaign ${campaign_id} batch attach failed: ${res.status}`);
       }
-      if (i + BATCH_SIZE < newIds.length) await delay(150);
+      if (i + BATCH_SIZE < newIds.length) await delay(100);
     }
 
     return NextResponse.json({

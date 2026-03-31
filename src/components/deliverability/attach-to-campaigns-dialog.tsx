@@ -6,13 +6,14 @@ import {
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { Loader2, CheckCircle2, XCircle, Search, X, Check } from "lucide-react";
+import { Loader2, Search, X, Check } from "lucide-react";
 
 interface Props {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   selectedDomains: string[];
-  onSuccess: () => void;
+  /** Called with the selected campaigns when user clicks Attach — parent handles the actual work */
+  onAttach: (campaigns: { id: number; name: string }[], domains: string[]) => void;
 }
 
 interface Campaign {
@@ -20,15 +21,6 @@ interface Campaign {
   name: string;
   status: string;
   client_tag: string;
-}
-
-interface AttachResult {
-  campaign_id: number;
-  campaign_name: string;
-  total_matched: number;
-  already_attached: number;
-  newly_attached: number;
-  error?: string;
 }
 
 const ALLOWED_STATUSES = ["active", "paused", "draft"];
@@ -39,29 +31,20 @@ const STATUS_COLORS: Record<string, string> = {
   draft: "bg-zinc-500/10 text-zinc-400 border-zinc-500/20",
 };
 
-export function AttachToCampaignsDialog({ open, onOpenChange, selectedDomains, onSuccess }: Props) {
-  const [phase, setPhase] = useState<"select-tag" | "select-campaigns" | "attaching" | "done">("select-tag");
+export function AttachToCampaignsDialog({ open, onOpenChange, selectedDomains, onAttach }: Props) {
+  const [phase, setPhase] = useState<"select-tag" | "select-campaigns">("select-tag");
   const [clientTags, setClientTags] = useState<string[]>([]);
   const [campaigns, setCampaigns] = useState<Campaign[]>([]);
   const [selectedTag, setSelectedTag] = useState("");
   const [selectedCampaignIds, setSelectedCampaignIds] = useState<Set<number>>(new Set());
   const [tagSearch, setTagSearch] = useState("");
   const [loading, setLoading] = useState(false);
-  const [results, setResults] = useState<AttachResult[]>([]);
-  const [progress, setProgress] = useState("");
-  const [totalNew, setTotalNew] = useState(0);
-  const [totalExisting, setTotalExisting] = useState(0);
-  const [totalErrors, setTotalErrors] = useState(0);
 
   useEffect(() => {
     if (!open) return;
     setPhase("select-tag");
     setSelectedTag("");
     setSelectedCampaignIds(new Set());
-    setResults([]);
-    setTotalNew(0);
-    setTotalExisting(0);
-    setTotalErrors(0);
     setTagSearch("");
 
     setLoading(true);
@@ -102,7 +85,6 @@ export function AttachToCampaignsDialog({ open, onOpenChange, selectedDomains, o
 
   const handleTagSelect = (tag: string) => {
     setSelectedTag(tag);
-    // Pre-select all campaigns for this tag
     const ids = campaigns
       .filter((c) => c.client_tag === tag && ALLOWED_STATUSES.includes(c.status))
       .map((c) => c.id);
@@ -127,49 +109,13 @@ export function AttachToCampaignsDialog({ open, onOpenChange, selectedDomains, o
     }
   };
 
-  const handleAttach = async () => {
-    if (selectedCampaigns.length === 0) return;
-    setPhase("attaching");
-    const allResults: AttachResult[] = [];
-    let newCount = 0, existingCount = 0, errorCount = 0;
-
-    for (const campaign of selectedCampaigns) {
-      setProgress(`Attaching to ${campaign.name}...`);
-      try {
-        const res = await fetch("/api/deliverability/attach-domains-to-campaign", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ campaign_id: campaign.id, domains: selectedDomains }),
-        });
-        const data = await res.json();
-        if (res.ok) {
-          const result: AttachResult = {
-            campaign_id: campaign.id,
-            campaign_name: campaign.name,
-            total_matched: data.total_matched || 0,
-            already_attached: data.already_attached || 0,
-            newly_attached: data.newly_attached || 0,
-          };
-          allResults.push(result);
-          newCount += result.newly_attached;
-          existingCount += result.already_attached;
-        } else {
-          allResults.push({ campaign_id: campaign.id, campaign_name: campaign.name, total_matched: 0, already_attached: 0, newly_attached: 0, error: data.error || "Failed" });
-          errorCount++;
-        }
-      } catch {
-        allResults.push({ campaign_id: campaign.id, campaign_name: campaign.name, total_matched: 0, already_attached: 0, newly_attached: 0, error: "Network error" });
-        errorCount++;
-      }
-      setResults([...allResults]);
-      setTotalNew(newCount);
-      setTotalExisting(existingCount);
-      setTotalErrors(errorCount);
-    }
-
-    setPhase("done");
-    setProgress("");
-    if (newCount > 0) onSuccess();
+  const handleStart = () => {
+    // Pass selected campaigns + domains to parent, close dialog immediately
+    onAttach(
+      selectedCampaigns.map((c) => ({ id: c.id, name: c.name })),
+      [...selectedDomains]
+    );
+    onOpenChange(false);
   };
 
   return (
@@ -182,7 +128,6 @@ export function AttachToCampaignsDialog({ open, onOpenChange, selectedDomains, o
           </p>
         </DialogHeader>
 
-        {/* STEP 1: Select client tag */}
         {phase === "select-tag" && (
           <div className="space-y-3 mt-2 flex-1 overflow-hidden flex flex-col">
             <p className="text-sm text-muted-foreground">Select a client tag:</p>
@@ -209,7 +154,6 @@ export function AttachToCampaignsDialog({ open, onOpenChange, selectedDomains, o
           </div>
         )}
 
-        {/* STEP 2: Select campaigns */}
         {phase === "select-campaigns" && (
           <div className="space-y-3 mt-2 flex-1 overflow-hidden flex flex-col">
             <div className="flex items-center justify-between">
@@ -241,58 +185,9 @@ export function AttachToCampaignsDialog({ open, onOpenChange, selectedDomains, o
 
             <div className="flex justify-end gap-2 pt-1">
               <Button variant="ghost" size="sm" onClick={() => onOpenChange(false)}>Cancel</Button>
-              <Button size="sm" disabled={selectedCampaigns.length === 0} onClick={handleAttach}>
+              <Button size="sm" disabled={selectedCampaigns.length === 0} onClick={handleStart}>
                 Attach to {selectedCampaigns.length} Campaign{selectedCampaigns.length !== 1 ? "s" : ""}
               </Button>
-            </div>
-          </div>
-        )}
-
-        {/* ATTACHING */}
-        {phase === "attaching" && (
-          <div className="space-y-3 mt-2">
-            <div className="flex items-center gap-2 text-sm">
-              <Loader2 className="h-4 w-4 animate-spin" />
-              <span className="text-muted-foreground">{progress}</span>
-            </div>
-            <div className="flex gap-4 text-xs">
-              <span className="text-emerald-500">{totalNew} newly attached</span>
-              <span className="text-muted-foreground">{totalExisting} already present</span>
-              {totalErrors > 0 && <span className="text-destructive">{totalErrors} errors</span>}
-            </div>
-            <div className="space-y-1 max-h-60 overflow-y-auto">
-              {results.map((r) => (
-                <div key={r.campaign_id} className="flex items-center gap-2 text-xs px-2 py-1 rounded">
-                  {r.error ? <XCircle className="h-3.5 w-3.5 text-destructive shrink-0" /> : <CheckCircle2 className="h-3.5 w-3.5 text-emerald-500 shrink-0" />}
-                  <span className="truncate">{r.campaign_name}</span>
-                  <span className="text-muted-foreground shrink-0 ml-auto">{r.error || `+${r.newly_attached} new, ${r.already_attached} existing`}</span>
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
-
-        {/* DONE */}
-        {phase === "done" && (
-          <div className="space-y-4 mt-2">
-            <div className="text-center py-4">
-              <p className="text-emerald-500 font-medium">Attachment complete</p>
-              <p className="text-sm text-muted-foreground mt-1">
-                {totalNew} newly attached · {totalExisting} already present
-                {totalErrors > 0 && ` · ${totalErrors} errors`}
-              </p>
-            </div>
-            <div className="space-y-1 max-h-60 overflow-y-auto rounded-lg border divide-y">
-              {results.map((r) => (
-                <div key={r.campaign_id} className="flex items-center gap-2 text-xs px-3 py-2">
-                  {r.error ? <XCircle className="h-3.5 w-3.5 text-destructive shrink-0" /> : <CheckCircle2 className="h-3.5 w-3.5 text-emerald-500 shrink-0" />}
-                  <span className="truncate">{r.campaign_name}</span>
-                  <span className="text-muted-foreground shrink-0 ml-auto">{r.error || `+${r.newly_attached} · ${r.already_attached} existing`}</span>
-                </div>
-              ))}
-            </div>
-            <div className="flex justify-end">
-              <Button variant="outline" size="sm" onClick={() => onOpenChange(false)}>Close</Button>
             </div>
           </div>
         )}
