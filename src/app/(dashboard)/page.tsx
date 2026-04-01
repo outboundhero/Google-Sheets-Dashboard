@@ -162,12 +162,12 @@ export default function DashboardPage() {
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
           {/* Going Off — left */}
           {clientsGoingOff.length > 0 && (
-            <div className="rounded-xl border border-red-500/30 bg-red-950/20 p-4">
+            <div className="rounded-xl border border-red-200 dark:border-red-500/30 bg-red-50 dark:bg-red-950/20 p-4">
               <div className="flex items-center gap-2 mb-3">
-                <XCircle className="h-4.5 w-4.5 text-red-400 shrink-0" />
+                <XCircle className="h-4.5 w-4.5 text-red-500 dark:text-red-400 shrink-0" />
                 <div>
-                  <h3 className="text-sm font-semibold text-red-200">Clients going off</h3>
-                  <p className="text-[11px] text-red-400/70">{clientsGoingOff.length} upcoming</p>
+                  <h3 className="text-sm font-semibold text-red-700 dark:text-red-200">Clients going off</h3>
+                  <p className="text-[11px] text-red-500/70 dark:text-red-400/70">{clientsGoingOff.length} upcoming</p>
                 </div>
               </div>
               <div className="flex flex-col gap-1.5">
@@ -175,12 +175,12 @@ export default function DashboardPage() {
                   <Link
                     key={c.clientAbbr}
                     href={`/clients/${encodeURIComponent(c.clientAbbr)}`}
-                    className="flex items-center justify-between rounded-lg bg-red-900/30 border border-red-800/40 px-3 py-2 text-sm hover:bg-red-900/50 transition-colors"
+                    className="flex items-center justify-between rounded-lg bg-red-100 dark:bg-red-900/30 border border-red-200 dark:border-red-800/40 px-3 py-2 text-sm hover:bg-red-200/70 dark:hover:bg-red-900/50 transition-colors"
                   >
-                    <span className="font-medium text-red-100 truncate">
-                      {c.companyName} <span className="font-normal text-red-400/60">({c.clientAbbr})</span>
+                    <span className="font-medium text-red-800 dark:text-red-100 truncate">
+                      {c.companyName} <span className="font-normal text-red-500/70 dark:text-red-400/60">({c.clientAbbr})</span>
                     </span>
-                    <span className="text-[10px] text-red-400 bg-red-900/60 rounded px-1.5 py-0.5 shrink-0 ml-2">
+                    <span className="text-[10px] text-red-600 dark:text-red-400 bg-red-200 dark:bg-red-900/60 rounded px-1.5 py-0.5 shrink-0 ml-2">
                       {c.isPause ? "pauses" : "churns"} {formatDate(c.offDate)}
                     </span>
                   </Link>
@@ -191,24 +191,24 @@ export default function DashboardPage() {
 
           {/* Churned — right */}
           {churnedClients.length > 0 && (
-            <div className="rounded-xl border border-zinc-700/50 bg-zinc-900/30 p-4">
+            <div className="rounded-xl border border-zinc-200 dark:border-zinc-700/50 bg-zinc-50 dark:bg-zinc-900/30 p-4">
               <div className="flex items-center gap-2 mb-3">
-                <XCircle className="h-4.5 w-4.5 text-zinc-400 shrink-0" />
+                <XCircle className="h-4.5 w-4.5 text-zinc-500 dark:text-zinc-400 shrink-0" />
                 <div>
-                  <h3 className="text-sm font-semibold text-zinc-200">Churned clients</h3>
-                  <p className="text-[11px] text-zinc-500">{churnedClients.length} total</p>
+                  <h3 className="text-sm font-semibold text-zinc-700 dark:text-zinc-200">Churned clients</h3>
+                  <p className="text-[11px] text-zinc-500 dark:text-zinc-500">{churnedClients.length} total</p>
                 </div>
               </div>
               <div className="max-h-52 overflow-y-auto space-y-1 pr-1">
                 {churnedClients.map((c) => (
                   <div
                     key={c.clientAbbr}
-                    className="flex items-center justify-between rounded-lg px-3 py-1.5 text-sm hover:bg-zinc-800/50 transition-colors"
+                    className="flex items-center justify-between rounded-lg px-3 py-1.5 text-sm hover:bg-zinc-100 dark:hover:bg-zinc-800/50 transition-colors"
                   >
-                    <span className="text-zinc-300 truncate">
-                      {c.companyName} <span className="text-zinc-600">({c.clientAbbr})</span>
+                    <span className="text-zinc-700 dark:text-zinc-300 truncate">
+                      {c.companyName} <span className="text-zinc-400 dark:text-zinc-600">({c.clientAbbr})</span>
                     </span>
-                    <span className="text-[10px] text-zinc-500 shrink-0 ml-2">
+                    <span className="text-[10px] text-zinc-500 dark:text-zinc-500 shrink-0 ml-2">
                       {formatDate(c.churnDate!)}
                     </span>
                   </div>
