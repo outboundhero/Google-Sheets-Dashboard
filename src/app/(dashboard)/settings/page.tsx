@@ -108,82 +108,70 @@ export default function SettingsPage() {
   };
 
   return (
-    <div className="space-y-6 max-w-3xl">
+    <div className="space-y-6">
       <PageHeader
         title="Settings"
-        description="Manage tracked sheets and preferences"
+        description="Manage tracked sheets, users, and preferences"
       />
 
-      {/* Tracked Sheets */}
-      <Card>
-        <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-4">
-          <CardTitle className="text-base font-semibold">
-            Tracked Sheets ({sheets.length})
-          </CardTitle>
-          <AddSheetDialog onSuccess={() => mutate()} />
-        </CardHeader>
-        <CardContent>
-          <TrackedSheetsList sheets={sheets} onRemoved={() => mutate()} />
-        </CardContent>
-      </Card>
+      {/* Two-column layout: Sheets on left, other cards on right */}
+      <div className="grid grid-cols-1 lg:grid-cols-[1fr_380px] gap-6">
+        {/* Tracked Sheets — left column */}
+        <Card>
+          <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-3">
+            <CardTitle className="text-base font-semibold">
+              Tracked Sheets ({sheets.length})
+            </CardTitle>
+            <AddSheetDialog onSuccess={() => mutate()} />
+          </CardHeader>
+          <CardContent>
+            <TrackedSheetsList sheets={sheets} onRemoved={() => mutate()} />
+          </CardContent>
+        </Card>
 
-      <Separator />
+        {/* Right column — stacked cards */}
+        <div className="space-y-4">
+          {/* Data Management */}
+          <Card>
+            <CardContent className="p-4 space-y-3">
+              <div className="flex items-center justify-between">
+                <div>
+                  <p className="text-sm font-semibold">Data Management</p>
+                  <p className="text-xs text-muted-foreground mt-0.5">
+                    Clear cache and fetch fresh data
+                  </p>
+                </div>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={handleRefreshAll}
+                  disabled={refreshing}
+                >
+                  {refreshing ? (
+                    <Loader2 className="mr-2 h-3.5 w-3.5 animate-spin" />
+                  ) : (
+                    <RefreshCw className="mr-2 h-3.5 w-3.5" />
+                  )}
+                  Refresh
+                </Button>
+              </div>
+            </CardContent>
+          </Card>
 
-      {/* Data Management */}
-      <Card>
-        <CardHeader>
-          <CardTitle className="text-base font-semibold">
-            Data Management
-          </CardTitle>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          <div className="flex items-center justify-between">
-            <div>
-              <p className="text-sm font-medium">Refresh All Data</p>
+          {/* Service Account Info */}
+          <Card>
+            <CardContent className="p-4 space-y-2">
+              <p className="text-sm font-semibold">Service Account</p>
               <p className="text-xs text-muted-foreground">
-                Clear the server cache and fetch fresh data from all sheets
+                Share your sheets with this email:
               </p>
-            </div>
-            <Button
-              variant="outline"
-              onClick={handleRefreshAll}
-              disabled={refreshing}
-            >
-              {refreshing ? (
-                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-              ) : (
-                <RefreshCw className="mr-2 h-4 w-4" />
-              )}
-              Refresh
-            </Button>
-          </div>
-          <div className="rounded-md bg-muted p-3">
-            <p className="text-xs text-muted-foreground">
-              Data syncs from Google Sheets to Redis. Click Refresh to
-              trigger a full sync of all tracked sheets.
-            </p>
-          </div>
-        </CardContent>
-      </Card>
-
-      <Separator />
-
-      {/* Service Account Info */}
-      <Card>
-        <CardHeader>
-          <CardTitle className="text-base font-semibold">
-            Service Account
-          </CardTitle>
-        </CardHeader>
-        <CardContent>
-          <p className="text-sm text-muted-foreground mb-2">
-            Share your Google Sheets with this email to grant read access:
-          </p>
-          <code className="block rounded-md bg-muted p-3 text-sm font-mono break-all">
-            n8n-1-291@outreachify-486520.iam.gserviceaccount.com
-          </code>
-        </CardContent>
-      </Card>
+              <code className="block rounded-md bg-muted p-2.5 text-xs font-mono break-all">
+                n8n-1-291@outreachify-486520.iam.gserviceaccount.com
+              </code>
+            </CardContent>
+          </Card>
+        </div>
+      </div>
 
       {/* User Management (Admin only) */}
       {currentRole === "admin" && (

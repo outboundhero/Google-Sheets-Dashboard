@@ -1,9 +1,8 @@
 "use client";
 
 import { useState } from "react";
-import { Trash2, ExternalLink, Loader2 } from "lucide-react";
+import { Trash2, ExternalLink, Loader2, Search, X } from "lucide-react";
 import type { TrackedSheet } from "@/types/sheet";
-import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { toast } from "sonner";
 
@@ -14,6 +13,7 @@ interface Props {
 
 export function TrackedSheetsList({ sheets, onRemoved }: Props) {
   const [removingId, setRemovingId] = useState<string | null>(null);
+  const [search, setSearch] = useState("");
 
   const handleRemove = async (id: string, name: string) => {
     setRemovingId(id);
@@ -38,43 +38,67 @@ export function TrackedSheetsList({ sheets, onRemoved }: Props) {
 
   if (sheets.length === 0) {
     return (
-      <div className="flex flex-col items-center justify-center py-12 text-center">
-        <p className="text-muted-foreground">
+      <div className="flex flex-col items-center justify-center py-8 text-center">
+        <p className="text-sm text-muted-foreground">
           No sheets tracked yet. Add your first Google Sheet above.
         </p>
       </div>
     );
   }
 
+  const filtered = search
+    ? sheets.filter(
+        (s) =>
+          s.name.toLowerCase().includes(search.toLowerCase()) ||
+          (s.clientTag || "").toLowerCase().includes(search.toLowerCase())
+      )
+    : sheets;
+
   return (
-    <div className="space-y-3">
-      {sheets.map((sheet) => (
-        <Card key={sheet.id}>
-          <CardContent className="flex items-center justify-between p-4">
+    <div className="space-y-2">
+      {/* Search */}
+      <div className="flex items-center gap-2 rounded-lg border bg-background px-3 py-1.5">
+        <Search className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
+        <input
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          placeholder="Search sheets..."
+          className="flex-1 text-sm bg-transparent outline-none placeholder:text-muted-foreground"
+        />
+        {search && (
+          <button onClick={() => setSearch("")}>
+            <X className="h-3 w-3 text-muted-foreground hover:text-foreground" />
+          </button>
+        )}
+      </div>
+
+      {/* Compact list with scroll */}
+      <div className="max-h-[400px] overflow-y-auto rounded-lg border divide-y">
+        {filtered.map((sheet) => (
+          <div
+            key={sheet.id}
+            className="flex items-center gap-3 px-3 py-2 hover:bg-muted/30 transition-colors"
+          >
             <div className="min-w-0 flex-1">
               <div className="flex items-center gap-2">
-                <h3 className="font-medium truncate">{sheet.name}</h3>
+                <span className="text-sm font-medium truncate">{sheet.name}</span>
                 <a
                   href={`https://docs.google.com/spreadsheets/d/${sheet.id}`}
                   target="_blank"
                   rel="noopener noreferrer"
-                  className="text-muted-foreground hover:text-foreground"
+                  className="text-muted-foreground hover:text-foreground shrink-0"
                   onClick={(e) => e.stopPropagation()}
                 >
-                  <ExternalLink className="h-3.5 w-3.5" />
+                  <ExternalLink className="h-3 w-3" />
                 </a>
               </div>
-              <div className="flex items-center gap-3 mt-1">
-                <span className="text-xs text-muted-foreground font-mono">
-                  {sheet.id.slice(0, 20)}...
-                </span>
+              <div className="flex items-center gap-2 mt-0.5">
                 {sheet.clientTag && (
-                  <span className="text-xs bg-muted px-2 py-0.5 rounded">
+                  <span className="text-[10px] bg-muted px-1.5 py-0.5 rounded font-medium">
                     {sheet.clientTag}
                   </span>
                 )}
-                <span className="text-xs text-muted-foreground">
-                  Added{" "}
+                <span className="text-[10px] text-muted-foreground">
                   {new Date(sheet.addedAt).toLocaleDateString()}
                 </span>
               </div>
@@ -82,19 +106,24 @@ export function TrackedSheetsList({ sheets, onRemoved }: Props) {
             <Button
               variant="ghost"
               size="icon"
-              className="text-muted-foreground hover:text-destructive shrink-0"
+              className="h-7 w-7 text-muted-foreground hover:text-destructive shrink-0"
               onClick={() => handleRemove(sheet.id, sheet.name)}
               disabled={removingId === sheet.id}
             >
               {removingId === sheet.id ? (
-                <Loader2 className="h-4 w-4 animate-spin" />
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
               ) : (
-                <Trash2 className="h-4 w-4" />
+                <Trash2 className="h-3.5 w-3.5" />
               )}
             </Button>
-          </CardContent>
-        </Card>
-      ))}
+          </div>
+        ))}
+        {filtered.length === 0 && (
+          <div className="py-6 text-center text-sm text-muted-foreground">
+            No sheets match "{search}"
+          </div>
+        )}
+      </div>
     </div>
   );
 }
