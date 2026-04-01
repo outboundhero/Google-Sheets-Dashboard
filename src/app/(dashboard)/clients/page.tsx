@@ -4,6 +4,7 @@ import { useState, useMemo, useEffect } from "react";
 import { Search } from "lucide-react";
 import { useAllLeads } from "@/lib/hooks/use-leads";
 import { useSheets } from "@/lib/hooks/use-sheets";
+import { useAuth } from "@/lib/auth-context";
 import { PageHeader } from "@/components/shared/page-header";
 import { ClientCard } from "@/components/clients/client-card";
 import { RefreshButton } from "@/components/shared/refresh-button";
@@ -34,6 +35,8 @@ function isDomainFlagged(d: DomainRow): boolean {
 export default function ClientsPage() {
   const { leads, isLoading, isSyncing, syncProgress, refresh } = useAllLeads();
   const { sheets } = useSheets();
+  const { role } = useAuth();
+  const isAdmin = role === "admin";
   const [search, setSearch] = useState("");
   const [deliverabilityDomains, setDeliverabilityDomains] = useState<DomainRow[]>([]);
 
@@ -209,7 +212,7 @@ export default function ClientsPage() {
         description={`${uniqueClients} tracked client${uniqueClients !== 1 ? "s" : ""}`}
       >
         <div className="flex items-center gap-3">
-          <RefreshButton onRefresh={refresh} isRefreshing={isSyncing} syncProgress={syncProgress} />
+          {isAdmin && <RefreshButton onRefresh={refresh} isRefreshing={isSyncing} syncProgress={syncProgress} />}
           <div className="relative w-64">
             <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
             <Input

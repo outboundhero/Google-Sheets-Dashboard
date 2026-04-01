@@ -11,6 +11,7 @@ import {
   PanelLeft,
   Mailbox,
   Send,
+  LogOut,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -20,14 +21,17 @@ import {
   TooltipContent,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
+import { useAuth } from "@/lib/auth-context";
 
-const navItems = [
-  { href: "/", label: "Dashboard", icon: LayoutDashboard },
-  { href: "/clients", label: "Clients", icon: Users },
-  { href: "/leads", label: "All Leads", icon: Table2 },
-  { href: "/deliverability", label: "Deliverability", icon: Mailbox },
-  { href: "/campaigns", label: "Campaigns", icon: Send },
-  { href: "/settings", label: "Settings", icon: Settings },
+type Role = "admin" | "viewer";
+
+const allNavItems: { href: string; label: string; icon: typeof LayoutDashboard; roles: Role[] }[] = [
+  { href: "/", label: "Dashboard", icon: LayoutDashboard, roles: ["admin"] },
+  { href: "/clients", label: "Clients", icon: Users, roles: ["admin", "viewer"] },
+  { href: "/leads", label: "All Leads", icon: Table2, roles: ["admin"] },
+  { href: "/deliverability", label: "Deliverability", icon: Mailbox, roles: ["admin"] },
+  { href: "/campaigns", label: "Campaigns", icon: Send, roles: ["admin"] },
+  { href: "/settings", label: "Settings", icon: Settings, roles: ["admin"] },
 ];
 
 interface SidebarProps {
@@ -37,6 +41,9 @@ interface SidebarProps {
 
 export function Sidebar({ collapsed, onToggle }: SidebarProps) {
   const pathname = usePathname();
+  const { user, role, signOut } = useAuth();
+
+  const navItems = allNavItems.filter((item) => item.roles.includes(role || "viewer"));
 
   return (
     <aside
@@ -100,24 +107,65 @@ export function Sidebar({ collapsed, onToggle }: SidebarProps) {
         })}
       </nav>
 
-      {/* Footer */}
-      <div
-        className={cn(
-          "flex items-center border-t p-3",
-          collapsed ? "justify-center" : "justify-between"
+      {/* User + Footer */}
+      <div className="border-t">
+        {/* User info */}
+        {user && !collapsed && (
+          <div className="flex items-center gap-2 px-4 py-2">
+            <div className="flex h-7 w-7 items-center justify-center rounded-full bg-muted text-xs font-medium">
+              {(user.email?.[0] || "?").toUpperCase()}
+            </div>
+            <div className="flex-1 min-w-0">
+              <p className="text-xs font-medium truncate">{user.email}</p>
+              <p className="text-[10px] text-muted-foreground capitalize">{role}</p>
+            </div>
+            <Tooltip delayDuration={0}>
+              <TooltipTrigger asChild>
+                <Button variant="ghost" size="icon" className="h-7 w-7 shrink-0" onClick={signOut}>
+                  <LogOut className="h-3.5 w-3.5" />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>Sign out</TooltipContent>
+            </Tooltip>
+          </div>
         )}
-      >
-        <ThemeToggle />
-        {!collapsed && (
-          <Button variant="ghost" size="icon" className="h-9 w-9" onClick={onToggle}>
-            <PanelLeftClose className="h-4 w-4" />
-          </Button>
+        {user && collapsed && (
+          <div className="flex flex-col items-center gap-1 py-2">
+            <Tooltip delayDuration={0}>
+              <TooltipTrigger asChild>
+                <button
+                  onClick={signOut}
+                  className="flex h-8 w-8 items-center justify-center rounded-full bg-muted text-xs font-medium hover:bg-destructive/10 hover:text-destructive transition-colors"
+                >
+                  {(user.email?.[0] || "?").toUpperCase()}
+                </button>
+              </TooltipTrigger>
+              <TooltipContent side="right">
+                {user.email} ({role}) — Click to sign out
+              </TooltipContent>
+            </Tooltip>
+          </div>
         )}
-        {collapsed && (
-          <Button variant="ghost" size="icon" className="h-9 w-9" onClick={onToggle}>
-            <PanelLeft className="h-4 w-4" />
-          </Button>
-        )}
+
+        {/* Theme + Collapse */}
+        <div
+          className={cn(
+            "flex items-center p-3",
+            collapsed ? "justify-center" : "justify-between"
+          )}
+        >
+          <ThemeToggle />
+          {!collapsed && (
+            <Button variant="ghost" size="icon" className="h-9 w-9" onClick={onToggle}>
+              <PanelLeftClose className="h-4 w-4" />
+            </Button>
+          )}
+          {collapsed && (
+            <Button variant="ghost" size="icon" className="h-9 w-9" onClick={onToggle}>
+              <PanelLeft className="h-4 w-4" />
+            </Button>
+          )}
+        </div>
       </div>
     </aside>
   );
