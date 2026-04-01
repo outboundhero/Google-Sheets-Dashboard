@@ -1,6 +1,6 @@
 "use client";
 
-import { RefreshCw, Loader2, UserPlus, Trash2, Users2, Shield } from "lucide-react";
+import { RefreshCw, Loader2, UserPlus, Trash2, Users2, Shield, KeyRound, ArrowUpDown } from "lucide-react";
 import { useState, useEffect, useCallback } from "react";
 import { useSheets } from "@/lib/hooks/use-sheets";
 import { useAuth } from "@/lib/auth-context";
@@ -34,6 +34,9 @@ export default function SettingsPage() {
   const [invitePassword, setInvitePassword] = useState("");
   const [inviting, setInviting] = useState(false);
   const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [togglingRoleId, setTogglingRoleId] = useState<string | null>(null);
+  const [resetPwUser, setResetPwUser] = useState<Profile | null>(null);
+  const [newPassword, setNewPassword] = useState("");
 
   const loadUsers = useCallback(async () => {
     setUsersLoading(true);
@@ -93,6 +96,50 @@ export default function SettingsPage() {
       toast.error("Failed to remove user");
     }
     setDeletingId(null);
+  };
+
+  const handleToggleRole = async (userId: string, currentRole: string) => {
+    const newRole = currentRole === "admin" ? "viewer" : "admin";
+    if (!confirm(`Change role to ${newRole}? User will need to sign out and back in for the change to take effect.`)) return;
+    setTogglingRoleId(userId);
+    try {
+      const res = await fetch("/api/auth/users", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ userId, role: newRole }),
+      });
+      if (res.ok) {
+        toast.success(`Role changed to ${newRole}`);
+        loadUsers();
+      } else {
+        const data = await res.json();
+        toast.error(data.error || "Failed to change role");
+      }
+    } catch {
+      toast.error("Failed to change role");
+    }
+    setTogglingRoleId(null);
+  };
+
+  const handleResetPassword = async () => {
+    if (!resetPwUser || !newPassword) return;
+    try {
+      const res = await fetch("/api/auth/users", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ userId: resetPwUser.id, password: newPassword }),
+      });
+      if (res.ok) {
+        toast.success(`Password reset for ${resetPwUser.email}`);
+        setResetPwUser(null);
+        setNewPassword("");
+      } else {
+        const data = await res.json();
+        toast.error(data.error || "Failed to reset password");
+      }
+    } catch {
+      toast.error("Failed to reset password");
+    }
   };
 
   const handleRefreshAll = async () => {
@@ -210,31 +257,80 @@ export default function SettingsPage() {
                           Added {new Date(u.created_at).toLocaleDateString()}
                         </p>
                       </div>
-                      <Badge variant="outline" className={u.role === "admin" ? "text-emerald-500 border-emerald-500/30" : "text-muted-foreground"}>
-                        <Shield className="mr-1 h-3 w-3" />
-                        {u.role}
-                      </Badge>
-                      {u.role !== "admin" && (
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          className="h-8 w-8 text-muted-foreground hover:text-destructive"
-                          disabled={deletingId === u.id}
-                          onClick={() => handleDeleteUser(u.id, u.email)}
-                        >
-                          {deletingId === u.id ? (
-                            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                      <button
+                        onClick={() => handleToggleRole(u.id, u.role)}
+                        disabled={togglingRoleId === u.id}
+                        className="shrink-0"
+                        title={`Click to change to ${u.role === "admin" ? "viewer" : "admin"}`}
+                      >
+                        <Badge variant="outline" className={`cursor-pointer transition-colors ${u.role === "admin" ? "text-emerald-500 border-emerald-500/30 hover:bg-emerald-500/10" : "text-muted-foreground hover:bg-muted"}`}>
+                          {togglingRoleId === u.id ? (
+                            <Loader2 className="mr-1 h-3 w-3 animate-spin" />
                           ) : (
-                            <Trash2 className="h-3.5 w-3.5" />
+                            <Shield className="mr-1 h-3 w-3" />
                           )}
-                        </Button>
-                      )}
+                          {u.role}
+                        </Badge>
+                      </button>
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className="h-8 w-8 text-muted-foreground hover:text-foreground"
+                        onClick={() => { setResetPwUser(u); setNewPassword(""); }}
+                        title="Reset password"
+                      >
+                        <KeyRound className="h-3.5 w-3.5" />
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className="h-8 w-8 text-muted-foreground hover:text-destructive"
+                        disabled={deletingId === u.id}
+                        onClick={() => handleDeleteUser(u.id, u.email)}
+                        title="Remove user"
+                      >
+                        {deletingId === u.id ? (
+                          <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                        ) : (
+                          <Trash2 className="h-3.5 w-3.5" />
+                        )}
+                      </Button>
                     </div>
                   ))}
                 </div>
               )}
             </CardContent>
           </Card>
+
+          {/* Reset Password Dialog */}
+          <Dialog open={!!resetPwUser} onOpenChange={(open) => { if (!open) setResetPwUser(null); }}>
+            <DialogContent className="sm:!max-w-md">
+              <DialogHeader>
+                <DialogTitle>Reset Password</DialogTitle>
+              </DialogHeader>
+              <div className="space-y-4 mt-2">
+                <p className="text-sm text-muted-foreground">
+                  Set a new password for <span className="font-medium text-foreground">{resetPwUser?.email}</span>
+                </p>
+                <div className="space-y-2">
+                  <label className="text-sm font-medium">New Password</label>
+                  <input
+                    type="text"
+                    value={newPassword}
+                    onChange={(e) => setNewPassword(e.target.value)}
+                    placeholder="Enter new password"
+                    className="flex h-10 w-full rounded-lg border bg-background px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                  />
+                </div>
+                <div className="flex justify-end gap-2">
+                  <Button variant="ghost" onClick={() => setResetPwUser(null)}>Cancel</Button>
+                  <Button onClick={handleResetPassword} disabled={!newPassword}>
+                    Reset Password
+                  </Button>
+                </div>
+              </div>
+            </DialogContent>
+          </Dialog>
 
           {/* Invite Dialog */}
           <Dialog open={showInvite} onOpenChange={setShowInvite}>
