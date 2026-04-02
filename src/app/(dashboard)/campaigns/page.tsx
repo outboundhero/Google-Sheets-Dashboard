@@ -228,15 +228,16 @@ export default function CampaignsPage() {
                       <span className="text-sm font-medium">{client.client}</span>
                       <span className="text-xs font-medium text-amber-500">{client.remaining.toLocaleString()} remaining</span>
                     </div>
-                    <div className="mt-1 space-y-0.5">
+                    <div className="mt-1.5 space-y-1 ml-2 border-l border-muted pl-3">
                       {client.campaigns.map((c) => (
                         <button
                           key={c.id}
                           onClick={() => setSelectedCampaign(c)}
-                          className="flex items-center justify-between w-full text-[11px] text-muted-foreground hover:text-foreground px-2 py-0.5 rounded hover:bg-muted/50 transition-colors"
+                          className="flex items-center gap-2 w-full text-xs text-muted-foreground hover:text-foreground px-2 py-1.5 rounded-md hover:bg-muted/50 transition-colors"
                         >
-                          <span className="truncate">{c.name.split(":").slice(1).join(":").trim() || c.name}</span>
-                          <span className="shrink-0 ml-2 tabular-nums">{c.remaining_leads.toLocaleString()}</span>
+                          <span className="truncate flex-1 text-left">{c.name.split(":").slice(1).join(":").trim() || c.name}</span>
+                          <Badge variant="outline" className={`text-[9px] px-1.5 py-0 shrink-0 ${STATUS_COLORS[c.status] || ""}`}>{c.status}</Badge>
+                          <span className="shrink-0 tabular-nums text-muted-foreground">{c.remaining_leads.toLocaleString()} left</span>
                         </button>
                       ))}
                     </div>
@@ -356,6 +357,10 @@ export default function CampaignsPage() {
           campaign={selectedCampaign}
           open={!!selectedCampaign}
           onOpenChange={(open) => { if (!open) setSelectedCampaign(null); }}
+          onStatusChange={(id, newStatus) => {
+            setCampaigns((prev) => prev.map((c) => c.id === id ? { ...c, status: newStatus } : c));
+            setSelectedCampaign((prev) => prev ? { ...prev, status: newStatus } : prev);
+          }}
         />
       )}
     </div>

@@ -4,7 +4,9 @@ import { useState, useEffect } from "react";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
-import { ChevronDown, ChevronRight, Loader2 } from "lucide-react";
+import { Button } from "@/components/ui/button";
+import { ChevronDown, ChevronRight, Loader2, Play, Pause, Archive } from "lucide-react";
+import { toast } from "sonner";
 
 interface Campaign {
   id: number;
@@ -141,13 +143,43 @@ function StepRow({ step, index, isVariant }: { step: Step; index?: number; isVar
   );
 }
 
-export function CampaignDetailDialog({ campaign: c, open, onOpenChange }: {
+export function CampaignDetailDialog({ campaign: c, open, onOpenChange, onStatusChange }: {
   campaign: Campaign;
   open: boolean;
   onOpenChange: (open: boolean) => void;
+  onStatusChange?: (id: number, newStatus: string) => void;
 }) {
   const [detail, setDetail] = useState<DetailData | null>(null);
   const [loading, setLoading] = useState(false);
+  const [statusAction, setStatusAction] = useState<string | null>(null);
+  const [confirming, setConfirming] = useState<string | null>(null);
+  const [currentStatus, setCurrentStatus] = useState(c.status);
+
+  useEffect(() => { setCurrentStatus(c.status); }, [c.status]);
+
+  const handleStatusChange = async (action: string) => {
+    setConfirming(null);
+    setStatusAction(action);
+    try {
+      const res = await fetch(`/api/campaigns/${c.id}/status`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action }),
+      });
+      const data = await res.json();
+      if (res.ok) {
+        const newStatus = action === "resume" ? "active" : action === "pause" ? "paused" : "archived";
+        setCurrentStatus(newStatus);
+        onStatusChange?.(c.id, newStatus);
+        toast.success(`Campaign ${action}d successfully`);
+      } else {
+        toast.error(data.error || `Failed to ${action} campaign`);
+      }
+    } catch {
+      toast.error(`Failed to ${action} campaign`);
+    }
+    setStatusAction(null);
+  };
 
   useEffect(() => {
     if (!open || !c.id) return;
@@ -172,11 +204,68 @@ export function CampaignDetailDialog({ campaign: c, open, onOpenChange }: {
           <DialogTitle className="text-base leading-tight pr-8">{c.name}</DialogTitle>
           <div className="flex items-center gap-2 mt-1.5 flex-wrap">
             {c.client_tag && <span className="text-[11px] bg-muted px-2 py-0.5 rounded">{c.client_tag}</span>}
-            <Badge variant="outline" className={`text-[10px] px-1.5 py-0 ${STATUS_COLORS[c.status] || ""}`}>{c.status}</Badge>
+            <Badge variant="outline" className={`text-[10px] px-1.5 py-0 ${STATUS_COLORS[currentStatus] || ""}`}>{currentStatus}</Badge>
             <span className="text-[11px] text-muted-foreground">
               {new Date(c.created_at).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })}
             </span>
           </div>
+
+          {/* Status Actions */}
+          {confirming ? (
+            <div className="flex items-center gap-2 mt-2 p-2.5 rounded-lg border bg-muted/30">
+              <span className="text-xs flex-1">
+                {confirming === "archive" ? "Archive" : confirming === "pause" ? "Pause" : "Resume"} this campaign?
+              </span>
+              <Button size="sm" variant="ghost" className="h-7 text-xs" onClick={() => setConfirming(null)}>Cancel</Button>
+              <Button
+                size="sm"
+                variant={confirming === "archive" ? "destructive" : "default"}
+                className="h-7 text-xs"
+                onClick={() => handleStatusChange(confirming)}
+              >
+                Confirm
+              </Button>
+            </div>
+          ) : (
+            <div className="flex items-center gap-1.5 mt-2">
+              {(currentStatus === "paused" || currentStatus === "draft") && (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="h-7 text-xs gap-1.5 text-emerald-600 dark:text-emerald-400 border-emerald-200 dark:border-emerald-500/30 hover:bg-emerald-50 dark:hover:bg-emerald-500/10"
+                  disabled={!!statusAction}
+                  onClick={() => setConfirming("resume")}
+                >
+                  {statusAction === "resume" ? <Loader2 className="h-3 w-3 animate-spin" /> : <Play className="h-3 w-3" />}
+                  Resume
+                </Button>
+              )}
+              {currentStatus === "active" && (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="h-7 text-xs gap-1.5 text-amber-600 dark:text-amber-400 border-amber-200 dark:border-amber-500/30 hover:bg-amber-50 dark:hover:bg-amber-500/10"
+                  disabled={!!statusAction}
+                  onClick={() => setConfirming("pause")}
+                >
+                  {statusAction === "pause" ? <Loader2 className="h-3 w-3 animate-spin" /> : <Pause className="h-3 w-3" />}
+                  Pause
+                </Button>
+              )}
+              {currentStatus !== "archived" && currentStatus !== "completed" && (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="h-7 text-xs gap-1.5 text-muted-foreground hover:text-destructive hover:border-destructive/30"
+                  disabled={!!statusAction}
+                  onClick={() => setConfirming("archive")}
+                >
+                  {statusAction === "archive" ? <Loader2 className="h-3 w-3 animate-spin" /> : <Archive className="h-3 w-3" />}
+                  Archive
+                </Button>
+              )}
+            </div>
+          )}
         </DialogHeader>
 
         <div className="space-y-4 mt-2">
