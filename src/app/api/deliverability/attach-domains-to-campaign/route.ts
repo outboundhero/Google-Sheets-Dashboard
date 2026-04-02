@@ -21,18 +21,25 @@ export async function POST(request: Request) {
 
     const supabase = getSupabaseAdmin();
 
-    // 1. Get all inbox IDs for the selected domains
+    // 1. Get all inbox IDs for the selected domains (paginate past 1000-row limit)
     const allInboxIds: number[] = [];
-    for (let i = 0; i < domains.length; i += 50) {
-      const batch = domains.slice(i, i + 50);
-      const { data } = await supabase
-        .from("deliverability_inboxes")
-        .select("id")
-        .in("domain", batch);
-      if (data) allInboxIds.push(...data.map((d) => d.id));
+    for (let i = 0; i < domains.length; i += 20) {
+      const batch = domains.slice(i, i + 20);
+      let offset = 0;
+      while (true) {
+        const { data } = await supabase
+          .from("deliverability_inboxes")
+          .select("id")
+          .in("domain", batch)
+          .range(offset, offset + 999);
+        if (!data || data.length === 0) break;
+        allInboxIds.push(...data.map((d) => d.id));
+        if (data.length < 1000) break;
+        offset += 1000;
+      }
     }
 
-    console.log(`[ATTACH-DOMAIN] Campaign ${campaign_id}: found ${allInboxIds.length} inboxes for ${domains.length} domains`);
+    console.log(`[ATTACH-DOMAIN] Campaign ${campaign_id}: found ${allInboxIds.length} inboxes across ${domains.length} domains`);
 
     if (allInboxIds.length === 0) {
       return NextResponse.json({ total_matched: 0, already_attached: 0, newly_attached: 0 });
