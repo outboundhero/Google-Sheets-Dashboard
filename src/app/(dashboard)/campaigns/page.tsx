@@ -66,6 +66,7 @@ export default function CampaignsPage() {
   const [lowLeadsOpen, setLowLeadsOpen] = useState(true);
   const [sortField, setSortField] = useState<"created_at" | "remaining_leads" | "emails_sent" | "replied">("created_at");
   const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
+  const [failedCampaigns, setFailedCampaigns] = useState<{ id: number; name: string; status: string }[]>([]);
 
   const loadCampaigns = useCallback(async () => {
     try {
@@ -79,10 +80,18 @@ export default function CampaignsPage() {
     } catch { /* ignore */ }
   }, []);
 
+  const loadFailedCampaigns = useCallback(async () => {
+    try {
+      const res = await fetch("/api/campaigns/failed");
+      const data = await res.json();
+      if (Array.isArray(data)) setFailedCampaigns(data);
+    } catch { /* ignore */ }
+  }, []);
+
   useEffect(() => {
     setLoading(true);
-    loadCampaigns().finally(() => setLoading(false));
-  }, [loadCampaigns]);
+    Promise.all([loadCampaigns(), loadFailedCampaigns()]).finally(() => setLoading(false));
+  }, [loadCampaigns, loadFailedCampaigns]);
 
   const handleSync = async () => {
     setSyncing(true);
@@ -196,6 +205,33 @@ export default function CampaignsPage() {
           </Card>
         ))}
       </div>
+
+      {/* Failed Campaigns Alert */}
+      {failedCampaigns.length > 0 && (
+        <div className="flex items-start gap-3 rounded-xl border border-red-200 dark:border-red-500/30 bg-red-50 dark:bg-red-950/20 px-4 py-3">
+          <AlertTriangle className="h-4 w-4 text-red-500 dark:text-red-400 shrink-0 mt-0.5" />
+          <div className="flex-1 min-w-0">
+            <div className="flex items-center gap-2">
+              <span className="text-sm font-semibold text-red-700 dark:text-red-200">Failed Campaigns</span>
+              <Badge variant="outline" className="text-[9px] px-1.5 py-0 bg-red-100 dark:bg-red-500/10 text-red-600 dark:text-red-400 border-red-200 dark:border-red-500/20">
+                {failedCampaigns.length}
+              </Badge>
+            </div>
+            <div className="mt-1.5 space-y-1">
+              {failedCampaigns.map((c) => (
+                <button
+                  key={c.id}
+                  onClick={() => setSelectedCampaign(campaigns.find((x) => x.id === c.id) || null)}
+                  className="flex items-center gap-2 w-full text-xs text-red-600 dark:text-red-300 hover:text-red-800 dark:hover:text-red-100 py-0.5 transition-colors text-left"
+                >
+                  <span className="h-1.5 w-1.5 rounded-full bg-red-400 dark:bg-red-500 shrink-0" />
+                  <span className="truncate">{c.name}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Low Leads Section */}
       {lowLeadsClients.length > 0 && (
