@@ -59,44 +59,57 @@ async function getFromSupabase(): Promise<CampaignData[] | null> {
 
 async function fetchFromAPI(): Promise<CampaignData[]> {
   const allCampaigns: CampaignData[] = [];
-  let page = 1;
-  while (true) {
-    const res = await fetch(
-      `${API_BASE}/campaigns?page=${page}&per_page=100`,
-      { headers, cache: "no-store" }
-    );
-    if (!res.ok) throw new Error(`API error: ${res.status}`);
-    const json = await res.json();
-    const campaigns = json.data || [];
-    for (const c of campaigns) {
-      const colonIdx = (c.name as string).indexOf(":");
-      const clientTag = colonIdx > 0 ? (c.name as string).substring(0, colonIdx).trim() : "";
-      const totalLeads = c.total_leads || 0;
-      const contacted = c.total_leads_contacted || 0;
-      allCampaigns.push({
-        id: c.id,
-        name: c.name,
-        status: c.status,
-        client_tag: clientTag,
-        total_leads: totalLeads,
-        total_leads_contacted: contacted,
-        remaining_leads: totalLeads - contacted,
-        emails_sent: c.emails_sent || 0,
-        replied: c.replied || 0,
-        unique_replies: c.unique_replies || 0,
-        bounced: c.bounced || 0,
-        opened: c.opened || 0,
-        unique_opens: c.unique_opens || 0,
-        interested: c.interested || 0,
-        unsubscribed: c.unsubscribed || 0,
-        completion_percentage: c.completion_percentage || 0,
-        created_at: c.created_at,
-        updated_at: c.updated_at,
-      });
+  // Fetch page 1 to get lastPage count
+  const firstRes = await fetch(`${API_BASE}/campaigns?page=1&per_page=100`, { headers, cache: "no-store" });
+  if (!firstRes.ok) throw new Error(`API error: ${firstRes.status}`);
+  const firstJson = await firstRes.json();
+  const lastPage = firstJson.meta?.last_page || 1;
+  const allRaw: Record<string, unknown>[] = [...(firstJson.data || [])];
+
+  // Fetch remaining pages concurrently in batches of 10
+  if (lastPage > 1) {
+    const pages = Array.from({ length: lastPage - 1 }, (_, i) => i + 2);
+    for (let i = 0; i < pages.length; i += 10) {
+      const batch = pages.slice(i, i + 10);
+      const results = await Promise.allSettled(
+        batch.map((p) =>
+          fetch(`${API_BASE}/campaigns?page=${p}&per_page=100`, { headers, cache: "no-store" })
+            .then((r) => r.json())
+            .then((j) => j.data || [])
+        )
+      );
+      for (const r of results) {
+        if (r.status === "fulfilled") allRaw.push(...r.value);
+      }
     }
-    const lastPage = json.meta?.last_page || 1;
-    if (page >= lastPage) break;
-    page++;
+  }
+
+  for (const c of allRaw) {
+    const name = c.name as string;
+    const colonIdx = name.indexOf(":");
+    const clientTag = colonIdx > 0 ? name.substring(0, colonIdx).trim() : "";
+    const totalLeads = (c.total_leads as number) || 0;
+    const contacted = (c.total_leads_contacted as number) || 0;
+    allCampaigns.push({
+      id: c.id as number,
+      name,
+      status: c.status as string,
+      client_tag: clientTag,
+      total_leads: totalLeads,
+      total_leads_contacted: contacted,
+      remaining_leads: totalLeads - contacted,
+      emails_sent: (c.emails_sent as number) || 0,
+      replied: (c.replied as number) || 0,
+      unique_replies: (c.unique_replies as number) || 0,
+      bounced: (c.bounced as number) || 0,
+      opened: (c.opened as number) || 0,
+      unique_opens: (c.unique_opens as number) || 0,
+      interested: (c.interested as number) || 0,
+      unsubscribed: (c.unsubscribed as number) || 0,
+      completion_percentage: (c.completion_percentage as number) || 0,
+      created_at: c.created_at as string,
+      updated_at: c.updated_at as string,
+    });
   }
   return allCampaigns;
 }

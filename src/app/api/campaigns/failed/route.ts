@@ -2,39 +2,44 @@ import { NextResponse } from "next/server";
 
 const API_BASE = "https://app.outboundhero.co/api";
 const API_KEY = process.env.OUTBOUNDHERO_API_KEY!;
-const headers = { Authorization: `Bearer ${API_KEY}`, "Content-Type": "application/json" };
+const headers = { Authorization: `Bearer ${API_KEY}` };
 
 export async function GET() {
   try {
-    // Fetch all campaigns pages and filter for failed status
-    const failed: { id: number; name: string; client_tag: string; created_at: string }[] = [];
-    let page = 1;
+    // Fetch page 1 to get lastPage
+    const firstRes = await fetch(`${API_BASE}/campaigns?page=1&per_page=100`, { headers, cache: "no-store" });
+    if (!firstRes.ok) throw new Error(`API error: ${firstRes.status}`);
+    const firstJson = await firstRes.json();
+    const lastPage = firstJson.meta?.last_page || 1;
 
-    while (true) {
-      const res = await fetch(`${API_BASE}/campaigns?page=${page}&per_page=100`, {
-        headers,
-        cache: "no-store",
-      });
-      if (!res.ok) break;
-      const json = await res.json();
-      const data = json.data || [];
+    const allData: Array<{ id: number; name: string; status: string; created_at: string }> = [...(firstJson.data || [])];
 
-      for (const c of data) {
-        if (c.status === "failed") {
-          const colonIdx = (c.name as string).indexOf(":");
-          failed.push({
-            id: c.id,
-            name: c.name,
-            client_tag: colonIdx > 0 ? c.name.substring(0, colonIdx).trim() : "",
-            created_at: c.created_at,
-          });
+    // Fetch remaining pages concurrently
+    if (lastPage > 1) {
+      const pages = Array.from({ length: lastPage - 1 }, (_, i) => i + 2);
+      for (let i = 0; i < pages.length; i += 10) {
+        const batch = pages.slice(i, i + 10);
+        const results = await Promise.allSettled(
+          batch.map((p) =>
+            fetch(`${API_BASE}/campaigns?page=${p}&per_page=100`, { headers, cache: "no-store" })
+              .then((r) => r.json())
+              .then((j) => j.data || [])
+          )
+        );
+        for (const r of results) {
+          if (r.status === "fulfilled") allData.push(...r.value);
         }
       }
-
-      const lastPage = json.meta?.last_page || 1;
-      if (page >= lastPage) break;
-      page++;
     }
+
+    const failed = allData
+      .filter((c) => c.status === "failed")
+      .map((c) => ({
+        id: c.id,
+        name: c.name,
+        client_tag: c.name.indexOf(":") > 0 ? c.name.substring(0, c.name.indexOf(":")).trim() : "",
+        created_at: c.created_at,
+      }));
 
     return NextResponse.json(failed);
   } catch (error) {

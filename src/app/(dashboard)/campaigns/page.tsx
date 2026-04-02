@@ -90,7 +90,10 @@ export default function CampaignsPage() {
 
   useEffect(() => {
     setLoading(true);
-    Promise.all([loadCampaigns(), loadFailedCampaigns()]).finally(() => setLoading(false));
+    // Load main campaigns first, then failed (sequentially to avoid rate limits)
+    loadCampaigns()
+      .then(() => loadFailedCampaigns())
+      .finally(() => setLoading(false));
   }, [loadCampaigns, loadFailedCampaigns]);
 
   const handleSync = async () => {
