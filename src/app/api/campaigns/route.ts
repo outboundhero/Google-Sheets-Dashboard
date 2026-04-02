@@ -127,8 +127,16 @@ export async function GET(request: Request) {
     const activeRows = tracker.filter((r) => {
       if (r.status.trim().toLowerCase() !== "active") return false;
       if (r.churnDate) {
-        const d = new Date(r.churnDate);
-        if (!isNaN(d.getTime()) && d <= now) return false;
+        const churn = new Date(r.churnDate);
+        if (!isNaN(churn.getTime()) && churn <= now) {
+          // Check if client was re-activated after the churn date
+          const reactivated = [r.startDate, r.goLiveDate].some((d) => {
+            if (!d) return false;
+            const dt = new Date(d);
+            return !isNaN(dt.getTime()) && dt > churn;
+          });
+          if (!reactivated) return false;
+        }
       }
       return true;
     });
