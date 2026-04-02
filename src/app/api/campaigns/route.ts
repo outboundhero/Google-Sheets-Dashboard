@@ -161,10 +161,24 @@ export async function GET(request: Request) {
     };
 
     // ?debug=1 includes diagnostics in the response
+    // ?debug=1&find=BHS shows all tracker rows matching that abbreviation
     if (debug) {
+      const findTag = searchParams.get("find")?.toUpperCase();
+      const matchingRows = findTag
+        ? tracker.filter((r) => r.clientAbbr.toUpperCase().includes(findTag)).map((r) => ({
+            abbr: r.clientAbbr,
+            companyName: r.companyName,
+            status: r.status,
+            statusRaw: JSON.stringify(r.status),
+            churnDate: r.churnDate,
+            startDate: r.startDate,
+            goLiveDate: r.goLiveDate,
+          }))
+        : undefined;
       response._debug = {
         trackerRowCount: tracker.length,
         activeRowCount: activeRows.length,
+        ...(matchingRows ? { findResults: matchingRows } : {}),
         activeRows: activeRows.map((r) => ({
           abbr: r.clientAbbr,
           status: r.status,
