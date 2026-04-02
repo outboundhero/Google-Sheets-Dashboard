@@ -134,7 +134,7 @@ export async function GET(request: Request) {
     });
 
     const activeClientTags = activeRows
-      .flatMap((r) => r.clientAbbr.split(/\s*&\s*/).map((a) => a.trim()))
+      .flatMap((r) => r.clientAbbr.split(" & ").map((a) => a.trim()))
       .filter(Boolean);
 
     // Case-insensitive lookup set
