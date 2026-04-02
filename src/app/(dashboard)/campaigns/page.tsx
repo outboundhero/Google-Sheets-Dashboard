@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useMemo, useCallback } from "react";
 import {
-  Search, X, Send, Mail, Reply, AlertTriangle,
+  Search, X, Send, Mail, Reply, AlertTriangle, CheckCircle2,
   ChevronDown, ChevronUp, RefreshCw, Loader2,
 } from "lucide-react";
 import {
@@ -251,56 +251,64 @@ export default function CampaignsPage() {
       </div>
 
       {/* Low Leads Section */}
-      {lowLeadsClients.length > 0 && (
-        <Card>
-          <button onClick={() => setLowLeadsOpen((v) => !v)} className="flex items-center justify-between w-full px-5 py-3">
-            <div className="flex items-center gap-2 text-sm font-medium">
+      <Card>
+        <button onClick={() => setLowLeadsOpen((v) => !v)} className="flex items-center justify-between w-full px-5 py-3">
+          <div className="flex items-center gap-2 text-sm font-medium">
+            {lowLeadsClients.length > 0 ? (
               <AlertTriangle className="h-4 w-4 text-amber-500" />
-              Low Remaining Leads
-              <Badge variant="secondary" className="text-[10px]">{lowLeadsClients.length}</Badge>
-            </div>
-            {lowLeadsOpen ? <ChevronUp className="h-4 w-4 text-muted-foreground" /> : <ChevronDown className="h-4 w-4 text-muted-foreground" />}
-          </button>
-          {lowLeadsOpen && (
-            <CardContent className="pt-0 space-y-4">
-              <div className="rounded-lg bg-muted/30 p-4">
-                <ResponsiveContainer width="100%" height={Math.max(180, lowLeadsClients.length * 32)}>
-                  <BarChart data={lowLeadsClients} layout="vertical" margin={{ left: 0, right: 16 }}>
-                    <XAxis type="number" tick={{ fontSize: 10 }} axisLine={false} tickLine={false} />
-                    <YAxis type="category" dataKey="client" width={70} tick={{ fontSize: 11 }} axisLine={false} tickLine={false} />
-                    <Tooltip content={<ChartTooltip />} cursor={{ fill: "transparent" }} />
-                    <Bar dataKey="remaining" fill="#f59e0b" radius={[0, 4, 4, 0]} maxBarSize={18} />
-                  </BarChart>
-                </ResponsiveContainer>
-              </div>
+            ) : (
+              <CheckCircle2 className="h-4 w-4 text-emerald-500" />
+            )}
+            Low Remaining Leads
+            <Badge variant="secondary" className="text-[10px]">{lowLeadsClients.length}</Badge>
+          </div>
+          {lowLeadsOpen ? <ChevronUp className="h-4 w-4 text-muted-foreground" /> : <ChevronDown className="h-4 w-4 text-muted-foreground" />}
+        </button>
+        {lowLeadsOpen && (
+          <CardContent className="pt-0 space-y-4">
+            {lowLeadsClients.length > 0 ? (
+              <>
+                <div className="rounded-lg bg-muted/30 p-4">
+                  <ResponsiveContainer width="100%" height={Math.max(180, lowLeadsClients.length * 32)}>
+                    <BarChart data={lowLeadsClients} layout="vertical" margin={{ left: 0, right: 16 }}>
+                      <XAxis type="number" tick={{ fontSize: 10 }} axisLine={false} tickLine={false} />
+                      <YAxis type="category" dataKey="client" width={70} tick={{ fontSize: 11 }} axisLine={false} tickLine={false} />
+                      <Tooltip content={<ChartTooltip />} cursor={{ fill: "transparent" }} />
+                      <Bar dataKey="remaining" fill="#f59e0b" radius={[0, 4, 4, 0]} maxBarSize={18} />
+                    </BarChart>
+                  </ResponsiveContainer>
+                </div>
 
-              <div className="divide-y rounded-lg border">
-                {lowLeadsClients.map((client) => (
-                  <div key={client.client} className="px-4 py-2.5">
-                    <div className="flex items-center justify-between">
-                      <span className="text-sm font-medium">{client.client}</span>
-                      <span className="text-xs font-medium text-amber-500">{client.remaining.toLocaleString()} remaining</span>
+                <div className="divide-y rounded-lg border">
+                  {lowLeadsClients.map((client) => (
+                    <div key={client.client} className="px-4 py-2.5">
+                      <div className="flex items-center justify-between">
+                        <span className="text-sm font-medium">{client.client}</span>
+                        <span className="text-xs font-medium text-amber-500">{client.remaining.toLocaleString()} remaining</span>
+                      </div>
+                      <div className="mt-1.5 space-y-1 ml-2 border-l border-muted pl-3">
+                        {client.campaigns.map((c) => (
+                          <button
+                            key={c.id}
+                            onClick={() => setSelectedCampaign(c)}
+                            className="flex items-center gap-2 w-full text-xs text-muted-foreground hover:text-foreground px-2 py-1.5 rounded-md hover:bg-muted/50 transition-colors"
+                          >
+                            <span className="truncate flex-1 text-left">{c.name.split(":").slice(1).join(":").trim() || c.name}</span>
+                            <Badge variant="outline" className={`text-[9px] px-1.5 py-0 shrink-0 ${STATUS_COLORS[c.status] || ""}`}>{c.status}</Badge>
+                            <span className="shrink-0 tabular-nums text-muted-foreground">{c.remaining_leads.toLocaleString()} left</span>
+                          </button>
+                        ))}
+                      </div>
                     </div>
-                    <div className="mt-1.5 space-y-1 ml-2 border-l border-muted pl-3">
-                      {client.campaigns.map((c) => (
-                        <button
-                          key={c.id}
-                          onClick={() => setSelectedCampaign(c)}
-                          className="flex items-center gap-2 w-full text-xs text-muted-foreground hover:text-foreground px-2 py-1.5 rounded-md hover:bg-muted/50 transition-colors"
-                        >
-                          <span className="truncate flex-1 text-left">{c.name.split(":").slice(1).join(":").trim() || c.name}</span>
-                          <Badge variant="outline" className={`text-[9px] px-1.5 py-0 shrink-0 ${STATUS_COLORS[c.status] || ""}`}>{c.status}</Badge>
-                          <span className="shrink-0 tabular-nums text-muted-foreground">{c.remaining_leads.toLocaleString()} left</span>
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </CardContent>
-          )}
-        </Card>
-      )}
+                  ))}
+                </div>
+              </>
+            ) : (
+              <p className="text-sm text-emerald-600 dark:text-emerald-400 pb-2">All clients have sufficient remaining leads (above 1,500)</p>
+            )}
+          </CardContent>
+        )}
+      </Card>
 
       {/* Filters */}
       <div className="flex items-center gap-2 flex-wrap">
