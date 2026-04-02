@@ -120,20 +120,23 @@ export async function GET() {
     // Get active client tags from Google Sheet (exclude churned clients with past churn date)
     const tracker = await getClientTrackerData().catch(() => []);
     const now = new Date();
-    const activeClients = new Set(
-      tracker
-        .filter((r) => {
-          if (r.status.trim().toLowerCase() !== "active") return false;
-          // Exclude if churn date is in the past
-          if (r.churnDate) {
-            const d = new Date(r.churnDate);
-            if (!isNaN(d.getTime()) && d <= now) return false;
-          }
-          return true;
-        })
-        .flatMap((r) => r.clientAbbr.split(" & ").map((a) => a.trim()))
-        .filter(Boolean)
-    );
+    const activeClientTags = tracker
+      .filter((r) => {
+        if (r.status.trim().toLowerCase() !== "active") return false;
+        // Exclude if churn date is in the past
+        if (r.churnDate) {
+          const d = new Date(r.churnDate);
+          if (!isNaN(d.getTime()) && d <= now) return false;
+        }
+        return true;
+      })
+      .flatMap((r) => r.clientAbbr.split(/\s*&\s*/).map((a) => a.trim()))
+      .filter(Boolean);
+
+    // Case-insensitive lookup set (store uppercase keys, compare uppercase)
+    const activeClientsUpper = new Set(activeClientTags.map((t) => t.toUpperCase()));
+
+    console.log("[CAMPAIGNS] Active client tags from tracker:", activeClientTags);
 
     // Try Supabase first, fall back to API
     let campaigns = await getFromSupabase();
@@ -141,14 +144,21 @@ export async function GET() {
       campaigns = await fetchFromAPI();
     }
 
-    // Filter to active clients only
+    // Collect all unique campaign client_tags for debugging
+    const allCampaignTags = new Set(campaigns.map((c) => c.client_tag).filter(Boolean));
+    const missingTags = [...allCampaignTags].filter((t) => !activeClientsUpper.has(t.toUpperCase()));
+    if (missingTags.length > 0) {
+      console.log("[CAMPAIGNS] Campaign tags NOT in active clients (will be filtered out):", missingTags);
+    }
+
+    // Filter to active clients only (case-insensitive match)
     const filtered = campaigns
-      .filter((c) => !c.client_tag || activeClients.has(c.client_tag))
+      .filter((c) => !c.client_tag || activeClientsUpper.has(c.client_tag.toUpperCase()))
       .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
 
     return NextResponse.json({
       campaigns: filtered,
-      activeClients: Array.from(activeClients).sort(),
+      activeClients: activeClientTags.sort(),
     });
   } catch (error) {
     console.error("[CAMPAIGNS] Error:", error);
