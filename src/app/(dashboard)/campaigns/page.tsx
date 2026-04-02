@@ -210,16 +210,28 @@ export default function CampaignsPage() {
       </div>
 
       {/* Failed Campaigns Alert */}
-      {failedCampaigns.length > 0 && (
-        <div className="flex items-start gap-3 rounded-xl border border-red-200 dark:border-red-500/30 bg-red-50 dark:bg-red-950/20 px-4 py-3">
-          <AlertTriangle className="h-4 w-4 text-red-500 dark:text-red-400 shrink-0 mt-0.5" />
-          <div className="flex-1 min-w-0">
-            <div className="flex items-center gap-2">
-              <span className="text-sm font-semibold text-red-700 dark:text-red-200">Failed Campaigns</span>
-              <Badge variant="outline" className="text-[9px] px-1.5 py-0 bg-red-100 dark:bg-red-500/10 text-red-600 dark:text-red-400 border-red-200 dark:border-red-500/20">
-                {failedCampaigns.length}
-              </Badge>
-            </div>
+      <div className={`flex items-start gap-3 rounded-xl border px-4 py-3 ${
+        failedCampaigns.length > 0
+          ? "border-red-200 dark:border-red-500/30 bg-red-50 dark:bg-red-950/20"
+          : "border-emerald-200 dark:border-emerald-500/30 bg-emerald-50 dark:bg-emerald-950/20"
+      }`}>
+        <AlertTriangle className={`h-4 w-4 shrink-0 mt-0.5 ${
+          failedCampaigns.length > 0 ? "text-red-500 dark:text-red-400" : "text-emerald-500 dark:text-emerald-400"
+        }`} />
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-2">
+            <span className={`text-sm font-semibold ${
+              failedCampaigns.length > 0 ? "text-red-700 dark:text-red-200" : "text-emerald-700 dark:text-emerald-200"
+            }`}>Failed Campaigns</span>
+            <Badge variant="outline" className={`text-[9px] px-1.5 py-0 ${
+              failedCampaigns.length > 0
+                ? "bg-red-100 dark:bg-red-500/10 text-red-600 dark:text-red-400 border-red-200 dark:border-red-500/20"
+                : "bg-emerald-100 dark:bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border-emerald-200 dark:border-emerald-500/20"
+            }`}>
+              {failedCampaigns.length}
+            </Badge>
+          </div>
+          {failedCampaigns.length > 0 ? (
             <div className="mt-1.5 space-y-1">
               {failedCampaigns.map((c) => (
                 <button
@@ -232,9 +244,11 @@ export default function CampaignsPage() {
                 </button>
               ))}
             </div>
-          </div>
+          ) : (
+            <p className="text-xs text-emerald-600 dark:text-emerald-400 mt-0.5">No failed campaigns</p>
+          )}
         </div>
-      )}
+      </div>
 
       {/* Low Leads Section */}
       {lowLeadsClients.length > 0 && (
