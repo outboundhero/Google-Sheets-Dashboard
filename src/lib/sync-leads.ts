@@ -24,14 +24,22 @@ export interface SyncResult {
 
 const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  return Promise.race([
+    promise,
+    new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error(`Timeout after ${ms}ms for ${label}`)), ms)
+    ),
+  ]);
+}
+
 // Google Sheets API: 300 reads/min per project (service account)
 // Process 10 sheets per chunk, all 10 concurrently (1 batch per chunk)
-// Natural delay between chunks = API response time (~2-3s) + Redis write (~0.5s)
-// Rate: 10 sheets / ~3s per chunk = ~200/min (safely under 300/min limit)
-// Total for 70 sheets: 7 chunks × ~3s = ~21s (well within 45s cron timeout)
 const CHUNK_SIZE = 10;
 const BATCH_SIZE = 10;
 const BATCH_DELAY_MS = 2000;
+const SHEET_TIMEOUT_MS = 30000; // 30s timeout per sheet fetch
+const MAX_RETRIES = 2; // Retry failed sheets up to 2 times
 
 /**
  * Sync a chunk of sheets starting from `offset`.
@@ -88,7 +96,13 @@ export async function syncChunk(offset: number = 0): Promise<SyncResult> {
     }
 
     const results = await Promise.allSettled(
-      batch.map((s) => getLeadsFromSheet(s.id, s.sheetName || "Leads", s.clientTag))
+      batch.map((s) =>
+        withTimeout(
+          getLeadsFromSheet(s.id, s.sheetName || "Leads", s.clientTag),
+          SHEET_TIMEOUT_MS,
+          s.name
+        )
+      )
     );
 
     const toStore: { sheetId: string; data: StoredSheetData }[] = [];
@@ -115,7 +129,8 @@ export async function syncChunk(offset: number = 0): Promise<SyncResult> {
         sheetsSuccess++;
       } else {
         console.warn(
-          `[syncChunk] First attempt failed for "${sheetInfo.name}" (${sheetInfo.id}), will retry`
+          `[syncChunk] First attempt failed for "${sheetInfo.name}" (${sheetInfo.id}):`,
+          result.reason?.message || result.reason
         );
         failedSheets.push(sheetInfo);
       }
@@ -124,34 +139,45 @@ export async function syncChunk(offset: number = 0): Promise<SyncResult> {
     // Pipeline write successful sheets from this batch
     await storeMultipleSheetLeads(toStore);
 
-    // Retry failed sheets one at a time with delay
+    // Retry failed sheets one at a time with increasing delays
     if (failedSheets.length > 0) {
-      await delay(BATCH_DELAY_MS);
       for (const sheetInfo of failedSheets) {
-        try {
-          const leads = await getLeadsFromSheet(sheetInfo.id, sheetInfo.sheetName || "Leads", sheetInfo.clientTag);
-          const trimmedLeads = leads.map(trimLeadForStorage);
-          await storeMultipleSheetLeads([{
-            sheetId: sheetInfo.id,
-            data: {
+        let succeeded = false;
+        for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+          await delay(BATCH_DELAY_MS * attempt); // Increasing backoff: 2s, 4s
+          try {
+            const leads = await withTimeout(
+              getLeadsFromSheet(sheetInfo.id, sheetInfo.sheetName || "Leads", sheetInfo.clientTag),
+              SHEET_TIMEOUT_MS,
+              sheetInfo.name
+            );
+            const trimmedLeads = leads.map(trimLeadForStorage);
+            await storeMultipleSheetLeads([{
               sheetId: sheetInfo.id,
-              clientTag: sheetInfo.clientTag,
-              sheetName: sheetInfo.sheetName || "Leads",
-              syncedAt: new Date().toISOString(),
-              leads: trimmedLeads,
-            },
-          }]);
-          newSheetKeys.push(`leads-store:sheet:${sheetInfo.id}`);
-          totalLeads += trimmedLeads.length;
-          sheetsSuccess++;
-          console.log(`[syncChunk] Retry succeeded for "${sheetInfo.name}"`);
-        } catch (retryErr) {
-          const errorMsg = retryErr instanceof Error ? retryErr.message : String(retryErr);
-          console.error(`[syncChunk] Retry also failed for "${sheetInfo.name}" (${sheetInfo.id}):`, errorMsg);
-          errors.push({ sheetId: sheetInfo.id, name: sheetInfo.name, error: errorMsg });
-          sheetsError++;
+              data: {
+                sheetId: sheetInfo.id,
+                clientTag: sheetInfo.clientTag,
+                sheetName: sheetInfo.sheetName || "Leads",
+                syncedAt: new Date().toISOString(),
+                leads: trimmedLeads,
+              },
+            }]);
+            newSheetKeys.push(`leads-store:sheet:${sheetInfo.id}`);
+            totalLeads += trimmedLeads.length;
+            sheetsSuccess++;
+            console.log(`[syncChunk] Retry ${attempt} succeeded for "${sheetInfo.name}"`);
+            succeeded = true;
+            break;
+          } catch (retryErr) {
+            const errorMsg = retryErr instanceof Error ? retryErr.message : String(retryErr);
+            console.warn(`[syncChunk] Retry ${attempt}/${MAX_RETRIES} failed for "${sheetInfo.name}":`, errorMsg);
+            if (attempt === MAX_RETRIES) {
+              console.error(`[syncChunk] All retries exhausted for "${sheetInfo.name}" (${sheetInfo.id})`);
+              errors.push({ sheetId: sheetInfo.id, name: sheetInfo.name, error: errorMsg });
+              sheetsError++;
+            }
+          }
         }
-        await delay(1000); // Small gap between individual retries
       }
     }
   }

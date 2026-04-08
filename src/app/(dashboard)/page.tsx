@@ -6,21 +6,21 @@ import {
   CheckCircle2,
   CalendarCheck,
   Sparkles,
-  RefreshCw,
   Clock,
   AlertTriangle,
   XCircle,
 } from "lucide-react";
 import Link from "next/link";
 import { useAnalytics } from "@/lib/hooks/use-analytics";
+import { useAllLeads } from "@/lib/hooks/use-leads";
 import { useSheets } from "@/lib/hooks/use-sheets";
 import { useClientTracker } from "@/lib/hooks/use-client-tracker";
 import { PageHeader } from "@/components/shared/page-header";
+import { RefreshButton } from "@/components/shared/refresh-button";
 import { StatCard } from "@/components/dashboard/stat-card";
 import { LeadsByStatusChart } from "@/components/dashboard/leads-by-status-chart";
 import { LeadsOverTimeChart } from "@/components/dashboard/leads-over-time-chart";
 import { TopClientsTable } from "@/components/dashboard/top-clients-table";
-import { Button } from "@/components/ui/button";
 import {
   Select,
   SelectContent,
@@ -38,9 +38,10 @@ function formatDate(dateStr: string): string {
 
 export default function DashboardPage() {
   const [selectedClient, setSelectedClient] = useState<string>("");
-  const { analytics, isLoading, isValidating, mutate } = useAnalytics(
+  const { analytics, isLoading, mutate } = useAnalytics(
     selectedClient || undefined
   );
+  const { isSyncing, syncProgress, refresh } = useAllLeads();
   const { sheets } = useSheets();
   const { clients: trackerClients } = useClientTracker();
 
@@ -94,6 +95,7 @@ export default function DashboardPage() {
   }, [sheets]);
 
   const handleRefresh = async () => {
+    await refresh();
     await fetch("/api/cache", { method: "DELETE" });
     await mutate();
   };
@@ -152,9 +154,7 @@ export default function DashboardPage() {
             ))}
           </SelectContent>
         </Select>
-        <Button variant="outline" size="icon" onClick={handleRefresh} disabled={isValidating} className="shrink-0">
-          <RefreshCw className={`h-4 w-4 ${isValidating ? "animate-spin" : ""}`} />
-        </Button>
+        <RefreshButton onRefresh={handleRefresh} isRefreshing={isSyncing} syncProgress={syncProgress} />
       </PageHeader>
 
       {/* Clients Going Off + Churned — side by side */}

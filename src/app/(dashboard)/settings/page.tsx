@@ -1,10 +1,12 @@
 "use client";
 
-import { RefreshCw, Loader2, UserPlus, Trash2, Users2, Shield, KeyRound, ArrowUpDown } from "lucide-react";
+import { Loader2, UserPlus, Trash2, Users2, Shield, KeyRound, ArrowUpDown } from "lucide-react";
 import { useState, useEffect, useCallback } from "react";
 import { useSheets } from "@/lib/hooks/use-sheets";
+import { useAllLeads } from "@/lib/hooks/use-leads";
 import { useAuth } from "@/lib/auth-context";
 import { PageHeader } from "@/components/shared/page-header";
+import { RefreshButton } from "@/components/shared/refresh-button";
 import { AddSheetDialog } from "@/components/settings/add-sheet-dialog";
 import { TrackedSheetsList } from "@/components/settings/tracked-sheets-list";
 import { Button } from "@/components/ui/button";
@@ -23,8 +25,8 @@ interface Profile {
 
 export default function SettingsPage() {
   const { sheets, mutate } = useSheets();
+  const { isSyncing, syncProgress, refresh } = useAllLeads();
   const { role: currentRole } = useAuth();
-  const [refreshing, setRefreshing] = useState(false);
 
   // User Management state
   const [users, setUsers] = useState<Profile[]>([]);
@@ -143,14 +145,12 @@ export default function SettingsPage() {
   };
 
   const handleRefreshAll = async () => {
-    setRefreshing(true);
     try {
+      await refresh();
       await fetch("/api/cache", { method: "DELETE" });
-      toast.success("Cache cleared. Data will refresh on next load.");
+      toast.success("All sheets synced successfully.");
     } catch {
-      toast.error("Failed to clear cache");
-    } finally {
-      setRefreshing(false);
+      toast.error("Sync failed");
     }
   };
 
@@ -185,22 +185,10 @@ export default function SettingsPage() {
                 <div>
                   <p className="text-sm font-semibold">Data Management</p>
                   <p className="text-xs text-muted-foreground mt-0.5">
-                    Clear cache and fetch fresh data
+                    Sync all sheets and refresh data
                   </p>
                 </div>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={handleRefreshAll}
-                  disabled={refreshing}
-                >
-                  {refreshing ? (
-                    <Loader2 className="mr-2 h-3.5 w-3.5 animate-spin" />
-                  ) : (
-                    <RefreshCw className="mr-2 h-3.5 w-3.5" />
-                  )}
-                  Refresh
-                </Button>
+                <RefreshButton onRefresh={handleRefreshAll} isRefreshing={isSyncing} syncProgress={syncProgress} />
               </div>
             </CardContent>
           </Card>
