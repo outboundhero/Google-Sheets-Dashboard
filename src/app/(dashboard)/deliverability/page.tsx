@@ -186,6 +186,7 @@ function DeliverabilityPageInner() {
   const [showFlagged, setShowFlagged] = useState(() => searchParams.get("flagged") === "true");
   const [flagSubFilter, setFlagSubFilter] = useState<"all" | "reply" | "bounce">("all");
   const [showReserve, setShowReserve] = useState(false);
+  const [warmupDaysFilter, setWarmupDaysFilter] = useState<"all" | "complete" | "5" | "10" | "15" | "20">("all");
   const [attachDialogOpen, setAttachDialogOpen] = useState(false);
   const [clientTags, setClientTags] = useState<Set<string>>(new Set());
   const [selectedDomains, setSelectedDomains] = useState<Set<string>>(new Set());
@@ -520,8 +521,18 @@ function DeliverabilityPageInner() {
     if (showReserve) {
       result = result.filter(isDomainReserve);
     }
+    if (warmupDaysFilter !== "all") {
+      result = result.filter((d) => {
+        const daysOld = d.domain_created_at
+          ? Math.floor((now - new Date(d.domain_created_at).getTime()) / (1000 * 60 * 60 * 24))
+          : 0;
+        const daysLeft = Math.max(0, 21 - daysOld);
+        if (warmupDaysFilter === "complete") return daysLeft === 0;
+        return daysLeft > 0 && daysLeft <= parseInt(warmupDaysFilter);
+      });
+    }
     return result;
-  }, [domains, tagFilters, domainSearch, typeFilter, showFlagged, flagSubFilter, showReserve, isDomainFlagged, hasReplyIssue, hasBounceIssue, isDomainReserve]);
+  }, [domains, tagFilters, domainSearch, typeFilter, showFlagged, flagSubFilter, showReserve, warmupDaysFilter, isDomainFlagged, hasReplyIssue, hasBounceIssue, isDomainReserve, now]);
 
   const flaggedCount = useMemo(() => domains.filter(isDomainFlagged).length, [domains, isDomainFlagged]);
 
@@ -796,6 +807,24 @@ function DeliverabilityPageInner() {
               )}
             </button>
 
+            {/* Warmup days filter */}
+            <select
+              value={warmupDaysFilter}
+              onChange={(e) => setWarmupDaysFilter(e.target.value as typeof warmupDaysFilter)}
+              className={`text-xs px-3 py-1.5 rounded-full border bg-background transition-colors cursor-pointer ${
+                warmupDaysFilter !== "all"
+                  ? "border-primary text-primary"
+                  : "border-border text-muted-foreground hover:border-foreground hover:text-foreground"
+              }`}
+            >
+              <option value="all">All Warmup</option>
+              <option value="complete">Complete</option>
+              <option value="5">≤ 5 days left</option>
+              <option value="10">≤ 10 days left</option>
+              <option value="15">≤ 15 days left</option>
+              <option value="20">≤ 20 days left</option>
+            </select>
+
             {/* Active tag chips */}
             {tagFilters.map((tag) => (
               <span
@@ -809,7 +838,7 @@ function DeliverabilityPageInner() {
               </span>
             ))}
 
-            {(tagFilters.length > 0 || domainSearch || typeFilter !== "all" || showReserve) && (
+            {(tagFilters.length > 0 || domainSearch || typeFilter !== "all" || showReserve || warmupDaysFilter !== "all") && (
               <span className="text-xs text-muted-foreground">
                 {filteredDomains.length} domain{filteredDomains.length !== 1 ? "s" : ""}
               </span>
