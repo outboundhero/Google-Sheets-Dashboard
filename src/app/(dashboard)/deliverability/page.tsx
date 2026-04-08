@@ -186,7 +186,7 @@ function DeliverabilityPageInner() {
   const [showFlagged, setShowFlagged] = useState(() => searchParams.get("flagged") === "true");
   const [flagSubFilter, setFlagSubFilter] = useState<"all" | "reply" | "bounce">("all");
   const [showReserve, setShowReserve] = useState(false);
-  const [warmupDaysFilter, setWarmupDaysFilter] = useState<"all" | "complete" | "5" | "10" | "15" | "20">("all");
+  const [warmupDaysFilter, setWarmupDaysFilter] = useState<string>("all");
   const [attachDialogOpen, setAttachDialogOpen] = useState(false);
   const [clientTags, setClientTags] = useState<Set<string>>(new Set());
   const [selectedDomains, setSelectedDomains] = useState<Set<string>>(new Set());
@@ -528,7 +528,9 @@ function DeliverabilityPageInner() {
           : 0;
         const daysLeft = Math.max(0, 21 - daysOld);
         if (warmupDaysFilter === "complete") return daysLeft === 0;
-        return daysLeft > 0 && daysLeft <= parseInt(warmupDaysFilter);
+        const maxDays = parseInt(warmupDaysFilter);
+        if (!isNaN(maxDays)) return daysLeft > 0 && daysLeft <= maxDays;
+        return true;
       });
     }
     return result;
@@ -808,22 +810,49 @@ function DeliverabilityPageInner() {
             </button>
 
             {/* Warmup days filter */}
-            <select
-              value={warmupDaysFilter}
-              onChange={(e) => setWarmupDaysFilter(e.target.value as typeof warmupDaysFilter)}
-              className={`text-xs px-3 py-1.5 rounded-full border bg-background transition-colors cursor-pointer ${
-                warmupDaysFilter !== "all"
+            <div className="flex items-center gap-1">
+              {[
+                { value: "all", label: "All Warmup" },
+                { value: "complete", label: "Complete" },
+              ].map((opt) => (
+                <button
+                  key={opt.value}
+                  onClick={() => setWarmupDaysFilter(opt.value)}
+                  className={`text-xs px-2.5 py-1.5 rounded-full border transition-colors ${
+                    warmupDaysFilter === opt.value
+                      ? "bg-primary text-primary-foreground border-primary"
+                      : "border-border text-muted-foreground hover:border-foreground hover:text-foreground"
+                  }`}
+                >
+                  {opt.label}
+                </button>
+              ))}
+              <div className={`flex items-center gap-1 text-xs px-2.5 py-1 rounded-full border transition-colors ${
+                warmupDaysFilter !== "all" && warmupDaysFilter !== "complete"
                   ? "border-primary text-primary"
-                  : "border-border text-muted-foreground hover:border-foreground hover:text-foreground"
-              }`}
-            >
-              <option value="all">All Warmup</option>
-              <option value="complete">Complete</option>
-              <option value="5">≤ 5 days left</option>
-              <option value="10">≤ 10 days left</option>
-              <option value="15">≤ 15 days left</option>
-              <option value="20">≤ 20 days left</option>
-            </select>
+                  : "border-border text-muted-foreground"
+              }`}>
+                <span>≤</span>
+                <input
+                  type="number"
+                  min="1"
+                  max="21"
+                  placeholder="days"
+                  value={warmupDaysFilter !== "all" && warmupDaysFilter !== "complete" ? warmupDaysFilter : ""}
+                  onChange={(e) => {
+                    const v = e.target.value;
+                    if (!v) { setWarmupDaysFilter("all"); return; }
+                    const n = parseInt(v);
+                    if (n >= 1 && n <= 21) setWarmupDaysFilter(String(n));
+                  }}
+                  onFocus={() => {
+                    if (warmupDaysFilter === "all" || warmupDaysFilter === "complete") setWarmupDaysFilter("");
+                  }}
+                  className="w-8 bg-transparent outline-none text-center tabular-nums [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none"
+                />
+                <span>days</span>
+              </div>
+            </div>
 
             {/* Active tag chips */}
             {tagFilters.map((tag) => (
