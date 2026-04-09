@@ -6,26 +6,30 @@ import {
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { Search, X, Check, Plus, Loader2, CheckCircle2, AlertTriangle } from "lucide-react";
+import { Search, X, Check, Plus, Loader2 } from "lucide-react";
 
 interface Tag { id: number; name: string }
-
 interface Campaign { id: number; name: string; status: string; client_tag: string }
+
+export interface TagApplyInfo {
+  mode: "add" | "remove";
+  tagIds: number[];
+  tagNames: string[];
+  domains: string[];
+  /** Campaigns to attach domains to (empty if skipped) */
+  campaigns: { id: number; name: string }[];
+}
 
 interface BulkTagDialogProps {
   mode: "add" | "remove";
   open: boolean;
   onOpenChange: (open: boolean) => void;
   selectedDomains: string[];
-  /** Existing tags on selected domains (collected by parent) */
   existingTags?: string[];
-  /** For remove mode: only these tags are shown */
   availableTags?: Tag[];
-  /** Called when data should be refreshed (after tags applied or campaigns attached) */
-  onSuccess: () => void;
+  /** Called with full selection — parent handles background execution */
+  onApply: (info: TagApplyInfo) => void;
 }
-
-type Phase = "tags" | "applying" | "campaigns" | "attaching" | "done";
 
 const STATUS_COLORS: Record<string, string> = {
   active: "bg-emerald-500/10 text-emerald-500 border-emerald-500/20",
@@ -34,9 +38,9 @@ const STATUS_COLORS: Record<string, string> = {
 };
 
 export function BulkTagDialog({
-  mode, open, onOpenChange, selectedDomains, existingTags, availableTags, onSuccess,
+  mode, open, onOpenChange, selectedDomains, existingTags, availableTags, onApply,
 }: BulkTagDialogProps) {
-  const [phase, setPhase] = useState<Phase>("tags");
+  const [phase, setPhase] = useState<"tags" | "campaigns">("tags");
   const [allTags, setAllTags] = useState<Tag[]>([]);
   const [loading, setLoading] = useState(false);
   const [selectedTagIds, setSelectedTagIds] = useState<Set<number>>(new Set());
@@ -45,22 +49,16 @@ export function BulkTagDialog({
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // Tag apply result
-  const [tagResult, setTagResult] = useState<{ affected: number } | null>(null);
-
-  // Campaign phase state
+  // Campaign selection
   const [campaigns, setCampaigns] = useState<Campaign[]>([]);
   const [selectedCampaignIds, setSelectedCampaignIds] = useState<Set<number>>(new Set());
   const [campaignSearch, setCampaignSearch] = useState("");
   const [campaignsLoading, setCampaignsLoading] = useState(false);
 
-  // Attach result
-  const [attachResults, setAttachResults] = useState<{ campaign: string; newly: number; existing: number; error?: string }[]>([]);
+  // Saved tag selection
+  const [savedTagIds, setSavedTagIds] = useState<number[]>([]);
+  const [savedTagNames, setSavedTagNames] = useState<string[]>([]);
 
-  // The tag names being applied in this session
-  const [appliedTagNames, setAppliedTagNames] = useState<string[]>([]);
-
-  // Reset on open
   useEffect(() => {
     if (!open) return;
     setPhase("tags");
@@ -68,12 +66,9 @@ export function BulkTagDialog({
     setSearch("");
     setNewTagName("");
     setError(null);
-    setTagResult(null);
     setCampaigns([]);
     setSelectedCampaignIds(new Set());
     setCampaignSearch("");
-    setAttachResults([]);
-    setAppliedTagNames([]);
 
     setLoading(true);
     fetch("/api/deliverability/bulk-tags")
@@ -83,7 +78,6 @@ export function BulkTagDialog({
       .finally(() => setLoading(false));
   }, [open]);
 
-  // Tag filtering
   const availableNames = useMemo(() => new Set((availableTags || []).map((t) => t.name)), [availableTags]);
   const tags = useMemo(() => mode === "add" ? allTags : allTags.filter((t) => availableNames.has(t.name)), [mode, allTags, availableNames]);
   const filtered = useMemo(() => {
@@ -108,7 +102,7 @@ export function BulkTagDialog({
         body: JSON.stringify({ action: "create", tagName: newTagName.trim() }),
       });
       const data = await res.json();
-      if (!res.ok) throw new Error(data.error || "Failed to create tag");
+      if (!res.ok) throw new Error(data.error || "Failed");
       const newTag: Tag = data.tag;
       setAllTags((prev) => [...prev, newTag].sort((a, b) => a.name.localeCompare(b.name)));
       setSelectedTagIds((prev) => new Set([...prev, newTag.id]));
@@ -120,38 +114,22 @@ export function BulkTagDialog({
     }
   };
 
-  // Apply tags and then transition to campaign phase (add mode) or close (remove mode)
-  const handleApplyTags = async () => {
+  const handleTagsConfirmed = () => {
     if (selectedTagIds.size === 0) return;
-    const tagNames = tags.filter((t) => selectedTagIds.has(t.id)).map((t) => t.name);
-    setAppliedTagNames(tagNames);
-    setPhase("applying");
-    setError(null);
+    const ids = Array.from(selectedTagIds);
+    const names = tags.filter((t) => selectedTagIds.has(t.id)).map((t) => t.name);
+    setSavedTagIds(ids);
+    setSavedTagNames(names);
 
-    try {
-      const res = await fetch("/api/deliverability/bulk-tags", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: mode, tagIds: Array.from(selectedTagIds), domains: selectedDomains }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || "Failed");
-      setTagResult({ affected: data.inboxesAffected || 0 });
-      onSuccess();
-
-      if (mode === "add") {
-        // Transition to campaign selection
-        loadCampaignsForTags(tagNames);
-      } else {
-        setPhase("done");
-      }
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed");
-      setPhase("done");
+    if (mode === "remove") {
+      // Remove mode: close immediately, no campaign step
+      onApply({ mode, tagIds: ids, tagNames: names, domains: [...selectedDomains], campaigns: [] });
+      onOpenChange(false);
+    } else {
+      loadCampaignsForTags(names);
     }
   };
 
-  // Load campaigns matching any of the tag names (existing + newly applied)
   const loadCampaignsForTags = useCallback(async (newTagNames: string[]) => {
     setCampaignsLoading(true);
     setPhase("campaigns");
@@ -159,23 +137,14 @@ export function BulkTagDialog({
       const res = await fetch("/api/campaigns");
       const data = await res.json();
       const allCampaigns: Campaign[] = data.campaigns || (Array.isArray(data) ? data : []);
-
-      // Combine existing tags on selected domains + newly applied tags
       const allRelevantTags = new Set([...(existingTags || []), ...newTagNames]);
-
-      // Filter campaigns whose client_tag matches any relevant tag
       const matching = allCampaigns.filter((c) =>
         c.status !== "archived" && c.status !== "completed" && allRelevantTags.has(c.client_tag)
       );
-
       setCampaigns(matching);
-      // Pre-select all
       setSelectedCampaignIds(new Set(matching.map((c) => c.id)));
-    } catch {
-      setCampaigns([]);
-    } finally {
-      setCampaignsLoading(false);
-    }
+    } catch { setCampaigns([]); }
+    finally { setCampaignsLoading(false); }
   }, [existingTags]);
 
   const filteredCampaigns = useMemo(() => {
@@ -188,53 +157,29 @@ export function BulkTagDialog({
     setSelectedCampaignIds((prev) => { const n = new Set(prev); if (n.has(id)) n.delete(id); else n.add(id); return n; });
   };
 
-  // Attach domains to selected campaigns
-  const handleAttachCampaigns = async () => {
-    if (selectedCampaignIds.size === 0) return;
-    setPhase("attaching");
-    const selected = campaigns.filter((c) => selectedCampaignIds.has(c.id));
-    const results: typeof attachResults = [];
-
-    for (const campaign of selected) {
-      try {
-        const res = await fetch("/api/deliverability/attach-domains-to-campaign", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ campaign_id: campaign.id, domains: selectedDomains }),
-        });
-        const data = await res.json();
-        if (res.ok) {
-          results.push({ campaign: campaign.name, newly: data.newly_attached || 0, existing: data.already_attached || 0 });
-        } else {
-          results.push({ campaign: campaign.name, newly: 0, existing: 0, error: data.error || `HTTP ${res.status}` });
-        }
-      } catch (e) {
-        results.push({ campaign: campaign.name, newly: 0, existing: 0, error: e instanceof Error ? e.message : "Failed" });
-      }
-      setAttachResults([...results]);
-    }
-    setPhase("done");
+  const handleConfirmAll = () => {
+    const selectedCamps = campaigns.filter((c) => selectedCampaignIds.has(c.id)).map((c) => ({ id: c.id, name: c.name }));
+    onApply({ mode, tagIds: savedTagIds, tagNames: savedTagNames, domains: [...selectedDomains], campaigns: selectedCamps });
+    onOpenChange(false);
   };
 
-  const handleClose = () => {
-    if (phase === "applying" || phase === "attaching") return;
+  const handleSkipCampaigns = () => {
+    onApply({ mode, tagIds: savedTagIds, tagNames: savedTagNames, domains: [...selectedDomains], campaigns: [] });
     onOpenChange(false);
   };
 
   return (
-    <Dialog open={open} onOpenChange={(v) => { if (!v) handleClose(); }}>
+    <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="sm:!max-w-lg max-h-[80vh] flex flex-col">
         <DialogHeader>
           <DialogTitle>
-            {phase === "campaigns" || phase === "attaching"
-              ? "Add to Campaigns?"
-              : phase === "done" && attachResults.length > 0
-                ? "Complete"
-                : `${mode === "add" ? "Add Tags" : "Remove Tags"} — ${selectedDomains.length} domain${selectedDomains.length !== 1 ? "s" : ""}`}
+            {phase === "campaigns"
+              ? "Select Campaigns"
+              : `${mode === "add" ? "Add Tags" : "Remove Tags"} — ${selectedDomains.length} domain${selectedDomains.length !== 1 ? "s" : ""}`}
           </DialogTitle>
         </DialogHeader>
 
-        {/* ── Phase: Tag Selection ── */}
+        {/* ── Tag Selection ── */}
         {phase === "tags" && (
           <div className="space-y-3 flex-1 overflow-hidden flex flex-col">
             {mode === "add" && (
@@ -250,14 +195,12 @@ export function BulkTagDialog({
                 </Button>
               </div>
             )}
-
             <div className="flex items-center gap-2 rounded-lg border bg-background px-3 py-1.5">
               <Search className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
               <input value={search} onChange={(e) => setSearch(e.target.value)}
                 placeholder="Search tags…" className="flex-1 text-sm bg-transparent outline-none placeholder:text-muted-foreground" />
               {search && <button onClick={() => setSearch("")}><X className="h-3 w-3 text-muted-foreground hover:text-foreground" /></button>}
             </div>
-
             {loading ? (
               <div className="flex items-center justify-center py-8"><Loader2 className="h-5 w-5 animate-spin text-muted-foreground" /></div>
             ) : filtered.length === 0 ? (
@@ -278,7 +221,6 @@ export function BulkTagDialog({
                 })}
               </div>
             )}
-
             {selectedNames.length > 0 && (
               <div className="flex flex-wrap gap-1.5">
                 {selectedNames.map((name) => (
@@ -286,53 +228,30 @@ export function BulkTagDialog({
                 ))}
               </div>
             )}
-
             {error && <div className="text-xs text-destructive">{error}</div>}
-
             <div className="flex items-center justify-between pt-1">
               <span className="text-xs text-muted-foreground">{selectedTagIds.size} tag{selectedTagIds.size !== 1 ? "s" : ""} selected</span>
               <div className="flex items-center gap-2">
-                <Button variant="ghost" size="sm" onClick={handleClose}>Cancel</Button>
-                <Button size="sm" disabled={selectedTagIds.size === 0} onClick={handleApplyTags}
+                <Button variant="ghost" size="sm" onClick={() => onOpenChange(false)}>Cancel</Button>
+                <Button size="sm" disabled={selectedTagIds.size === 0} onClick={handleTagsConfirmed}
                   variant={mode === "remove" ? "destructive" : "default"}>
-                  {mode === "add" ? "Add Tags" : "Remove Tags"}
+                  {mode === "add" ? "Next" : "Remove Tags"}
                 </Button>
               </div>
             </div>
           </div>
         )}
 
-        {/* ── Phase: Applying Tags ── */}
-        {phase === "applying" && (
-          <div className="flex flex-col items-center justify-center py-10 gap-3">
-            <Loader2 className="h-6 w-6 animate-spin text-primary" />
-            <p className="text-sm text-muted-foreground">
-              {mode === "add" ? "Adding" : "Removing"} tags {mode === "add" ? "to" : "from"} {selectedDomains.length} domains...
-            </p>
-          </div>
-        )}
-
-        {/* ── Phase: Campaign Selection (add mode only) ── */}
+        {/* ── Campaign Selection ── */}
         {phase === "campaigns" && (
           <div className="space-y-3 flex-1 overflow-hidden flex flex-col">
-            {/* Tag result banner */}
-            {tagResult && (
-              <div className="flex items-center gap-2 rounded-lg border border-emerald-500/30 bg-emerald-950/20 px-3 py-2">
-                <CheckCircle2 className="h-3.5 w-3.5 text-emerald-500 shrink-0" />
-                <span className="text-xs text-emerald-200">Tags added — {tagResult.affected} inboxes updated</span>
-              </div>
-            )}
-
             <p className="text-sm text-muted-foreground">
-              Also add these {selectedDomains.length} domains to campaigns?
+              Also attach these {selectedDomains.length} domains to campaigns?
             </p>
-
             {campaignsLoading ? (
               <div className="flex items-center justify-center py-8"><Loader2 className="h-5 w-5 animate-spin text-muted-foreground" /></div>
             ) : campaigns.length === 0 ? (
-              <div className="text-center py-6 text-sm text-muted-foreground">
-                No matching campaigns found for these tags.
-              </div>
+              <div className="text-center py-6 text-sm text-muted-foreground">No matching campaigns found for these tags.</div>
             ) : (
               <>
                 <div className="flex items-center gap-2 rounded-lg border bg-background px-3 py-1.5">
@@ -341,7 +260,6 @@ export function BulkTagDialog({
                     placeholder="Search campaigns…" className="flex-1 text-sm bg-transparent outline-none placeholder:text-muted-foreground" />
                   {campaignSearch && <button onClick={() => setCampaignSearch("")}><X className="h-3 w-3 text-muted-foreground hover:text-foreground" /></button>}
                 </div>
-
                 <div className="flex items-center justify-between">
                   <span className="text-xs text-muted-foreground">{selectedCampaignIds.size} of {campaigns.length} selected</span>
                   <button onClick={() => {
@@ -351,7 +269,6 @@ export function BulkTagDialog({
                     {selectedCampaignIds.size === filteredCampaigns.length ? "Deselect all" : "Select all"}
                   </button>
                 </div>
-
                 <div className="flex-1 overflow-y-auto rounded-lg border divide-y">
                   {filteredCampaigns.map((c) => {
                     const selected = selectedCampaignIds.has(c.id);
@@ -369,81 +286,13 @@ export function BulkTagDialog({
                 </div>
               </>
             )}
-
             <div className="flex justify-end gap-2 pt-1">
-              <Button variant="ghost" size="sm" onClick={() => { setPhase("done"); }}>Skip</Button>
-              <Button size="sm" disabled={selectedCampaignIds.size === 0} onClick={handleAttachCampaigns}>
-                Attach to {selectedCampaignIds.size} Campaign{selectedCampaignIds.size !== 1 ? "s" : ""}
+              <Button variant="ghost" size="sm" onClick={handleSkipCampaigns}>Skip</Button>
+              <Button size="sm" onClick={handleConfirmAll}>
+                {selectedCampaignIds.size > 0
+                  ? `Add Tags & Attach to ${selectedCampaignIds.size} Campaign${selectedCampaignIds.size !== 1 ? "s" : ""}`
+                  : "Add Tags Only"}
               </Button>
-            </div>
-          </div>
-        )}
-
-        {/* ── Phase: Attaching to Campaigns ── */}
-        {phase === "attaching" && (
-          <div className="space-y-3 py-4">
-            <div className="flex items-center gap-2 text-sm">
-              <Loader2 className="h-4 w-4 animate-spin text-primary" />
-              <span>Attaching domains to campaigns...</span>
-              <span className="text-xs text-muted-foreground ml-auto">{attachResults.length}/{campaigns.filter((c) => selectedCampaignIds.has(c.id)).length}</span>
-            </div>
-            {attachResults.length > 0 && (
-              <div className="max-h-40 overflow-y-auto rounded-lg border divide-y">
-                {attachResults.map((r, i) => (
-                  <div key={i} className="flex items-center gap-2 px-3 py-1.5 text-xs">
-                    {r.error ? <AlertTriangle className="h-3 w-3 text-destructive shrink-0" /> : <CheckCircle2 className="h-3 w-3 text-emerald-500 shrink-0" />}
-                    <span className="truncate">{r.campaign}</span>
-                    {!r.error && <span className="ml-auto text-muted-foreground shrink-0">+{r.newly} · {r.existing} existing</span>}
-                    {r.error && <span className="ml-auto text-destructive shrink-0">{r.error}</span>}
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-        )}
-
-        {/* ── Phase: Done ── */}
-        {phase === "done" && (
-          <div className="space-y-3 py-2">
-            {error ? (
-              <div className="flex items-start gap-2 rounded-lg border border-red-500/30 bg-red-950/20 px-3 py-2">
-                <AlertTriangle className="h-3.5 w-3.5 text-red-500 shrink-0 mt-0.5" />
-                <span className="text-xs text-red-200">{error}</span>
-              </div>
-            ) : (
-              <>
-                {tagResult && (
-                  <div className="flex items-center gap-2 rounded-lg border border-emerald-500/30 bg-emerald-950/20 px-3 py-2">
-                    <CheckCircle2 className="h-3.5 w-3.5 text-emerald-500 shrink-0" />
-                    <span className="text-xs text-emerald-200">
-                      Tags {mode === "add" ? "added" : "removed"} — {tagResult.affected} inboxes updated
-                    </span>
-                  </div>
-                )}
-                {attachResults.length > 0 && (
-                  <div className="space-y-1.5">
-                    <div className="flex items-center gap-2 rounded-lg border border-emerald-500/30 bg-emerald-950/20 px-3 py-2">
-                      <CheckCircle2 className="h-3.5 w-3.5 text-emerald-500 shrink-0" />
-                      <span className="text-xs text-emerald-200">
-                        Attached to {attachResults.filter((r) => !r.error).length} campaign{attachResults.filter((r) => !r.error).length !== 1 ? "s" : ""}
-                      </span>
-                    </div>
-                    <div className="max-h-40 overflow-y-auto rounded-lg border divide-y">
-                      {attachResults.map((r, i) => (
-                        <div key={i} className="flex items-center gap-2 px-3 py-1.5 text-xs">
-                          {r.error ? <AlertTriangle className="h-3 w-3 text-destructive shrink-0" /> : <CheckCircle2 className="h-3 w-3 text-emerald-500 shrink-0" />}
-                          <span className="truncate">{r.campaign}</span>
-                          {!r.error && <span className="ml-auto text-muted-foreground shrink-0">+{r.newly} · {r.existing} existing</span>}
-                          {r.error && <span className="ml-auto text-destructive shrink-0">{r.error}</span>}
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                )}
-              </>
-            )}
-            <div className="flex justify-end pt-1">
-              <Button size="sm" onClick={handleClose}>Close</Button>
             </div>
           </div>
         )}

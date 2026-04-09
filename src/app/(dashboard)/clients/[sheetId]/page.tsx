@@ -16,7 +16,7 @@ import { columns } from "@/components/leads-table/columns";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
-import { BulkTagDialog } from "@/components/deliverability/bulk-tag-dialog";
+import { BulkTagDialog, type TagApplyInfo } from "@/components/deliverability/bulk-tag-dialog";
 import { BulkDeleteDialog } from "@/components/deliverability/bulk-delete-dialog";
 import { AttachToCampaignsDialog } from "@/components/deliverability/attach-to-campaigns-dialog";
 import { RemoveFromCampaignsDialog } from "@/components/deliverability/remove-from-campaigns-dialog";
@@ -371,9 +371,56 @@ function ClientDomainsDialog({
   const attachDomainsRef = useRef<string[]>([]);
   const now = Date.now();
 
+  // Background tag + campaign combo state
+  interface JobItem { campaign: string; status: "pending" | "running" | "done" | "error"; newly: number; existing: number; error?: string }
+  interface TagCampaignJob { tagStatus: "running" | "done" | "error"; tagLabel: string; tagAffected?: number; tagError?: string; campaignJobs: JobItem[]; campaignsDone: boolean }
+  const [tagCampaignJob, setTagCampaignJob] = useState<TagCampaignJob | null>(null);
+
+  const startBackgroundTagCampaign = useCallback(async (info: TagApplyInfo) => {
+    const tagLabel = `${info.mode === "add" ? "Adding" : "Removing"} ${info.tagNames.join(", ")}`;
+    const campaignJobs: JobItem[] = info.campaigns.map((c) => ({ campaign: c.name, status: "pending" as const, newly: 0, existing: 0 }));
+    setTagCampaignJob({ tagStatus: "running", tagLabel, campaignJobs, campaignsDone: info.campaigns.length === 0 });
+    setSelectedDomains(new Set());
+
+    const tagPromise = fetch("/api/deliverability/bulk-tags", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: info.mode, tagIds: info.tagIds, domains: info.domains }),
+    }).then(async (res) => {
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Failed");
+      setTagCampaignJob((prev) => prev ? { ...prev, tagStatus: "done", tagAffected: data.inboxesAffected || 0 } : prev);
+    }).catch((err) => {
+      setTagCampaignJob((prev) => prev ? { ...prev, tagStatus: "error", tagError: err instanceof Error ? err.message : "Failed" } : prev);
+    });
+
+    const campaignPromise = (async () => {
+      for (let i = 0; i < info.campaigns.length; i++) {
+        const campaign = info.campaigns[i];
+        setTagCampaignJob((prev) => prev ? { ...prev, campaignJobs: prev.campaignJobs.map((j, idx) => idx === i ? { ...j, status: "running" } : j) } : prev);
+        try {
+          const res = await fetch("/api/deliverability/attach-domains-to-campaign", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ campaign_id: campaign.id, domains: info.domains }),
+          });
+          const data = await res.json();
+          if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+          setTagCampaignJob((prev) => prev ? { ...prev, campaignJobs: prev.campaignJobs.map((j, idx) => idx === i ? { ...j, status: "done", newly: data.newly_attached || 0, existing: data.already_attached || 0 } : j) } : prev);
+        } catch (err) {
+          setTagCampaignJob((prev) => prev ? { ...prev, campaignJobs: prev.campaignJobs.map((j, idx) => idx === i ? { ...j, status: "error", error: err instanceof Error ? err.message : "Failed" } : j) } : prev);
+        }
+      }
+      setTagCampaignJob((prev) => prev ? { ...prev, campaignsDone: true } : prev);
+    })();
+
+    await Promise.all([tagPromise, campaignPromise]);
+    onDomainsChanged();
+  }, [onDomainsChanged]);
+
   // Reset selection when dialog closes
   useEffect(() => {
-    if (!open) { setSelectedDomains(new Set()); setDomainSearch(""); }
+    if (!open) { setSelectedDomains(new Set()); setDomainSearch(""); setTagCampaignJob(null); }
   }, [open]);
 
   const filtered = useMemo(() => {
@@ -484,6 +531,33 @@ function ClientDomainsDialog({
           )}
 
           {/* Table */}
+          {/* Background tag + campaign progress */}
+          {tagCampaignJob && (
+            <div className="rounded-lg border bg-muted/30 px-3 py-2 mt-1">
+              <div className="space-y-1 max-h-32 overflow-y-auto">
+                <div className="flex items-center gap-2 text-xs">
+                  {tagCampaignJob.tagStatus === "running" && <Loader2 className="h-3 w-3 animate-spin text-primary shrink-0" />}
+                  {tagCampaignJob.tagStatus === "done" && <CheckCircle2 className="h-3 w-3 text-emerald-500 shrink-0" />}
+                  {tagCampaignJob.tagStatus === "error" && <AlertTriangle className="h-3 w-3 text-destructive shrink-0" />}
+                  <span className="text-muted-foreground">{tagCampaignJob.tagLabel}</span>
+                  {tagCampaignJob.tagStatus === "done" && <span className="shrink-0 ml-auto text-emerald-500">{tagCampaignJob.tagAffected} inboxes</span>}
+                  {tagCampaignJob.tagStatus === "error" && <span className="shrink-0 ml-auto text-destructive">{tagCampaignJob.tagError}</span>}
+                </div>
+                {tagCampaignJob.campaignJobs.map((job, i) => (
+                  <div key={i} className="flex items-center gap-2 text-xs">
+                    {job.status === "running" && <Loader2 className="h-3 w-3 animate-spin text-primary shrink-0" />}
+                    {job.status === "done" && <CheckCircle2 className="h-3 w-3 text-emerald-500 shrink-0" />}
+                    {job.status === "error" && <AlertTriangle className="h-3 w-3 text-destructive shrink-0" />}
+                    {job.status === "pending" && <div className="h-3 w-3 rounded-full border border-muted-foreground/30 shrink-0" />}
+                    <span className="truncate text-muted-foreground">{job.campaign}</span>
+                    {job.status === "done" && <span className="shrink-0 ml-auto text-emerald-500">+{job.newly} · {job.existing} existing</span>}
+                    {job.status === "error" && <span className="shrink-0 ml-auto text-destructive">{job.error}</span>}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
           <div className="flex-1 overflow-y-auto rounded-lg border mt-1">
             <table className="w-full table-fixed">
               <thead className="sticky top-0 z-10">
@@ -622,10 +696,7 @@ function ClientDomainsDialog({
                 })()
               : undefined
           }
-          onSuccess={() => {
-            onDomainsChanged();
-            setSelectedDomains(new Set());
-          }}
+          onApply={startBackgroundTagCampaign}
         />
       )}
 
