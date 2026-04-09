@@ -1,7 +1,7 @@
 "use client";
 
-import { use, useMemo, useState, useEffect, useCallback } from "react";
-import { ArrowLeft, Users, CheckCircle2, CalendarCheck, Sparkles, Clock, AlertTriangle, Globe, Mail, Loader2, X } from "lucide-react";
+import { use, useMemo, useState, useEffect, useCallback, useRef } from "react";
+import { ArrowLeft, Users, CheckCircle2, CalendarCheck, Sparkles, Clock, AlertTriangle, Globe, Check, Search, X } from "lucide-react";
 import Link from "next/link";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Badge } from "@/components/ui/badge";
@@ -10,13 +10,15 @@ import { useAllLeads } from "@/lib/hooks/use-leads";
 import { useSheets } from "@/lib/hooks/use-sheets";
 import { useClientTracker } from "@/lib/hooks/use-client-tracker";
 import { PageHeader } from "@/components/shared/page-header";
-import { StatCard } from "@/components/dashboard/stat-card";
-import { LeadsByStatusChart } from "@/components/dashboard/leads-by-status-chart";
 import { LeadsOverTimeChart } from "@/components/dashboard/leads-over-time-chart";
 import { DataTable } from "@/components/leads-table/data-table";
 import { columns } from "@/components/leads-table/columns";
 import { Button } from "@/components/ui/button";
+import { Card, CardContent } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
+import { BulkTagDialog } from "@/components/deliverability/bulk-tag-dialog";
+import { BulkDeleteDialog } from "@/components/deliverability/bulk-delete-dialog";
+import { AttachToCampaignsDialog } from "@/components/deliverability/attach-to-campaigns-dialog";
 import {
   Select,
   SelectContent,
@@ -25,6 +27,17 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { computeAnalytics } from "@/lib/analytics";
+
+interface DomainRow {
+  domain: string;
+  inbox_count: number;
+  tags?: string[];
+  total_sent?: number;
+  total_replied?: number;
+  total_bounced?: number;
+  outlook_count?: number;
+  google_count?: number;
+}
 
 export default function ClientDetailPage({
   params,
@@ -41,16 +54,6 @@ export default function ClientDetailPage({
   const [selectedSheetFilter, setSelectedSheetFilter] = useState<string>("all");
   const [showDomainsDialog, setShowDomainsDialog] = useState(false);
 
-  interface DomainRow {
-    domain: string;
-    inbox_count: number;
-    tags?: string[];
-    total_sent?: number;
-    total_replied?: number;
-    total_bounced?: number;
-    outlook_count?: number;
-    google_count?: number;
-  }
   const [domains, setDomains] = useState<DomainRow[]>([]);
   const [domainsLoading, setDomainsLoading] = useState(false);
 
@@ -91,13 +94,16 @@ export default function ClientDetailPage({
   useEffect(() => { loadDomains(); }, [loadDomains]);
 
   const domainStats = useMemo(() => {
-    let outlook = 0, google = 0, flagged = 0;
+    let outlookInboxes = 0, googleInboxes = 0, outlookDomains = 0, googleDomains = 0, flagged = 0;
     for (const d of domains) {
-      outlook += d.outlook_count || 0;
-      google += d.google_count || 0;
-      // Flagging logic
-      const isG = (d.google_count || 0) > 0 && (d.outlook_count || 0) === 0;
-      const isO = (d.outlook_count || 0) > 0 && (d.google_count || 0) === 0;
+      const ol = d.outlook_count || 0;
+      const g = d.google_count || 0;
+      outlookInboxes += ol;
+      googleInboxes += g;
+      if (ol > 0) outlookDomains++;
+      if (g > 0) googleDomains++;
+      const isG = g > 0 && ol === 0;
+      const isO = ol > 0 && g === 0;
       const sent = d.total_sent || 0;
       if ((isG || isO) && sent > 100) {
         const rr = (d.total_replied || 0) / sent;
@@ -105,7 +111,7 @@ export default function ClientDetailPage({
         if (rr < 0.01 || br > 0.03) flagged++;
       }
     }
-    return { total: domains.length, outlook, google, flagged };
+    return { total: domains.length, totalInboxes: domains.reduce((s, d) => s + d.inbox_count, 0), outlookDomains, outlookInboxes, googleDomains, googleInboxes, flagged };
   }, [domains]);
 
   // Get all sheets for this client tag
@@ -247,49 +253,35 @@ export default function ClientDetailPage({
 
       {analytics && (
         <>
-          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
-            <StatCard
-              title="Total Leads"
-              value={analytics.totalLeads.toLocaleString()}
-              icon={Users}
-            />
-            <StatCard
-              title="Quality Leads"
-              value={`${analytics.qualityLeadPercentage}%`}
-              subtitle={`${analytics.qualityLeads} of ${analytics.totalLeads}`}
-              icon={CheckCircle2}
-            />
-            <StatCard
-              title="Meeting-Ready"
-              value={analytics.meetingReadyLeads.toLocaleString()}
-              icon={CalendarCheck}
-            />
-            <StatCard
-              title="Interested"
-              value={analytics.interestedLeads.toLocaleString()}
-              icon={Sparkles}
-            />
-          </div>
+          {/* Stats Overview */}
+          <Card>
+            <CardContent className="p-0">
+              <div className="grid grid-cols-2 lg:grid-cols-3 xl:grid-cols-6 divide-x divide-y lg:divide-y-0">
+                {[
+                  { label: "Total Leads", value: analytics.totalLeads.toLocaleString(), icon: Users, sub: null },
+                  { label: "Quality Leads", value: `${analytics.qualityLeadPercentage}%`, icon: CheckCircle2, sub: `${analytics.qualityLeads} of ${analytics.totalLeads}` },
+                  { label: "Meeting-Ready", value: analytics.meetingReadyLeads.toLocaleString(), icon: CalendarCheck, sub: null },
+                  { label: "Interested", value: analytics.interestedLeads.toLocaleString(), icon: Sparkles, sub: null },
+                  { label: "Meeting-Ready (24h)", value: meetingReadyMetrics.last24h.toLocaleString(), icon: Clock, sub: "Past 24h (PST)" },
+                  { label: "Missing Status", value: meetingReadyMetrics.withoutStatus.toLocaleString(), icon: AlertTriangle, sub: "Without status" },
+                ].map((s) => (
+                  <div key={s.label} className="flex items-center gap-3 p-4">
+                    <div className="rounded-lg bg-muted p-2 shrink-0">
+                      <s.icon className="h-4 w-4 text-muted-foreground" />
+                    </div>
+                    <div className="min-w-0">
+                      <p className="text-[11px] text-muted-foreground truncate">{s.label}</p>
+                      <p className="text-xl font-bold tracking-tight">{s.value}</p>
+                      {s.sub && <p className="text-[10px] text-muted-foreground">{s.sub}</p>}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </CardContent>
+          </Card>
 
-          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-            <StatCard
-              title="Meeting-Ready (24h)"
-              value={meetingReadyMetrics.last24h.toLocaleString()}
-              subtitle="Delivered in past 24 hours (PST)"
-              icon={Clock}
-            />
-            <StatCard
-              title="Missing Status"
-              value={meetingReadyMetrics.withoutStatus.toLocaleString()}
-              subtitle="Meeting-ready leads without status"
-              icon={AlertTriangle}
-            />
-          </div>
-
-          <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-            <LeadsByStatusChart data={analytics.leadsByStatus} />
-            <LeadsOverTimeChart data={leadsOverTime} billingStartDate={billingStartDate} />
-          </div>
+          {/* Leads Over Time — full width */}
+          <LeadsOverTimeChart data={leadsOverTime} billingStartDate={billingStartDate} />
         </>
       )}
 
@@ -306,25 +298,25 @@ export default function ClientDetailPage({
               </div>
               <div>
                 <p className="text-sm font-medium">Domains</p>
-                <p className="text-xs text-muted-foreground">{domainStats.total} domains · Click to view details</p>
+                <p className="text-xs text-muted-foreground">{domainStats.total} domains · {domainStats.totalInboxes} inboxes · Click to manage</p>
               </div>
             </div>
-            <div className="flex items-center gap-4">
-              {domainStats.outlook > 0 && (
-                <div className="text-center">
-                  <p className="text-lg font-semibold text-blue-400">{domainStats.outlook}</p>
-                  <p className="text-[10px] text-muted-foreground">Outlook</p>
+            <div className="flex items-center gap-5">
+              {domainStats.outlookDomains > 0 && (
+                <div className="text-right">
+                  <p className="text-sm font-semibold text-blue-400">{domainStats.outlookDomains} <span className="text-[10px] font-normal text-muted-foreground">domains</span></p>
+                  <p className="text-[10px] text-muted-foreground">{domainStats.outlookInboxes} Outlook inboxes</p>
                 </div>
               )}
-              {domainStats.google > 0 && (
-                <div className="text-center">
-                  <p className="text-lg font-semibold text-red-400">{domainStats.google}</p>
-                  <p className="text-[10px] text-muted-foreground">Google</p>
+              {domainStats.googleDomains > 0 && (
+                <div className="text-right">
+                  <p className="text-sm font-semibold text-red-400">{domainStats.googleDomains} <span className="text-[10px] font-normal text-muted-foreground">domains</span></p>
+                  <p className="text-[10px] text-muted-foreground">{domainStats.googleInboxes} Google inboxes</p>
                 </div>
               )}
               {domainStats.flagged > 0 && (
-                <div className="text-center">
-                  <p className="text-lg font-semibold text-destructive">{domainStats.flagged}</p>
+                <div className="text-right">
+                  <p className="text-sm font-semibold text-destructive">{domainStats.flagged}</p>
                   <p className="text-[10px] text-muted-foreground">Flagged</p>
                 </div>
               )}
@@ -333,22 +325,122 @@ export default function ClientDetailPage({
         </button>
       )}
 
-      {/* Domains Dialog */}
-      <Dialog open={showDomainsDialog} onOpenChange={setShowDomainsDialog}>
+      {/* Domains Dialog — with bulk actions */}
+      <ClientDomainsDialog
+        open={showDomainsDialog}
+        onOpenChange={setShowDomainsDialog}
+        clientTag={clientTag}
+        domains={domains}
+        domainStats={domainStats}
+        onDomainsChanged={loadDomains}
+      />
+
+      <div>
+        <h2 className="text-lg font-semibold mb-4">All Leads</h2>
+        <DataTable columns={columns} data={clientLeads} hideClientFilter />
+      </div>
+    </div>
+  );
+}
+
+// ─── Client Domains Dialog with bulk actions ────────────────────────────────
+
+function ClientDomainsDialog({
+  open,
+  onOpenChange,
+  clientTag,
+  domains,
+  domainStats,
+  onDomainsChanged,
+}: {
+  open: boolean;
+  onOpenChange: (v: boolean) => void;
+  clientTag: string;
+  domains: DomainRow[];
+  domainStats: { total: number; totalInboxes: number; outlookDomains: number; outlookInboxes: number; googleDomains: number; googleInboxes: number; flagged: number };
+  onDomainsChanged: () => void;
+}) {
+  const [selectedDomains, setSelectedDomains] = useState<Set<string>>(new Set());
+  const [domainSearch, setDomainSearch] = useState("");
+  const [bulkTagMode, setBulkTagMode] = useState<"add" | "remove" | null>(null);
+  const [showBulkDelete, setShowBulkDelete] = useState(false);
+  const [showAttachCampaigns, setShowAttachCampaigns] = useState(false);
+  const attachDomainsRef = useRef<string[]>([]);
+
+  // Reset selection when dialog closes
+  useEffect(() => {
+    if (!open) { setSelectedDomains(new Set()); setDomainSearch(""); }
+  }, [open]);
+
+  const filtered = useMemo(() => {
+    if (!domainSearch) return domains;
+    const q = domainSearch.toLowerCase();
+    return domains.filter((d) => d.domain.toLowerCase().includes(q));
+  }, [domains, domainSearch]);
+
+  const getFlagReasons = (d: DomainRow) => {
+    const isG = (d.google_count || 0) > 0 && (d.outlook_count || 0) === 0;
+    const isO = (d.outlook_count || 0) > 0 && (d.google_count || 0) === 0;
+    const sent = d.total_sent || 0;
+    const reasons: string[] = [];
+    if ((isG || isO) && sent > 100) {
+      if ((d.total_replied || 0) / sent < 0.01) reasons.push("Low replies");
+      if ((d.total_bounced || 0) / sent > 0.03) reasons.push("High bounces");
+    }
+    return reasons;
+  };
+
+  const allSelected = filtered.length > 0 && filtered.every((d) => selectedDomains.has(d.domain));
+
+  const toggleAll = () => {
+    if (allSelected) setSelectedDomains(new Set());
+    else setSelectedDomains(new Set(filtered.map((d) => d.domain)));
+  };
+
+  const toggleDomain = (domain: string) => {
+    setSelectedDomains((prev) => {
+      const next = new Set(prev);
+      if (next.has(domain)) next.delete(domain);
+      else next.add(domain);
+      return next;
+    });
+  };
+
+  const startBackgroundAttach = useCallback(async (campaigns: { id: number; name: string }[], domainsList: string[]) => {
+    attachDomainsRef.current = domainsList;
+    setSelectedDomains(new Set());
+    for (const campaign of campaigns) {
+      for (let attempt = 1; attempt <= 3; attempt++) {
+        try {
+          const res = await fetch("/api/deliverability/attach-domains-to-campaign", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ campaign_id: campaign.id, domains: attachDomainsRef.current }),
+          });
+          if (res.ok) break;
+        } catch { /* retry */ }
+        if (attempt < 3) await new Promise((r) => setTimeout(r, 3000));
+      }
+    }
+  }, []);
+
+  return (
+    <>
+      <Dialog open={open} onOpenChange={onOpenChange}>
         <DialogContent className="sm:!max-w-[90vw] lg:!max-w-[80vw] max-h-[85vh] flex flex-col">
           <DialogHeader className="shrink-0">
             <DialogTitle className="text-lg">{clientTag} — {domainStats.total} Domains</DialogTitle>
             <div className="flex gap-4 mt-2">
-              {domainStats.outlook > 0 && (
+              {domainStats.outlookDomains > 0 && (
                 <div className="flex items-center gap-1.5">
                   <div className="h-2 w-2 rounded-full bg-blue-400" />
-                  <span className="text-xs text-muted-foreground">{domainStats.outlook} Outlook</span>
+                  <span className="text-xs text-muted-foreground">{domainStats.outlookDomains} Outlook domains · {domainStats.outlookInboxes} inboxes</span>
                 </div>
               )}
-              {domainStats.google > 0 && (
+              {domainStats.googleDomains > 0 && (
                 <div className="flex items-center gap-1.5">
                   <div className="h-2 w-2 rounded-full bg-red-400" />
-                  <span className="text-xs text-muted-foreground">{domainStats.google} Google</span>
+                  <span className="text-xs text-muted-foreground">{domainStats.googleDomains} Google domains · {domainStats.googleInboxes} inboxes</span>
                 </div>
               )}
               {domainStats.flagged > 0 && (
@@ -360,12 +452,49 @@ export default function ClientDetailPage({
             </div>
           </DialogHeader>
 
-          <div className="flex-1 overflow-y-auto rounded-lg border mt-3">
+          {/* Search */}
+          <div className="flex items-center gap-2 rounded-lg border bg-background px-3 py-1.5 mt-2">
+            <Search className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
+            <input
+              value={domainSearch}
+              onChange={(e) => setDomainSearch(e.target.value)}
+              placeholder="Search domains..."
+              className="flex-1 text-sm bg-transparent outline-none placeholder:text-muted-foreground"
+            />
+            {domainSearch && <button onClick={() => setDomainSearch("")}><X className="h-3 w-3 text-muted-foreground hover:text-foreground" /></button>}
+          </div>
+
+          {/* Bulk action bar */}
+          {selectedDomains.size > 0 && (
+            <div className="flex items-center gap-3 rounded-xl border bg-muted/50 px-4 py-2.5 mt-1">
+              <span className="text-xs font-medium">{selectedDomains.size} domain{selectedDomains.size !== 1 ? "s" : ""} selected</span>
+              <div className="flex items-center gap-2 ml-auto">
+                <Button size="sm" variant="outline" className="h-7 text-xs gap-1.5" onClick={() => setBulkTagMode("add")}>+ Add Tags</Button>
+                <Button size="sm" variant="outline" className="h-7 text-xs gap-1.5" onClick={() => setShowAttachCampaigns(true)}>Attach to Campaigns</Button>
+                <Button size="sm" variant="outline" className="h-7 text-xs gap-1.5 text-destructive hover:text-destructive" onClick={() => setBulkTagMode("remove")}>− Remove Tags</Button>
+                <Button size="sm" variant="destructive" className="h-7 text-xs gap-1.5" onClick={() => setShowBulkDelete(true)}>Delete</Button>
+                <Button size="sm" variant="ghost" className="h-7 text-xs" onClick={() => setSelectedDomains(new Set())}>Clear</Button>
+              </div>
+            </div>
+          )}
+
+          {/* Table */}
+          <div className="flex-1 overflow-y-auto rounded-lg border mt-1">
             <table className="w-full table-fixed">
               <thead className="sticky top-0 z-10">
                 <tr className="bg-muted/50 border-b text-[11px] text-muted-foreground">
-                  <th className="text-left font-medium px-5 py-2.5 w-[30%]">Domain</th>
-                  <th className="text-left font-medium px-3 py-2.5 w-[30%]">Tags</th>
+                  <th className="w-[32px] px-3 py-2.5">
+                    <button
+                      onClick={toggleAll}
+                      className={`h-4 w-4 rounded border flex items-center justify-center transition-colors ${
+                        allSelected ? "bg-primary border-primary text-primary-foreground" : "border-muted-foreground/30 hover:border-foreground"
+                      }`}
+                    >
+                      {allSelected && <Check className="h-3 w-3" />}
+                    </button>
+                  </th>
+                  <th className="text-left font-medium px-3 py-2.5 w-[28%]">Domain</th>
+                  <th className="text-left font-medium px-3 py-2.5 w-[22%]">Tags</th>
                   <th className="text-center font-medium px-3 py-2.5 w-[10%]">Inboxes</th>
                   <th className="text-center font-medium px-3 py-2.5 w-[10%]">Sent</th>
                   <th className="text-center font-medium px-3 py-2.5 w-[10%]">Replied</th>
@@ -373,34 +502,37 @@ export default function ClientDetailPage({
                 </tr>
               </thead>
               <tbody className="divide-y">
-                {domains.map((d) => {
-                  const isG = (d.google_count || 0) > 0 && (d.outlook_count || 0) === 0;
-                  const isO = (d.outlook_count || 0) > 0 && (d.google_count || 0) === 0;
+                {filtered.map((d) => {
+                  const flagReasons = getFlagReasons(d);
+                  const isFlagged = flagReasons.length > 0;
+                  const isSelected = selectedDomains.has(d.domain);
                   const totalSent = d.total_sent || 0;
-                  const hasSent = totalSent > 100;
                   const replyRate = totalSent > 0 ? ((d.total_replied || 0) / totalSent * 100).toFixed(1) : "0";
                   const bounceRate = totalSent > 0 ? ((d.total_bounced || 0) / totalSent * 100).toFixed(1) : "0";
-                  const replyRateNum = totalSent > 0 ? (d.total_replied || 0) / totalSent : 0;
-                  const bounceRateNum = totalSent > 0 ? (d.total_bounced || 0) / totalSent : 0;
-                  const flagReasons: string[] = [];
-                  if ((isG || isO) && hasSent) {
-                    if (replyRateNum < 0.01) flagReasons.push("Low replies");
-                    if (bounceRateNum > 0.03) flagReasons.push("High bounces");
-                  }
-                  const isFlagged = flagReasons.length > 0;
 
                   return (
-                    <tr key={d.domain} className={`${isFlagged ? "bg-destructive/5" : "hover:bg-muted/30"} transition-colors`}>
-                      <td className="px-5 py-3">
+                    <tr
+                      key={d.domain}
+                      className={`transition-colors cursor-pointer ${
+                        isSelected ? "bg-primary/5" : isFlagged ? "bg-destructive/5" : "hover:bg-muted/30"
+                      }`}
+                      onClick={() => toggleDomain(d.domain)}
+                    >
+                      <td className="px-3 py-3">
+                        <div className={`h-4 w-4 rounded border flex items-center justify-center transition-colors ${
+                          isSelected ? "bg-primary border-primary text-primary-foreground" : "border-muted-foreground/30"
+                        }`}>
+                          {isSelected && <Check className="h-3 w-3" />}
+                        </div>
+                      </td>
+                      <td className="px-3 py-3">
                         <div className="flex items-center gap-2">
                           <Globe className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
-                          <span className="text-sm font-medium">{d.domain}</span>
+                          <span className="text-sm font-medium truncate">{d.domain}</span>
                           {isFlagged && (
                             <Tooltip>
                               <TooltipTrigger asChild>
-                                <span className="shrink-0 cursor-help">
-                                  <AlertTriangle className="h-3.5 w-3.5 text-destructive" />
-                                </span>
+                                <span className="shrink-0 cursor-help"><AlertTriangle className="h-3.5 w-3.5 text-destructive" /></span>
                               </TooltipTrigger>
                               <TooltipContent side="right" className="bg-destructive/95 text-destructive-foreground border-destructive/50 text-xs">
                                 {flagReasons.join(" · ")}
@@ -411,9 +543,10 @@ export default function ClientDetailPage({
                       </td>
                       <td className="px-3 py-3">
                         <div className="flex gap-1 flex-wrap">
-                          {d.tags?.map((t) => (
+                          {d.tags?.slice(0, 3).map((t) => (
                             <span key={t} className="text-[10px] bg-muted px-1.5 py-0.5 rounded text-muted-foreground">{t}</span>
                           ))}
+                          {d.tags && d.tags.length > 3 && <span className="text-[10px] text-muted-foreground">+{d.tags.length - 3}</span>}
                         </div>
                       </td>
                       <td className="text-center px-3 py-3">
@@ -445,10 +578,55 @@ export default function ClientDetailPage({
         </DialogContent>
       </Dialog>
 
-      <div>
-        <h2 className="text-lg font-semibold mb-4">All Leads</h2>
-        <DataTable columns={columns} data={clientLeads} hideClientFilter />
-      </div>
-    </div>
+      {/* Bulk Tag Dialog */}
+      {bulkTagMode && (
+        <BulkTagDialog
+          mode={bulkTagMode}
+          open={!!bulkTagMode}
+          onOpenChange={(v) => { if (!v) setBulkTagMode(null); }}
+          selectedDomains={Array.from(selectedDomains)}
+          availableTags={
+            bulkTagMode === "remove"
+              ? (() => {
+                  const tagMap = new Map<string, { id: number; name: string }>();
+                  for (const d of domains) {
+                    if (selectedDomains.has(d.domain) && d.tags) {
+                      for (const tagName of d.tags) {
+                        if (!tagMap.has(tagName)) tagMap.set(tagName, { id: 0, name: tagName });
+                      }
+                    }
+                  }
+                  return Array.from(tagMap.values());
+                })()
+              : undefined
+          }
+          onSuccess={() => {
+            onDomainsChanged();
+            setSelectedDomains(new Set());
+          }}
+        />
+      )}
+
+      {/* Bulk Delete Dialog */}
+      <BulkDeleteDialog
+        open={showBulkDelete}
+        onOpenChange={setShowBulkDelete}
+        selectedDomains={domains
+          .filter((d) => selectedDomains.has(d.domain))
+          .map((d) => ({ domain: d.domain, inbox_count: d.inbox_count }))}
+        onSuccess={() => {
+          onDomainsChanged();
+          setSelectedDomains(new Set());
+        }}
+      />
+
+      {/* Attach to Campaigns Dialog */}
+      <AttachToCampaignsDialog
+        open={showAttachCampaigns}
+        onOpenChange={setShowAttachCampaigns}
+        selectedDomains={Array.from(selectedDomains)}
+        onAttach={startBackgroundAttach}
+      />
+    </>
   );
 }
