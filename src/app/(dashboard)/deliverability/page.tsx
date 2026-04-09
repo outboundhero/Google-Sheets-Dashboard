@@ -524,7 +524,7 @@ function DeliverabilityPageInner() {
         })
         .filter((d) => {
           if (tagFilters.length === 0) return true;
-          return d.tags && tagFilters.some((tag) => d.tags!.includes(tag));
+          return d.tags && tagFilters.every((tag) => d.tags!.includes(tag));
         }),
     [domains, warmupFilter, warmupSearch, showReserve, warmupTypeFilter, tagFilters, isDomainReserve, now]
   );
@@ -567,7 +567,7 @@ function DeliverabilityPageInner() {
     let result = domains;
     if (tagFilters.length > 0) {
       result = result.filter((d) =>
-        d.tags && tagFilters.some((tag) => d.tags!.includes(tag))
+        d.tags && tagFilters.every((tag) => d.tags!.includes(tag))
       );
     }
     if (domainSearch) {
