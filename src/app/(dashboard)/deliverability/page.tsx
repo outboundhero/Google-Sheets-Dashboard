@@ -210,8 +210,10 @@ function DeliverabilityPageInner() {
     tagError?: string;
     campaignJobs: AttachJob[];
     campaignsDone: boolean;
+    domains: string[];
   }
   const [tagCampaignJob, setTagCampaignJob] = useState<TagCampaignJob | null>(null);
+  const [domainsCopied, setDomainsCopied] = useState(false);
 
 
   const startBackgroundAttach = useCallback(async (campaigns: { id: number; name: string }[], domains: string[]) => {
@@ -298,8 +300,9 @@ function DeliverabilityPageInner() {
   const startBackgroundTagCampaign = useCallback(async (info: TagApplyInfo) => {
     const tagLabel = `${info.mode === "add" ? "Adding" : "Removing"} ${info.tagNames.join(", ")}`;
     const campaignJobs: AttachJob[] = info.campaigns.map((c) => ({ campaign: c.name, status: "pending" as const, newly: 0, existing: 0 }));
-    setTagCampaignJob({ tagStatus: "running", tagLabel, campaignJobs, campaignsDone: info.campaigns.length === 0 });
+    setTagCampaignJob({ tagStatus: "running", tagLabel, campaignJobs, campaignsDone: info.campaigns.length === 0, domains: info.domains });
     setSelectedDomains(new Set());
+    setDomainsCopied(false);
 
     // Run tags + campaigns in parallel
     const tagPromise = fetch("/api/deliverability/bulk-tags", {
@@ -747,7 +750,19 @@ function DeliverabilityPageInner() {
               </span>
             </div>
             {tagCampaignJob.tagStatus !== "running" && tagCampaignJob.campaignsDone && (
-              <button onClick={() => setTagCampaignJob(null)} className="text-xs text-muted-foreground hover:text-foreground">Dismiss</button>
+              <div className="flex items-center gap-3">
+                <button
+                  onClick={() => {
+                    navigator.clipboard.writeText(tagCampaignJob.domains.join("\n"));
+                    setDomainsCopied(true);
+                    setTimeout(() => setDomainsCopied(false), 2000);
+                  }}
+                  className="text-xs text-primary hover:underline"
+                >
+                  {domainsCopied ? "Copied!" : "Copy Domains"}
+                </button>
+                <button onClick={() => setTagCampaignJob(null)} className="text-xs text-muted-foreground hover:text-foreground">Dismiss</button>
+              </div>
             )}
           </div>
           <div className="space-y-1 max-h-40 overflow-y-auto">

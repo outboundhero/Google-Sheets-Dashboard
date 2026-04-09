@@ -373,14 +373,16 @@ function ClientDomainsDialog({
 
   // Background tag + campaign combo state
   interface JobItem { campaign: string; status: "pending" | "running" | "done" | "error"; newly: number; existing: number; error?: string }
-  interface TagCampaignJob { tagStatus: "running" | "done" | "error"; tagLabel: string; tagAffected?: number; tagError?: string; campaignJobs: JobItem[]; campaignsDone: boolean }
+  interface TagCampaignJob { tagStatus: "running" | "done" | "error"; tagLabel: string; tagAffected?: number; tagError?: string; campaignJobs: JobItem[]; campaignsDone: boolean; domains: string[] }
   const [tagCampaignJob, setTagCampaignJob] = useState<TagCampaignJob | null>(null);
+  const [domainsCopied, setDomainsCopied] = useState(false);
 
   const startBackgroundTagCampaign = useCallback(async (info: TagApplyInfo) => {
     const tagLabel = `${info.mode === "add" ? "Adding" : "Removing"} ${info.tagNames.join(", ")}`;
     const campaignJobs: JobItem[] = info.campaigns.map((c) => ({ campaign: c.name, status: "pending" as const, newly: 0, existing: 0 }));
-    setTagCampaignJob({ tagStatus: "running", tagLabel, campaignJobs, campaignsDone: info.campaigns.length === 0 });
+    setTagCampaignJob({ tagStatus: "running", tagLabel, campaignJobs, campaignsDone: info.campaigns.length === 0, domains: info.domains });
     setSelectedDomains(new Set());
+    setDomainsCopied(false);
 
     const tagPromise = fetch("/api/deliverability/bulk-tags", {
       method: "POST",
@@ -534,6 +536,28 @@ function ClientDomainsDialog({
           {/* Background tag + campaign progress */}
           {tagCampaignJob && (
             <div className="rounded-lg border bg-muted/30 px-3 py-2 mt-1">
+              <div className="flex items-center justify-between mb-1">
+                <div className="flex items-center gap-2 text-xs">
+                  {(tagCampaignJob.tagStatus === "running" || !tagCampaignJob.campaignsDone) && <Loader2 className="h-3 w-3 animate-spin text-primary shrink-0" />}
+                  {tagCampaignJob.tagStatus !== "running" && tagCampaignJob.campaignsDone && <CheckCircle2 className="h-3 w-3 text-emerald-500 shrink-0" />}
+                  <span className="font-medium">{tagCampaignJob.tagStatus === "running" || !tagCampaignJob.campaignsDone ? "Processing..." : "Complete"}</span>
+                </div>
+                {tagCampaignJob.tagStatus !== "running" && tagCampaignJob.campaignsDone && (
+                  <div className="flex items-center gap-3">
+                    <button
+                      onClick={() => {
+                        navigator.clipboard.writeText(tagCampaignJob.domains.join("\n"));
+                        setDomainsCopied(true);
+                        setTimeout(() => setDomainsCopied(false), 2000);
+                      }}
+                      className="text-[10px] text-primary hover:underline"
+                    >
+                      {domainsCopied ? "Copied!" : "Copy Domains"}
+                    </button>
+                    <button onClick={() => setTagCampaignJob(null)} className="text-[10px] text-muted-foreground hover:text-foreground">Dismiss</button>
+                  </div>
+                )}
+              </div>
               <div className="space-y-1 max-h-32 overflow-y-auto">
                 <div className="flex items-center gap-2 text-xs">
                   {tagCampaignJob.tagStatus === "running" && <Loader2 className="h-3 w-3 animate-spin text-primary shrink-0" />}
