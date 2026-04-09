@@ -1,7 +1,7 @@
 "use client";
 
 import { use, useMemo, useState, useEffect, useCallback, useRef } from "react";
-import { ArrowLeft, Users, CheckCircle2, CalendarCheck, Sparkles, Clock, AlertTriangle, Globe, Check, Search, X } from "lucide-react";
+import { ArrowLeft, Users, CheckCircle2, CalendarCheck, Sparkles, Clock, AlertTriangle, Globe, Check, Search, X, Loader2 } from "lucide-react";
 import Link from "next/link";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Badge } from "@/components/ui/badge";
@@ -600,6 +600,13 @@ function ClientDomainsDialog({
           open={!!bulkTagMode}
           onOpenChange={(v) => { if (!v) setBulkTagMode(null); }}
           selectedDomains={Array.from(selectedDomains)}
+          existingTags={(() => {
+            const tagSet = new Set<string>();
+            for (const d of domains) {
+              if (selectedDomains.has(d.domain) && d.tags) d.tags.forEach((t) => tagSet.add(t));
+            }
+            return Array.from(tagSet);
+          })()}
           availableTags={
             bulkTagMode === "remove"
               ? (() => {

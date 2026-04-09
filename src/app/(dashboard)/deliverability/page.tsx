@@ -202,6 +202,7 @@ function DeliverabilityPageInner() {
   const [attachRunning, setAttachRunning] = useState(false);
   const attachDomainsRef = useRef<string[]>([]);
 
+
   const startBackgroundAttach = useCallback(async (campaigns: { id: number; name: string }[], domains: string[]) => {
     attachDomainsRef.current = domains;
     const jobs: AttachJob[] = campaigns.map((c) => ({ campaign: c.name, status: "pending" as const, newly: 0, existing: 0 }));
@@ -1389,18 +1390,23 @@ function DeliverabilityPageInner() {
           open={!!bulkTagMode}
           onOpenChange={(open) => { if (!open) setBulkTagMode(null); }}
           selectedDomains={Array.from(selectedDomains)}
+          existingTags={(() => {
+            const tagSet = new Set<string>();
+            for (const domain of selectedDomains) {
+              const d = domains.find((dd) => dd.domain === domain);
+              if (d?.tags) d.tags.forEach((t) => tagSet.add(t));
+            }
+            return Array.from(tagSet);
+          })()}
           availableTags={
             bulkTagMode === "remove"
               ? (() => {
-                  // Collect all unique tags from selected domains
                   const tagMap = new Map<string, { id: number; name: string }>();
                   for (const domain of selectedDomains) {
                     const d = domains.find((dd) => dd.domain === domain);
                     if (d?.tags) {
                       for (const tagName of d.tags) {
-                        if (!tagMap.has(tagName)) {
-                          tagMap.set(tagName, { id: 0, name: tagName });
-                        }
+                        if (!tagMap.has(tagName)) tagMap.set(tagName, { id: 0, name: tagName });
                       }
                     }
                   }
