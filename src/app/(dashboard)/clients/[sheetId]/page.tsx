@@ -19,6 +19,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { BulkTagDialog } from "@/components/deliverability/bulk-tag-dialog";
 import { BulkDeleteDialog } from "@/components/deliverability/bulk-delete-dialog";
 import { AttachToCampaignsDialog } from "@/components/deliverability/attach-to-campaigns-dialog";
+import { RemoveFromCampaignsDialog } from "@/components/deliverability/remove-from-campaigns-dialog";
 import {
   Select,
   SelectContent,
@@ -31,6 +32,7 @@ import { computeAnalytics } from "@/lib/analytics";
 interface DomainRow {
   domain: string;
   inbox_count: number;
+  domain_created_at?: string | null;
   tags?: string[];
   total_sent?: number;
   total_replied?: number;
@@ -365,7 +367,9 @@ function ClientDomainsDialog({
   const [bulkTagMode, setBulkTagMode] = useState<"add" | "remove" | null>(null);
   const [showBulkDelete, setShowBulkDelete] = useState(false);
   const [showAttachCampaigns, setShowAttachCampaigns] = useState(false);
+  const [showRemoveFromCampaigns, setShowRemoveFromCampaigns] = useState(false);
   const attachDomainsRef = useRef<string[]>([]);
+  const now = Date.now();
 
   // Reset selection when dialog closes
   useEffect(() => {
@@ -471,6 +475,7 @@ function ClientDomainsDialog({
               <div className="flex items-center gap-2 ml-auto">
                 <Button size="sm" variant="outline" className="h-7 text-xs gap-1.5" onClick={() => setBulkTagMode("add")}>+ Add Tags</Button>
                 <Button size="sm" variant="outline" className="h-7 text-xs gap-1.5" onClick={() => setShowAttachCampaigns(true)}>Attach to Campaigns</Button>
+                <Button size="sm" variant="outline" className="h-7 text-xs gap-1.5 text-amber-500 hover:text-amber-500" onClick={() => setShowRemoveFromCampaigns(true)}>Remove from Campaigns</Button>
                 <Button size="sm" variant="outline" className="h-7 text-xs gap-1.5 text-destructive hover:text-destructive" onClick={() => setBulkTagMode("remove")}>− Remove Tags</Button>
                 <Button size="sm" variant="destructive" className="h-7 text-xs gap-1.5" onClick={() => setShowBulkDelete(true)}>Delete</Button>
                 <Button size="sm" variant="ghost" className="h-7 text-xs" onClick={() => setSelectedDomains(new Set())}>Clear</Button>
@@ -493,12 +498,13 @@ function ClientDomainsDialog({
                       {allSelected && <Check className="h-3 w-3" />}
                     </button>
                   </th>
-                  <th className="text-left font-medium px-3 py-2.5 w-[28%]">Domain</th>
-                  <th className="text-left font-medium px-3 py-2.5 w-[22%]">Tags</th>
-                  <th className="text-center font-medium px-3 py-2.5 w-[10%]">Inboxes</th>
-                  <th className="text-center font-medium px-3 py-2.5 w-[10%]">Sent</th>
-                  <th className="text-center font-medium px-3 py-2.5 w-[10%]">Replied</th>
-                  <th className="text-center font-medium px-3 py-2.5 w-[10%]">Bounced</th>
+                  <th className="text-left font-medium px-3 py-2.5 w-[25%]">Domain</th>
+                  <th className="text-left font-medium px-3 py-2.5 w-[18%]">Tags</th>
+                  <th className="text-center font-medium px-3 py-2.5 w-[8%]">Inboxes</th>
+                  <th className="text-center font-medium px-3 py-2.5 w-[9%]">Sent</th>
+                  <th className="text-center font-medium px-3 py-2.5 w-[9%]">Replied</th>
+                  <th className="text-center font-medium px-3 py-2.5 w-[9%]">Bounced</th>
+                  <th className="text-center font-medium px-3 py-2.5 w-[9%]">Warmup</th>
                 </tr>
               </thead>
               <tbody className="divide-y">
@@ -509,6 +515,8 @@ function ClientDomainsDialog({
                   const totalSent = d.total_sent || 0;
                   const replyRate = totalSent > 0 ? ((d.total_replied || 0) / totalSent * 100).toFixed(1) : "0";
                   const bounceRate = totalSent > 0 ? ((d.total_bounced || 0) / totalSent * 100).toFixed(1) : "0";
+                  const daysOld = d.domain_created_at ? Math.floor((now - new Date(d.domain_created_at).getTime()) / 86400000) : 0;
+                  const warmupDaysLeft = Math.max(0, 21 - daysOld);
 
                   return (
                     <tr
@@ -569,6 +577,13 @@ function ClientDomainsDialog({
                         </span>
                         <p className="text-[10px] text-muted-foreground">{bounceRate}%</p>
                       </td>
+                      <td className="text-center px-3 py-3">
+                        {warmupDaysLeft > 0 ? (
+                          <Badge className="bg-amber-500/15 text-amber-400 border-amber-500/30 text-[10px]">{warmupDaysLeft}d left</Badge>
+                        ) : (
+                          <Badge className="bg-emerald-500/15 text-emerald-400 border-emerald-500/30 text-[10px]">Complete</Badge>
+                        )}
+                      </td>
                     </tr>
                   );
                 })}
@@ -626,6 +641,14 @@ function ClientDomainsDialog({
         onOpenChange={setShowAttachCampaigns}
         selectedDomains={Array.from(selectedDomains)}
         onAttach={startBackgroundAttach}
+      />
+
+      {/* Remove from Campaigns Dialog */}
+      <RemoveFromCampaignsDialog
+        open={showRemoveFromCampaigns}
+        onOpenChange={setShowRemoveFromCampaigns}
+        selectedDomains={Array.from(selectedDomains)}
+        onComplete={() => setSelectedDomains(new Set())}
       />
     </>
   );

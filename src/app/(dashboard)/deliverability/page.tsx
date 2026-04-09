@@ -26,6 +26,7 @@ import { AttachCampaignsDialog } from "@/components/deliverability/attach-campai
 import { BulkTagDialog } from "@/components/deliverability/bulk-tag-dialog";
 import { BulkDeleteDialog } from "@/components/deliverability/bulk-delete-dialog";
 import { AttachToCampaignsDialog } from "@/components/deliverability/attach-to-campaigns-dialog";
+import { RemoveFromCampaignsDialog } from "@/components/deliverability/remove-from-campaigns-dialog";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip";
 
@@ -193,6 +194,7 @@ function DeliverabilityPageInner() {
   const [bulkTagMode, setBulkTagMode] = useState<"add" | "remove" | null>(null);
   const [showBulkDelete, setShowBulkDelete] = useState(false);
   const [showAttachCampaigns, setShowAttachCampaigns] = useState(false);
+  const [showRemoveFromCampaigns, setShowRemoveFromCampaigns] = useState(false);
 
   // Background attach state
   interface AttachJob { campaign: string; status: "pending" | "running" | "done" | "error"; newly: number; existing: number; error?: string }
@@ -921,6 +923,14 @@ function DeliverabilityPageInner() {
                     <Button
                       size="sm"
                       variant="outline"
+                      className="h-7 text-xs gap-1.5 text-amber-500 hover:text-amber-500"
+                      onClick={() => setShowRemoveFromCampaigns(true)}
+                    >
+                      Remove from Campaigns
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="outline"
                       className="h-7 text-xs gap-1.5 text-destructive hover:text-destructive"
                       onClick={() => setBulkTagMode("remove")}
                     >
@@ -1427,6 +1437,14 @@ function DeliverabilityPageInner() {
         onOpenChange={setShowAttachCampaigns}
         selectedDomains={Array.from(selectedDomains)}
         onAttach={startBackgroundAttach}
+      />
+
+      {/* Remove from Campaigns Dialog */}
+      <RemoveFromCampaignsDialog
+        open={showRemoveFromCampaigns}
+        onOpenChange={setShowRemoveFromCampaigns}
+        selectedDomains={Array.from(selectedDomains)}
+        onComplete={() => setSelectedDomains(new Set())}
       />
     </div>
   );
