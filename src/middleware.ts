@@ -11,7 +11,9 @@ const VIEWER_API_GETS = [
   "/api/client-tracker",
   "/api/deliverability/domains",
   "/api/deliverability/tags",
+  "/api/deliverability/bulk-tags",
   "/api/client-tags",
+  "/api/campaigns",
 ];
 
 export async function middleware(request: NextRequest) {
@@ -35,7 +37,12 @@ export async function middleware(request: NextRequest) {
   const { supabase, response } = createMiddlewareSupabaseClient(request);
 
   // Get authenticated user
-  const { data: { user } } = await supabase.auth.getUser();
+  const { data: { user }, error: authError } = await supabase.auth.getUser();
+
+  // Auth error: log but don't block (session may have expired)
+  if (authError) {
+    console.error("[MIDDLEWARE] Auth error:", authError.message, "path:", pathname);
+  }
 
   // Login page: redirect to dashboard if already authenticated
   if (pathname === "/login") {
@@ -48,15 +55,18 @@ export async function middleware(request: NextRequest) {
     return response;
   }
 
-  // Not authenticated: redirect to login
+  // Not authenticated: redirect to login (but not for API routes — return 401)
   if (!user) {
+    if (pathname.startsWith("/api/")) {
+      return NextResponse.json({ error: "Unauthorized", authError: authError?.message }, { status: 401 });
+    }
     const url = request.nextUrl.clone();
     url.pathname = "/login";
     return NextResponse.redirect(url);
   }
 
-  // Check role
-  const role = user.app_metadata?.role || "viewer";
+  // Check role from app_metadata, fall back to profiles table role
+  const role = user.app_metadata?.role || user.user_metadata?.role || "viewer";
 
   // Admin: allow everything
   if (role === "admin") {
