@@ -1,7 +1,7 @@
 "use client";
 
 import { use, useMemo, useState, useEffect, useCallback, useRef } from "react";
-import { ArrowLeft, Users, CheckCircle2, CalendarCheck, Sparkles, Clock, AlertTriangle, Globe, Check, Search, X, Loader2 } from "lucide-react";
+import { ArrowLeft, Users, CheckCircle2, CalendarCheck, Sparkles, Clock, AlertTriangle, Globe, Check, Search, X, Loader2, Download, Copy } from "lucide-react";
 import Link from "next/link";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Badge } from "@/components/ui/badge";
@@ -376,6 +376,62 @@ function ClientDomainsDialog({
   interface TagCampaignJob { tagStatus: "running" | "done" | "error"; tagLabel: string; tagAffected?: number; tagError?: string; campaignJobs: JobItem[]; campaignsDone: boolean; domains: string[] }
   const [tagCampaignJob, setTagCampaignJob] = useState<TagCampaignJob | null>(null);
   const [domainsCopied, setDomainsCopied] = useState(false);
+  const [showExportMenu, setShowExportMenu] = useState(false);
+  const [exportCopied, setExportCopied] = useState(false);
+
+  // Drag-to-select
+  const isDraggingRef = useRef(false);
+  const dragSelectModeRef = useRef(true);
+
+  const handleDragStart = useCallback((domain: string) => {
+    isDraggingRef.current = true;
+    const wasSelected = selectedDomains.has(domain);
+    dragSelectModeRef.current = !wasSelected;
+    setSelectedDomains((prev) => {
+      const next = new Set(prev);
+      if (dragSelectModeRef.current) next.add(domain);
+      else next.delete(domain);
+      return next;
+    });
+  }, [selectedDomains]);
+
+  const handleDragEnter = useCallback((domain: string) => {
+    if (!isDraggingRef.current) return;
+    setSelectedDomains((prev) => {
+      const next = new Set(prev);
+      if (dragSelectModeRef.current) next.add(domain);
+      else next.delete(domain);
+      return next;
+    });
+  }, []);
+
+  useEffect(() => {
+    const up = () => { isDraggingRef.current = false; };
+    const click = () => setShowExportMenu(false);
+    window.addEventListener("mouseup", up);
+    window.addEventListener("click", click);
+    return () => { window.removeEventListener("mouseup", up); window.removeEventListener("click", click); };
+  }, []);
+
+  const exportDomainsCsv = useCallback(() => {
+    const selected = domains.filter((d) => selectedDomains.has(d.domain));
+    const header = "Domain,Inboxes,Outlook,Google,Sent,Replied,Bounced,Tags";
+    const rows = selected.map((d) =>
+      `${d.domain},${d.inbox_count},${d.outlook_count || 0},${d.google_count || 0},${d.total_sent || 0},${d.total_replied || 0},${d.total_bounced || 0},"${(d.tags || []).join(", ")}"`
+    );
+    const blob = new Blob([[header, ...rows].join("\n")], { type: "text/csv" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = `domains-export-${selectedDomains.size}.csv`;
+    a.click();
+    setShowExportMenu(false);
+  }, [domains, selectedDomains]);
+
+  const copyDomainsToClipboard = useCallback(() => {
+    navigator.clipboard.writeText(Array.from(selectedDomains).join("\n"));
+    setExportCopied(true);
+    setTimeout(() => { setExportCopied(false); setShowExportMenu(false); }, 1500);
+  }, [selectedDomains]);
 
   const startBackgroundTagCampaign = useCallback(async (info: TagApplyInfo) => {
     const tagLabel = `${info.mode === "add" ? "Adding" : "Removing"} ${info.tagNames.join(", ")}`;
@@ -527,6 +583,21 @@ function ClientDomainsDialog({
                 <Button size="sm" variant="outline" className="h-7 text-xs gap-1.5 text-amber-500 hover:text-amber-500" onClick={() => setShowRemoveFromCampaigns(true)}>Remove from Campaigns</Button>
                 <Button size="sm" variant="outline" className="h-7 text-xs gap-1.5 text-destructive hover:text-destructive" onClick={() => setBulkTagMode("remove")}>− Remove Tags</Button>
                 <Button size="sm" variant="destructive" className="h-7 text-xs gap-1.5" onClick={() => setShowBulkDelete(true)}>Delete</Button>
+                <div className="relative">
+                  <Button size="sm" variant="outline" className="h-7 text-xs gap-1.5" onClick={(e) => { e.stopPropagation(); setShowExportMenu((v) => !v); }}>
+                    <Download className="h-3 w-3" /> Export
+                  </Button>
+                  {showExportMenu && (
+                    <div className="absolute top-full right-0 mt-1 z-50 rounded-lg border bg-popover shadow-md py-1 min-w-[160px]">
+                      <button onClick={copyDomainsToClipboard} className="flex items-center gap-2 w-full px-3 py-1.5 text-xs hover:bg-muted transition-colors">
+                        <Copy className="h-3 w-3" /> {exportCopied ? "Copied!" : "Copy Domains"}
+                      </button>
+                      <button onClick={exportDomainsCsv} className="flex items-center gap-2 w-full px-3 py-1.5 text-xs hover:bg-muted transition-colors">
+                        <Download className="h-3 w-3" /> Download CSV
+                      </button>
+                    </div>
+                  )}
+                </div>
                 <Button size="sm" variant="ghost" className="h-7 text-xs" onClick={() => setSelectedDomains(new Set())}>Clear</Button>
               </div>
             </div>
@@ -619,15 +690,19 @@ function ClientDomainsDialog({
                   return (
                     <tr
                       key={d.domain}
-                      className={`transition-colors cursor-pointer ${
+                      onMouseEnter={() => handleDragEnter(d.domain)}
+                      className={`transition-colors cursor-pointer select-none ${
                         isSelected ? "bg-primary/5" : isFlagged ? "bg-destructive/5" : "hover:bg-muted/30"
                       }`}
                       onClick={() => toggleDomain(d.domain)}
                     >
                       <td className="px-3 py-3">
-                        <div className={`h-4 w-4 rounded border flex items-center justify-center transition-colors ${
-                          isSelected ? "bg-primary border-primary text-primary-foreground" : "border-muted-foreground/30"
-                        }`}>
+                        <div
+                          onMouseDown={(e) => { e.preventDefault(); e.stopPropagation(); handleDragStart(d.domain); }}
+                          className={`h-4 w-4 rounded border flex items-center justify-center transition-colors ${
+                            isSelected ? "bg-primary border-primary text-primary-foreground" : "border-muted-foreground/30"
+                          }`}
+                        >
                           {isSelected && <Check className="h-3 w-3" />}
                         </div>
                       </td>
