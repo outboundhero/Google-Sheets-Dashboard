@@ -571,34 +571,32 @@ function DeliverabilityPageInner() {
   }, [getFlagReasons]);
 
   // Client-side filter: tag match (OR) + domain search + type filter + flagged
-  // Export helpers
+  // Export helpers — domain names only
   const exportDomainsCsv = useCallback(() => {
-    const selected = domains.filter((d) => selectedDomains.has(d.domain));
-    const header = "Domain,Inboxes,Outlook,Google,Sent,Replied,Bounced,Tags";
-    const rows = selected.map((d) =>
-      `${d.domain},${d.inbox_count},${d.outlook_count || 0},${d.google_count || 0},${d.total_sent || 0},${d.total_replied || 0},${d.total_bounced || 0},"${(d.tags || []).join(", ")}"`
-    );
-    const csv = [header, ...rows].join("\n");
+    const domainList = Array.from(selectedDomains);
+    const csv = ["Domain", ...domainList].join("\n");
     const blob = new Blob([csv], { type: "text/csv" });
-    const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
-    a.href = url;
-    a.download = `domains-export-${selectedDomains.size}.csv`;
+    a.href = URL.createObjectURL(blob);
+    a.download = `domains-${selectedDomains.size}.csv`;
     a.click();
-    URL.revokeObjectURL(url);
     setShowExportMenu(false);
-  }, [domains, selectedDomains]);
+  }, [selectedDomains]);
 
   const copyDomainsToClipboard = useCallback(() => {
-    const domainList = Array.from(selectedDomains).join("\n");
-    navigator.clipboard.writeText(domainList);
+    navigator.clipboard.writeText(Array.from(selectedDomains).join("\n"));
     setExportCopied(true);
     setTimeout(() => { setExportCopied(false); setShowExportMenu(false); }, 1500);
   }, [selectedDomains]);
 
-  // Drag-to-select handlers
-  const handleDragStart = useCallback((domain: string) => {
+  // Drag-to-select: track by index range so fast scrolling doesn't skip rows
+  const dragStartIdx = useRef(-1);
+  const dragLastIdx = useRef(-1);
+
+  const handleDragStart = useCallback((idx: number, domain: string) => {
     isDragging.current = true;
+    dragStartIdx.current = idx;
+    dragLastIdx.current = idx;
     const wasSelected = selectedDomains.has(domain);
     dragSelectMode.current = !wasSelected;
     setSelectedDomains((prev) => {
@@ -609,22 +607,28 @@ function DeliverabilityPageInner() {
     });
   }, [selectedDomains]);
 
-  const handleDragEnter = useCallback((domain: string) => {
-    if (!isDragging.current) return;
+  const handleDragEnter = useCallback((idx: number, filteredList: { domain: string }[]) => {
+    if (!isDragging.current || idx === dragLastIdx.current) return;
+    // Select/deselect all rows between last index and current index (fills gaps from fast scrolling)
+    const from = Math.min(dragLastIdx.current, idx);
+    const to = Math.max(dragLastIdx.current, idx);
+    dragLastIdx.current = idx;
     setSelectedDomains((prev) => {
       const next = new Set(prev);
-      if (dragSelectMode.current) next.add(domain);
-      else next.delete(domain);
+      for (let i = from; i <= to; i++) {
+        const d = filteredList[i]?.domain;
+        if (!d) continue;
+        if (dragSelectMode.current) next.add(d);
+        else next.delete(d);
+      }
       return next;
     });
   }, []);
 
   useEffect(() => {
-    const handleMouseUp = () => { isDragging.current = false; };
-    const handleClickOutside = () => setShowExportMenu(false);
+    const handleMouseUp = () => { isDragging.current = false; dragStartIdx.current = -1; };
     window.addEventListener("mouseup", handleMouseUp);
-    window.addEventListener("click", handleClickOutside);
-    return () => { window.removeEventListener("mouseup", handleMouseUp); window.removeEventListener("click", handleClickOutside); };
+    return () => window.removeEventListener("mouseup", handleMouseUp);
   }, []);
 
   const filteredDomains = useMemo(() => {
@@ -1135,13 +1139,13 @@ function DeliverabilityPageInner() {
                         size="sm"
                         variant="outline"
                         className="h-7 text-xs gap-1.5"
-                        onClick={() => setShowExportMenu((v) => !v)}
+                        onClick={(e) => { e.stopPropagation(); setShowExportMenu((v) => !v); }}
                       >
                         <Download className="h-3 w-3" />
                         Export
                       </Button>
                       {showExportMenu && (
-                        <div className="absolute top-full right-0 mt-1 z-50 rounded-lg border bg-popover shadow-md py-1 min-w-[160px]">
+                        <div className="absolute top-full right-0 mt-1 z-50 rounded-lg border bg-popover shadow-md py-1 min-w-[160px]" onClick={(e) => e.stopPropagation()}>
                           <button
                             onClick={copyDomainsToClipboard}
                             className="flex items-center gap-2 w-full px-3 py-1.5 text-xs hover:bg-muted transition-colors"
@@ -1200,7 +1204,7 @@ function DeliverabilityPageInner() {
                 <span className="text-center">Bounced</span>
                 <span className="text-center">Warmup</span>
               </div>
-              {filteredDomains.map((d) => {
+              {filteredDomains.map((d, domainIdx) => {
                 const daysOld = d.domain_created_at
                   ? Math.floor((now - new Date(d.domain_created_at).getTime()) / (1000 * 60 * 60 * 24))
                   : 0;
@@ -1220,7 +1224,7 @@ function DeliverabilityPageInner() {
                 return (
                   <div
                     key={d.domain}
-                    onMouseEnter={() => handleDragEnter(d.domain)}
+                    onMouseEnter={() => handleDragEnter(domainIdx, filteredDomains)}
                     className={`grid grid-cols-[28px_1fr_100px_80px_80px_80px_100px] gap-3 items-center rounded-xl border px-4 py-3 transition-colors select-none ${
                       isSelected
                         ? "bg-primary/5 border-primary/30"
@@ -1231,7 +1235,7 @@ function DeliverabilityPageInner() {
                   >
                     {/* Checkbox — supports drag-to-select */}
                     <button
-                      onMouseDown={(e) => { e.preventDefault(); handleDragStart(d.domain); }}
+                      onMouseDown={(e) => { e.preventDefault(); handleDragStart(domainIdx, d.domain); }}
                       className={`h-4 w-4 rounded border flex items-center justify-center shrink-0 transition-colors ${
                         isSelected
                           ? "bg-primary border-primary text-primary-foreground"

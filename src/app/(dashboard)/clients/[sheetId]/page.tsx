@@ -383,8 +383,14 @@ function ClientDomainsDialog({
   const isDraggingRef = useRef(false);
   const dragSelectModeRef = useRef(true);
 
-  const handleDragStart = useCallback((domain: string) => {
+  // Drag-to-select: index-based range to handle fast scrolling
+  const dragStartIdx = useRef(-1);
+  const dragLastIdx = useRef(-1);
+
+  const handleDragStart = useCallback((idx: number, domain: string) => {
     isDraggingRef.current = true;
+    dragStartIdx.current = idx;
+    dragLastIdx.current = idx;
     const wasSelected = selectedDomains.has(domain);
     dragSelectModeRef.current = !wasSelected;
     setSelectedDomains((prev) => {
@@ -395,37 +401,38 @@ function ClientDomainsDialog({
     });
   }, [selectedDomains]);
 
-  const handleDragEnter = useCallback((domain: string) => {
-    if (!isDraggingRef.current) return;
+  const handleDragEnter = useCallback((idx: number, list: DomainRow[]) => {
+    if (!isDraggingRef.current || idx === dragLastIdx.current) return;
+    const from = Math.min(dragLastIdx.current, idx);
+    const to = Math.max(dragLastIdx.current, idx);
+    dragLastIdx.current = idx;
     setSelectedDomains((prev) => {
       const next = new Set(prev);
-      if (dragSelectModeRef.current) next.add(domain);
-      else next.delete(domain);
+      for (let i = from; i <= to; i++) {
+        const d = list[i]?.domain;
+        if (!d) continue;
+        if (dragSelectModeRef.current) next.add(d);
+        else next.delete(d);
+      }
       return next;
     });
   }, []);
 
   useEffect(() => {
-    const up = () => { isDraggingRef.current = false; };
-    const click = () => setShowExportMenu(false);
+    const up = () => { isDraggingRef.current = false; dragStartIdx.current = -1; };
     window.addEventListener("mouseup", up);
-    window.addEventListener("click", click);
-    return () => { window.removeEventListener("mouseup", up); window.removeEventListener("click", click); };
+    return () => window.removeEventListener("mouseup", up);
   }, []);
 
   const exportDomainsCsv = useCallback(() => {
-    const selected = domains.filter((d) => selectedDomains.has(d.domain));
-    const header = "Domain,Inboxes,Outlook,Google,Sent,Replied,Bounced,Tags";
-    const rows = selected.map((d) =>
-      `${d.domain},${d.inbox_count},${d.outlook_count || 0},${d.google_count || 0},${d.total_sent || 0},${d.total_replied || 0},${d.total_bounced || 0},"${(d.tags || []).join(", ")}"`
-    );
-    const blob = new Blob([[header, ...rows].join("\n")], { type: "text/csv" });
+    const csv = ["Domain", ...Array.from(selectedDomains)].join("\n");
+    const blob = new Blob([csv], { type: "text/csv" });
     const a = document.createElement("a");
     a.href = URL.createObjectURL(blob);
-    a.download = `domains-export-${selectedDomains.size}.csv`;
+    a.download = `domains-${selectedDomains.size}.csv`;
     a.click();
     setShowExportMenu(false);
-  }, [domains, selectedDomains]);
+  }, [selectedDomains]);
 
   const copyDomainsToClipboard = useCallback(() => {
     navigator.clipboard.writeText(Array.from(selectedDomains).join("\n"));
@@ -588,7 +595,7 @@ function ClientDomainsDialog({
                     <Download className="h-3 w-3" /> Export
                   </Button>
                   {showExportMenu && (
-                    <div className="absolute top-full right-0 mt-1 z-50 rounded-lg border bg-popover shadow-md py-1 min-w-[160px]">
+                    <div className="absolute top-full right-0 mt-1 z-50 rounded-lg border bg-popover shadow-md py-1 min-w-[160px]" onClick={(e) => e.stopPropagation()}>
                       <button onClick={copyDomainsToClipboard} className="flex items-center gap-2 w-full px-3 py-1.5 text-xs hover:bg-muted transition-colors">
                         <Copy className="h-3 w-3" /> {exportCopied ? "Copied!" : "Copy Domains"}
                       </button>
@@ -677,7 +684,7 @@ function ClientDomainsDialog({
                 </tr>
               </thead>
               <tbody className="divide-y">
-                {filtered.map((d) => {
+                {filtered.map((d, domainIdx) => {
                   const flagReasons = getFlagReasons(d);
                   const isFlagged = flagReasons.length > 0;
                   const isSelected = selectedDomains.has(d.domain);
@@ -690,7 +697,7 @@ function ClientDomainsDialog({
                   return (
                     <tr
                       key={d.domain}
-                      onMouseEnter={() => handleDragEnter(d.domain)}
+                      onMouseEnter={() => handleDragEnter(domainIdx, filtered)}
                       className={`transition-colors cursor-pointer select-none ${
                         isSelected ? "bg-primary/5" : isFlagged ? "bg-destructive/5" : "hover:bg-muted/30"
                       }`}
@@ -698,7 +705,7 @@ function ClientDomainsDialog({
                     >
                       <td className="px-3 py-3">
                         <div
-                          onMouseDown={(e) => { e.preventDefault(); e.stopPropagation(); handleDragStart(d.domain); }}
+                          onMouseDown={(e) => { e.preventDefault(); e.stopPropagation(); handleDragStart(domainIdx, d.domain); }}
                           className={`h-4 w-4 rounded border flex items-center justify-center transition-colors ${
                             isSelected ? "bg-primary border-primary text-primary-foreground" : "border-muted-foreground/30"
                           }`}
