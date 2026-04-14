@@ -31,6 +31,7 @@ import { AttachToCampaignsDialog } from "@/components/deliverability/attach-to-c
 import { RemoveFromCampaignsDialog } from "@/components/deliverability/remove-from-campaigns-dialog";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip";
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 
 interface DomainRow {
   domain: string;
@@ -218,6 +219,12 @@ function DeliverabilityPageInner() {
   const [domainsCopied, setDomainsCopied] = useState(false);
   const [showExportMenu, setShowExportMenu] = useState(false);
   const [exportCopied, setExportCopied] = useState(false);
+
+  // Bulk limit update state
+  const [limitDialog, setLimitDialog] = useState<{ type: "daily" | "warmup"; domains: string[] } | null>(null);
+  const [limitInput, setLimitInput] = useState("");
+  interface LimitJob { type: "daily" | "warmup"; limit: number; status: "running" | "done" | "error"; updated?: number; total?: number; error?: string }
+  const [limitJob, setLimitJob] = useState<LimitJob | null>(null);
 
   // Drag-to-select state
   const isDragging = useRef(false);
@@ -589,6 +596,23 @@ function DeliverabilityPageInner() {
     setTimeout(() => { setExportCopied(false); setShowExportMenu(false); }, 1500);
   }, [selectedDomains]);
 
+  const startBulkLimitUpdate = useCallback(async (type: "daily" | "warmup", limit: number, domainList: string[]) => {
+    setLimitJob({ type, limit, status: "running" });
+    setSelectedDomains(new Set());
+    try {
+      const res = await fetch("/api/deliverability/bulk-limits", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ domains: domainList, type, limit }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Failed");
+      setLimitJob({ type, limit, status: "done", updated: data.updated, total: data.total });
+    } catch (err) {
+      setLimitJob({ type, limit, status: "error", error: err instanceof Error ? err.message : "Failed" });
+    }
+  }, []);
+
   // Drag-to-select: track by index range so fast scrolling doesn't skip rows
   const dragStartIdx = useRef(-1);
   const dragLastIdx = useRef(-1);
@@ -859,6 +883,35 @@ function DeliverabilityPageInner() {
         </div>
       )}
 
+      {/* Bulk Limit Update Progress */}
+      {limitJob && (
+        <div className="rounded-lg border bg-muted/30 px-4 py-3">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2 text-sm">
+              {limitJob.status === "running" && <Loader2 className="h-3.5 w-3.5 animate-spin text-primary" />}
+              {limitJob.status === "done" && <CheckCircle2 className="h-3.5 w-3.5 text-emerald-500" />}
+              {limitJob.status === "error" && <AlertTriangle className="h-3.5 w-3.5 text-destructive" />}
+              <span className="font-medium">
+                {limitJob.status === "running"
+                  ? `Updating ${limitJob.type === "daily" ? "daily sending" : "warmup"} limit to ${limitJob.limit}...`
+                  : limitJob.status === "done"
+                    ? `${limitJob.type === "daily" ? "Daily sending" : "Warmup"} limit updated to ${limitJob.limit}`
+                    : "Limit update failed"}
+              </span>
+              {limitJob.status === "done" && (
+                <span className="text-xs text-muted-foreground">{limitJob.updated}/{limitJob.total} inboxes</span>
+              )}
+              {limitJob.status === "error" && (
+                <span className="text-xs text-destructive">{limitJob.error}</span>
+              )}
+            </div>
+            {limitJob.status !== "running" && (
+              <button onClick={() => setLimitJob(null)} className="text-xs text-muted-foreground hover:text-foreground">Dismiss</button>
+            )}
+          </div>
+        </div>
+      )}
+
       {/* Tabs */}
       <div className="flex items-center gap-1 border-b">
         <button
@@ -1117,6 +1170,22 @@ function DeliverabilityPageInner() {
                       onClick={() => setShowRemoveFromCampaigns(true)}
                     >
                       Remove from Campaigns
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="h-7 text-xs gap-1.5"
+                      onClick={() => { setLimitDialog({ type: "daily", domains: Array.from(selectedDomains) }); setLimitInput(""); }}
+                    >
+                      Daily Limit
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="h-7 text-xs gap-1.5"
+                      onClick={() => { setLimitDialog({ type: "warmup", domains: Array.from(selectedDomains) }); setLimitInput(""); }}
+                    >
+                      Warmup Limit
                     </Button>
                     <Button
                       size="sm"
@@ -1660,6 +1729,56 @@ function DeliverabilityPageInner() {
         selectedDomains={Array.from(selectedDomains)}
         onComplete={() => setSelectedDomains(new Set())}
       />
+
+      {/* Bulk Limit Update Dialog */}
+      {limitDialog && (
+        <Dialog open={!!limitDialog} onOpenChange={(v) => { if (!v) setLimitDialog(null); }}>
+          <DialogContent className="sm:!max-w-sm">
+            <DialogHeader>
+              <DialogTitle>
+                Update {limitDialog.type === "daily" ? "Daily Sending" : "Warmup"} Limit
+              </DialogTitle>
+            </DialogHeader>
+            <div className="space-y-4 mt-2">
+              <p className="text-sm text-muted-foreground">
+                Set the {limitDialog.type === "daily" ? "daily sending" : "daily warmup"} limit for all inboxes across {limitDialog.domains.length} domain{limitDialog.domains.length !== 1 ? "s" : ""}.
+              </p>
+              <div className="flex items-center gap-3">
+                <input
+                  type="number"
+                  min="1"
+                  max="100"
+                  value={limitInput}
+                  onChange={(e) => setLimitInput(e.target.value)}
+                  placeholder="Enter limit..."
+                  autoFocus
+                  className="flex-1 rounded-lg border bg-background px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-primary/30 tabular-nums [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none"
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" && limitInput && parseInt(limitInput) > 0) {
+                      startBulkLimitUpdate(limitDialog.type, parseInt(limitInput), limitDialog.domains);
+                      setLimitDialog(null);
+                    }
+                  }}
+                />
+                <span className="text-sm text-muted-foreground whitespace-nowrap">per day</span>
+              </div>
+              <div className="flex justify-end gap-2">
+                <Button variant="ghost" size="sm" onClick={() => setLimitDialog(null)}>Cancel</Button>
+                <Button
+                  size="sm"
+                  disabled={!limitInput || parseInt(limitInput) <= 0}
+                  onClick={() => {
+                    startBulkLimitUpdate(limitDialog.type, parseInt(limitInput), limitDialog.domains);
+                    setLimitDialog(null);
+                  }}
+                >
+                  Update Limit
+                </Button>
+              </div>
+            </div>
+          </DialogContent>
+        </Dialog>
+      )}
     </div>
   );
 }
