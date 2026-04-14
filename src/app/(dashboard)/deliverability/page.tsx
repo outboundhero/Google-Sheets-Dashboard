@@ -612,7 +612,7 @@ function DeliverabilityPageInner() {
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Failed");
-      setLimitJob({ type, limit, status: data.failed > 0 ? "error" : "done", updated: data.updated, total: data.total, error: data.failed > 0 ? `${data.failed} inboxes failed` : undefined });
+      setLimitJob({ type, limit, status: "done", updated: data.updated, total: data.total, error: data.failed > 0 ? `${data.failed} skipped (invalid)` : undefined });
       loadDomains();
     } catch (err) {
       setLimitJob({ type, limit, status: "error", error: err instanceof Error ? err.message : "Failed" });
@@ -926,7 +926,10 @@ function DeliverabilityPageInner() {
                     : "Limit update failed"}
               </span>
               {limitJob.status === "done" && (
-                <span className="text-xs text-muted-foreground">{limitJob.updated}/{limitJob.total} inboxes</span>
+                <span className="text-xs text-muted-foreground">
+                  {limitJob.updated}/{limitJob.total} inboxes
+                  {limitJob.error && <span className="text-amber-500 ml-2">· {limitJob.error}</span>}
+                </span>
               )}
               {limitJob.status === "error" && (
                 <span className="text-xs text-destructive">{limitJob.error}</span>
