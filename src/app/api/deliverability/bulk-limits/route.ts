@@ -5,15 +5,10 @@ const API_BASE = "https://app.outboundhero.co/api";
 const API_KEY = process.env.OUTBOUNDHERO_API_KEY!;
 const headers = { Authorization: `Bearer ${API_KEY}` };
 
-export const maxDuration = 120;
+export const maxDuration = 300;
 
-/**
- * POST /api/deliverability/bulk-limits
- * Body: { domains: string[], type: "daily" | "warmup", limit: number }
- *
- * Gets all inbox IDs for the domains, then calls the bulk update API
- * in batches of 200 to stay under payload limits.
- */
+const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
 export async function POST(request: Request) {
   try {
     const { domains, type, limit } = (await request.json()) as {
@@ -28,16 +23,16 @@ export async function POST(request: Request) {
 
     const supabase = getSupabaseAdmin();
 
-    // Get all inbox IDs for selected domains
+    // Get all inbox IDs for selected domains — paginate properly
     const allInboxIds: number[] = [];
-    for (let i = 0; i < domains.length; i += 20) {
-      const batch = domains.slice(i, i + 20);
+    for (let i = 0; i < domains.length; i += 10) {
+      const domainBatch = domains.slice(i, i + 10);
       let offset = 0;
       while (true) {
         const { data } = await supabase
           .from("deliverability_inboxes")
           .select("id")
-          .in("domain", batch)
+          .in("domain", domainBatch)
           .range(offset, offset + 999);
         if (!data || data.length === 0) break;
         allInboxIds.push(...data.map((d) => d.id));
@@ -47,39 +42,49 @@ export async function POST(request: Request) {
     }
 
     if (allInboxIds.length === 0) {
-      return NextResponse.json({ updated: 0, total: 0 });
+      return NextResponse.json({ updated: 0, failed: 0, total: 0 });
     }
 
-    // Bulk update in batches of 200
-    const BATCH = 200;
-    let updated = 0;
-    let failed = 0;
     const endpoint = type === "daily"
       ? `${API_BASE}/sender-emails/daily-limits/bulk`
       : `${API_BASE}/warmup/sender-emails/update-daily-warmup-limits`;
 
+    // Small batches (50) with retry — EmailBison may reject large batches
+    const BATCH = 50;
+    let updated = 0;
+    let failed = 0;
+
     for (let i = 0; i < allInboxIds.length; i += BATCH) {
       const batch = allInboxIds.slice(i, i + BATCH);
-      try {
-        const res = await fetch(endpoint, {
-          method: "PATCH",
-          headers: { ...headers, "Content-Type": "application/json" },
-          body: JSON.stringify({ sender_email_ids: batch, daily_limit: limit }),
-        });
-        if (res.ok) {
-          updated += batch.length;
-        } else {
-          failed += batch.length;
+      let success = false;
+
+      for (let attempt = 1; attempt <= 3; attempt++) {
+        try {
+          const res = await fetch(endpoint, {
+            method: "PATCH",
+            headers: { ...headers, "Content-Type": "application/json" },
+            body: JSON.stringify({ sender_email_ids: batch, daily_limit: limit }),
+          });
+          if (res.ok) {
+            updated += batch.length;
+            success = true;
+            break;
+          }
+          // Rate limit or server error — retry
+          if (attempt < 3) await delay(2000 * attempt);
+        } catch {
+          if (attempt < 3) await delay(2000 * attempt);
         }
-      } catch {
-        failed += batch.length;
       }
+      if (!success) failed += batch.length;
+
+      // Small delay between batches to avoid rate limiting
+      if (i + BATCH < allInboxIds.length) await delay(300);
     }
 
     // Update local Supabase data
     if (updated > 0) {
       const updateField = type === "daily" ? { daily_limit: limit } : { warmup_daily_limit: limit };
-      // Update in batches (Supabase .in() has limits)
       for (let i = 0; i < allInboxIds.length; i += 500) {
         const batch = allInboxIds.slice(i, i + 500);
         await supabase
