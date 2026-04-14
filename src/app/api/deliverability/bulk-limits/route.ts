@@ -76,12 +76,17 @@ export async function POST(request: Request) {
       }
     }
 
-    // Update local Supabase data for daily limit
-    if (type === "daily" && updated > 0) {
-      await supabase
-        .from("deliverability_inboxes")
-        .update({ daily_limit: limit })
-        .in("id", allInboxIds);
+    // Update local Supabase data
+    if (updated > 0) {
+      const updateField = type === "daily" ? { daily_limit: limit } : { warmup_daily_limit: limit };
+      // Update in batches (Supabase .in() has limits)
+      for (let i = 0; i < allInboxIds.length; i += 500) {
+        const batch = allInboxIds.slice(i, i + 500);
+        await supabase
+          .from("deliverability_inboxes")
+          .update(updateField)
+          .in("id", batch);
+      }
     }
 
     return NextResponse.json({

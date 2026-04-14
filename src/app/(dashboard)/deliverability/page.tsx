@@ -44,6 +44,8 @@ interface DomainRow {
   total_bounced?: number;
   outlook_count?: number;
   google_count?: number;
+  daily_limit_total?: number;
+  warmup_limit_total?: number;
 }
 
 interface SyncProgress {
@@ -608,10 +610,11 @@ function DeliverabilityPageInner() {
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Failed");
       setLimitJob({ type, limit, status: "done", updated: data.updated, total: data.total });
+      loadDomains(); // Refresh to show updated limits
     } catch (err) {
       setLimitJob({ type, limit, status: "error", error: err instanceof Error ? err.message : "Failed" });
     }
-  }, []);
+  }, [loadDomains]);
 
   // Drag-to-select: track by index range so fast scrolling doesn't skip rows
   const dragStartIdx = useRef(-1);
@@ -1245,7 +1248,7 @@ function DeliverabilityPageInner() {
               )}
 
               {/* Table header */}
-              <div className="grid grid-cols-[28px_1fr_100px_80px_80px_80px_100px] gap-3 px-4 py-2 text-xs text-muted-foreground font-medium">
+              <div className="grid grid-cols-[28px_1fr_80px_70px_70px_70px_70px_70px_90px] gap-2 px-4 py-2 text-xs text-muted-foreground font-medium">
                 <button
                   onClick={() => {
                     const allVisible = filteredDomains.map((d) => d.domain);
@@ -1271,7 +1274,9 @@ function DeliverabilityPageInner() {
                 <span className="text-center">Sent</span>
                 <span className="text-center">Replied</span>
                 <span className="text-center">Bounced</span>
+                <span className="text-center">Daily</span>
                 <span className="text-center">Warmup</span>
+                <span className="text-center">Status</span>
               </div>
               {filteredDomains.map((d, domainIdx) => {
                 const daysOld = d.domain_created_at
@@ -1294,7 +1299,7 @@ function DeliverabilityPageInner() {
                   <div
                     key={d.domain}
                     onMouseEnter={() => handleDragEnter(domainIdx, filteredDomains)}
-                    className={`grid grid-cols-[28px_1fr_100px_80px_80px_80px_100px] gap-3 items-center rounded-xl border px-4 py-3 transition-colors select-none ${
+                    className={`grid grid-cols-[28px_1fr_80px_70px_70px_70px_70px_70px_90px] gap-2 items-center rounded-xl border px-4 py-3 transition-colors select-none ${
                       isSelected
                         ? "bg-primary/5 border-primary/30"
                         : flagged
@@ -1385,6 +1390,16 @@ function DeliverabilityPageInner() {
                         ? "text-destructive" : ""
                     }`}>
                       {(d.total_bounced || 0).toLocaleString()}
+                    </div>
+
+                    {/* Daily Limit */}
+                    <div className="text-center text-sm tabular-nums text-muted-foreground">
+                      {d.daily_limit_total || 0}
+                    </div>
+
+                    {/* Warmup Limit */}
+                    <div className="text-center text-sm tabular-nums text-muted-foreground">
+                      {d.warmup_limit_total || 0}
                     </div>
 
                     {/* Warmup status */}

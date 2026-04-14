@@ -34,7 +34,41 @@ export async function GET(request: Request) {
       offset += PAGE;
     }
 
-    return NextResponse.json(allDomains);
+    // Aggregate daily_limit and warmup_daily_limit from inboxes per domain
+    const domainNames = allDomains.map((d) => d.domain as string);
+    const limitMap = new Map<string, { daily_limit_total: number; warmup_limit_total: number }>();
+
+    if (domainNames.length > 0) {
+      // Query in batches of 500 domains
+      for (let i = 0; i < domainNames.length; i += 500) {
+        const batch = domainNames.slice(i, i + 500);
+        const { data: inboxData } = await supabase
+          .from("deliverability_inboxes")
+          .select("domain, daily_limit, warmup_daily_limit")
+          .in("domain", batch);
+
+        if (inboxData) {
+          for (const inbox of inboxData) {
+            const existing = limitMap.get(inbox.domain) || { daily_limit_total: 0, warmup_limit_total: 0 };
+            existing.daily_limit_total += inbox.daily_limit || 0;
+            existing.warmup_limit_total += inbox.warmup_daily_limit || 0;
+            limitMap.set(inbox.domain, existing);
+          }
+        }
+      }
+    }
+
+    // Merge limit data into domains
+    const result = allDomains.map((d) => {
+      const limits = limitMap.get(d.domain as string);
+      return {
+        ...d,
+        daily_limit_total: limits?.daily_limit_total || 0,
+        warmup_limit_total: limits?.warmup_limit_total || 0,
+      };
+    });
+
+    return NextResponse.json(result);
   } catch (error) {
     const message = error instanceof Error ? error.message : "Failed";
     return NextResponse.json({ error: message }, { status: 500 });
