@@ -9,6 +9,7 @@ import {
   CheckCircle2,
   Clock,
   ChevronDown,
+  ChevronUp,
   Search,
   X,
   Check,
@@ -193,6 +194,8 @@ function DeliverabilityPageInner() {
   const [flagSubFilter, setFlagSubFilter] = useState<"all" | "reply" | "bounce">("all");
   const [showReserve, setShowReserve] = useState(false);
   const [warmupDaysFilter, setWarmupDaysFilter] = useState<string>("all");
+  const [sortField, setSortField] = useState<"domain" | "inbox_count" | "total_sent" | "total_replied" | "total_bounced" | "daily_limit" | "warmup_days" | null>(null);
+  const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
   const [attachDialogOpen, setAttachDialogOpen] = useState(false);
   const [clientTags, setClientTags] = useState<Set<string>>(new Set());
   const [selectedDomains, setSelectedDomains] = useState<Set<string>>(new Set());
@@ -699,8 +702,29 @@ function DeliverabilityPageInner() {
         return true;
       });
     }
+    // Sort
+    if (sortField) {
+      const dir = sortDir === "asc" ? 1 : -1;
+      result = [...result].sort((a, b) => {
+        let av: number | string = 0, bv: number | string = 0;
+        switch (sortField) {
+          case "domain": av = a.domain; bv = b.domain; return dir * av.localeCompare(bv);
+          case "inbox_count": av = a.inbox_count; bv = b.inbox_count; break;
+          case "total_sent": av = a.total_sent || 0; bv = b.total_sent || 0; break;
+          case "total_replied": av = a.total_replied || 0; bv = b.total_replied || 0; break;
+          case "total_bounced": av = a.total_bounced || 0; bv = b.total_bounced || 0; break;
+          case "daily_limit": av = a.daily_limit_total || 0; bv = b.daily_limit_total || 0; break;
+          case "warmup_days": {
+            const aDays = a.domain_created_at ? Math.max(0, 21 - Math.floor((now - new Date(a.domain_created_at).getTime()) / 86400000)) : 0;
+            const bDays = b.domain_created_at ? Math.max(0, 21 - Math.floor((now - new Date(b.domain_created_at).getTime()) / 86400000)) : 0;
+            av = aDays; bv = bDays; break;
+          }
+        }
+        return dir * ((av as number) - (bv as number));
+      });
+    }
     return result;
-  }, [domains, tagFilters, domainSearch, typeFilter, showFlagged, flagSubFilter, showReserve, warmupDaysFilter, isDomainFlagged, hasReplyIssue, hasBounceIssue, isDomainReserve, now]);
+  }, [domains, tagFilters, domainSearch, typeFilter, showFlagged, flagSubFilter, showReserve, warmupDaysFilter, sortField, sortDir, isDomainFlagged, hasReplyIssue, hasBounceIssue, isDomainReserve, now]);
 
   const flaggedCount = useMemo(() => domains.filter(isDomainFlagged).length, [domains, isDomainFlagged]);
 
@@ -1269,13 +1293,34 @@ function DeliverabilityPageInner() {
                     <Check className="h-3 w-3" />
                   )}
                 </button>
-                <span>Domain</span>
-                <span className="text-center">Inboxes</span>
-                <span className="text-center">Sent</span>
-                <span className="text-center">Replied</span>
-                <span className="text-center">Bounced</span>
-                <span className="text-center">Daily</span>
-                <span className="text-center">Status</span>
+                {([
+                  { field: "domain" as const, label: "Domain", align: "text-left" },
+                  { field: "inbox_count" as const, label: "Inboxes", align: "text-center" },
+                  { field: "total_sent" as const, label: "Sent", align: "text-center" },
+                  { field: "total_replied" as const, label: "Replied", align: "text-center" },
+                  { field: "total_bounced" as const, label: "Bounced", align: "text-center" },
+                  { field: "daily_limit" as const, label: "Daily", align: "text-center" },
+                  { field: "warmup_days" as const, label: "Status", align: "text-center" },
+                ] as const).map((col) => (
+                  <button
+                    key={col.field}
+                    onClick={() => {
+                      if (sortField === col.field) {
+                        if (sortDir === "desc") setSortDir("asc");
+                        else { setSortField(null); setSortDir("desc"); }
+                      } else {
+                        setSortField(col.field);
+                        setSortDir("desc");
+                      }
+                    }}
+                    className={`${col.align} hover:text-foreground transition-colors flex items-center gap-0.5 ${col.align === "text-center" ? "justify-center" : ""}`}
+                  >
+                    {col.label}
+                    {sortField === col.field && (
+                      sortDir === "desc" ? <ChevronDown className="h-3 w-3" /> : <ChevronUp className="h-3 w-3" />
+                    )}
+                  </button>
+                ))}
               </div>
               {filteredDomains.map((d, domainIdx) => {
                 const daysOld = d.domain_created_at
