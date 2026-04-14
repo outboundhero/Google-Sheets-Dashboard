@@ -57,24 +57,51 @@ export async function POST(request: Request) {
       const batch = allInboxIds.slice(i, i + BATCH);
       let success = false;
 
-      for (let attempt = 1; attempt <= 3; attempt++) {
-        try {
-          const res = await fetch(endpoint, {
-            method: "PATCH",
-            headers: { ...headers, "Content-Type": "application/json" },
-            body: JSON.stringify({ sender_email_ids: batch, daily_limit: limit }),
-          });
-          if (res.ok) {
-            updated += batch.length;
-            success = true;
-            break;
+      try {
+        const res = await fetch(endpoint, {
+          method: "PATCH",
+          headers: { ...headers, "Content-Type": "application/json" },
+          body: JSON.stringify({ sender_email_ids: batch, daily_limit: limit }),
+        });
+        if (res.ok) {
+          updated += batch.length;
+          success = true;
+        } else if (res.status === 422) {
+          // One or more IDs are invalid — fall back to smaller sub-batches to isolate bad IDs
+          console.warn(`[BULK-LIMITS] Batch ${i}-${i + batch.length} got 422, retrying in sub-batches of 10`);
+          for (let j = 0; j < batch.length; j += 10) {
+            const sub = batch.slice(j, j + 10);
+            try {
+              const subRes = await fetch(endpoint, {
+                method: "PATCH",
+                headers: { ...headers, "Content-Type": "application/json" },
+                body: JSON.stringify({ sender_email_ids: sub, daily_limit: limit }),
+              });
+              if (subRes.ok) { updated += sub.length; }
+              else {
+                // Try one by one to skip individual bad IDs
+                for (const id of sub) {
+                  try {
+                    const singleRes = await fetch(endpoint, {
+                      method: "PATCH",
+                      headers: { ...headers, "Content-Type": "application/json" },
+                      body: JSON.stringify({ sender_email_ids: [id], daily_limit: limit }),
+                    });
+                    if (singleRes.ok) updated++;
+                    else { failed++; console.warn(`[BULK-LIMITS] Invalid inbox ID ${id}, skipping`); }
+                  } catch { failed++; }
+                }
+              }
+            } catch { failed += sub.length; }
+            await delay(200);
           }
+          success = true; // Handled individually
+        } else {
           const errText = await res.text().catch(() => "");
-          console.error(`[BULK-LIMITS] Batch ${i}-${i + batch.length} attempt ${attempt}: ${res.status} ${errText.slice(0, 200)}`);
-          if (attempt < 3) await delay(2000 * attempt);
-        } catch {
-          if (attempt < 3) await delay(2000 * attempt);
+          console.error(`[BULK-LIMITS] Batch ${i}-${i + batch.length}: ${res.status} ${errText.slice(0, 200)}`);
         }
+      } catch (e) {
+        console.error(`[BULK-LIMITS] Batch ${i}-${i + batch.length} network error:`, e);
       }
       if (!success) failed += batch.length;
 
