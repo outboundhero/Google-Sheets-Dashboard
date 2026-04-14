@@ -39,23 +39,31 @@ export async function GET(request: Request) {
     const limitMap = new Map<string, { daily_limit: number; warmup_limit: number }>();
 
     if (domainNames.length > 0) {
-      for (let i = 0; i < domainNames.length; i += 500) {
-        const batch = domainNames.slice(i, i + 500);
-        const { data: inboxData } = await supabase
-          .from("deliverability_inboxes")
-          .select("domain, daily_limit, warmup_daily_limit")
-          .in("domain", batch);
+      // Query one inbox per domain using DISTINCT ON via raw SQL for efficiency
+      // Fallback: paginate through all inboxes
+      for (let i = 0; i < domainNames.length; i += 200) {
+        const batch = domainNames.slice(i, i + 200);
+        let offset = 0;
+        const seen = new Set<string>();
+        while (true) {
+          const { data: inboxData } = await supabase
+            .from("deliverability_inboxes")
+            .select("domain, daily_limit, warmup_daily_limit")
+            .in("domain", batch)
+            .range(offset, offset + 999);
 
-        if (inboxData) {
+          if (!inboxData || inboxData.length === 0) break;
           for (const inbox of inboxData) {
-            // Take the first inbox's limits per domain (all inboxes in a domain share the same limit)
-            if (!limitMap.has(inbox.domain)) {
+            if (!seen.has(inbox.domain)) {
+              seen.add(inbox.domain);
               limitMap.set(inbox.domain, {
                 daily_limit: inbox.daily_limit || 0,
                 warmup_limit: inbox.warmup_daily_limit || 0,
               });
             }
           }
+          if (inboxData.length < 1000) break;
+          offset += 1000;
         }
       }
     }

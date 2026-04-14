@@ -19,6 +19,12 @@ interface SenderEmail {
   total_replied_count: number;
   total_opened_count: number;
   bounced_count: number;
+  warmup_score?: number;
+  warmup_daily_limit?: number;
+  warmup_emails_sent?: number;
+  warmup_replies_received?: number;
+  warmup_emails_saved_from_spam?: number;
+  warmup_bounces_received_count?: number;
   created_at: string;
   updated_at: string;
 }
@@ -79,6 +85,12 @@ export async function POST(request: Request) {
       total_replied_count: inbox.total_replied_count,
       total_opened_count: inbox.total_opened_count,
       bounced_count: inbox.bounced_count,
+      warmup_score: inbox.warmup_score ?? null,
+      warmup_daily_limit: inbox.warmup_daily_limit ?? null,
+      warmup_emails_sent: inbox.warmup_emails_sent ?? null,
+      warmup_replies_received: inbox.warmup_replies_received ?? null,
+      warmup_emails_saved_from_spam: inbox.warmup_emails_saved_from_spam ?? null,
+      warmup_bounces_received_count: inbox.warmup_bounces_received_count ?? null,
       created_at: inbox.created_at,
       updated_at: inbox.updated_at,
       synced_at: new Date().toISOString(),
