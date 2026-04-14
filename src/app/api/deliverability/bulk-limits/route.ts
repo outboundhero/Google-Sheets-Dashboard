@@ -23,16 +23,15 @@ export async function POST(request: Request) {
 
     const supabase = getSupabaseAdmin();
 
-    // Get all inbox IDs for selected domains — paginate properly
+    // Get all inbox IDs — query each domain individually to avoid pagination issues
     const allInboxIds: number[] = [];
-    for (let i = 0; i < domains.length; i += 10) {
-      const domainBatch = domains.slice(i, i + 10);
+    for (const domain of domains) {
       let offset = 0;
       while (true) {
         const { data } = await supabase
           .from("deliverability_inboxes")
           .select("id")
-          .in("domain", domainBatch)
+          .eq("domain", domain)
           .range(offset, offset + 999);
         if (!data || data.length === 0) break;
         allInboxIds.push(...data.map((d) => d.id));
@@ -70,7 +69,8 @@ export async function POST(request: Request) {
             success = true;
             break;
           }
-          // Rate limit or server error — retry
+          const errText = await res.text().catch(() => "");
+          console.error(`[BULK-LIMITS] Batch ${i}-${i + batch.length} attempt ${attempt}: ${res.status} ${errText.slice(0, 200)}`);
           if (attempt < 3) await delay(2000 * attempt);
         } catch {
           if (attempt < 3) await delay(2000 * attempt);

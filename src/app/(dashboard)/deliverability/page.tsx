@@ -612,8 +612,8 @@ function DeliverabilityPageInner() {
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Failed");
-      setLimitJob({ type, limit, status: "done", updated: data.updated, total: data.total });
-      loadDomains(); // Refresh to show updated limits
+      setLimitJob({ type, limit, status: data.failed > 0 ? "error" : "done", updated: data.updated, total: data.total, error: data.failed > 0 ? `${data.failed} inboxes failed` : undefined });
+      loadDomains();
     } catch (err) {
       setLimitJob({ type, limit, status: "error", error: err instanceof Error ? err.message : "Failed" });
     }
