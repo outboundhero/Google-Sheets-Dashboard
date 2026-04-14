@@ -36,10 +36,9 @@ export async function GET(request: Request) {
 
     // Aggregate daily_limit and warmup_daily_limit from inboxes per domain
     const domainNames = allDomains.map((d) => d.domain as string);
-    const limitMap = new Map<string, { daily_limit_total: number; warmup_limit_total: number }>();
+    const limitMap = new Map<string, { daily_limit: number; warmup_limit: number }>();
 
     if (domainNames.length > 0) {
-      // Query in batches of 500 domains
       for (let i = 0; i < domainNames.length; i += 500) {
         const batch = domainNames.slice(i, i + 500);
         const { data: inboxData } = await supabase
@@ -49,10 +48,13 @@ export async function GET(request: Request) {
 
         if (inboxData) {
           for (const inbox of inboxData) {
-            const existing = limitMap.get(inbox.domain) || { daily_limit_total: 0, warmup_limit_total: 0 };
-            existing.daily_limit_total += inbox.daily_limit || 0;
-            existing.warmup_limit_total += inbox.warmup_daily_limit || 0;
-            limitMap.set(inbox.domain, existing);
+            // Take the first inbox's limits per domain (all inboxes in a domain share the same limit)
+            if (!limitMap.has(inbox.domain)) {
+              limitMap.set(inbox.domain, {
+                daily_limit: inbox.daily_limit || 0,
+                warmup_limit: inbox.warmup_daily_limit || 0,
+              });
+            }
           }
         }
       }
@@ -63,8 +65,8 @@ export async function GET(request: Request) {
       const limits = limitMap.get(d.domain as string);
       return {
         ...d,
-        daily_limit_total: limits?.daily_limit_total || 0,
-        warmup_limit_total: limits?.warmup_limit_total || 0,
+        daily_limit_total: limits?.daily_limit || 0,
+        warmup_limit_total: limits?.warmup_limit || 0,
       };
     });
 
