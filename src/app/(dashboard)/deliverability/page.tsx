@@ -1392,13 +1392,10 @@ function DeliverabilityPageInner() {
                           </Tooltip>
                         )}
                       </div>
-                      <div className="flex items-center gap-1.5 mt-1 ml-5">
-                        {d.tags && d.tags.slice(0, 3).map((t) => (
+                      <div className="flex items-center gap-1.5 mt-1 ml-5 flex-wrap">
+                        {d.tags?.map((t) => (
                           <span key={t} className="text-[10px] bg-muted px-1.5 py-0.5 rounded text-muted-foreground">{t}</span>
                         ))}
-                        {d.tags && d.tags.length > 3 && (
-                          <span className="text-[10px] text-muted-foreground">+{d.tags.length - 3}</span>
-                        )}
                       </div>
                     </div>
 
