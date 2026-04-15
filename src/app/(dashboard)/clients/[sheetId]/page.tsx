@@ -424,15 +424,25 @@ function ClientDomainsDialog({
     return () => window.removeEventListener("mouseup", up);
   }, []);
 
-  const exportDomainsCsv = useCallback(() => {
-    const csv = ["Domain", ...Array.from(selectedDomains)].join("\n");
+  const exportDomainsCsv = useCallback((withStats?: boolean) => {
+    const selected = domains.filter((d) => selectedDomains.has(d.domain));
+    let csv: string;
+    if (withStats) {
+      const header = "Domain,Inboxes,Sent,Replied,Bounced,Tags";
+      const rows = selected.map((d) =>
+        `${d.domain},${d.inbox_count},${d.total_sent || 0},${d.total_replied || 0},${d.total_bounced || 0},"${(d.tags || []).join(", ")}"`
+      );
+      csv = [header, ...rows].join("\n");
+    } else {
+      csv = ["Domain", ...selected.map((d) => d.domain)].join("\n");
+    }
     const blob = new Blob([csv], { type: "text/csv" });
     const a = document.createElement("a");
     a.href = URL.createObjectURL(blob);
-    a.download = `domains-${selectedDomains.size}.csv`;
+    a.download = `domains-${selectedDomains.size}${withStats ? "-stats" : ""}.csv`;
     a.click();
     setShowExportMenu(false);
-  }, [selectedDomains]);
+  }, [domains, selectedDomains]);
 
   const copyDomainsToClipboard = useCallback(() => {
     navigator.clipboard.writeText(Array.from(selectedDomains).join("\n"));
@@ -599,8 +609,11 @@ function ClientDomainsDialog({
                       <button onClick={copyDomainsToClipboard} className="flex items-center gap-2 w-full px-3 py-1.5 text-xs hover:bg-muted transition-colors">
                         <Copy className="h-3 w-3" /> {exportCopied ? "Copied!" : "Copy Domains"}
                       </button>
-                      <button onClick={exportDomainsCsv} className="flex items-center gap-2 w-full px-3 py-1.5 text-xs hover:bg-muted transition-colors">
+                      <button onClick={() => exportDomainsCsv(false)} className="flex items-center gap-2 w-full px-3 py-1.5 text-xs hover:bg-muted transition-colors">
                         <Download className="h-3 w-3" /> Download CSV
+                      </button>
+                      <button onClick={() => exportDomainsCsv(true)} className="flex items-center gap-2 w-full px-3 py-1.5 text-xs hover:bg-muted transition-colors">
+                        <Download className="h-3 w-3" /> Download CSV (with stats)
                       </button>
                     </div>
                   )}
