@@ -227,6 +227,10 @@ function DeliverabilityPageInner() {
 
   // Bulk limit update state
   const [limitDialog, setLimitDialog] = useState<{ type: "daily" | "warmup"; domains: string[] } | null>(null);
+
+  // Sync selected domains state
+  interface SyncSelectedJob { status: "running" | "done" | "error"; synced: number; totalDomains: number; error?: string }
+  const [syncSelectedJob, setSyncSelectedJob] = useState<SyncSelectedJob | null>(null);
   const [limitInput, setLimitInput] = useState("");
   interface LimitJob { type: "daily" | "warmup"; limit: number; status: "running" | "done" | "error"; updated?: number; total?: number; error?: string }
   const [limitJob, setLimitJob] = useState<LimitJob | null>(null);
@@ -619,6 +623,57 @@ function DeliverabilityPageInner() {
     }
   }, [loadDomains]);
 
+  // Sync selected domains — 4 parallel streams
+  const startSyncSelected = useCallback(async (domainList: string[]) => {
+    const STREAMS = 4;
+    setSyncSelectedJob({ status: "running", synced: 0, totalDomains: domainList.length });
+    setSelectedDomains(new Set());
+
+    // Split domains into N chunks
+    const chunkSize = Math.ceil(domainList.length / STREAMS);
+    const chunks: string[][] = [];
+    for (let i = 0; i < domainList.length; i += chunkSize) {
+      chunks.push(domainList.slice(i, i + chunkSize));
+    }
+
+    let totalSynced = 0;
+    let hasError = false;
+
+    // Run streams in parallel
+    const results = await Promise.allSettled(
+      chunks.map(async (chunk) => {
+        try {
+          const res = await fetch("/api/deliverability/sync-domains", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ domains: chunk }),
+          });
+          const data = await res.json();
+          if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+          totalSynced += data.synced || 0;
+          setSyncSelectedJob((prev) => prev ? { ...prev, synced: totalSynced } : prev);
+          return data;
+        } catch (err) {
+          hasError = true;
+          throw err;
+        }
+      })
+    );
+
+    // Rebuild domain stats
+    try {
+      await fetch("/api/deliverability/sync", { method: "PUT" });
+    } catch { /* best effort */ }
+
+    const errors = results.filter((r) => r.status === "rejected");
+    if (errors.length > 0 || hasError) {
+      setSyncSelectedJob({ status: "error", synced: totalSynced, totalDomains: domainList.length, error: `${errors.length} stream(s) failed` });
+    } else {
+      setSyncSelectedJob({ status: "done", synced: totalSynced, totalDomains: domainList.length });
+    }
+    loadDomains();
+  }, [loadDomains]);
+
   // Drag-to-select: track by index range so fast scrolling doesn't skip rows
   const dragStartIdx = useRef(-1);
   const dragLastIdx = useRef(-1);
@@ -942,6 +997,33 @@ function DeliverabilityPageInner() {
         </div>
       )}
 
+      {/* Sync Selected Progress */}
+      {syncSelectedJob && (
+        <div className="rounded-lg border bg-muted/30 px-4 py-3">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2 text-sm">
+              {syncSelectedJob.status === "running" && <Loader2 className="h-3.5 w-3.5 animate-spin text-primary" />}
+              {syncSelectedJob.status === "done" && <CheckCircle2 className="h-3.5 w-3.5 text-emerald-500" />}
+              {syncSelectedJob.status === "error" && <AlertTriangle className="h-3.5 w-3.5 text-destructive" />}
+              <span className="font-medium">
+                {syncSelectedJob.status === "running"
+                  ? `Syncing ${syncSelectedJob.totalDomains} domain${syncSelectedJob.totalDomains !== 1 ? "s" : ""}...`
+                  : syncSelectedJob.status === "done"
+                    ? `Synced ${syncSelectedJob.totalDomains} domain${syncSelectedJob.totalDomains !== 1 ? "s" : ""}`
+                    : "Sync failed"}
+              </span>
+              <span className="text-xs text-muted-foreground">{syncSelectedJob.synced} inboxes updated</span>
+              {syncSelectedJob.status === "error" && syncSelectedJob.error && (
+                <span className="text-xs text-destructive">· {syncSelectedJob.error}</span>
+              )}
+            </div>
+            {syncSelectedJob.status !== "running" && (
+              <button onClick={() => setSyncSelectedJob(null)} className="text-xs text-muted-foreground hover:text-foreground">Dismiss</button>
+            )}
+          </div>
+        </div>
+      )}
+
       {/* Tabs */}
       <div className="flex items-center gap-1 border-b">
         <button
@@ -1232,6 +1314,15 @@ function DeliverabilityPageInner() {
                       onClick={() => setShowBulkDelete(true)}
                     >
                       Delete
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="h-7 text-xs gap-1.5"
+                      onClick={() => startSyncSelected(Array.from(selectedDomains))}
+                    >
+                      <RefreshCw className="h-3 w-3" />
+                      Sync Selected
                     </Button>
                     <div className="relative">
                       <Button
