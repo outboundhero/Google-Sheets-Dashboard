@@ -194,6 +194,9 @@ function DeliverabilityPageInner() {
   const [flagSubFilter, setFlagSubFilter] = useState<"all" | "reply" | "bounce">("all");
   const [showReserve, setShowReserve] = useState(false);
   const [warmupDaysFilter, setWarmupDaysFilter] = useState<string>("all");
+  const [warmupDaysFrom, setWarmupDaysFrom] = useState("");
+  const [warmupDaysTo, setWarmupDaysTo] = useState("");
+  const [showAssigned, setShowAssigned] = useState(false);
   const [sortField, setSortField] = useState<"domain" | "inbox_count" | "total_sent" | "total_replied" | "total_bounced" | "daily_limit" | "warmup_days" | null>(null);
   const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
   const [attachDialogOpen, setAttachDialogOpen] = useState(false);
@@ -523,6 +526,8 @@ function DeliverabilityPageInner() {
   }, [clientTags]);
 
   const reserveCount = useMemo(() => domains.filter(isDomainReserve).length, [domains, isDomainReserve]);
+  const isDomainAssigned = useCallback((d: DomainRow) => !isDomainReserve(d), [isDomainReserve]);
+  const assignedCount = useMemo(() => domains.filter(isDomainAssigned).length, [domains, isDomainAssigned]);
 
   const now = Date.now();
 
@@ -755,6 +760,9 @@ function DeliverabilityPageInner() {
     if (showReserve) {
       result = result.filter(isDomainReserve);
     }
+    if (showAssigned) {
+      result = result.filter(isDomainAssigned);
+    }
     if (warmupDaysFilter !== "all") {
       result = result.filter((d) => {
         const daysOld = d.domain_created_at
@@ -765,6 +773,18 @@ function DeliverabilityPageInner() {
         const maxDays = parseInt(warmupDaysFilter);
         if (!isNaN(maxDays)) return daysLeft > 0 && daysLeft <= maxDays;
         return true;
+      });
+    }
+    // Warmup range filter (from-to)
+    if (warmupDaysFrom || warmupDaysTo) {
+      const from = warmupDaysFrom ? parseInt(warmupDaysFrom) : 0;
+      const to = warmupDaysTo ? parseInt(warmupDaysTo) : 21;
+      result = result.filter((d) => {
+        const daysOld = d.domain_created_at
+          ? Math.floor((now - new Date(d.domain_created_at).getTime()) / (1000 * 60 * 60 * 24))
+          : 0;
+        const daysLeft = Math.max(0, 21 - daysOld);
+        return daysLeft >= from && daysLeft <= to;
       });
     }
     // Sort
@@ -789,7 +809,7 @@ function DeliverabilityPageInner() {
       });
     }
     return result;
-  }, [domains, tagFilters, domainSearch, typeFilter, showFlagged, flagSubFilter, showReserve, warmupDaysFilter, sortField, sortDir, isDomainFlagged, hasReplyIssue, hasBounceIssue, isDomainReserve, now]);
+  }, [domains, tagFilters, domainSearch, typeFilter, showFlagged, flagSubFilter, showReserve, showAssigned, warmupDaysFilter, warmupDaysFrom, warmupDaysTo, sortField, sortDir, isDomainFlagged, hasReplyIssue, hasBounceIssue, isDomainReserve, isDomainAssigned, now]);
 
   const flaggedCount = useMemo(() => domains.filter(isDomainFlagged).length, [domains, isDomainFlagged]);
 
@@ -1158,7 +1178,7 @@ function DeliverabilityPageInner() {
 
             {/* Reserve filter */}
             <button
-              onClick={() => setShowReserve((v) => !v)}
+              onClick={() => { setShowReserve((v) => !v); if (!showReserve) setShowAssigned(false); }}
               className={`text-xs px-3 py-1.5 rounded-full border transition-colors flex items-center gap-1.5 ${
                 showReserve
                   ? "bg-amber-500 text-white border-amber-500"
@@ -1176,6 +1196,25 @@ function DeliverabilityPageInner() {
               )}
             </button>
 
+            {/* Assigned filter (opposite of Reserve) */}
+            <button
+              onClick={() => { setShowAssigned((v) => !v); if (!showAssigned) setShowReserve(false); }}
+              className={`text-xs px-3 py-1.5 rounded-full border transition-colors flex items-center gap-1.5 ${
+                showAssigned
+                  ? "bg-primary text-primary-foreground border-primary"
+                  : "border-border text-muted-foreground hover:border-foreground hover:text-foreground"
+              }`}
+            >
+              Assigned
+              {assignedCount > 0 && (
+                <span className={`text-[10px] font-medium rounded-full px-1.5 ${
+                  showAssigned ? "bg-primary-foreground/20" : "bg-primary/15 text-primary"
+                }`}>
+                  {assignedCount}
+                </span>
+              )}
+            </button>
+
             {/* Warmup days filter */}
             <div className="flex items-center gap-1">
               {[
@@ -1184,7 +1223,7 @@ function DeliverabilityPageInner() {
               ].map((opt) => (
                 <button
                   key={opt.value}
-                  onClick={() => setWarmupDaysFilter(opt.value)}
+                  onClick={() => { setWarmupDaysFilter(opt.value); setWarmupDaysFrom(""); setWarmupDaysTo(""); }}
                   className={`text-xs px-2.5 py-1.5 rounded-full border transition-colors ${
                     warmupDaysFilter === opt.value
                       ? "bg-primary text-primary-foreground border-primary"
@@ -1195,27 +1234,28 @@ function DeliverabilityPageInner() {
                 </button>
               ))}
               <div className={`flex items-center gap-1 text-xs px-2.5 py-1 rounded-full border transition-colors ${
-                warmupDaysFilter !== "all" && warmupDaysFilter !== "complete"
+                warmupDaysFrom || warmupDaysTo
                   ? "border-primary text-primary"
                   : "border-border text-muted-foreground"
               }`}>
-                <span>≤</span>
                 <input
                   type="number"
-                  min="1"
+                  min="0"
                   max="21"
-                  placeholder="days"
-                  value={warmupDaysFilter !== "all" && warmupDaysFilter !== "complete" ? warmupDaysFilter : ""}
-                  onChange={(e) => {
-                    const v = e.target.value;
-                    if (!v) { setWarmupDaysFilter("all"); return; }
-                    const n = parseInt(v);
-                    if (n >= 1 && n <= 21) setWarmupDaysFilter(String(n));
-                  }}
-                  onFocus={() => {
-                    if (warmupDaysFilter === "all" || warmupDaysFilter === "complete") setWarmupDaysFilter("");
-                  }}
-                  className="w-8 bg-transparent outline-none text-center tabular-nums [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none"
+                  placeholder="0"
+                  value={warmupDaysFrom}
+                  onChange={(e) => { setWarmupDaysFrom(e.target.value); setWarmupDaysFilter("all"); }}
+                  className="w-6 bg-transparent outline-none text-center tabular-nums [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none"
+                />
+                <span>–</span>
+                <input
+                  type="number"
+                  min="0"
+                  max="21"
+                  placeholder="21"
+                  value={warmupDaysTo}
+                  onChange={(e) => { setWarmupDaysTo(e.target.value); setWarmupDaysFilter("all"); }}
+                  className="w-6 bg-transparent outline-none text-center tabular-nums [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none"
                 />
                 <span>days</span>
               </div>
@@ -1234,7 +1274,7 @@ function DeliverabilityPageInner() {
               </span>
             ))}
 
-            {(tagFilters.length > 0 || domainSearch || typeFilter !== "all" || showReserve || warmupDaysFilter !== "all") && (
+            {(tagFilters.length > 0 || domainSearch || typeFilter !== "all" || showReserve || showAssigned || warmupDaysFilter !== "all" || warmupDaysFrom || warmupDaysTo) && (
               <span className="text-xs text-muted-foreground">
                 {filteredDomains.length} domain{filteredDomains.length !== 1 ? "s" : ""}
               </span>
