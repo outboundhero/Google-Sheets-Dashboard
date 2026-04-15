@@ -428,10 +428,11 @@ function ClientDomainsDialog({
     const selected = domains.filter((d) => selectedDomains.has(d.domain));
     let csv: string;
     if (withStats) {
-      const header = "Domain,Inboxes,Sent,Replied,Bounced,Tags";
-      const rows = selected.map((d) =>
-        `${d.domain},${d.inbox_count},${d.total_sent || 0},${d.total_replied || 0},${d.total_bounced || 0},"${(d.tags || []).join(", ")}"`
-      );
+      const header = "Domain,Date Added,Inboxes,Sent,Replied,Bounced,Tags";
+      const rows = selected.map((d) => {
+        const dateAdded = d.domain_created_at ? new Date(d.domain_created_at).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" }) : "";
+        return `${d.domain},${dateAdded},${d.inbox_count},${d.total_sent || 0},${d.total_replied || 0},${d.total_bounced || 0},"${(d.tags || []).join(", ")}"`;
+      });
       csv = [header, ...rows].join("\n");
     } else {
       csv = ["Domain", ...selected.map((d) => d.domain)].join("\n");
