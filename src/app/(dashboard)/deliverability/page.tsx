@@ -218,6 +218,7 @@ function DeliverabilityPageInner() {
     tagStatus: "running" | "done" | "error";
     tagLabel: string;
     tagAffected?: number;
+    tagFailed?: number;
     tagError?: string;
     campaignJobs: AttachJob[];
     campaignsDone: boolean;
@@ -339,7 +340,7 @@ function DeliverabilityPageInner() {
     }).then(async (res) => {
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Failed");
-      setTagCampaignJob((prev) => prev ? { ...prev, tagStatus: "done", tagAffected: data.inboxesAffected || 0 } : prev);
+      setTagCampaignJob((prev) => prev ? { ...prev, tagStatus: "done", tagAffected: data.inboxesAffected || 0, tagFailed: data.failed || 0 } : prev);
     }).catch((err) => {
       setTagCampaignJob((prev) => prev ? { ...prev, tagStatus: "error", tagError: err instanceof Error ? err.message : "Failed" } : prev);
     });
@@ -973,10 +974,18 @@ function DeliverabilityPageInner() {
             {/* Tag status line */}
             <div className="flex items-center gap-2 text-xs">
               {tagCampaignJob.tagStatus === "running" && <Loader2 className="h-3 w-3 animate-spin text-primary shrink-0" />}
-              {tagCampaignJob.tagStatus === "done" && <CheckCircle2 className="h-3 w-3 text-emerald-500 shrink-0" />}
+              {tagCampaignJob.tagStatus === "done" && (tagCampaignJob.tagFailed ?? 0) > 0 && <AlertTriangle className="h-3 w-3 text-amber-500 shrink-0" />}
+              {tagCampaignJob.tagStatus === "done" && (tagCampaignJob.tagFailed ?? 0) === 0 && <CheckCircle2 className="h-3 w-3 text-emerald-500 shrink-0" />}
               {tagCampaignJob.tagStatus === "error" && <AlertTriangle className="h-3 w-3 text-destructive shrink-0" />}
               <span className="text-muted-foreground">{tagCampaignJob.tagLabel}</span>
-              {tagCampaignJob.tagStatus === "done" && <span className="shrink-0 ml-auto text-emerald-500">{tagCampaignJob.tagAffected} inboxes</span>}
+              {tagCampaignJob.tagStatus === "done" && (
+                <span className="shrink-0 ml-auto text-emerald-500">
+                  {tagCampaignJob.tagAffected} inboxes
+                  {(tagCampaignJob.tagFailed ?? 0) > 0 && (
+                    <span className="text-amber-500"> ({tagCampaignJob.tagFailed} skipped)</span>
+                  )}
+                </span>
+              )}
               {tagCampaignJob.tagStatus === "error" && <span className="shrink-0 ml-auto text-destructive">{tagCampaignJob.tagError}</span>}
             </div>
             {/* Campaign lines */}

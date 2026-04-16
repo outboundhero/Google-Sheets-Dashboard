@@ -8,6 +8,8 @@ const apiHeaders = {
   "Content-Type": "application/json",
 };
 
+const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
 interface Tag {
   id: number;
   name: string;
@@ -74,37 +76,96 @@ export async function POST(request: Request) {
 
     const supabase = getSupabaseAdmin();
 
-    // 1. Get all inbox IDs for the selected domains
-    const { data: inboxes, error: inboxError } = await supabase
-      .from("deliverability_inboxes")
-      .select("id, domain, tags")
-      .in("domain", domains);
+    // 1. Get all inbox IDs for the selected domains (paginate per domain to avoid 1000-row cap)
+    const inboxes: { id: number; domain: string; tags: Tag[] }[] = [];
+    for (const domain of domains) {
+      let offset = 0;
+      while (true) {
+        const { data, error: inboxError } = await supabase
+          .from("deliverability_inboxes")
+          .select("id, domain, tags")
+          .eq("domain", domain)
+          .range(offset, offset + 999);
+        if (inboxError) throw new Error(inboxError.message);
+        if (!data || data.length === 0) break;
+        inboxes.push(...data);
+        if (data.length < 1000) break;
+        offset += 1000;
+      }
+    }
 
-    if (inboxError) throw new Error(inboxError.message);
-    if (!inboxes || inboxes.length === 0) {
-      return NextResponse.json({ success: true, inboxesAffected: 0 });
+    if (inboxes.length === 0) {
+      return NextResponse.json({ success: true, inboxesAffected: 0, failed: 0, total: 0 });
     }
 
     const senderEmailIds = inboxes.map((i) => i.id);
 
-    // 2. Call OutboundHero API to add or remove tags
+    // 2. Call OutboundHero API to add or remove tags — batched with retry
     const endpoint =
       action === "add"
         ? `${API_BASE}/tags/attach-to-sender-emails`
         : `${API_BASE}/tags/remove-from-sender-emails`;
 
-    const res = await fetch(endpoint, {
-      method: "POST",
-      headers: apiHeaders,
-      body: JSON.stringify({
-        tag_ids: tagIds,
-        sender_email_ids: senderEmailIds,
-      }),
-    });
+    const BATCH = 50;
+    let updated = 0;
+    let failed = 0;
+    const successIds = new Set<number>();
 
-    if (!res.ok) {
-      const text = await res.text();
-      throw new Error(`OutboundHero API error: ${res.status} ${text}`);
+    for (let i = 0; i < senderEmailIds.length; i += BATCH) {
+      const batch = senderEmailIds.slice(i, i + BATCH);
+
+      try {
+        const res = await fetch(endpoint, {
+          method: "POST",
+          headers: apiHeaders,
+          body: JSON.stringify({ tag_ids: tagIds, sender_email_ids: batch }),
+        });
+
+        if (res.ok) {
+          updated += batch.length;
+          for (const id of batch) successIds.add(id);
+        } else if (res.status === 422) {
+          // Invalid IDs in batch — fall back to sub-batches of 10
+          console.warn(`[BULK-TAGS] Batch ${i}-${i + batch.length} got 422, retrying in sub-batches`);
+          for (let j = 0; j < batch.length; j += 10) {
+            const sub = batch.slice(j, j + 10);
+            try {
+              const subRes = await fetch(endpoint, {
+                method: "POST",
+                headers: apiHeaders,
+                body: JSON.stringify({ tag_ids: tagIds, sender_email_ids: sub }),
+              });
+              if (subRes.ok) {
+                updated += sub.length;
+                for (const id of sub) successIds.add(id);
+              } else {
+                // Try one by one to isolate bad IDs
+                for (const id of sub) {
+                  try {
+                    const singleRes = await fetch(endpoint, {
+                      method: "POST",
+                      headers: apiHeaders,
+                      body: JSON.stringify({ tag_ids: tagIds, sender_email_ids: [id] }),
+                    });
+                    if (singleRes.ok) { updated++; successIds.add(id); }
+                    else { failed++; console.warn(`[BULK-TAGS] Invalid inbox ID ${id}, skipping`); }
+                  } catch { failed++; }
+                }
+              }
+            } catch { failed += sub.length; }
+            await delay(200);
+          }
+        } else {
+          const errText = await res.text().catch(() => "");
+          console.error(`[BULK-TAGS] Batch ${i}-${i + batch.length}: ${res.status} ${errText.slice(0, 200)}`);
+          failed += batch.length;
+        }
+      } catch (e) {
+        console.error(`[BULK-TAGS] Batch ${i}-${i + batch.length} network error:`, e);
+        failed += batch.length;
+      }
+
+      if (i + BATCH < senderEmailIds.length) await delay(300);
     }
 
     // 3. Fetch the tag objects for the IDs we're working with
@@ -119,8 +180,12 @@ export async function POST(request: Request) {
       .map((id) => tagMap.get(id))
       .filter(Boolean) as Tag[];
 
-    // 4. Update local Supabase inbox tags
-    for (const inbox of inboxes) {
+    // 4. Update local Supabase inbox tags (only for successfully updated inboxes)
+    const inboxesToUpdate = updated > 0
+      ? inboxes.filter((i) => successIds.has(i.id))
+      : [];
+
+    for (const inbox of inboxesToUpdate) {
       const currentTags: Tag[] = Array.isArray(inbox.tags) ? inbox.tags : [];
       let updatedTags: Tag[];
 
@@ -165,7 +230,9 @@ export async function POST(request: Request) {
 
     return NextResponse.json({
       success: true,
-      inboxesAffected: senderEmailIds.length,
+      inboxesAffected: updated,
+      failed,
+      total: senderEmailIds.length,
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Failed";
