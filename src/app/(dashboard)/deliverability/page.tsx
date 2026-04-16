@@ -208,7 +208,7 @@ function DeliverabilityPageInner() {
   const [showRemoveFromCampaigns, setShowRemoveFromCampaigns] = useState(false);
 
   // Background attach state
-  interface AttachJob { campaign: string; status: "pending" | "running" | "done" | "error"; newly: number; existing: number; error?: string }
+  interface AttachJob { campaign: string; status: "pending" | "running" | "done" | "error"; newly: number; existing: number; failed?: number; error?: string }
   const [attachJobs, setAttachJobs] = useState<AttachJob[]>([]);
   const [attachRunning, setAttachRunning] = useState(false);
   const attachDomainsRef = useRef<string[]>([]);
@@ -266,7 +266,7 @@ function DeliverabilityPageInner() {
           });
           const data = await res.json();
           if (res.ok) {
-            setAttachJobs((prev) => prev.map((j, idx) => idx === i ? { ...j, status: "done", newly: data.newly_attached || 0, existing: data.already_attached || 0 } : j));
+            setAttachJobs((prev) => prev.map((j, idx) => idx === i ? { ...j, status: "done", newly: data.newly_attached || 0, existing: data.already_attached || 0, failed: data.failed || 0 } : j));
             success = true;
             break;
           }
@@ -363,7 +363,7 @@ function DeliverabilityPageInner() {
           if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
           setTagCampaignJob((prev) => prev ? {
             ...prev,
-            campaignJobs: prev.campaignJobs.map((j, idx) => idx === i ? { ...j, status: "done", newly: data.newly_attached || 0, existing: data.already_attached || 0 } : j),
+            campaignJobs: prev.campaignJobs.map((j, idx) => idx === i ? { ...j, status: "done", newly: data.newly_attached || 0, existing: data.already_attached || 0, failed: data.failed || 0 } : j),
           } : prev);
         } catch (err) {
           setTagCampaignJob((prev) => prev ? {
@@ -932,7 +932,7 @@ function DeliverabilityPageInner() {
                 {job.status === "pending" && <div className="h-3 w-3 rounded-full border border-muted-foreground/30 shrink-0" />}
                 <span className="truncate text-muted-foreground">{job.campaign}</span>
                 {job.status === "done" && (
-                  <span className="shrink-0 ml-auto text-emerald-500">+{job.newly} · {job.existing} existing</span>
+                  <span className="shrink-0 ml-auto text-emerald-500">+{job.newly} · {job.existing} existing{(job.failed ?? 0) > 0 && <span className="text-amber-500"> ({job.failed} skipped)</span>}</span>
                 )}
                 {job.status === "error" && (
                   <span className="shrink-0 ml-auto text-destructive">{job.error}</span>
@@ -996,7 +996,7 @@ function DeliverabilityPageInner() {
                 {job.status === "error" && <AlertTriangle className="h-3 w-3 text-destructive shrink-0" />}
                 {job.status === "pending" && <div className="h-3 w-3 rounded-full border border-muted-foreground/30 shrink-0" />}
                 <span className="truncate text-muted-foreground">{job.campaign}</span>
-                {job.status === "done" && <span className="shrink-0 ml-auto text-emerald-500">+{job.newly} · {job.existing} existing</span>}
+                {job.status === "done" && <span className="shrink-0 ml-auto text-emerald-500">+{job.newly} · {job.existing} existing{(job.failed ?? 0) > 0 && <span className="text-amber-500"> ({job.failed} skipped)</span>}</span>}
                 {job.status === "error" && <span className="shrink-0 ml-auto text-destructive">{job.error}</span>}
               </div>
             ))}

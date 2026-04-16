@@ -66,27 +66,70 @@ export async function POST(request: Request) {
     const newIds = allInboxIds.filter((id) => !alreadyAttached.has(id));
     const alreadyCount = allInboxIds.length - newIds.length;
 
-    // 4. Attach in batches of 100
+    // 4. Attach in batches of 50 with retry for invalid IDs
     let attached = 0;
-    for (let i = 0; i < newIds.length; i += BATCH_SIZE) {
-      const batch = newIds.slice(i, i + BATCH_SIZE);
-      const res = await fetch(`${API_BASE}/campaigns/${campaign_id}/attach-sender-emails`, {
-        method: "POST",
-        headers: { ...headers, "Content-Type": "application/json" },
-        body: JSON.stringify({ sender_email_ids: batch }),
-      });
-      if (res.ok) {
-        attached += batch.length;
-      } else {
-        console.error(`[ATTACH-DOMAIN] Campaign ${campaign_id} batch attach failed: ${res.status}`);
+    let failed = 0;
+    const ATTACH_BATCH = 50;
+    for (let i = 0; i < newIds.length; i += ATTACH_BATCH) {
+      const batch = newIds.slice(i, i + ATTACH_BATCH);
+
+      try {
+        const res = await fetch(`${API_BASE}/campaigns/${campaign_id}/attach-sender-emails`, {
+          method: "POST",
+          headers: { ...headers, "Content-Type": "application/json" },
+          body: JSON.stringify({ sender_email_ids: batch }),
+        });
+
+        if (res.ok) {
+          attached += batch.length;
+        } else if (res.status === 422) {
+          // Invalid IDs in batch — fall back to sub-batches of 10
+          console.warn(`[ATTACH-DOMAIN] Campaign ${campaign_id} batch ${i}-${i + batch.length} got 422, retrying in sub-batches`);
+          for (let j = 0; j < batch.length; j += 10) {
+            const sub = batch.slice(j, j + 10);
+            try {
+              const subRes = await fetch(`${API_BASE}/campaigns/${campaign_id}/attach-sender-emails`, {
+                method: "POST",
+                headers: { ...headers, "Content-Type": "application/json" },
+                body: JSON.stringify({ sender_email_ids: sub }),
+              });
+              if (subRes.ok) {
+                attached += sub.length;
+              } else {
+                // Try one by one to skip individual bad IDs
+                for (const id of sub) {
+                  try {
+                    const singleRes = await fetch(`${API_BASE}/campaigns/${campaign_id}/attach-sender-emails`, {
+                      method: "POST",
+                      headers: { ...headers, "Content-Type": "application/json" },
+                      body: JSON.stringify({ sender_email_ids: [id] }),
+                    });
+                    if (singleRes.ok) attached++;
+                    else { failed++; console.warn(`[ATTACH-DOMAIN] Invalid inbox ID ${id}, skipping`); }
+                  } catch { failed++; }
+                }
+              }
+            } catch { failed += sub.length; }
+            await delay(200);
+          }
+        } else {
+          const errText = await res.text().catch(() => "");
+          console.error(`[ATTACH-DOMAIN] Campaign ${campaign_id} batch ${i}-${i + batch.length}: ${res.status} ${errText.slice(0, 200)}`);
+          failed += batch.length;
+        }
+      } catch (e) {
+        console.error(`[ATTACH-DOMAIN] Campaign ${campaign_id} batch ${i}-${i + batch.length} network error:`, e);
+        failed += batch.length;
       }
-      if (i + BATCH_SIZE < newIds.length) await delay(100);
+
+      if (i + ATTACH_BATCH < newIds.length) await delay(300);
     }
 
     return NextResponse.json({
       total_matched: allInboxIds.length,
       already_attached: alreadyCount,
       newly_attached: attached,
+      failed,
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Failed";
