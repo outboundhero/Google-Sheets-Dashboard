@@ -5,7 +5,7 @@ import {
   Dialog, DialogContent, DialogHeader, DialogTitle,
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
-import { Loader2, ChevronDown } from "lucide-react";
+import { Loader2, ChevronDown, ExternalLink } from "lucide-react";
 
 interface SheetOption {
   clientTag: string;
@@ -129,8 +129,16 @@ export function SendToSheetDialog({
             </div>
 
             {selectedSheet && (
-              <div className="text-xs text-muted-foreground rounded-lg border bg-muted/30 px-3 py-2">
-                Target: <span className="font-medium text-foreground">{selectedSheet.sheetName}</span> &rarr; Domains tab
+              <div className="flex items-center justify-between text-xs text-muted-foreground rounded-lg border bg-muted/30 px-3 py-2">
+                <span>Target: <span className="font-medium text-foreground">{selectedSheet.sheetName}</span> &rarr; Domains tab</span>
+                <a
+                  href={`https://docs.google.com/spreadsheets/d/${selectedSheet.sheetId}/edit#gid=0`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="flex items-center gap-1 text-primary hover:underline shrink-0 ml-2"
+                >
+                  Open <ExternalLink className="h-3 w-3" />
+                </a>
               </div>
             )}
 
