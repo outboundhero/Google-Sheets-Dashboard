@@ -2,15 +2,30 @@ import { NextResponse } from "next/server";
 import { getConfig } from "@/lib/sheets-config";
 import { getSheetMetadata, appendDomainsToSheet } from "@/lib/google-sheets";
 
-/**
- * GET /api/deliverability/send-to-sheet
- * Returns tracked sheets that have a "Domains" tab.
- */
-export async function GET() {
-  try {
-    const config = await getConfig();
+interface SheetInfo {
+  clientTag: string;
+  sheetName: string;
+  sheetId: string;
+}
+
+// Cache available sheets for 10 minutes to avoid hammering Google Sheets API
+let cachedSheets: SheetInfo[] | null = null;
+let cachedAt = 0;
+const CACHE_TTL = 10 * 60 * 1000;
+
+async function getAvailableSheets(): Promise<SheetInfo[]> {
+  if (cachedSheets && Date.now() - cachedAt < CACHE_TTL) {
+    return cachedSheets;
+  }
+
+  const config = await getConfig();
+
+  // Check sheets sequentially in batches of 5 to avoid quota issues
+  const sheets: SheetInfo[] = [];
+  for (let i = 0; i < config.sheets.length; i += 5) {
+    const batch = config.sheets.slice(i, i + 5);
     const results = await Promise.allSettled(
-      config.sheets.map(async (sheet) => {
+      batch.map(async (sheet) => {
         const meta = await getSheetMetadata(sheet.id);
         if (meta.sheetNames.includes("Domains")) {
           return { clientTag: sheet.clientTag, sheetName: meta.title, sheetId: sheet.id };
@@ -18,14 +33,25 @@ export async function GET() {
         return null;
       })
     );
-
-    const sheets: { clientTag: string; sheetName: string; sheetId: string }[] = [];
     for (const result of results) {
       if (result.status === "fulfilled" && result.value) {
         sheets.push(result.value);
       }
     }
+  }
 
+  cachedSheets = sheets;
+  cachedAt = Date.now();
+  return sheets;
+}
+
+/**
+ * GET /api/deliverability/send-to-sheet
+ * Returns tracked sheets that have a "Domains" tab (cached).
+ */
+export async function GET() {
+  try {
+    const sheets = await getAvailableSheets();
     return NextResponse.json({ sheets });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Failed";
@@ -52,32 +78,37 @@ export async function POST(request: Request) {
       );
     }
 
-    // Look up TrackedSheet by clientTag
-    const config = await getConfig();
-    const sheet = config.sheets.find((s) => s.clientTag === clientTag);
-    if (!sheet) {
-      return NextResponse.json(
-        { error: `No tracked sheet found for client tag "${clientTag}"` },
-        { status: 404 }
-      );
+    // Look up sheet from cache first, fall back to config
+    const cached = await getAvailableSheets();
+    const cachedSheet = cached.find((s) => s.clientTag === clientTag);
+
+    let sheetId: string;
+    let sheetName: string;
+
+    if (cachedSheet) {
+      sheetId = cachedSheet.sheetId;
+      sheetName = cachedSheet.sheetName;
+    } else {
+      // Not in cache — look up directly (single API call)
+      const config = await getConfig();
+      const tracked = config.sheets.find((s) => s.clientTag === clientTag);
+      if (!tracked) {
+        return NextResponse.json(
+          { error: `No tracked sheet found for client tag "${clientTag}"` },
+          { status: 404 }
+        );
+      }
+      sheetId = tracked.id;
+      sheetName = tracked.name;
     }
 
-    // Verify the "Domains" tab exists
-    const meta = await getSheetMetadata(sheet.id);
-    if (!meta.sheetNames.includes("Domains")) {
-      return NextResponse.json(
-        { error: `Sheet "${meta.title}" does not have a "Domains" tab` },
-        { status: 400 }
-      );
-    }
-
-    // Append domains
-    const result = await appendDomainsToSheet(sheet.id, domains);
+    // Append domains (appendDomainsToSheet reads existing for dedup + writes — 2 API calls total)
+    const result = await appendDomainsToSheet(sheetId, domains);
 
     return NextResponse.json({
       added: result.added,
       duplicates: result.duplicates,
-      sheetName: meta.title,
+      sheetName,
       clientTag,
     });
   } catch (error) {
