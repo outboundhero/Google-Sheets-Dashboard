@@ -16,7 +16,7 @@ export interface ClientTrackerRow {
   pauseDate: string | null;
 }
 
-const SCOPES = ["https://www.googleapis.com/auth/spreadsheets.readonly"];
+const SCOPES = ["https://www.googleapis.com/auth/spreadsheets"];
 
 let sheetsClient: sheets_v4.Sheets | null = null;
 
@@ -389,4 +389,54 @@ export async function getAllClientTags(): Promise<string[]> {
   const result = Array.from(tags).sort();
   cache.set(cacheKey, result);
   return result;
+}
+
+/**
+ * Append domains to a spreadsheet's "Domains" tab.
+ * Deduplicates against existing domains in column B.
+ * Writes: [Date Added, Domain, "FALSE", "New"] per row.
+ */
+export async function appendDomainsToSheet(
+  spreadsheetId: string,
+  domains: string[]
+): Promise<{ added: number; duplicates: number }> {
+  const sheets = await getSheetsClient();
+  const sheetName = "Domains";
+  const escaped = escapeSheetName(sheetName);
+
+  // Read existing domains from column B (skip header rows 1-2)
+  const existingRes = await sheets.spreadsheets.values.get({
+    spreadsheetId,
+    range: `${escaped}!B3:B`,
+  });
+  const existingDomains = new Set(
+    (existingRes.data.values || []).map((row) => (row[0] || "").trim().toLowerCase())
+  );
+
+  // Filter out duplicates
+  const newDomains = domains.filter(
+    (d) => !existingDomains.has(d.trim().toLowerCase())
+  );
+  const duplicates = domains.length - newDomains.length;
+
+  if (newDomains.length === 0) {
+    return { added: 0, duplicates };
+  }
+
+  // Format date as M/D/YYYY (no leading zeros)
+  const now = new Date();
+  const dateStr = `${now.getMonth() + 1}/${now.getDate()}/${now.getFullYear()}`;
+
+  // Build rows: [Date Added, Domain, Whitelisted?, Duplicate Check]
+  const rows = newDomains.map((domain) => [dateStr, domain, "FALSE", "New"]);
+
+  await sheets.spreadsheets.values.append({
+    spreadsheetId,
+    range: `${escaped}!A:D`,
+    valueInputOption: "USER_ENTERED",
+    insertDataOption: "INSERT_ROWS",
+    requestBody: { values: rows },
+  });
+
+  return { added: newDomains.length, duplicates };
 }

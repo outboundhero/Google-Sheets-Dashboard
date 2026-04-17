@@ -48,7 +48,7 @@ export function AttachToCampaignsDialog({ open, onOpenChange, selectedDomains, o
     setTagSearch("");
 
     setLoading(true);
-    fetch("/api/campaigns")
+    fetch("/api/campaigns?all=1")
       .then((r) => r.json())
       .then((data) => {
         const camps: Campaign[] = data.campaigns || (Array.isArray(data) ? data : []);

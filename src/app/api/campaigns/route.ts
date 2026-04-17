@@ -119,6 +119,7 @@ export async function GET(request: Request) {
   try {
     const { searchParams } = new URL(request.url);
     const debug = searchParams.get("debug") === "1";
+    const showAll = searchParams.get("all") === "1";
 
     // Get active client tags from Google Sheet (exclude churned clients with past churn date)
     const tracker = await getClientTrackerData().catch(() => []);
@@ -158,10 +159,12 @@ export async function GET(request: Request) {
     const allCampaignTags = [...new Set(campaigns.map((c) => c.client_tag).filter(Boolean))];
     const filteredOutTags = allCampaignTags.filter((t) => !activeClientsUpper.has(t.toUpperCase()));
 
-    // Filter to active clients only (case-insensitive match)
-    const filtered = campaigns
-      .filter((c) => !c.client_tag || activeClientsUpper.has(c.client_tag.toUpperCase()))
-      .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+    // Filter to active clients only — unless ?all=1 is passed (for deliverability bulk operations)
+    const filtered = showAll
+      ? campaigns.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
+      : campaigns
+          .filter((c) => !c.client_tag || activeClientsUpper.has(c.client_tag.toUpperCase()))
+          .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
 
     const response: Record<string, unknown> = {
       campaigns: filtered,

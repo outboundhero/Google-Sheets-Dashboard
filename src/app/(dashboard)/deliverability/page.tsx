@@ -30,6 +30,7 @@ import { BulkTagDialog, type TagApplyInfo } from "@/components/deliverability/bu
 import { BulkDeleteDialog } from "@/components/deliverability/bulk-delete-dialog";
 import { AttachToCampaignsDialog } from "@/components/deliverability/attach-to-campaigns-dialog";
 import { RemoveFromCampaignsDialog } from "@/components/deliverability/remove-from-campaigns-dialog";
+import { SendToSheetDialog } from "@/components/deliverability/send-to-sheet-dialog";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -223,11 +224,21 @@ function DeliverabilityPageInner() {
     campaignJobs: AttachJob[];
     campaignsDone: boolean;
     domains: string[];
+    sheetStatus?: "running" | "done" | "error" | "skipped";
+    sheetLabel?: string;
+    sheetAdded?: number;
+    sheetDuplicates?: number;
+    sheetError?: string;
   }
   const [tagCampaignJob, setTagCampaignJob] = useState<TagCampaignJob | null>(null);
   const [domainsCopied, setDomainsCopied] = useState(false);
   const [showExportMenu, setShowExportMenu] = useState(false);
   const [exportCopied, setExportCopied] = useState(false);
+  const [showSendToSheet, setShowSendToSheet] = useState(false);
+
+  // Standalone sheet append state
+  interface SheetAppendJob { status: "running" | "done" | "error"; label: string; added?: number; duplicates?: number; error?: string }
+  const [sheetAppendJob, setSheetAppendJob] = useState<SheetAppendJob | null>(null);
 
   // Bulk limit update state
   const [limitDialog, setLimitDialog] = useState<{ type: "daily" | "warmup"; domains: string[] } | null>(null);
@@ -328,11 +339,15 @@ function DeliverabilityPageInner() {
   const startBackgroundTagCampaign = useCallback(async (info: TagApplyInfo) => {
     const tagLabel = `${info.mode === "add" ? "Adding" : "Removing"} ${info.tagNames.join(", ")}`;
     const campaignJobs: AttachJob[] = info.campaigns.map((c) => ({ campaign: c.name, status: "pending" as const, newly: 0, existing: 0 }));
-    setTagCampaignJob({ tagStatus: "running", tagLabel, campaignJobs, campaignsDone: info.campaigns.length === 0, domains: info.domains });
+    setTagCampaignJob({
+      tagStatus: "running", tagLabel, campaignJobs, campaignsDone: info.campaigns.length === 0, domains: info.domains,
+      sheetStatus: info.sheetAppend ? "running" : "skipped",
+      sheetLabel: info.sheetAppend ? `Sending to ${info.sheetAppend.clientTag} sheet...` : undefined,
+    });
     setSelectedDomains(new Set());
     setDomainsCopied(false);
 
-    // Run tags + campaigns in parallel
+    // Run tags + campaigns + sheet append in parallel
     const tagPromise = fetch("/api/deliverability/bulk-tags", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -375,10 +390,59 @@ function DeliverabilityPageInner() {
       setTagCampaignJob((prev) => prev ? { ...prev, campaignsDone: true } : prev);
     })();
 
-    await Promise.all([tagPromise, campaignPromise]);
+    const sheetPromise = (async () => {
+      if (!info.sheetAppend) return;
+      try {
+        const res = await fetch("/api/deliverability/send-to-sheet", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ domains: info.domains, clientTag: info.sheetAppend.clientTag }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || "Failed");
+        setTagCampaignJob((prev) => prev ? {
+          ...prev, sheetStatus: "done",
+          sheetLabel: `Added to "${data.sheetName}" Domains tab`,
+          sheetAdded: data.added, sheetDuplicates: data.duplicates,
+        } : prev);
+      } catch (err) {
+        setTagCampaignJob((prev) => prev ? {
+          ...prev, sheetStatus: "error",
+          sheetLabel: "Sheet append failed",
+          sheetError: err instanceof Error ? err.message : "Failed",
+        } : prev);
+      }
+    })();
+
+    await Promise.all([tagPromise, campaignPromise, sheetPromise]);
     loadDomains();
     loadTags();
   }, [loadDomains, loadTags]);
+
+  const startBackgroundSheetAppend = useCallback(async (doms: string[], clientTag: string) => {
+    setSheetAppendJob({ status: "running", label: `Sending ${doms.length} domains to ${clientTag} sheet...` });
+    setSelectedDomains(new Set());
+    try {
+      const res = await fetch("/api/deliverability/send-to-sheet", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ domains: doms, clientTag }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Failed");
+      setSheetAppendJob({
+        status: "done",
+        label: `Added to "${data.sheetName}" Domains tab`,
+        added: data.added, duplicates: data.duplicates,
+      });
+    } catch (err) {
+      setSheetAppendJob({
+        status: "error",
+        label: "Sheet append failed",
+        error: err instanceof Error ? err.message : "Failed",
+      });
+    }
+  }, []);
 
   useEffect(() => {
     loadDomains();
@@ -943,18 +1007,19 @@ function DeliverabilityPageInner() {
         </div>
       )}
 
-      {/* Background Tag + Campaign Progress */}
-      {tagCampaignJob && (
+      {/* Background Tag + Campaign + Sheet Progress */}
+      {tagCampaignJob && (() => {
+        const sheetDone = !tagCampaignJob.sheetStatus || tagCampaignJob.sheetStatus === "done" || tagCampaignJob.sheetStatus === "error" || tagCampaignJob.sheetStatus === "skipped";
+        const allDone = tagCampaignJob.tagStatus !== "running" && tagCampaignJob.campaignsDone && sheetDone;
+        return (
         <div className="rounded-lg border bg-muted/30 px-4 py-3">
           <div className="flex items-center justify-between mb-2">
             <div className="flex items-center gap-2 text-sm">
-              {(tagCampaignJob.tagStatus === "running" || !tagCampaignJob.campaignsDone) && <Loader2 className="h-3.5 w-3.5 animate-spin text-primary" />}
-              {tagCampaignJob.tagStatus !== "running" && tagCampaignJob.campaignsDone && <CheckCircle2 className="h-3.5 w-3.5 text-emerald-500" />}
-              <span className="font-medium">
-                {tagCampaignJob.tagStatus === "running" || !tagCampaignJob.campaignsDone ? "Processing..." : "Complete"}
-              </span>
+              {!allDone && <Loader2 className="h-3.5 w-3.5 animate-spin text-primary" />}
+              {allDone && <CheckCircle2 className="h-3.5 w-3.5 text-emerald-500" />}
+              <span className="font-medium">{allDone ? "Complete" : "Processing..."}</span>
             </div>
-            {tagCampaignJob.tagStatus !== "running" && tagCampaignJob.campaignsDone && (
+            {allDone && (
               <div className="flex items-center gap-3">
                 <button
                   onClick={() => {
@@ -1000,6 +1065,53 @@ function DeliverabilityPageInner() {
                 {job.status === "error" && <span className="shrink-0 ml-auto text-destructive">{job.error}</span>}
               </div>
             ))}
+            {/* Sheet append line */}
+            {tagCampaignJob.sheetStatus && tagCampaignJob.sheetStatus !== "skipped" && (
+              <div className="flex items-center gap-2 text-xs">
+                {tagCampaignJob.sheetStatus === "running" && <Loader2 className="h-3 w-3 animate-spin text-primary shrink-0" />}
+                {tagCampaignJob.sheetStatus === "done" && <CheckCircle2 className="h-3 w-3 text-emerald-500 shrink-0" />}
+                {tagCampaignJob.sheetStatus === "error" && <AlertTriangle className="h-3 w-3 text-destructive shrink-0" />}
+                <span className="text-muted-foreground">{tagCampaignJob.sheetLabel}</span>
+                {tagCampaignJob.sheetStatus === "done" && (
+                  <span className="shrink-0 ml-auto text-emerald-500">
+                    +{tagCampaignJob.sheetAdded} added
+                    {(tagCampaignJob.sheetDuplicates ?? 0) > 0 && (
+                      <span className="text-amber-500"> ({tagCampaignJob.sheetDuplicates} duplicates)</span>
+                    )}
+                  </span>
+                )}
+                {tagCampaignJob.sheetStatus === "error" && <span className="shrink-0 ml-auto text-destructive">{tagCampaignJob.sheetError}</span>}
+              </div>
+            )}
+          </div>
+        </div>
+        );
+      })()}
+
+      {/* Standalone Sheet Append Progress */}
+      {sheetAppendJob && (
+        <div className="rounded-lg border bg-muted/30 px-4 py-3">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2 text-sm">
+              {sheetAppendJob.status === "running" && <Loader2 className="h-3.5 w-3.5 animate-spin text-primary" />}
+              {sheetAppendJob.status === "done" && <CheckCircle2 className="h-3.5 w-3.5 text-emerald-500" />}
+              {sheetAppendJob.status === "error" && <AlertTriangle className="h-3.5 w-3.5 text-destructive" />}
+              <span className="font-medium">{sheetAppendJob.label}</span>
+              {sheetAppendJob.status === "done" && (
+                <span className="text-xs text-emerald-500 ml-2">
+                  +{sheetAppendJob.added} added
+                  {(sheetAppendJob.duplicates ?? 0) > 0 && (
+                    <span className="text-amber-500"> ({sheetAppendJob.duplicates} duplicates)</span>
+                  )}
+                </span>
+              )}
+              {sheetAppendJob.status === "error" && (
+                <span className="text-xs text-destructive ml-2">{sheetAppendJob.error}</span>
+              )}
+            </div>
+            {sheetAppendJob.status !== "running" && (
+              <button onClick={() => setSheetAppendJob(null)} className="text-xs text-muted-foreground hover:text-foreground">Dismiss</button>
+            )}
           </div>
         </div>
       )}
@@ -1419,6 +1531,15 @@ function DeliverabilityPageInner() {
                         </div>
                       )}
                     </div>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="h-7 text-xs gap-1.5"
+                      onClick={() => setShowSendToSheet(true)}
+                    >
+                      <Send className="h-3 w-3" />
+                      Send to Sheet
+                    </Button>
                     <Button
                       size="sm"
                       variant="ghost"
@@ -1939,6 +2060,24 @@ function DeliverabilityPageInner() {
         onOpenChange={setShowRemoveFromCampaigns}
         selectedDomains={Array.from(selectedDomains)}
         onComplete={() => setSelectedDomains(new Set())}
+      />
+
+      {/* Send to Sheet Dialog */}
+      <SendToSheetDialog
+        open={showSendToSheet}
+        onOpenChange={setShowSendToSheet}
+        selectedDomains={Array.from(selectedDomains)}
+        domainTags={(() => {
+          const tags: string[] = [];
+          for (const domain of selectedDomains) {
+            const d = domains.find((dd) => dd.domain === domain);
+            if (d?.tags) tags.push(...d.tags);
+          }
+          return tags;
+        })()}
+        onConfirm={({ domains: doms, clientTag }) => {
+          startBackgroundSheetAppend(doms, clientTag);
+        }}
       />
 
       {/* Bulk Limit Update Dialog */}

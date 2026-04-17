@@ -6,7 +6,7 @@ import {
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { Search, X, Check, Plus, Loader2 } from "lucide-react";
+import { Search, X, Check, Plus, Loader2, ChevronDown } from "lucide-react";
 
 interface Tag { id: number; name: string }
 interface Campaign { id: number; name: string; status: string; client_tag: string }
@@ -18,6 +18,8 @@ export interface TagApplyInfo {
   domains: string[];
   /** Campaigns to attach domains to (empty if skipped) */
   campaigns: { id: number; name: string }[];
+  /** If set, also append domains to this client's Domains sheet */
+  sheetAppend?: { clientTag: string } | null;
 }
 
 interface BulkTagDialogProps {
@@ -40,7 +42,7 @@ const STATUS_COLORS: Record<string, string> = {
 export function BulkTagDialog({
   mode, open, onOpenChange, selectedDomains, existingTags, availableTags, onApply,
 }: BulkTagDialogProps) {
-  const [phase, setPhase] = useState<"tags" | "campaigns">("tags");
+  const [phase, setPhase] = useState<"tags" | "campaigns" | "sheet">("tags");
   const [allTags, setAllTags] = useState<Tag[]>([]);
   const [loading, setLoading] = useState(false);
   const [selectedTagIds, setSelectedTagIds] = useState<Set<number>>(new Set());
@@ -58,6 +60,12 @@ export function BulkTagDialog({
   // Saved tag selection
   const [savedTagIds, setSavedTagIds] = useState<number[]>([]);
   const [savedTagNames, setSavedTagNames] = useState<string[]>([]);
+
+  // Sheet append selection
+  const [savedCampaigns, setSavedCampaigns] = useState<{ id: number; name: string }[]>([]);
+  const [availableSheets, setAvailableSheets] = useState<{ clientTag: string; sheetName: string }[]>([]);
+  const [sheetsLoading, setSheetsLoading] = useState(false);
+  const [selectedSheetTag, setSelectedSheetTag] = useState<string | null>(null);
 
   useEffect(() => {
     if (!open) return;
@@ -134,7 +142,7 @@ export function BulkTagDialog({
     setCampaignsLoading(true);
     setPhase("campaigns");
     try {
-      const res = await fetch("/api/campaigns");
+      const res = await fetch("/api/campaigns?all=1");
       const data = await res.json();
       const allCampaigns: Campaign[] = data.campaigns || (Array.isArray(data) ? data : []);
       const allRelevantTags = new Set([...(existingTags || []), ...newTagNames]);
@@ -157,14 +165,40 @@ export function BulkTagDialog({
     setSelectedCampaignIds((prev) => { const n = new Set(prev); if (n.has(id)) n.delete(id); else n.add(id); return n; });
   };
 
+  const transitionToSheet = (camps: { id: number; name: string }[]) => {
+    setSavedCampaigns(camps);
+    setSheetsLoading(true);
+    setPhase("sheet");
+    fetch("/api/deliverability/send-to-sheet")
+      .then((r) => r.json())
+      .then((data) => {
+        const sheets: { clientTag: string; sheetName: string }[] = data.sheets || [];
+        setAvailableSheets(sheets);
+        // Auto-detect: match tag names being added to available sheet clientTags
+        const sheetTags = new Set(sheets.map((s) => s.clientTag));
+        const match = savedTagNames.find((t) => sheetTags.has(t));
+        setSelectedSheetTag(match || sheets[0]?.clientTag || null);
+      })
+      .catch(() => setAvailableSheets([]))
+      .finally(() => setSheetsLoading(false));
+  };
+
   const handleConfirmAll = () => {
     const selectedCamps = campaigns.filter((c) => selectedCampaignIds.has(c.id)).map((c) => ({ id: c.id, name: c.name }));
-    onApply({ mode, tagIds: savedTagIds, tagNames: savedTagNames, domains: [...selectedDomains], campaigns: selectedCamps });
-    onOpenChange(false);
+    transitionToSheet(selectedCamps);
   };
 
   const handleSkipCampaigns = () => {
-    onApply({ mode, tagIds: savedTagIds, tagNames: savedTagNames, domains: [...selectedDomains], campaigns: [] });
+    transitionToSheet([]);
+  };
+
+  const handleSheetConfirm = () => {
+    onApply({ mode, tagIds: savedTagIds, tagNames: savedTagNames, domains: [...selectedDomains], campaigns: savedCampaigns, sheetAppend: selectedSheetTag ? { clientTag: selectedSheetTag } : null });
+    onOpenChange(false);
+  };
+
+  const handleSheetSkip = () => {
+    onApply({ mode, tagIds: savedTagIds, tagNames: savedTagNames, domains: [...selectedDomains], campaigns: savedCampaigns, sheetAppend: null });
     onOpenChange(false);
   };
 
@@ -173,7 +207,9 @@ export function BulkTagDialog({
       <DialogContent className="sm:!max-w-lg max-h-[80vh] flex flex-col">
         <DialogHeader>
           <DialogTitle>
-            {phase === "campaigns"
+            {phase === "sheet"
+              ? "Add to Domains Sheet"
+              : phase === "campaigns"
               ? "Select Campaigns"
               : `${mode === "add" ? "Add Tags" : "Remove Tags"} — ${selectedDomains.length} domain${selectedDomains.length !== 1 ? "s" : ""}`}
           </DialogTitle>
@@ -290,8 +326,60 @@ export function BulkTagDialog({
               <Button variant="ghost" size="sm" onClick={handleSkipCampaigns}>Skip</Button>
               <Button size="sm" onClick={handleConfirmAll}>
                 {selectedCampaignIds.size > 0
-                  ? `Add Tags & Attach to ${selectedCampaignIds.size} Campaign${selectedCampaignIds.size !== 1 ? "s" : ""}`
-                  : "Add Tags Only"}
+                  ? `Attach to ${selectedCampaignIds.size} Campaign${selectedCampaignIds.size !== 1 ? "s" : ""} & Next`
+                  : "Next"}
+              </Button>
+            </div>
+          </div>
+        )}
+
+        {/* ── Sheet Append Selection ── */}
+        {phase === "sheet" && (
+          <div className="space-y-4">
+            <p className="text-sm text-muted-foreground">
+              Also add these {selectedDomains.length} domains to a client&apos;s Domains sheet?
+            </p>
+
+            {sheetsLoading ? (
+              <div className="flex items-center justify-center py-6">
+                <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
+              </div>
+            ) : availableSheets.length === 0 ? (
+              <div className="text-sm text-muted-foreground py-4">
+                No tracked sheets have a &quot;Domains&quot; tab.
+              </div>
+            ) : (
+              <div className="space-y-3">
+                <div className="space-y-1.5">
+                  <label className="text-xs font-medium text-muted-foreground">Client Sheet</label>
+                  <div className="relative">
+                    <select
+                      value={selectedSheetTag || ""}
+                      onChange={(e) => setSelectedSheetTag(e.target.value)}
+                      className="w-full appearance-none rounded-lg border bg-background px-3 py-2 pr-8 text-sm outline-none focus:ring-1 focus:ring-primary"
+                    >
+                      {availableSheets.map((s) => (
+                        <option key={s.clientTag} value={s.clientTag}>
+                          {s.clientTag} — {s.sheetName}
+                        </option>
+                      ))}
+                    </select>
+                    <ChevronDown className="absolute right-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground pointer-events-none" />
+                  </div>
+                </div>
+
+                {selectedSheetTag && (
+                  <div className="text-xs text-muted-foreground rounded-lg border bg-muted/30 px-3 py-2">
+                    Target: <span className="font-medium text-foreground">{availableSheets.find((s) => s.clientTag === selectedSheetTag)?.sheetName}</span> &rarr; Domains tab
+                  </div>
+                )}
+              </div>
+            )}
+
+            <div className="flex justify-end gap-2 pt-1">
+              <Button variant="ghost" size="sm" onClick={handleSheetSkip}>Skip</Button>
+              <Button size="sm" disabled={!selectedSheetTag || availableSheets.length === 0} onClick={handleSheetConfirm}>
+                Add to Sheet
               </Button>
             </div>
           </div>
