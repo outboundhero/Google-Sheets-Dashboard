@@ -394,7 +394,7 @@ export async function getAllClientTags(): Promise<string[]> {
 /**
  * Append domains to a spreadsheet's "Domains" tab.
  * Deduplicates against existing domains in column B.
- * Writes: [Date Added, Domain, "FALSE", "New"] per row.
+ * Writes: [Date Added, Domain] per row.
  */
 export async function appendDomainsToSheet(
   spreadsheetId: string,
@@ -427,12 +427,12 @@ export async function appendDomainsToSheet(
   const now = new Date();
   const dateStr = `${now.getMonth() + 1}/${now.getDate()}/${now.getFullYear()}`;
 
-  // Build rows: [Date Added, Domain, Whitelisted?, Duplicate Check]
-  const rows = newDomains.map((domain) => [dateStr, domain, "FALSE", "New"]);
+  // Build rows: [Date Added, Domain]
+  const rows = newDomains.map((domain) => [dateStr, domain]);
 
   await sheets.spreadsheets.values.append({
     spreadsheetId,
-    range: `${escaped}!A:D`,
+    range: `${escaped}!A:B`,
     valueInputOption: "USER_ENTERED",
     insertDataOption: "INSERT_ROWS",
     requestBody: { values: rows },

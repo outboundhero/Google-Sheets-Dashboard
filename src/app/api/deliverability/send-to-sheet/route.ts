@@ -78,29 +78,17 @@ export async function POST(request: Request) {
       );
     }
 
-    // Look up sheet from cache first, fall back to config
-    const cached = await getAvailableSheets();
-    const cachedSheet = cached.find((s) => s.clientTag === clientTag);
-
-    let sheetId: string;
-    let sheetName: string;
-
-    if (cachedSheet) {
-      sheetId = cachedSheet.sheetId;
-      sheetName = cachedSheet.sheetName;
-    } else {
-      // Not in cache — look up directly (single API call)
-      const config = await getConfig();
-      const tracked = config.sheets.find((s) => s.clientTag === clientTag);
-      if (!tracked) {
-        return NextResponse.json(
-          { error: `No tracked sheet found for client tag "${clientTag}"` },
-          { status: 404 }
-        );
-      }
-      sheetId = tracked.id;
-      sheetName = tracked.name;
+    // Look up sheet directly from config (no Google Sheets API calls)
+    const config = await getConfig();
+    const tracked = config.sheets.find((s) => s.clientTag === clientTag);
+    if (!tracked) {
+      return NextResponse.json(
+        { error: `No tracked sheet found for client tag "${clientTag}"` },
+        { status: 404 }
+      );
     }
+    const sheetId = tracked.id;
+    const sheetName = tracked.name;
 
     // Append domains (appendDomainsToSheet reads existing for dedup + writes — 2 API calls total)
     const result = await appendDomainsToSheet(sheetId, domains);
