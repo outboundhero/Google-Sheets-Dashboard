@@ -8,6 +8,7 @@ import {
 import { getSheetMetadata } from "@/lib/google-sheets";
 import { syncSingleSheet } from "@/lib/sync-leads";
 import { removeStoredSheet } from "@/lib/leads-store";
+import { syncSheetsToSupabase } from "@/lib/supabase-sheets-sync";
 
 export async function GET() {
   try {
@@ -69,9 +70,12 @@ export async function POST(request: Request) {
 
     await addSheet(sheet);
 
-    // Fire-and-forget: sync this sheet's leads into Redis
+    // Fire-and-forget: sync this sheet's leads into Redis + update Supabase
     syncSingleSheet(sheetId, sheetName, clientTag).catch((err) =>
       console.error("[sheets/POST] Background sync failed:", err)
+    );
+    syncSheetsToSupabase().catch((err) =>
+      console.error("[sheets/POST] Supabase sync failed:", err)
     );
 
     return NextResponse.json(sheet, { status: 201 });
@@ -96,6 +100,9 @@ export async function DELETE(request: Request) {
 
     await removeSheet(id);
     await removeStoredSheet(id);
+    syncSheetsToSupabase().catch((err) =>
+      console.error("[sheets/DELETE] Supabase sync failed:", err)
+    );
     return NextResponse.json({ success: true });
   } catch (error) {
     return NextResponse.json(

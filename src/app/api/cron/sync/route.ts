@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { syncChunk } from "@/lib/sync-leads";
 import { getConfig } from "@/lib/sheets-config";
 import { getSupabaseAdmin } from "@/lib/supabase";
+import { syncSheetsToSupabase } from "@/lib/supabase-sheets-sync";
 
 const DELIVERABILITY_API = "https://app.outboundhero.co/api";
 const DELIVERABILITY_KEY = process.env.OUTBOUNDHERO_API_KEY!;
@@ -150,6 +151,11 @@ export async function GET() {
         campaignsSynced = rows.length;
       }
     } catch { /* ignore campaign sync errors in cron */ }
+
+    // Sync tracked sheets config to Supabase
+    await syncSheetsToSupabase().catch((err) =>
+      console.error("[cron/sync] Supabase sheets sync failed:", err)
+    );
 
     return NextResponse.json({
       totalSynced,

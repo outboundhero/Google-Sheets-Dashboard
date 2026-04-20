@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { syncChunk } from "@/lib/sync-leads";
 import { getSyncMetadata, isSyncStale } from "@/lib/leads-store";
+import { syncSheetsToSupabase } from "@/lib/supabase-sheets-sync";
 
 export const maxDuration = 60;
 
@@ -23,6 +24,13 @@ export async function POST(request: Request) {
     const offset = parseInt(searchParams.get("offset") || "0", 10);
 
     const result = await syncChunk(offset);
+
+    if (result.complete) {
+      syncSheetsToSupabase().catch((err) =>
+        console.error("[sync] Supabase sheets sync failed:", err)
+      );
+    }
+
     return NextResponse.json(result);
   } catch (error) {
     const message = error instanceof Error ? error.message : "Sync failed";
