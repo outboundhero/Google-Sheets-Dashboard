@@ -33,6 +33,11 @@ export async function middleware(request: NextRequest) {
     return NextResponse.next();
   }
 
+  // Allow external API endpoints (use their own Bearer token auth)
+  if (pathname.startsWith("/api/external")) {
+    return NextResponse.next();
+  }
+
   // Create Supabase client (refreshes session cookies)
   const { supabase, response } = createMiddlewareSupabaseClient(request);
 
