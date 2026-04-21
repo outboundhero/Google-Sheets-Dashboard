@@ -149,13 +149,10 @@ export async function GET(request: Request) {
     // Case-insensitive lookup set
     const activeClientsUpper = new Set(activeClientTags.map((t) => t.toUpperCase()));
 
-    // ?all=1: always fetch fresh from API (deliverability dialogs need all campaigns including newly created)
-    // Default: try Supabase cache first, fall back to API
-    let campaigns: CampaignData[];
-    if (showAll) {
+    // Try Supabase first, fall back to API
+    let campaigns = await getFromSupabase();
+    if (!campaigns) {
       campaigns = await fetchFromAPI();
-    } else {
-      campaigns = (await getFromSupabase()) || (await fetchFromAPI());
     }
 
     // Collect all unique campaign client_tags for debugging
