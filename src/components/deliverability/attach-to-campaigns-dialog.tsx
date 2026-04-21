@@ -55,7 +55,7 @@ export function AttachToCampaignsDialog({ open, onOpenChange, selectedDomains, o
         setCampaigns(camps);
         const tags = new Set<string>();
         for (const c of camps) {
-          if (c.client_tag && ALLOWED_STATUSES.includes(c.status)) tags.add(c.client_tag);
+          if (c.client_tag && ALLOWED_STATUSES.includes(c.status.toLowerCase())) tags.add(c.client_tag);
         }
         setClientTags(Array.from(tags).sort());
       })
@@ -66,10 +66,10 @@ export function AttachToCampaignsDialog({ open, onOpenChange, selectedDomains, o
   const matchingCampaigns = useMemo(() => {
     if (!selectedTag) return [];
     return campaigns
-      .filter((c) => c.client_tag === selectedTag && ALLOWED_STATUSES.includes(c.status))
+      .filter((c) => c.client_tag === selectedTag && ALLOWED_STATUSES.includes(c.status.toLowerCase()))
       .sort((a, b) => {
         const order: Record<string, number> = { active: 0, draft: 1, paused: 2 };
-        return (order[a.status] ?? 3) - (order[b.status] ?? 3);
+        return (order[a.status.toLowerCase()] ?? 3) - (order[b.status.toLowerCase()] ?? 3);
       });
   }, [campaigns, selectedTag]);
 
@@ -86,7 +86,7 @@ export function AttachToCampaignsDialog({ open, onOpenChange, selectedDomains, o
   const handleTagSelect = (tag: string) => {
     setSelectedTag(tag);
     const ids = campaigns
-      .filter((c) => c.client_tag === tag && ALLOWED_STATUSES.includes(c.status))
+      .filter((c) => c.client_tag === tag && ALLOWED_STATUSES.includes(c.status.toLowerCase()))
       .map((c) => c.id);
     setSelectedCampaignIds(new Set(ids));
     setPhase("select-campaigns");
@@ -141,7 +141,7 @@ export function AttachToCampaignsDialog({ open, onOpenChange, selectedDomains, o
             ) : (
               <div className="flex-1 overflow-y-auto rounded-lg border divide-y">
                 {filteredTags.map((tag) => {
-                  const count = campaigns.filter((c) => c.client_tag === tag && ALLOWED_STATUSES.includes(c.status)).length;
+                  const count = campaigns.filter((c) => c.client_tag === tag && ALLOWED_STATUSES.includes(c.status.toLowerCase())).length;
                   return (
                     <button key={tag} onClick={() => handleTagSelect(tag)} className="flex items-center justify-between w-full px-3 py-2 text-sm hover:bg-muted/50 transition-colors">
                       <span className="font-medium">{tag}</span>
@@ -177,7 +177,7 @@ export function AttachToCampaignsDialog({ open, onOpenChange, selectedDomains, o
                       {selected && <Check className="h-3 w-3" />}
                     </div>
                     <span className="truncate flex-1 text-left">{c.name}</span>
-                    <Badge variant="outline" className={`text-[9px] px-1.5 py-0 shrink-0 ${STATUS_COLORS[c.status] || ""}`}>{c.status}</Badge>
+                    <Badge variant="outline" className={`text-[9px] px-1.5 py-0 shrink-0 ${STATUS_COLORS[c.status.toLowerCase()] || ""}`}>{c.status}</Badge>
                   </button>
                 );
               })}

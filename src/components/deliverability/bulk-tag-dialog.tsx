@@ -147,7 +147,7 @@ export function BulkTagDialog({
       const allCampaigns: Campaign[] = data.campaigns || (Array.isArray(data) ? data : []);
       const allRelevantTags = new Set([...(existingTags || []), ...newTagNames]);
       const matching = allCampaigns.filter((c) =>
-        c.status !== "archived" && c.status !== "completed" && allRelevantTags.has(c.client_tag)
+        c.status.toLowerCase() !== "archived" && c.status.toLowerCase() !== "completed" && allRelevantTags.has(c.client_tag)
       );
       setCampaigns(matching);
       setSelectedCampaignIds(new Set(matching.map((c) => c.id)));
