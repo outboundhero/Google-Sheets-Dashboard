@@ -2,7 +2,7 @@ import { NextResponse, type NextRequest } from "next/server";
 import { createMiddlewareSupabaseClient } from "@/lib/supabase";
 
 // Viewer-allowed page paths
-const VIEWER_PAGES = ["/clients"];
+const VIEWER_PAGES = ["/clients", "/deliverability"];
 // Viewer-allowed API paths (GET only)
 const VIEWER_API_GETS = [
   "/api/data/all",
@@ -12,6 +12,7 @@ const VIEWER_API_GETS = [
   "/api/deliverability/domains",
   "/api/deliverability/tags",
   "/api/deliverability/bulk-tags",
+  "/api/deliverability/sync",
   "/api/client-tags",
   "/api/campaigns",
 ];
