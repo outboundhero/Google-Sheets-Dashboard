@@ -34,6 +34,7 @@ import { SendToSheetDialog } from "@/components/deliverability/send-to-sheet-dia
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { useAuth } from "@/lib/auth-context";
 
 interface DomainRow {
   domain: string;
@@ -174,6 +175,8 @@ export default function DeliverabilityPage() {
 
 function DeliverabilityPageInner() {
   const searchParams = useSearchParams();
+  const { role } = useAuth();
+  const isAdmin = role === "admin";
   const [domains, setDomains] = useState<DomainRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [syncing, setSyncing] = useState(false);
@@ -913,25 +916,29 @@ function DeliverabilityPageInner() {
               <X className="h-3 w-3" /> Reset
             </Button>
           )}
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() => setAttachDialogOpen(true)}
-            className="gap-2"
-          >
-            <Link2 className="h-4 w-4" />
-            Attach to Campaigns
-          </Button>
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={handleSync}
-            disabled={syncing}
-            className="gap-2"
-          >
-            <RefreshCw className={`h-4 w-4 ${syncing ? "animate-spin" : ""}`} />
-            {syncing ? "Syncing…" : savedPage && savedPage > 1 ? `Resume (page ${savedPage.toLocaleString()})` : "Sync Inboxes"}
-          </Button>
+          {isAdmin && (
+            <>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => setAttachDialogOpen(true)}
+                className="gap-2"
+              >
+                <Link2 className="h-4 w-4" />
+                Attach to Campaigns
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={handleSync}
+                disabled={syncing}
+                className="gap-2"
+              >
+                <RefreshCw className={`h-4 w-4 ${syncing ? "animate-spin" : ""}`} />
+                {syncing ? "Syncing…" : savedPage && savedPage > 1 ? `Resume (page ${savedPage.toLocaleString()})` : "Sync Inboxes"}
+              </Button>
+            </>
+          )}
         </div>
       </PageHeader>
 
@@ -1423,8 +1430,8 @@ function DeliverabilityPageInner() {
             </div>
           ) : (
             <div className="space-y-1.5">
-              {/* Bulk action bar */}
-              {selectedDomains.size > 0 && (
+              {/* Bulk action bar (admin only) */}
+              {isAdmin && selectedDomains.size > 0 && (
                 <div className="flex items-center gap-3 rounded-xl border bg-muted/50 px-4 py-2.5">
                   <span className="text-xs font-medium">
                     {selectedDomains.size} domain{selectedDomains.size !== 1 ? "s" : ""} selected
@@ -1839,8 +1846,8 @@ function DeliverabilityPageInner() {
             )}
           </div>
 
-          {/* Bulk action bar for warmup */}
-          {selectedDomains.size > 0 && (
+          {/* Bulk action bar for warmup (admin only) */}
+          {isAdmin && selectedDomains.size > 0 && (
             <div className="flex items-center gap-3 rounded-xl border bg-muted/50 px-4 py-2.5">
               <span className="text-xs font-medium">
                 {selectedDomains.size} domain{selectedDomains.size !== 1 ? "s" : ""} selected
