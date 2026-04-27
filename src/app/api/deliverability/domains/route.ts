@@ -7,31 +7,38 @@ export async function GET(request: Request) {
     const { searchParams } = new URL(request.url);
     const tagsParam = searchParams.get("tags");
 
-    // Paginate to get ALL domains (Supabase caps at 1000 per query)
-    const allDomains: Record<string, unknown>[] = [];
+    // Get total count first, then fetch all pages in parallel
     const PAGE = 1000;
-    let offset = 0;
+    const tagNames = tagsParam
+      ? tagsParam.split(",").map((t) => t.trim()).filter(Boolean)
+      : [];
 
-    while (true) {
-      let query = supabase
+    const buildQuery = () => {
+      let q = supabase
         .from("deliverability_domains")
-        .select("*")
-        .order("domain_created_at", { ascending: false, nullsFirst: false })
-        .range(offset, offset + PAGE - 1);
+        .select("*", { count: "exact" })
+        .order("domain_created_at", { ascending: false, nullsFirst: false });
+      if (tagNames.length > 0) q = q.overlaps("tags", tagNames);
+      return q;
+    };
 
-      if (tagsParam) {
-        const tagNames = tagsParam.split(",").map((t) => t.trim()).filter(Boolean);
-        if (tagNames.length > 0) {
-          query = query.overlaps("tags", tagNames);
-        }
+    // First page also returns the total count
+    const firstRes = await buildQuery().range(0, PAGE - 1);
+    if (firstRes.error) throw firstRes.error;
+    const total = firstRes.count || firstRes.data?.length || 0;
+    const allDomains: Record<string, unknown>[] = [...(firstRes.data || [])];
+
+    // Fetch remaining pages in parallel
+    if (total > PAGE) {
+      const remainingPages = Math.ceil(total / PAGE) - 1;
+      const pagePromises = [];
+      for (let i = 1; i <= remainingPages; i++) {
+        pagePromises.push(buildQuery().range(i * PAGE, (i + 1) * PAGE - 1));
       }
-
-      const { data, error } = await query;
-      if (error) throw error;
-      if (!data || data.length === 0) break;
-      allDomains.push(...data);
-      if (data.length < PAGE) break;
-      offset += PAGE;
+      const pageResults = await Promise.all(pagePromises);
+      for (const res of pageResults) {
+        if (res.data) allDomains.push(...res.data);
+      }
     }
 
     // Aggregate daily_limit and warmup_daily_limit from inboxes per domain
@@ -39,31 +46,45 @@ export async function GET(request: Request) {
     const limitMap = new Map<string, { daily_limit: number; warmup_limit: number }>();
 
     if (domainNames.length > 0) {
-      // Query one inbox per domain using DISTINCT ON via raw SQL for efficiency
-      // Fallback: paginate through all inboxes
-      for (let i = 0; i < domainNames.length; i += 200) {
-        const batch = domainNames.slice(i, i + 200);
-        let offset = 0;
-        const seen = new Set<string>();
-        while (true) {
-          const { data: inboxData } = await supabase
-            .from("deliverability_inboxes")
-            .select("domain, daily_limit, warmup_daily_limit")
-            .in("domain", batch)
-            .range(offset, offset + 999);
+      // Run all domain batches in parallel — within each batch, paginate sequentially
+      const BATCH_SIZE = 200;
+      const batches: string[][] = [];
+      for (let i = 0; i < domainNames.length; i += BATCH_SIZE) {
+        batches.push(domainNames.slice(i, i + BATCH_SIZE));
+      }
 
-          if (!inboxData || inboxData.length === 0) break;
-          for (const inbox of inboxData) {
-            if (!seen.has(inbox.domain)) {
-              seen.add(inbox.domain);
-              limitMap.set(inbox.domain, {
-                daily_limit: inbox.daily_limit || 0,
-                warmup_limit: inbox.warmup_daily_limit || 0,
-              });
+      const batchResults = await Promise.all(
+        batches.map(async (batch) => {
+          const localMap = new Map<string, { daily_limit: number; warmup_limit: number }>();
+          const seen = new Set<string>();
+          let offset = 0;
+          while (seen.size < batch.length) {
+            const { data: inboxData } = await supabase
+              .from("deliverability_inboxes")
+              .select("domain, daily_limit, warmup_daily_limit")
+              .in("domain", batch)
+              .range(offset, offset + 999);
+
+            if (!inboxData || inboxData.length === 0) break;
+            for (const inbox of inboxData) {
+              if (!seen.has(inbox.domain)) {
+                seen.add(inbox.domain);
+                localMap.set(inbox.domain, {
+                  daily_limit: inbox.daily_limit || 0,
+                  warmup_limit: inbox.warmup_daily_limit || 0,
+                });
+              }
             }
+            if (inboxData.length < 1000) break;
+            offset += 1000;
           }
-          if (inboxData.length < 1000) break;
-          offset += 1000;
+          return localMap;
+        })
+      );
+
+      for (const localMap of batchResults) {
+        for (const [domain, limits] of localMap) {
+          limitMap.set(domain, limits);
         }
       }
     }
