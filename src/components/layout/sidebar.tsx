@@ -29,7 +29,7 @@ const allNavItems: { href: string; label: string; icon: typeof LayoutDashboard; 
   { href: "/", label: "Dashboard", icon: LayoutDashboard, roles: ["admin"] },
   { href: "/clients", label: "Clients", icon: Users, roles: ["admin", "viewer"] },
   { href: "/leads", label: "All Leads", icon: Table2, roles: ["admin"] },
-  { href: "/deliverability", label: "Deliverability", icon: Mailbox, roles: ["admin"] },
+  { href: "/deliverability", label: "Deliverability", icon: Mailbox, roles: ["admin", "viewer"] },
   { href: "/campaigns", label: "Campaigns", icon: Send, roles: ["admin"] },
   { href: "/settings", label: "Settings", icon: Settings, roles: ["admin"] },
 ];
