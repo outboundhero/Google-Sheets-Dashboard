@@ -405,13 +405,22 @@ export async function appendDomainsToSheet(
   const escaped = escapeSheetName(sheetName);
 
   // Read existing domains from column B (skip header rows 1-2)
-  const existingRes = await sheets.spreadsheets.values.get({
-    spreadsheetId,
-    range: `${escaped}!B3:B`,
-  });
-  const existingDomains = new Set(
-    (existingRes.data.values || []).map((row) => (row[0] || "").trim().toLowerCase())
-  );
+  // Wrapped in try/catch since sheet may have fewer than 3 rows (just header)
+  const existingDomains = new Set<string>();
+  try {
+    const existingRes = await sheets.spreadsheets.values.get({
+      spreadsheetId,
+      range: `${escaped}!B3:B`,
+    });
+    for (const row of existingRes.data.values || []) {
+      const v = (row[0] || "").trim().toLowerCase();
+      if (v) existingDomains.add(v);
+    }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : "";
+    // "exceeds grid limits" means the sheet doesn't have row 3 yet — no existing domains
+    if (!msg.includes("exceeds grid limits")) throw err;
+  }
 
   // Filter out duplicates
   const newDomains = domains.filter(
