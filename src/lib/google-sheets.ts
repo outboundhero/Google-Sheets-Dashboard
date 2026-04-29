@@ -439,13 +439,41 @@ export async function appendDomainsToSheet(
   // Build rows: [Date Added, Domain]
   const rows = newDomains.map((domain) => [dateStr, domain]);
 
-  await sheets.spreadsheets.values.append({
+  const doAppend = () => sheets.spreadsheets.values.append({
     spreadsheetId,
     range: `${escaped}!A:B`,
     valueInputOption: "USER_ENTERED",
     insertDataOption: "INSERT_ROWS",
     requestBody: { values: rows },
   });
+
+  try {
+    await doAppend();
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : "";
+    if (!msg.includes("exceeds grid limits")) throw err;
+
+    // Sheet doesn't have enough rows — extend it and retry
+    const meta = await sheets.spreadsheets.get({
+      spreadsheetId,
+      fields: "sheets(properties(sheetId,title,gridProperties))",
+    });
+    const domainsSheet = meta.data.sheets?.find((s) => s.properties?.title === sheetName);
+    if (!domainsSheet?.properties?.sheetId) throw err;
+    await sheets.spreadsheets.batchUpdate({
+      spreadsheetId,
+      requestBody: {
+        requests: [{
+          appendDimension: {
+            sheetId: domainsSheet.properties.sheetId,
+            dimension: "ROWS",
+            length: rows.length + 100,
+          },
+        }],
+      },
+    });
+    await doAppend();
+  }
 
   return { added: newDomains.length, duplicates };
 }
