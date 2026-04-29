@@ -667,7 +667,13 @@ function DeliverabilityPageInner() {
     if (withStats) {
       const header = "Domain,Date Added,Inboxes,Sent,Replied,Bounced,Daily Limit,Tags";
       const rows = selected.map((d) => {
-        const dateAdded = d.domain_created_at ? new Date(d.domain_created_at).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" }) : "";
+        let dateAdded = "";
+        if (d.domain_created_at) {
+          const dt = new Date(d.domain_created_at);
+          const mm = String(dt.getMonth() + 1).padStart(2, "0");
+          const dd = String(dt.getDate()).padStart(2, "0");
+          dateAdded = `${mm}-${dd}-${dt.getFullYear()}`;
+        }
         return `${d.domain},${dateAdded},${d.inbox_count},${d.total_sent || 0},${d.total_replied || 0},${d.total_bounced || 0},${d.daily_limit_total || 0},"${(d.tags || []).join(", ")}"`;
       });
       csv = [header, ...rows].join("\n");
