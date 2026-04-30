@@ -5,7 +5,7 @@ import {
   Dialog, DialogContent, DialogHeader, DialogTitle,
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
-import { Loader2, ChevronDown, ExternalLink } from "lucide-react";
+import { Loader2, Search, X, ExternalLink } from "lucide-react";
 
 interface SheetOption {
   clientTag: string;
@@ -29,6 +29,7 @@ export function SendToSheetDialog({
   const [sheets, setSheets] = useState<SheetOption[]>([]);
   const [loading, setLoading] = useState(false);
   const [selectedTag, setSelectedTag] = useState<string | null>(null);
+  const [search, setSearch] = useState("");
   const [error, setError] = useState<string | null>(null);
 
   // Auto-detect most common tag that matches a tracked sheet
@@ -54,11 +55,16 @@ export function SendToSheetDialog({
     if (!open) return;
     setError(null);
     setLoading(true);
-    fetch("/api/deliverability/send-to-sheet")
+    // Fetch tracked sheets directly from config (instant, no Google Sheets API calls)
+    fetch("/api/sheets")
       .then((r) => r.json())
       .then((data) => {
-        if (data.sheets) setSheets(data.sheets);
-        else setError(data.error || "Failed to load sheets");
+        const list: SheetOption[] = (Array.isArray(data) ? data : []).map((s: { id: string; name: string; clientTag: string }) => ({
+          clientTag: s.clientTag,
+          sheetName: s.name,
+          sheetId: s.id,
+        }));
+        setSheets(list);
       })
       .catch(() => setError("Failed to load sheets"))
       .finally(() => setLoading(false));
@@ -73,10 +79,16 @@ export function SendToSheetDialog({
 
   // Reset when dialog closes
   useEffect(() => {
-    if (!open) { setSelectedTag(null); setSheets([]); }
+    if (!open) { setSelectedTag(null); setSheets([]); setSearch(""); }
   }, [open]);
 
   const selectedSheet = sheets.find((s) => s.clientTag === selectedTag);
+
+  const filteredSheets = useMemo(() => {
+    if (!search) return sheets;
+    const q = search.toLowerCase();
+    return sheets.filter((s) => s.clientTag.toLowerCase().includes(q) || s.sheetName.toLowerCase().includes(q));
+  }, [sheets, search]);
 
   const handleConfirm = () => {
     if (!selectedTag) return;
@@ -86,7 +98,7 @@ export function SendToSheetDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:!max-w-md">
+      <DialogContent className="sm:!max-w-md max-h-[80vh] flex flex-col">
         <DialogHeader>
           <DialogTitle>Send to Domains Sheet</DialogTitle>
         </DialogHeader>
@@ -98,41 +110,46 @@ export function SendToSheetDialog({
         ) : error ? (
           <div className="text-sm text-destructive py-4">{error}</div>
         ) : sheets.length === 0 ? (
-          <div className="text-sm text-muted-foreground py-4">
-            No tracked sheets have a &quot;Domains&quot; tab. Add a &quot;Domains&quot; tab to a client sheet first.
-          </div>
+          <div className="text-sm text-muted-foreground py-4">No tracked sheets found.</div>
         ) : (
-          <div className="space-y-4">
+          <div className="space-y-3 flex-1 overflow-hidden flex flex-col">
             <p className="text-sm text-muted-foreground">
               {selectedDomains.length} domain{selectedDomains.length !== 1 ? "s" : ""} will be added to the Domains tab.
               Duplicates are automatically skipped.
             </p>
 
-            {/* Client tag selector */}
-            <div className="space-y-1.5">
-              <label className="text-xs font-medium text-muted-foreground">Client Sheet</label>
-              <div className="relative">
-                <select
-                  value={selectedTag || ""}
-                  onChange={(e) => setSelectedTag(e.target.value)}
-                  className="w-full appearance-none rounded-lg border bg-background px-3 py-2 pr-8 text-sm outline-none focus:ring-1 focus:ring-primary"
-                >
-                  <option value="" disabled>Select a client...</option>
-                  {sheets.map((s) => (
-                    <option key={s.clientTag} value={s.clientTag}>
-                      {s.clientTag} — {s.sheetName}
-                    </option>
-                  ))}
-                </select>
-                <ChevronDown className="absolute right-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground pointer-events-none" />
-              </div>
+            <div className="flex items-center gap-2 rounded-lg border bg-background px-3 py-1.5">
+              <Search className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
+              <input value={search} onChange={(e) => setSearch(e.target.value)}
+                placeholder="Search client sheets…" className="flex-1 text-sm bg-transparent outline-none placeholder:text-muted-foreground" />
+              {search && <button onClick={() => setSearch("")}><X className="h-3 w-3 text-muted-foreground hover:text-foreground" /></button>}
+            </div>
+
+            <div className="flex-1 overflow-y-auto rounded-lg border divide-y">
+              {filteredSheets.length === 0 ? (
+                <div className="text-center py-6 text-sm text-muted-foreground">No sheets match</div>
+              ) : (
+                filteredSheets.map((s) => {
+                  const selected = selectedTag === s.clientTag;
+                  return (
+                    <button key={s.clientTag} onClick={() => setSelectedTag(s.clientTag)}
+                      className={`flex items-center gap-2.5 w-full px-3 py-2 text-sm text-left transition-colors ${selected ? "bg-primary/10" : "hover:bg-muted/50"}`}>
+                      <div className={`h-4 w-4 rounded-full border flex items-center justify-center shrink-0 transition-colors ${selected ? "bg-primary border-primary" : "border-muted-foreground/30"}`}>
+                        {selected && <div className="h-1.5 w-1.5 rounded-full bg-primary-foreground" />}
+                      </div>
+                      <span className="font-medium shrink-0">{s.clientTag}</span>
+                      <span className="text-muted-foreground truncate">— {s.sheetName}</span>
+                    </button>
+                  );
+                })
+              )}
             </div>
 
             {selectedSheet && (
               <div className="flex items-center justify-between text-xs text-muted-foreground rounded-lg border bg-muted/30 px-3 py-2">
                 <span>Target: <span className="font-medium text-foreground">{selectedSheet.sheetName}</span> &rarr; Domains tab</span>
                 <a
-                  href={`https://docs.google.com/spreadsheets/d/${selectedSheet.sheetId}/edit#gid=0`}
+                  href={`https://docs.google.com/spreadsheets/d/${selectedSheet.sheetId}/edit`}
                   target="_blank"
                   rel="noopener noreferrer"
                   className="flex items-center gap-1 text-primary hover:underline shrink-0 ml-2"

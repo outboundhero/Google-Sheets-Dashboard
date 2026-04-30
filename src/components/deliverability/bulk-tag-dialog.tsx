@@ -6,7 +6,7 @@ import {
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { Search, X, Check, Plus, Loader2, ChevronDown } from "lucide-react";
+import { Search, X, Check, Plus, Loader2 } from "lucide-react";
 
 interface Tag { id: number; name: string }
 interface Campaign { id: number; name: string; status: string; client_tag: string }
@@ -66,6 +66,7 @@ export function BulkTagDialog({
   const [availableSheets, setAvailableSheets] = useState<{ clientTag: string; sheetName: string }[]>([]);
   const [sheetsLoading, setSheetsLoading] = useState(false);
   const [selectedSheetTag, setSelectedSheetTag] = useState<string | null>(null);
+  const [sheetSearch, setSheetSearch] = useState("");
 
   useEffect(() => {
     if (!open) return;
@@ -77,6 +78,8 @@ export function BulkTagDialog({
     setCampaigns([]);
     setSelectedCampaignIds(new Set());
     setCampaignSearch("");
+    setSheetSearch("");
+    setSelectedSheetTag(null);
 
     setLoading(true);
     fetch("/api/deliverability/bulk-tags")
@@ -161,6 +164,14 @@ export function BulkTagDialog({
     return campaigns.filter((c) => c.name.toLowerCase().includes(q));
   }, [campaigns, campaignSearch]);
 
+  const filteredSheets = useMemo(() => {
+    if (!sheetSearch) return availableSheets;
+    const q = sheetSearch.toLowerCase();
+    return availableSheets.filter(
+      (s) => s.clientTag.toLowerCase().includes(q) || s.sheetName.toLowerCase().includes(q)
+    );
+  }, [availableSheets, sheetSearch]);
+
   const toggleCampaign = (id: number) => {
     setSelectedCampaignIds((prev) => { const n = new Set(prev); if (n.has(id)) n.delete(id); else n.add(id); return n; });
   };
@@ -169,10 +180,14 @@ export function BulkTagDialog({
     setSavedCampaigns(camps);
     setSheetsLoading(true);
     setPhase("sheet");
-    fetch("/api/deliverability/send-to-sheet")
+    // Fetch tracked sheets directly (fast, no Google Sheets API calls)
+    fetch("/api/sheets")
       .then((r) => r.json())
       .then((data) => {
-        const sheets: { clientTag: string; sheetName: string }[] = data.sheets || [];
+        const sheets: { clientTag: string; sheetName: string }[] = (Array.isArray(data) ? data : []).map((s: { clientTag: string; name: string }) => ({
+          clientTag: s.clientTag,
+          sheetName: s.name,
+        }));
         setAvailableSheets(sheets);
         // Auto-detect: match tag names being added to available sheet clientTags
         const sheetTags = new Set(sheets.map((s) => s.clientTag));
@@ -335,7 +350,7 @@ export function BulkTagDialog({
 
         {/* ── Sheet Append Selection ── */}
         {phase === "sheet" && (
-          <div className="space-y-4">
+          <div className="space-y-3 flex-1 overflow-hidden flex flex-col">
             <p className="text-sm text-muted-foreground">
               Also add these {selectedDomains.length} domains to a client&apos;s Domains sheet?
             </p>
@@ -345,35 +360,40 @@ export function BulkTagDialog({
                 <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
               </div>
             ) : availableSheets.length === 0 ? (
-              <div className="text-sm text-muted-foreground py-4">
-                No tracked sheets have a &quot;Domains&quot; tab.
-              </div>
+              <div className="text-sm text-muted-foreground py-4">No tracked sheets found.</div>
             ) : (
-              <div className="space-y-3">
-                <div className="space-y-1.5">
-                  <label className="text-xs font-medium text-muted-foreground">Client Sheet</label>
-                  <div className="relative">
-                    <select
-                      value={selectedSheetTag || ""}
-                      onChange={(e) => setSelectedSheetTag(e.target.value)}
-                      className="w-full appearance-none rounded-lg border bg-background px-3 py-2 pr-8 text-sm outline-none focus:ring-1 focus:ring-primary"
-                    >
-                      {availableSheets.map((s) => (
-                        <option key={s.clientTag} value={s.clientTag}>
-                          {s.clientTag} — {s.sheetName}
-                        </option>
-                      ))}
-                    </select>
-                    <ChevronDown className="absolute right-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground pointer-events-none" />
-                  </div>
+              <>
+                <div className="flex items-center gap-2 rounded-lg border bg-background px-3 py-1.5">
+                  <Search className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
+                  <input value={sheetSearch} onChange={(e) => setSheetSearch(e.target.value)}
+                    placeholder="Search client sheets…" className="flex-1 text-sm bg-transparent outline-none placeholder:text-muted-foreground" />
+                  {sheetSearch && <button onClick={() => setSheetSearch("")}><X className="h-3 w-3 text-muted-foreground hover:text-foreground" /></button>}
                 </div>
-
+                <div className="flex-1 overflow-y-auto rounded-lg border divide-y">
+                  {filteredSheets.length === 0 ? (
+                    <div className="text-center py-6 text-sm text-muted-foreground">No sheets match</div>
+                  ) : (
+                    filteredSheets.map((s) => {
+                      const selected = selectedSheetTag === s.clientTag;
+                      return (
+                        <button key={s.clientTag} onClick={() => setSelectedSheetTag(s.clientTag)}
+                          className={`flex items-center gap-2.5 w-full px-3 py-2 text-sm text-left transition-colors ${selected ? "bg-primary/10" : "hover:bg-muted/50"}`}>
+                          <div className={`h-4 w-4 rounded-full border flex items-center justify-center shrink-0 transition-colors ${selected ? "bg-primary border-primary" : "border-muted-foreground/30"}`}>
+                            {selected && <div className="h-1.5 w-1.5 rounded-full bg-primary-foreground" />}
+                          </div>
+                          <span className="font-medium shrink-0">{s.clientTag}</span>
+                          <span className="text-muted-foreground truncate">— {s.sheetName}</span>
+                        </button>
+                      );
+                    })
+                  )}
+                </div>
                 {selectedSheetTag && (
                   <div className="text-xs text-muted-foreground rounded-lg border bg-muted/30 px-3 py-2">
                     Target: <span className="font-medium text-foreground">{availableSheets.find((s) => s.clientTag === selectedSheetTag)?.sheetName}</span> &rarr; Domains tab
                   </div>
                 )}
-              </div>
+              </>
             )}
 
             <div className="flex justify-end gap-2 pt-1">
