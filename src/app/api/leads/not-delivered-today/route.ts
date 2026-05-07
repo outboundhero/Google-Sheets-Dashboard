@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { getStoredLeads } from "@/lib/leads-store";
-import { isPstWithinTestWindow } from "@/lib/date-utils";
+import { isPstTodayOrYesterday } from "@/lib/date-utils";
 import { listDismissedKeys, dismissLead, dismissedKey } from "@/lib/dismissed-leads";
 import type { Lead } from "@/types/lead";
 
@@ -12,7 +12,7 @@ function statusMatches(status: string | undefined | null): boolean {
 }
 
 function leadDateMatches(l: { replyTime: string; timeWeGotReply: string }): boolean {
-  return isPstWithinTestWindow(l.replyTime) || isPstWithinTestWindow(l.timeWeGotReply);
+  return isPstTodayOrYesterday(l.replyTime) || isPstTodayOrYesterday(l.timeWeGotReply);
 }
 
 interface BannerLead {

@@ -268,7 +268,7 @@ export default function DashboardPage() {
             <div className="flex-1 space-y-3">
               <div>
                 <h2 className="text-xl font-bold text-violet-900 dark:text-violet-100">
-                  {notDeliveredTotal} lead{notDeliveredTotal !== 1 ? "s" : ""} not delivered (test window: since May 5)
+                  {notDeliveredTotal} lead{notDeliveredTotal !== 1 ? "s" : ""} not delivered (today + yesterday)
                 </h2>
                 <p className="text-sm text-violet-700 dark:text-violet-400 mt-0.5">
                   Across {notDeliveredByClient.length} client{notDeliveredByClient.length !== 1 ? "s" : ""} (PST) — click a client to review and mark delivered
