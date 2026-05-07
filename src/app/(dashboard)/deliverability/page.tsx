@@ -900,16 +900,22 @@ function DeliverabilityPageInner() {
   }, [domains, isDomainReserve, now]);
   const replyIssueCount = useMemo(() => domains.filter(hasReplyIssue).length, [domains, hasReplyIssue]);
   const bounceIssueCount = useMemo(() => domains.filter(hasBounceIssue).length, [domains, hasBounceIssue]);
+  // Derive inbox count from loaded domains (the sync-stats count endpoint can lag/return 0 on large tables).
+  const totalInboxesFromDomains = useMemo(
+    () => domains.reduce((sum, d) => sum + (d.inbox_count || 0), 0),
+    [domains]
+  );
 
   return (
     <div className="space-y-6">
       <PageHeader
         title="Deliverability"
-        description={
-          syncStats
-            ? `${syncStats.inboxCount?.toLocaleString() ?? 0} inboxes across ${syncStats.domainCount?.toLocaleString() ?? 0} domains`
-            : "Manage your sender inboxes and email warmup"
-        }
+        description={(() => {
+          const inboxCount = totalInboxesFromDomains > 0 ? totalInboxesFromDomains : (syncStats?.inboxCount ?? 0);
+          const domainCount = domains.length || syncStats?.domainCount || 0;
+          if (!syncStats && domains.length === 0) return "Manage your sender inboxes and email warmup";
+          return `${inboxCount.toLocaleString()} inboxes across ${domainCount.toLocaleString()} domains`;
+        })()}
       >
         <div className="flex items-center gap-2">
           {savedPage && savedPage > 1 && !syncing && (

@@ -3,17 +3,26 @@ const TLD = ".info";
 const COUNT = 80;
 const MODEL = "gpt-4o-mini";
 
-const PROMPT = `Generate ${COUNT} generic ${TLD} domain name suggestions for a ${NICHE} business.
+function buildPrompt(examples: string[]): string {
+  const exampleBlock = examples.length > 0
+    ? `Style reference — match the look/length/word-choice of these existing domains we already own:
+${examples.map((e) => `- ${e}`).join("\n")}
+
+`
+    : "";
+
+  return `${exampleBlock}Generate ${COUNT} fresh ${TLD} domain name suggestions for a ${NICHE} business.
 Rules:
-- Use only a single suffix OR a single prefix attached to a real-word root (not both).
-- Brandable, easy to type, lowercase, no hyphens, no numbers.
+- Match the style of the reference domains above: descriptive multi-word names that combine an industry term (cleaning, janitorial, facility, sanitation, custodial, maintenance, etc.) with a business descriptor (services, solutions, group, hub, pros, experts, team, co, plus, max, prime, elite, building, commercial).
+- Lowercase, no hyphens, no numbers, no spaces.
 - Each name must end in ${TLD}.
-- Prefer common cleaning/business adjectives like pro, hub, group, services, solutions, plus, max, prime, elite, co (used at most once per name).
 - Avoid trademarked or famous brand names.
+- Do not repeat any of the reference domains above.
 
 Return JSON only: { "domains": ["name1${TLD}", "name2${TLD}", ...] }`;
+}
 
-export async function generateDomainCandidates(): Promise<string[]> {
+export async function generateDomainCandidates(examples: string[] = []): Promise<string[]> {
   const apiKey = process.env.OPENAI_API_KEY;
   if (!apiKey) throw new Error("OPENAI_API_KEY missing");
 
@@ -27,7 +36,7 @@ export async function generateDomainCandidates(): Promise<string[]> {
       model: MODEL,
       messages: [
         { role: "system", content: "You generate domain name lists. Output JSON only." },
-        { role: "user", content: PROMPT },
+        { role: "user", content: buildPrompt(examples) },
       ],
       response_format: { type: "json_object" },
       temperature: 0.9,
@@ -53,6 +62,7 @@ export async function generateDomainCandidates(): Promise<string[]> {
   }
 
   const raw = Array.isArray(parsed.domains) ? parsed.domains : [];
+  const exampleSet = new Set(examples.map((e) => e.toLowerCase()));
   const cleaned = new Set<string>();
   for (const item of raw) {
     if (typeof item !== "string") continue;
@@ -61,6 +71,7 @@ export async function generateDomainCandidates(): Promise<string[]> {
     const withTld = lower.endsWith(TLD) ? lower : lower.replace(/\.[a-z]+$/, "") + TLD;
     if (!/^[a-z0-9-]+\.info$/.test(withTld)) continue;
     if (withTld.startsWith("-") || withTld.endsWith("-.info")) continue;
+    if (exampleSet.has(withTld)) continue;
     cleaned.add(withTld);
   }
   return Array.from(cleaned);

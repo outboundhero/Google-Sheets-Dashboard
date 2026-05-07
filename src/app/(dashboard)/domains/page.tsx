@@ -15,6 +15,8 @@ import {
   Check,
   DollarSign,
   RefreshCw,
+  Trash2,
+  ShieldOff,
 } from "lucide-react";
 import { PageHeader } from "@/components/shared/page-header";
 import { Button } from "@/components/ui/button";
@@ -35,8 +37,11 @@ interface RecentResult {
 
 interface PerDomain {
   domain: string;
-  status: "pending" | "registering" | "auto_renew" | "done" | "error";
+  status: "pending" | "registering" | "done" | "error";
+  registered: boolean;
+  autoRenewDisabled: boolean;
   error?: string;
+  autoRenewError?: string;
 }
 
 interface RegisterJob {
@@ -83,6 +88,7 @@ export default function DomainsPage() {
   // Registration job
   const [registerJob, setRegisterJob] = useState<RegisterJob | null>(null);
   const [registering, setRegistering] = useState(false);
+  const [deleting, setDeleting] = useState(false);
 
   // ─── Discovery loop ───────────────────────────────────────────────────────
   useEffect(() => {
@@ -215,7 +221,12 @@ export default function DomainsPage() {
     if (list.length === 0) return;
     setRegistering(true);
     setRegisterJob({
-      perDomain: list.map((d) => ({ domain: d, status: "pending" })),
+      perDomain: list.map((d) => ({
+        domain: d,
+        status: "pending",
+        registered: false,
+        autoRenewDisabled: false,
+      })),
       sheetStatus: "pending",
     });
 
@@ -239,7 +250,13 @@ export default function DomainsPage() {
           setRegisterJob((prev) => prev ? {
             ...prev,
             perDomain: prev.perDomain.map((p, idx) =>
-              idx === i ? { ...p, status: "done", error: data.autoRenewError || undefined } : p
+              idx === i ? {
+                ...p,
+                status: "done",
+                registered: true,
+                autoRenewDisabled: !!data.autoRenewDisabled,
+                autoRenewError: data.autoRenewError || undefined,
+              } : p
             ),
           } : prev);
         } else {
@@ -287,6 +304,32 @@ export default function DomainsPage() {
     setSelected(new Set());
     setRegistering(false);
     mutateDomains();
+  }, [selected, mutateDomains]);
+
+  const deleteSelected = useCallback(async () => {
+    const list = Array.from(selected);
+    if (list.length === 0) return;
+    if (!confirm(`Remove ${list.length} domain${list.length !== 1 ? "s" : ""} from the list? They can be re-discovered later.`)) {
+      return;
+    }
+    setDeleting(true);
+    try {
+      const res = await fetch("/api/domains/delete", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ domains: list }),
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data?.error || `HTTP ${res.status}`);
+      }
+      setSelected(new Set());
+      await mutateDomains();
+    } catch (e) {
+      alert(e instanceof Error ? e.message : "Delete failed");
+    } finally {
+      setDeleting(false);
+    }
   }, [selected, mutateDomains]);
 
   // ─── Render ────────────────────────────────────────────────────────────────
@@ -421,7 +464,17 @@ export default function DomainsPage() {
             <span className="text-xs font-medium">{selected.size} selected</span>
             <div className="flex items-center gap-2">
               <Button variant="ghost" size="sm" className="h-7 text-xs" onClick={() => setSelected(new Set())}>Clear</Button>
-              <Button size="sm" className="h-7 text-xs gap-1.5" onClick={startRegistration} disabled={registering}>
+              <Button
+                variant="outline"
+                size="sm"
+                className="h-7 text-xs gap-1.5 text-destructive hover:text-destructive border-destructive/30"
+                onClick={deleteSelected}
+                disabled={deleting || registering}
+              >
+                {deleting ? <Loader2 className="h-3 w-3 animate-spin" /> : <Trash2 className="h-3 w-3" />}
+                Delete
+              </Button>
+              <Button size="sm" className="h-7 text-xs gap-1.5" onClick={startRegistration} disabled={registering || deleting}>
                 {registering ? <Loader2 className="h-3 w-3 animate-spin" /> : <DollarSign className="h-3 w-3" />}
                 Register {selected.size} domain{selected.size !== 1 ? "s" : ""}
               </Button>
@@ -473,53 +526,67 @@ export default function DomainsPage() {
       </div>
 
       {/* Registration progress */}
-      {registerJob && (
-        <div className="rounded-xl border bg-card p-5 space-y-3">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-2">
-              {registering ? (
-                <Loader2 className="h-4 w-4 animate-spin text-primary" />
-              ) : registerJob.sheetStatus === "done" || registerJob.sheetStatus === "skipped" ? (
-                <CheckCircle2 className="h-4 w-4 text-emerald-500" />
-              ) : (
-                <AlertTriangle className="h-4 w-4 text-amber-500" />
-              )}
-              <h3 className="text-sm font-semibold">{registering ? "Registering domains" : "Registration complete"}</h3>
-            </div>
-            {!registering && (
-              <button onClick={() => setRegisterJob(null)} className="text-[11px] text-muted-foreground hover:text-foreground">
-                Dismiss
-              </button>
-            )}
-          </div>
-
-          <div className="space-y-1 max-h-64 overflow-y-auto">
-            {registerJob.perDomain.map((p) => (
-              <PerDomainRow key={p.domain} p={p} />
-            ))}
-            {registerJob.sheetStatus !== "skipped" && (
-              <div className="flex items-center gap-2 text-xs pt-1 mt-1 border-t">
-                {registerJob.sheetStatus === "pending" && <div className="h-3 w-3 rounded-full border border-muted-foreground/30 shrink-0" />}
-                {registerJob.sheetStatus === "running" && <Loader2 className="h-3 w-3 animate-spin text-primary shrink-0" />}
-                {registerJob.sheetStatus === "done" && <CheckCircle2 className="h-3 w-3 text-emerald-500 shrink-0" />}
-                {registerJob.sheetStatus === "error" && <AlertTriangle className="h-3 w-3 text-destructive shrink-0" />}
-                <span className="text-muted-foreground">Append to Secondary Domain sheet</span>
-                {registerJob.sheetStatus === "done" && (
-                  <span className="ml-auto text-emerald-500">
-                    +{registerJob.sheetAdded} added
-                    {(registerJob.sheetSkipped ?? 0) > 0 && (
-                      <span className="text-amber-500"> ({registerJob.sheetSkipped} dup)</span>
-                    )}
-                  </span>
+      {registerJob && (() => {
+        const total = registerJob.perDomain.length;
+        const registeredCount = registerJob.perDomain.filter((p) => p.registered).length;
+        const autoRenewOffCount = registerJob.perDomain.filter((p) => p.autoRenewDisabled).length;
+        const failedCount = registerJob.perDomain.filter((p) => p.status === "error").length;
+        const autoRenewWarnCount = registerJob.perDomain.filter((p) => p.registered && !p.autoRenewDisabled).length;
+        const allDone = !registering && (registerJob.sheetStatus === "done" || registerJob.sheetStatus === "skipped" || registerJob.sheetStatus === "error");
+        return (
+          <div className="rounded-xl border bg-card p-5 space-y-4">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                {registering ? (
+                  <Loader2 className="h-4 w-4 animate-spin text-primary" />
+                ) : registerJob.sheetStatus === "error" || failedCount > 0 ? (
+                  <AlertTriangle className="h-4 w-4 text-amber-500" />
+                ) : (
+                  <CheckCircle2 className="h-4 w-4 text-emerald-500" />
                 )}
-                {registerJob.sheetStatus === "error" && (
-                  <span className="ml-auto text-destructive truncate">{registerJob.sheetError}</span>
-                )}
+                <h3 className="text-sm font-semibold">
+                  {registering ? "Registering domains" : "Registration complete"}
+                </h3>
               </div>
-            )}
+              {allDone && (
+                <button onClick={() => setRegisterJob(null)} className="text-[11px] text-muted-foreground hover:text-foreground">
+                  Dismiss
+                </button>
+              )}
+            </div>
+
+            {/* Summary progress bars */}
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+              <ProgressTile
+                icon={<DollarSign className="h-3.5 w-3.5" />}
+                label="Registered"
+                done={registeredCount}
+                total={total}
+                accent="emerald"
+                running={registering}
+                failedCount={failedCount}
+              />
+              <ProgressTile
+                icon={<ShieldOff className="h-3.5 w-3.5" />}
+                label="Auto-renew off"
+                done={autoRenewOffCount}
+                total={registeredCount || total}
+                accent="violet"
+                running={registering}
+                warnCount={autoRenewWarnCount}
+              />
+              <SheetTile job={registerJob} />
+            </div>
+
+            {/* Per-domain detail */}
+            <div className="space-y-1 max-h-64 overflow-y-auto pt-2 border-t">
+              {registerJob.perDomain.map((p) => (
+                <PerDomainRow key={p.domain} p={p} />
+              ))}
+            </div>
           </div>
-        </div>
-      )}
+        );
+      })()}
     </div>
   );
 }
@@ -601,20 +668,113 @@ function PerDomainRow({ p }: { p: PerDomain }) {
     <div className="flex items-center gap-2 text-xs px-2 py-1.5 rounded hover:bg-muted/30">
       {p.status === "pending" && <div className="h-3 w-3 rounded-full border border-muted-foreground/30 shrink-0" />}
       {p.status === "registering" && <Loader2 className="h-3 w-3 animate-spin text-primary shrink-0" />}
-      {p.status === "auto_renew" && <Loader2 className="h-3 w-3 animate-spin text-primary shrink-0" />}
       {p.status === "done" && <CheckCircle2 className="h-3 w-3 text-emerald-500 shrink-0" />}
       {p.status === "error" && <AlertTriangle className="h-3 w-3 text-destructive shrink-0" />}
       <span className="font-medium truncate">{p.domain}</span>
-      <span className="ml-auto shrink-0 text-[10px]">
-        {p.status === "registering" && <span className="text-primary">registering…</span>}
-        {p.status === "auto_renew" && <span className="text-primary">disabling auto-renew…</span>}
+      <span className="ml-auto shrink-0 flex items-center gap-2">
+        {p.status === "registering" && <span className="text-[10px] text-primary">registering…</span>}
         {p.status === "done" && (
+          <>
+            <span className="text-[10px] text-emerald-500 flex items-center gap-1">
+              <DollarSign className="h-2.5 w-2.5" />
+              registered
+            </span>
+            {p.autoRenewDisabled ? (
+              <span className="text-[10px] text-violet-500 flex items-center gap-1">
+                <ShieldOff className="h-2.5 w-2.5" />
+                auto-renew off
+              </span>
+            ) : (
+              <span className="text-[10px] text-amber-500 flex items-center gap-1" title={p.autoRenewError || ""}>
+                <AlertTriangle className="h-2.5 w-2.5" />
+                auto-renew {p.autoRenewError ? "failed" : "pending"}
+              </span>
+            )}
+          </>
+        )}
+        {p.status === "error" && (
+          <span className="text-[10px] text-destructive max-w-[280px] truncate">{p.error}</span>
+        )}
+      </span>
+    </div>
+  );
+}
+
+function ProgressTile({
+  icon, label, done, total, accent, running, failedCount, warnCount,
+}: {
+  icon: React.ReactNode;
+  label: string;
+  done: number;
+  total: number;
+  accent: "emerald" | "violet";
+  running?: boolean;
+  failedCount?: number;
+  warnCount?: number;
+}) {
+  const pct = total > 0 ? Math.min(100, (done / total) * 100) : 0;
+  const barColor = accent === "emerald" ? "bg-emerald-500" : "bg-violet-500";
+  const textColor = accent === "emerald" ? "text-emerald-500" : "text-violet-500";
+  return (
+    <div className="rounded-lg border bg-muted/30 px-3 py-2.5 space-y-1.5">
+      <div className="flex items-center gap-1.5">
+        <span className={textColor}>{icon}</span>
+        <span className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">{label}</span>
+        {running && <Loader2 className="h-3 w-3 animate-spin text-muted-foreground ml-auto" />}
+      </div>
+      <div className="flex items-baseline gap-2">
+        <span className={`text-lg font-semibold tabular-nums ${textColor}`}>{done}</span>
+        <span className="text-xs text-muted-foreground">/ {total}</span>
+        {(failedCount ?? 0) > 0 && (
+          <span className="ml-auto text-[10px] text-destructive">{failedCount} failed</span>
+        )}
+        {(warnCount ?? 0) > 0 && !failedCount && (
+          <span className="ml-auto text-[10px] text-amber-500">{warnCount} pending</span>
+        )}
+      </div>
+      <div className="h-1.5 w-full rounded-full bg-muted overflow-hidden">
+        <div className={`h-full ${barColor} transition-all duration-500 ease-out`} style={{ width: `${pct}%` }} />
+      </div>
+    </div>
+  );
+}
+
+function SheetTile({ job }: { job: RegisterJob }) {
+  const status = job.sheetStatus;
+  return (
+    <div className="rounded-lg border bg-muted/30 px-3 py-2.5 space-y-1.5">
+      <div className="flex items-center gap-1.5">
+        <Globe className="h-3.5 w-3.5 text-primary" />
+        <span className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">Sheet append</span>
+        {status === "running" && <Loader2 className="h-3 w-3 animate-spin text-muted-foreground ml-auto" />}
+        {status === "done" && <CheckCircle2 className="h-3 w-3 text-emerald-500 ml-auto" />}
+        {status === "error" && <AlertTriangle className="h-3 w-3 text-destructive ml-auto" />}
+      </div>
+      <div className="text-lg font-semibold tabular-nums">
+        {status === "pending" && <span className="text-muted-foreground">—</span>}
+        {status === "running" && <span className="text-primary">writing…</span>}
+        {status === "skipped" && <span className="text-muted-foreground">skipped</span>}
+        {status === "done" && (
           <span className="text-emerald-500">
-            registered {p.error && <span className="text-amber-500">· auto-renew warn</span>}
+            +{job.sheetAdded ?? 0}
+            {(job.sheetSkipped ?? 0) > 0 && (
+              <span className="text-[11px] text-amber-500 ml-1.5">· {job.sheetSkipped} dup</span>
+            )}
           </span>
         )}
-        {p.status === "error" && <span className="text-destructive max-w-[260px] inline-block truncate">{p.error}</span>}
-      </span>
+        {status === "error" && (
+          <span className="text-destructive text-xs truncate block" title={job.sheetError}>
+            {job.sheetError || "failed"}
+          </span>
+        )}
+      </div>
+      <div className="text-[10px] text-muted-foreground truncate">
+        {status === "pending" && "Secondary Domain column"}
+        {status === "running" && "Secondary Domain column"}
+        {status === "done" && "Secondary Domain column"}
+        {status === "skipped" && "No registered domains to append"}
+        {status === "error" && "Secondary Domain column"}
+      </div>
     </div>
   );
 }
