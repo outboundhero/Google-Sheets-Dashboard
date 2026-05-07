@@ -9,6 +9,7 @@ export interface NotDeliveredLead {
   name: string;
   company: string;
   replyTime: string;
+  timeWeGotReply: string;
   sheetId: string;
   sheetName: string;
   sheetClientTag: string;

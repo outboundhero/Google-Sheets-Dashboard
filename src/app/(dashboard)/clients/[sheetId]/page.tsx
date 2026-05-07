@@ -286,7 +286,7 @@ export default function ClientDetailPage({
             {undeliveredLeads.map((l) => {
               const dismissKey = `${l.sheetId}::${l.email}`;
               const isDismissing = dismissingEmails.has(dismissKey);
-              const dayLabel = isPstToday(l.replyTime) ? "Today" : "Yesterday";
+              const dayLabel = (isPstToday(l.replyTime) || isPstToday(l.timeWeGotReply)) ? "Today" : "Yesterday";
               return (
                 <div
                   key={dismissKey}

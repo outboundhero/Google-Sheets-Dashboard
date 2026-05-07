@@ -4,13 +4,23 @@ import { isPstTodayOrYesterday } from "@/lib/date-utils";
 import { listDismissedKeys, dismissLead, dismissedKey } from "@/lib/dismissed-leads";
 import type { Lead } from "@/types/lead";
 
-const STATUS_MATCH = "Lead not Received";
+const STATUS_MATCH = "lead not received";
+
+function statusMatches(status: string | undefined | null): boolean {
+  if (!status) return false;
+  return status.trim().toLowerCase() === STATUS_MATCH;
+}
+
+function leadDateMatches(l: { replyTime: string; timeWeGotReply: string }): boolean {
+  return isPstTodayOrYesterday(l.replyTime) || isPstTodayOrYesterday(l.timeWeGotReply);
+}
 
 interface BannerLead {
   email: string;
   name: string;
   company: string;
   replyTime: string;
+  timeWeGotReply: string;
   sheetId: string;
   sheetName: string;
   sheetClientTag: string;
@@ -22,6 +32,7 @@ function pickBannerFields(l: Lead): BannerLead {
     name: l.name,
     company: l.company,
     replyTime: l.replyTime,
+    timeWeGotReply: l.timeWeGotReply,
     sheetId: l.sheetId,
     sheetName: l.sheetName,
     sheetClientTag: l.sheetClientTag,
@@ -41,8 +52,8 @@ export async function GET(request: Request) {
     const seen = new Set<string>();
     const matched: Lead[] = [];
     for (const l of leads) {
-      if (l.status !== STATUS_MATCH) continue;
-      if (!isPstTodayOrYesterday(l.replyTime)) continue;
+      if (!statusMatches(l.status)) continue;
+      if (!leadDateMatches(l)) continue;
       if (clientTag && l.sheetClientTag !== clientTag) continue;
       const k = dismissedKey(l.sheetId, l.email);
       if (dismissed.has(k)) continue;
