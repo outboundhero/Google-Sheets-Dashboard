@@ -15,6 +15,7 @@ const VIEWER_API_GETS = [
   "/api/deliverability/sync",
   "/api/client-tags",
   "/api/campaigns",
+  "/api/leads/not-delivered-today",
 ];
 
 export async function middleware(request: NextRequest) {

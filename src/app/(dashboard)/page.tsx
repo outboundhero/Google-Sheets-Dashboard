@@ -15,6 +15,7 @@ import { useAnalytics } from "@/lib/hooks/use-analytics";
 import { useAllLeads } from "@/lib/hooks/use-leads";
 import { useSheets } from "@/lib/hooks/use-sheets";
 import { useClientTracker } from "@/lib/hooks/use-client-tracker";
+import { useNotDeliveredTodayAggregate } from "@/lib/hooks/use-not-delivered-today";
 import { PageHeader } from "@/components/shared/page-header";
 import { RefreshButton } from "@/components/shared/refresh-button";
 import { StatCard } from "@/components/dashboard/stat-card";
@@ -44,6 +45,7 @@ export default function DashboardPage() {
   const { isSyncing, syncProgress, refresh } = useAllLeads();
   const { sheets } = useSheets();
   const { clients: trackerClients } = useClientTracker();
+  const { total: notDeliveredTotal, byClient: notDeliveredByClient } = useNotDeliveredTodayAggregate();
 
   // Set of tracked client tags for fast lookup
   const trackedClientTags = useMemo(
@@ -285,7 +287,7 @@ export default function DashboardPage() {
       </div>
 
       {/* Additional Metrics */}
-      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
         <StatCard
           title="Meeting-Ready (24h)"
           value={analytics.meetingReadyLast24h.toLocaleString()}
@@ -298,7 +300,36 @@ export default function DashboardPage() {
           subtitle="Meeting-ready leads without status"
           icon={AlertTriangle}
         />
+        <StatCard
+          title="Not Delivered Today"
+          value={notDeliveredTotal.toLocaleString()}
+          subtitle={notDeliveredTotal === 0 ? "All clients clear" : `Across ${notDeliveredByClient.length} client${notDeliveredByClient.length !== 1 ? "s" : ""} (PST)`}
+          icon={XCircle}
+        />
       </div>
+
+      {/* Not Delivered Today by Client */}
+      {notDeliveredTotal > 0 && (
+        <div className="rounded-xl border border-violet-500/30 bg-violet-500/5 p-4">
+          <div className="flex items-center gap-2 mb-3">
+            <XCircle className="h-4 w-4 text-violet-400 shrink-0" />
+            <h3 className="text-sm font-semibold text-violet-200">Not Delivered Today by Client</h3>
+            <span className="text-[11px] text-violet-400/70 ml-auto">PST</span>
+          </div>
+          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-2">
+            {notDeliveredByClient.filter((c) => c.count > 0).map((c) => (
+              <Link
+                key={c.clientTag}
+                href={`/clients/${encodeURIComponent(c.clientTag)}`}
+                className="flex items-center justify-between rounded-lg bg-violet-500/10 border border-violet-500/30 px-3 py-2 text-sm hover:bg-violet-500/20 transition-colors"
+              >
+                <span className="font-medium text-violet-100/90 truncate">{c.clientTag}</span>
+                <span className="text-violet-300 font-semibold tabular-nums shrink-0 ml-2">{c.count}</span>
+              </Link>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* Charts */}
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">

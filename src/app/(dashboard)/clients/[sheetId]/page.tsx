@@ -1,7 +1,7 @@
 "use client";
 
 import { use, useMemo, useState, useEffect, useCallback, useRef } from "react";
-import { ArrowLeft, Users, CheckCircle2, CalendarCheck, Sparkles, Clock, AlertTriangle, Globe, Check, Search, X, Loader2, Download, Copy } from "lucide-react";
+import { ArrowLeft, Users, CheckCircle2, CalendarCheck, Sparkles, Clock, AlertTriangle, Globe, Check, Search, X, Loader2, Download, Copy, XCircle } from "lucide-react";
 import Link from "next/link";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Badge } from "@/components/ui/badge";
@@ -9,6 +9,8 @@ import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip
 import { useAllLeads } from "@/lib/hooks/use-leads";
 import { useSheets } from "@/lib/hooks/use-sheets";
 import { useClientTracker } from "@/lib/hooks/use-client-tracker";
+import { useNotDeliveredToday } from "@/lib/hooks/use-not-delivered-today";
+import { useAuth } from "@/lib/auth-context";
 import { PageHeader } from "@/components/shared/page-header";
 import { LeadsOverTimeChart } from "@/components/dashboard/leads-over-time-chart";
 import { DataTable } from "@/components/leads-table/data-table";
@@ -52,6 +54,41 @@ export default function ClientDetailPage({
   const { leads: allLeads, isLoading } = useAllLeads();
   const { sheets } = useSheets();
   const { clients: trackerClients } = useClientTracker();
+  const { role } = useAuth();
+  const isAdmin = role === "admin";
+  const {
+    leads: undeliveredLeads,
+    count: undeliveredCount,
+    mutate: mutateUndelivered,
+  } = useNotDeliveredToday(clientTag);
+  const [dismissingEmails, setDismissingEmails] = useState<Set<string>>(new Set());
+
+  const handleMarkDelivered = useCallback(async (sheetId: string, leadEmail: string) => {
+    const dismissKey = `${sheetId}::${leadEmail}`;
+    setDismissingEmails((prev) => new Set(prev).add(dismissKey));
+    await mutateUndelivered(
+      (prev) => prev ? {
+        leads: prev.leads.filter((l) => !(l.email === leadEmail && l.sheetId === sheetId)),
+        count: Math.max(0, prev.count - 1),
+      } : prev,
+      { revalidate: false },
+    );
+    try {
+      await fetch("/api/leads/not-delivered-today", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sheetId, leadEmail, clientTag }),
+      });
+    } catch {
+      // On failure, revalidate so the lead reappears
+      mutateUndelivered();
+    }
+    setDismissingEmails((prev) => {
+      const next = new Set(prev);
+      next.delete(dismissKey);
+      return next;
+    });
+  }, [clientTag, mutateUndelivered]);
 
   const [selectedSheetFilter, setSelectedSheetFilter] = useState<string>("all");
   const [showDomainsDialog, setShowDomainsDialog] = useState(false);
@@ -233,6 +270,50 @@ export default function ClientDetailPage({
           </div>
         )}
       </div>
+
+      {/* Leads Not Delivered Today */}
+      {undeliveredCount > 0 && (
+        <div className="rounded-xl border border-violet-500/30 bg-violet-500/5 p-4">
+          <div className="flex items-center gap-2 mb-2">
+            <XCircle className="h-4 w-4 text-violet-400 shrink-0" />
+            <span className="text-sm font-medium text-violet-200">
+              {undeliveredCount} lead{undeliveredCount !== 1 ? "s" : ""} not delivered today
+            </span>
+            <span className="text-[10px] text-violet-400/70 ml-auto">PST</span>
+          </div>
+          <div className="space-y-1 max-h-64 overflow-y-auto">
+            {undeliveredLeads.map((l) => {
+              const dismissKey = `${l.sheetId}::${l.email}`;
+              const isDismissing = dismissingEmails.has(dismissKey);
+              return (
+                <div
+                  key={dismissKey}
+                  className="flex items-center justify-between gap-2 text-xs px-2 py-1.5 rounded hover:bg-violet-900/10"
+                >
+                  <div className="min-w-0 flex-1 flex items-center gap-2">
+                    <span className="text-violet-100/90 font-medium truncate">{l.name || "—"}</span>
+                    <span className="text-violet-100/60 truncate">· {l.email}</span>
+                    {l.company && (
+                      <span className="text-violet-100/50 truncate hidden sm:inline">· {l.company}</span>
+                    )}
+                  </div>
+                  {isAdmin && (
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="h-6 text-[10px] px-2 border-violet-500/40 text-violet-200 hover:bg-violet-500/20 shrink-0"
+                      disabled={isDismissing}
+                      onClick={() => handleMarkDelivered(l.sheetId, l.email)}
+                    >
+                      {isDismissing ? "..." : "Delivered"}
+                    </Button>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
 
       {/* Low Remaining Leads Alert */}
       {totalRemaining > 0 && totalRemaining < 1500 && clientCampaigns.length > 0 && (
