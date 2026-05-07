@@ -20,7 +20,7 @@ const SCOPES = ["https://www.googleapis.com/auth/spreadsheets"];
 
 let sheetsClient: sheets_v4.Sheets | null = null;
 
-async function getSheetsClient(): Promise<sheets_v4.Sheets> {
+export async function getSheetsClient(): Promise<sheets_v4.Sheets> {
   if (sheetsClient) return sheetsClient;
 
   const auth = new google.auth.JWT({

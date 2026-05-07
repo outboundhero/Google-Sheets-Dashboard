@@ -11,6 +11,7 @@ import {
   PanelLeft,
   Mailbox,
   Send,
+  Globe,
   LogOut,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -31,6 +32,7 @@ const allNavItems: { href: string; label: string; icon: typeof LayoutDashboard; 
   { href: "/leads", label: "All Leads", icon: Table2, roles: ["admin"] },
   { href: "/deliverability", label: "Deliverability", icon: Mailbox, roles: ["admin", "viewer"] },
   { href: "/campaigns", label: "Campaigns", icon: Send, roles: ["admin"] },
+  { href: "/domains", label: "Domains", icon: Globe, roles: ["admin"] },
   { href: "/settings", label: "Settings", icon: Settings, roles: ["admin"] },
 ];
 
