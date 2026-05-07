@@ -11,3 +11,13 @@ export function isPstToday(iso: string | null | undefined): boolean {
   if (isNaN(d.getTime())) return false;
   return pstDateString(d) === pstDateString(new Date());
 }
+
+export function isPstTodayOrYesterday(iso: string | null | undefined): boolean {
+  if (!iso) return false;
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return false;
+  const now = new Date();
+  const yesterday = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+  const target = pstDateString(d);
+  return target === pstDateString(now) || target === pstDateString(yesterday);
+}

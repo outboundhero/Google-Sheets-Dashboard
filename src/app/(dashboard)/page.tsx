@@ -260,6 +260,39 @@ export default function DashboardPage() {
         </div>
       )}
 
+      {/* Not Delivered Today */}
+      {notDeliveredTotal > 0 && (
+        <div className="rounded-xl border-2 border-violet-400 dark:border-violet-600 bg-violet-50 dark:bg-violet-950/30 p-5">
+          <div className="flex items-start gap-4">
+            <XCircle className="h-7 w-7 text-violet-500 dark:text-violet-400 mt-0.5 shrink-0" />
+            <div className="flex-1 space-y-3">
+              <div>
+                <h2 className="text-xl font-bold text-violet-900 dark:text-violet-100">
+                  {notDeliveredTotal} lead{notDeliveredTotal !== 1 ? "s" : ""} not delivered (today + yesterday)
+                </h2>
+                <p className="text-sm text-violet-700 dark:text-violet-400 mt-0.5">
+                  Across {notDeliveredByClient.length} client{notDeliveredByClient.length !== 1 ? "s" : ""} (PST) — click a client to review and mark delivered
+                </p>
+              </div>
+              <div className="flex flex-wrap gap-2">
+                {notDeliveredByClient.filter((c) => c.count > 0).map((c) => (
+                  <Link
+                    key={c.clientTag}
+                    href={`/clients/${encodeURIComponent(c.clientTag)}`}
+                    className="inline-flex items-center gap-2 rounded-lg bg-violet-100 dark:bg-violet-900/50 border border-violet-300 dark:border-violet-700 px-3 py-1.5 text-sm font-semibold text-violet-900 dark:text-violet-200 hover:bg-violet-200 dark:hover:bg-violet-800/60 transition-colors"
+                  >
+                    {c.clientTag}
+                    <span className="text-xs font-normal text-violet-700 dark:text-violet-300 bg-violet-200 dark:bg-violet-800/60 rounded px-1.5 py-0.5 tabular-nums">
+                      {c.count}
+                    </span>
+                  </Link>
+                ))}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Stat Cards */}
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
         <StatCard
@@ -287,7 +320,7 @@ export default function DashboardPage() {
       </div>
 
       {/* Additional Metrics */}
-      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
         <StatCard
           title="Meeting-Ready (24h)"
           value={analytics.meetingReadyLast24h.toLocaleString()}
@@ -300,36 +333,7 @@ export default function DashboardPage() {
           subtitle="Meeting-ready leads without status"
           icon={AlertTriangle}
         />
-        <StatCard
-          title="Not Delivered Today"
-          value={notDeliveredTotal.toLocaleString()}
-          subtitle={notDeliveredTotal === 0 ? "All clients clear" : `Across ${notDeliveredByClient.length} client${notDeliveredByClient.length !== 1 ? "s" : ""} (PST)`}
-          icon={XCircle}
-        />
       </div>
-
-      {/* Not Delivered Today by Client */}
-      {notDeliveredTotal > 0 && (
-        <div className="rounded-xl border border-violet-500/30 bg-violet-500/5 p-4">
-          <div className="flex items-center gap-2 mb-3">
-            <XCircle className="h-4 w-4 text-violet-400 shrink-0" />
-            <h3 className="text-sm font-semibold text-violet-200">Not Delivered Today by Client</h3>
-            <span className="text-[11px] text-violet-400/70 ml-auto">PST</span>
-          </div>
-          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-2">
-            {notDeliveredByClient.filter((c) => c.count > 0).map((c) => (
-              <Link
-                key={c.clientTag}
-                href={`/clients/${encodeURIComponent(c.clientTag)}`}
-                className="flex items-center justify-between rounded-lg bg-violet-500/10 border border-violet-500/30 px-3 py-2 text-sm hover:bg-violet-500/20 transition-colors"
-              >
-                <span className="font-medium text-violet-100/90 truncate">{c.clientTag}</span>
-                <span className="text-violet-300 font-semibold tabular-nums shrink-0 ml-2">{c.count}</span>
-              </Link>
-            ))}
-          </div>
-        </div>
-      )}
 
       {/* Charts */}
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">

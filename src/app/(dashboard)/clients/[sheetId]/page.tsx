@@ -10,6 +10,7 @@ import { useAllLeads } from "@/lib/hooks/use-leads";
 import { useSheets } from "@/lib/hooks/use-sheets";
 import { useClientTracker } from "@/lib/hooks/use-client-tracker";
 import { useNotDeliveredToday } from "@/lib/hooks/use-not-delivered-today";
+import { isPstToday } from "@/lib/date-utils";
 import { useAuth } from "@/lib/auth-context";
 import { PageHeader } from "@/components/shared/page-header";
 import { LeadsOverTimeChart } from "@/components/dashboard/leads-over-time-chart";
@@ -277,7 +278,7 @@ export default function ClientDetailPage({
           <div className="flex items-center gap-2 mb-2">
             <XCircle className="h-4 w-4 text-violet-400 shrink-0" />
             <span className="text-sm font-medium text-violet-200">
-              {undeliveredCount} lead{undeliveredCount !== 1 ? "s" : ""} not delivered today
+              {undeliveredCount} lead{undeliveredCount !== 1 ? "s" : ""} not delivered (today + yesterday)
             </span>
             <span className="text-[10px] text-violet-400/70 ml-auto">PST</span>
           </div>
@@ -285,12 +286,16 @@ export default function ClientDetailPage({
             {undeliveredLeads.map((l) => {
               const dismissKey = `${l.sheetId}::${l.email}`;
               const isDismissing = dismissingEmails.has(dismissKey);
+              const dayLabel = isPstToday(l.replyTime) ? "Today" : "Yesterday";
               return (
                 <div
                   key={dismissKey}
                   className="flex items-center justify-between gap-2 text-xs px-2 py-1.5 rounded hover:bg-violet-900/10"
                 >
                   <div className="min-w-0 flex-1 flex items-center gap-2">
+                    <span className={`shrink-0 text-[10px] px-1.5 py-0.5 rounded ${dayLabel === "Today" ? "bg-violet-500/30 text-violet-100" : "bg-violet-500/10 text-violet-300/80"}`}>
+                      {dayLabel}
+                    </span>
                     <span className="text-violet-100/90 font-medium truncate">{l.name || "—"}</span>
                     <span className="text-violet-100/60 truncate">· {l.email}</span>
                     {l.company && (

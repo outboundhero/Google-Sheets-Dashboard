@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { getStoredLeads } from "@/lib/leads-store";
-import { isPstToday } from "@/lib/date-utils";
+import { isPstTodayOrYesterday } from "@/lib/date-utils";
 import { listDismissedKeys, dismissLead, dismissedKey } from "@/lib/dismissed-leads";
 import type { Lead } from "@/types/lead";
 
@@ -42,7 +42,7 @@ export async function GET(request: Request) {
     const matched: Lead[] = [];
     for (const l of leads) {
       if (l.status !== STATUS_MATCH) continue;
-      if (!isPstToday(l.replyTime)) continue;
+      if (!isPstTodayOrYesterday(l.replyTime)) continue;
       if (clientTag && l.sheetClientTag !== clientTag) continue;
       const k = dismissedKey(l.sheetId, l.email);
       if (dismissed.has(k)) continue;
