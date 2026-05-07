@@ -10,7 +10,7 @@ import { useAllLeads } from "@/lib/hooks/use-leads";
 import { useSheets } from "@/lib/hooks/use-sheets";
 import { useClientTracker } from "@/lib/hooks/use-client-tracker";
 import { useNotDeliveredToday } from "@/lib/hooks/use-not-delivered-today";
-import { isPstToday } from "@/lib/date-utils";
+import { isPstToday, pstDateString } from "@/lib/date-utils";
 import { useAuth } from "@/lib/auth-context";
 import { PageHeader } from "@/components/shared/page-header";
 import { LeadsOverTimeChart } from "@/components/dashboard/leads-over-time-chart";
@@ -278,7 +278,7 @@ export default function ClientDetailPage({
           <div className="flex items-center gap-2 mb-2">
             <XCircle className="h-4 w-4 text-violet-400 shrink-0" />
             <span className="text-sm font-medium text-violet-200">
-              {undeliveredCount} lead{undeliveredCount !== 1 ? "s" : ""} not delivered (today + yesterday)
+              {undeliveredCount} lead{undeliveredCount !== 1 ? "s" : ""} not delivered (test window: since May 5)
             </span>
             <span className="text-[10px] text-violet-400/70 ml-auto">PST</span>
           </div>
@@ -286,7 +286,13 @@ export default function ClientDetailPage({
             {undeliveredLeads.map((l) => {
               const dismissKey = `${l.sheetId}::${l.email}`;
               const isDismissing = dismissingEmails.has(dismissKey);
-              const dayLabel = (isPstToday(l.replyTime) || isPstToday(l.timeWeGotReply)) ? "Today" : "Yesterday";
+              const sourceIso = l.replyTime || l.timeWeGotReply;
+              const isToday = isPstToday(l.replyTime) || isPstToday(l.timeWeGotReply);
+              const dayLabel = isToday
+                ? "Today"
+                : sourceIso
+                  ? pstDateString(new Date(sourceIso))
+                  : "—";
               return (
                 <div
                   key={dismissKey}
