@@ -37,15 +37,32 @@ function parseDate(dateStr: string): Date | null {
   return null;
 }
 
+/**
+ * A lead counts as the client's "deliverable" if the client uses meeting-ready
+ * categories (`currentCategory` includes "meeting"). For clients whose sheets
+ * never populate `currentCategory` (e.g. BHS), fall back to status === "Quality Lead".
+ */
+function makeDeliverablePredicate(leads: Lead[]): (l: Lead) => boolean {
+  const usesMeetingCategory = leads.some((l) =>
+    (l.currentCategory || "").toLowerCase().includes("meeting")
+  );
+  if (usesMeetingCategory) {
+    return (l) => (l.currentCategory || "").toLowerCase().includes("meeting");
+  }
+  return (l) => l.status.trim().toLowerCase() === "quality lead";
+}
+
 function computeTimeSeries(
   leads: Lead[],
-  goLiveDate?: Date | null
+  goLiveDate?: Date | null,
+  isDeliverable?: (l: Lead) => boolean
 ): { date: string; count: number }[] {
   const byMonth: Record<string, number> = {};
+  const predicate = isDeliverable || makeDeliverablePredicate(leads);
 
   for (const lead of leads) {
-    // When billing cycle is active, only count Meeting-Ready leads
-    if (goLiveDate && !lead.currentCategory.toLowerCase().includes("meeting")) continue;
+    // When billing cycle is active, only count "deliverable" leads
+    if (goLiveDate && !predicate(lead)) continue;
 
     const d = parseDate(lead.timeWeGotReply) || parseDate(lead.replyTime);
     if (!d) continue;
@@ -158,9 +175,11 @@ export function computeAnalytics(
   const leadNotReceived = withNormalized.filter((l) => l._status === "Lead not Received").length;
   const duplicated = withNormalized.filter((l) => l._status === "Duplicated").length;
 
-  const meetingReadyLeads = filtered.filter((l) =>
-    l.currentCategory.toLowerCase().includes("meeting")
-  ).length;
+  // Per-client adaptive predicate: most clients tag leads via `currentCategory`,
+  // but some (e.g. BHS) leave it empty and rely on `status` only. Falling back
+  // to status === "Quality Lead" lets those clients show on the time chart.
+  const isDeliverable = makeDeliverablePredicate(filtered);
+  const meetingReadyLeads = filtered.filter(isDeliverable).length;
   const interestedLeads = filtered.filter(
     (l) => l.currentCategory.toLowerCase() === "interested"
   ).length;
@@ -214,7 +233,7 @@ export function computeAnalytics(
     .map(([category, items]) => ({ category, count: items.length }))
     .sort((a, b) => b.count - a.count);
 
-  const leadsOverTime = computeTimeSeries(filtered, goLiveDate);
+  const leadsOverTime = computeTimeSeries(filtered, goLiveDate, isDeliverable);
 
   const topClients = leadsByClient
     .map(({ client, count }) => {
@@ -240,17 +259,17 @@ export function computeAnalytics(
   const twentyFourHoursAgoPst = new Date(nowPst.getTime() - 24 * 60 * 60 * 1000);
 
   const meetingReadyLast24h = filtered.filter((l) => {
-    if (!l.currentCategory.toLowerCase().includes("meeting")) return false;
+    if (!isDeliverable(l)) return false;
     const replyDate = parseDate(l.timeWeGotReply) || parseDate(l.replyTime);
     if (!replyDate) return false;
     const replyPst = new Date(replyDate.getTime() + (pstOffset + replyDate.getTimezoneOffset()) * 60000);
     return replyPst >= twentyFourHoursAgoPst;
   }).length;
 
-  // Meeting-ready leads without a status
+  // "Deliverable" leads without a status — same predicate, just no status
   const meetingReadyNoStatus = filtered.filter(
     (l) =>
-      l.currentCategory.toLowerCase().includes("meeting") &&
+      isDeliverable(l) &&
       !l.status.trim()
   );
   const meetingReadyWithoutStatus = meetingReadyNoStatus.length;
@@ -266,12 +285,15 @@ export function computeAnalytics(
       continue;
     }
 
-    // Find the most recent meeting-ready lead date for this client
+    // Per-client deliverable predicate (same fallback as elsewhere)
+    const clientDeliverable = makeDeliverablePredicate(clientLeads);
+
+    // Find the most recent deliverable lead date for this client
     let lastMeetingReadyDate: Date | null = null;
     let hasRecentMeetingReady = false;
 
     for (const l of clientLeads) {
-      if (!l.currentCategory.toLowerCase().includes("meeting")) continue;
+      if (!clientDeliverable(l)) continue;
       const replyDate = parseDate(l.timeWeGotReply) || parseDate(l.replyTime);
       if (!replyDate) continue;
 
