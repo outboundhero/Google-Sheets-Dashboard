@@ -89,6 +89,7 @@ export default function DomainsPage() {
   const [registerJob, setRegisterJob] = useState<RegisterJob | null>(null);
   const [registering, setRegistering] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const registerCardRef = useRef<HTMLDivElement>(null);
 
   // ─── Discovery loop ───────────────────────────────────────────────────────
   useEffect(() => {
@@ -228,6 +229,10 @@ export default function DomainsPage() {
         autoRenewDisabled: false,
       })),
       sheetStatus: "pending",
+    });
+    // Scroll to the registration card so the user sees progress.
+    requestAnimationFrame(() => {
+      registerCardRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
     });
 
     const succeeded: string[] = [];
@@ -460,7 +465,7 @@ export default function DomainsPage() {
         </div>
 
         {selected.size > 0 && isAdmin && (
-          <div className="flex items-center justify-between gap-3 px-4 py-2.5 border-b bg-primary/5">
+          <div className="sticky top-0 z-30 flex items-center justify-between gap-3 px-4 py-2.5 border-b bg-card/95 backdrop-blur supports-[backdrop-filter]:bg-card/80 shadow-sm">
             <span className="text-xs font-medium">{selected.size} selected</span>
             <div className="flex items-center gap-2">
               <Button variant="ghost" size="sm" className="h-7 text-xs" onClick={() => setSelected(new Set())}>Clear</Button>
@@ -534,7 +539,7 @@ export default function DomainsPage() {
         const autoRenewWarnCount = registerJob.perDomain.filter((p) => p.registered && !p.autoRenewDisabled).length;
         const allDone = !registering && (registerJob.sheetStatus === "done" || registerJob.sheetStatus === "skipped" || registerJob.sheetStatus === "error");
         return (
-          <div className="rounded-xl border bg-card p-5 space-y-4">
+          <div ref={registerCardRef} className="rounded-xl border bg-card p-5 space-y-4 scroll-mt-4">
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-2">
                 {registering ? (
