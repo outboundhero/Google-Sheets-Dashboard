@@ -238,6 +238,11 @@ export default function DomainsPage() {
     const succeeded: string[] = [];
     for (let i = 0; i < list.length; i++) {
       const domain = list[i];
+      // Porkbun's create endpoint has its own 1-per-10s rate limit, so pace
+      // between attempts. The first call has no wait.
+      if (i > 0) {
+        await new Promise((r) => setTimeout(r, TICK_MS));
+      }
       setRegisterJob((prev) => prev ? {
         ...prev,
         perDomain: prev.perDomain.map((p, idx) => idx === i ? { ...p, status: "registering" } : p),
