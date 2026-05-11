@@ -445,6 +445,69 @@ export default function DomainsPage() {
         )}
       </div>
 
+      {/* Registration progress (rendered at top so it's visible immediately) */}
+      {registerJob && (() => {
+        const total = registerJob.perDomain.length;
+        const registeredCount = registerJob.perDomain.filter((p) => p.registered).length;
+        const autoRenewOffCount = registerJob.perDomain.filter((p) => p.autoRenewDisabled).length;
+        const failedCount = registerJob.perDomain.filter((p) => p.status === "error").length;
+        const autoRenewWarnCount = registerJob.perDomain.filter((p) => p.registered && !p.autoRenewDisabled).length;
+        const allDone = !registering && (registerJob.sheetStatus === "done" || registerJob.sheetStatus === "skipped" || registerJob.sheetStatus === "error");
+        return (
+          <div ref={registerCardRef} className="rounded-xl border bg-card p-5 space-y-4 scroll-mt-4">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                {registering ? (
+                  <Loader2 className="h-4 w-4 animate-spin text-primary" />
+                ) : registerJob.sheetStatus === "error" || failedCount > 0 ? (
+                  <AlertTriangle className="h-4 w-4 text-amber-500" />
+                ) : (
+                  <CheckCircle2 className="h-4 w-4 text-emerald-500" />
+                )}
+                <h3 className="text-sm font-semibold">
+                  {registering ? "Registering domains" : "Registration complete"}
+                </h3>
+              </div>
+              {allDone && (
+                <button onClick={() => setRegisterJob(null)} className="text-[11px] text-muted-foreground hover:text-foreground">
+                  Dismiss
+                </button>
+              )}
+            </div>
+
+            {/* Summary progress bars */}
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+              <ProgressTile
+                icon={<DollarSign className="h-3.5 w-3.5" />}
+                label="Registered"
+                done={registeredCount}
+                total={total}
+                accent="emerald"
+                running={registering}
+                failedCount={failedCount}
+              />
+              <ProgressTile
+                icon={<ShieldOff className="h-3.5 w-3.5" />}
+                label="Auto-renew off"
+                done={autoRenewOffCount}
+                total={registeredCount || total}
+                accent="violet"
+                running={registering}
+                warnCount={autoRenewWarnCount}
+              />
+              <SheetTile job={registerJob} />
+            </div>
+
+            {/* Per-domain detail */}
+            <div className="space-y-1 max-h-64 overflow-y-auto pt-2 border-t">
+              {registerJob.perDomain.map((p) => (
+                <PerDomainRow key={p.domain} p={p} />
+              ))}
+            </div>
+          </div>
+        );
+      })()}
+
       {/* Available domains list */}
       <div className="rounded-xl border bg-card">
         <div className="flex items-center justify-between gap-3 px-4 py-3 border-b">
@@ -535,68 +598,6 @@ export default function DomainsPage() {
         )}
       </div>
 
-      {/* Registration progress */}
-      {registerJob && (() => {
-        const total = registerJob.perDomain.length;
-        const registeredCount = registerJob.perDomain.filter((p) => p.registered).length;
-        const autoRenewOffCount = registerJob.perDomain.filter((p) => p.autoRenewDisabled).length;
-        const failedCount = registerJob.perDomain.filter((p) => p.status === "error").length;
-        const autoRenewWarnCount = registerJob.perDomain.filter((p) => p.registered && !p.autoRenewDisabled).length;
-        const allDone = !registering && (registerJob.sheetStatus === "done" || registerJob.sheetStatus === "skipped" || registerJob.sheetStatus === "error");
-        return (
-          <div ref={registerCardRef} className="rounded-xl border bg-card p-5 space-y-4 scroll-mt-4">
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-2">
-                {registering ? (
-                  <Loader2 className="h-4 w-4 animate-spin text-primary" />
-                ) : registerJob.sheetStatus === "error" || failedCount > 0 ? (
-                  <AlertTriangle className="h-4 w-4 text-amber-500" />
-                ) : (
-                  <CheckCircle2 className="h-4 w-4 text-emerald-500" />
-                )}
-                <h3 className="text-sm font-semibold">
-                  {registering ? "Registering domains" : "Registration complete"}
-                </h3>
-              </div>
-              {allDone && (
-                <button onClick={() => setRegisterJob(null)} className="text-[11px] text-muted-foreground hover:text-foreground">
-                  Dismiss
-                </button>
-              )}
-            </div>
-
-            {/* Summary progress bars */}
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-              <ProgressTile
-                icon={<DollarSign className="h-3.5 w-3.5" />}
-                label="Registered"
-                done={registeredCount}
-                total={total}
-                accent="emerald"
-                running={registering}
-                failedCount={failedCount}
-              />
-              <ProgressTile
-                icon={<ShieldOff className="h-3.5 w-3.5" />}
-                label="Auto-renew off"
-                done={autoRenewOffCount}
-                total={registeredCount || total}
-                accent="violet"
-                running={registering}
-                warnCount={autoRenewWarnCount}
-              />
-              <SheetTile job={registerJob} />
-            </div>
-
-            {/* Per-domain detail */}
-            <div className="space-y-1 max-h-64 overflow-y-auto pt-2 border-t">
-              {registerJob.perDomain.map((p) => (
-                <PerDomainRow key={p.domain} p={p} />
-              ))}
-            </div>
-          </div>
-        );
-      })()}
     </div>
   );
 }
