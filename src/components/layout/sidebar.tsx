@@ -76,10 +76,17 @@ export function Sidebar({ collapsed, onToggle }: SidebarProps) {
       {/* Navigation */}
       <nav className="flex-1 space-y-1 px-2 py-4">
         {navItems.map((item) => {
-          const isActive =
-            item.href === "/"
-              ? pathname === "/"
-              : pathname.startsWith(item.href);
+          const isActive = (() => {
+            if (item.href === "/") return pathname === "/";
+            if (!pathname.startsWith(item.href)) return false;
+            const moreSpecific = navItems.some(
+              (other) =>
+                other.href !== item.href &&
+                other.href.startsWith(item.href + "/") &&
+                pathname.startsWith(other.href)
+            );
+            return !moreSpecific;
+          })();
 
           const linkContent = (
             <Link
