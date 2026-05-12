@@ -11,6 +11,10 @@
     {
       "path": "/api/cron/redirect-check",
       "schedule": "0 6 */2 * *"
+    },
+    {
+      "path": "/api/cron/inbox-orders-poll",
+      "schedule": "0 */6 * * *"
     }
   ]
 }

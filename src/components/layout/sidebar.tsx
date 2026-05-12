@@ -13,6 +13,7 @@ import {
   Send,
   Globe,
   LogOut,
+  PackagePlus,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -31,6 +32,7 @@ const allNavItems: { href: string; label: string; icon: typeof LayoutDashboard; 
   { href: "/clients", label: "Clients", icon: Users, roles: ["admin", "viewer"] },
   { href: "/leads", label: "All Leads", icon: Table2, roles: ["admin"] },
   { href: "/deliverability", label: "Deliverability", icon: Mailbox, roles: ["admin", "viewer"] },
+  { href: "/deliverability/inbox-orders", label: "Inbox Orders", icon: PackagePlus, roles: ["admin"] },
   { href: "/campaigns", label: "Campaigns", icon: Send, roles: ["admin"] },
   { href: "/domains", label: "Domains", icon: Globe, roles: ["admin"] },
   { href: "/settings", label: "Settings", icon: Settings, roles: ["admin"] },
