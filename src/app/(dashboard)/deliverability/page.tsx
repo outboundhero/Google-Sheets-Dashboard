@@ -21,6 +21,7 @@ import {
   Loader2,
   Download,
   Copy,
+  ExternalLink,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -49,6 +50,8 @@ interface DomainRow {
   google_count?: number;
   daily_limit_total?: number;
   warmup_limit_total?: number;
+  redirect_url?: string | null;
+  redirect_checked_at?: string | null;
 }
 
 interface SyncProgress {
@@ -249,6 +252,10 @@ function DeliverabilityPageInner() {
   // Sync selected domains state
   interface SyncSelectedJob { status: "running" | "done" | "error"; synced: number; totalDomains: number; error?: string }
   const [syncSelectedJob, setSyncSelectedJob] = useState<SyncSelectedJob | null>(null);
+
+  // Check redirects job state
+  interface RedirectCheckJob { status: "running" | "done" | "error"; checked: number; total: number; redirects: number; error?: string }
+  const [redirectCheckJob, setRedirectCheckJob] = useState<RedirectCheckJob | null>(null);
   const [limitInput, setLimitInput] = useState("");
   interface LimitJob { type: "daily" | "warmup"; limit: number; status: "running" | "done" | "error"; updated?: number; total?: number; error?: string }
   const [limitJob, setLimitJob] = useState<LimitJob | null>(null);
@@ -763,6 +770,40 @@ function DeliverabilityPageInner() {
     loadDomains();
   }, [loadDomains]);
 
+  const startCheckRedirects = useCallback(async (domainList: string[]) => {
+    if (domainList.length === 0) return;
+    setRedirectCheckJob({ status: "running", checked: 0, total: domainList.length, redirects: 0 });
+    setSelectedDomains(new Set());
+
+    const CHUNK = 50;
+    let checked = 0;
+    let redirects = 0;
+    try {
+      for (let i = 0; i < domainList.length; i += CHUNK) {
+        const slice = domainList.slice(i, i + CHUNK);
+        const res = await fetch("/api/deliverability/check-redirects", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ domains: slice }),
+        });
+        if (!res.ok) {
+          const data = await res.json().catch(() => ({}));
+          throw new Error(data?.error || `HTTP ${res.status}`);
+        }
+        const data = await res.json();
+        const results: { redirectUrl: string | null }[] = data.results || [];
+        checked += results.length;
+        redirects += results.filter((r) => r.redirectUrl).length;
+        setRedirectCheckJob({ status: "running", checked, total: domainList.length, redirects });
+      }
+      setRedirectCheckJob({ status: "done", checked, total: domainList.length, redirects });
+      loadDomains();
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : "Failed";
+      setRedirectCheckJob({ status: "error", checked, total: domainList.length, redirects, error: msg });
+    }
+  }, [loadDomains]);
+
   // Drag-to-select: track by index range so fast scrolling doesn't skip rows
   const dragStartIdx = useRef(-1);
   const dragLastIdx = useRef(-1);
@@ -1167,6 +1208,33 @@ function DeliverabilityPageInner() {
         </div>
       )}
 
+      {/* Check Redirects Progress */}
+      {redirectCheckJob && (
+        <div className="rounded-lg border bg-muted/30 px-4 py-3">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2 text-sm">
+              {redirectCheckJob.status === "running" && <Loader2 className="h-3.5 w-3.5 animate-spin text-primary" />}
+              {redirectCheckJob.status === "done" && <CheckCircle2 className="h-3.5 w-3.5 text-emerald-500" />}
+              {redirectCheckJob.status === "error" && <AlertTriangle className="h-3.5 w-3.5 text-destructive" />}
+              <span className="font-medium">
+                {redirectCheckJob.status === "running"
+                  ? `Checking redirects · ${redirectCheckJob.checked} / ${redirectCheckJob.total}`
+                  : redirectCheckJob.status === "done"
+                    ? `Checked ${redirectCheckJob.total} domain${redirectCheckJob.total !== 1 ? "s" : ""}`
+                    : "Redirect check failed"}
+              </span>
+              <span className="text-xs text-muted-foreground">{redirectCheckJob.redirects} redirect{redirectCheckJob.redirects !== 1 ? "s" : ""} found</span>
+              {redirectCheckJob.status === "error" && redirectCheckJob.error && (
+                <span className="text-xs text-destructive">· {redirectCheckJob.error}</span>
+              )}
+            </div>
+            {redirectCheckJob.status !== "running" && (
+              <button onClick={() => setRedirectCheckJob(null)} className="text-xs text-muted-foreground hover:text-foreground">Dismiss</button>
+            )}
+          </div>
+        </div>
+      )}
+
       {/* Sync Selected Progress */}
       {syncSelectedJob && (
         <div className="rounded-lg border bg-muted/30 px-4 py-3">
@@ -1514,6 +1582,15 @@ function DeliverabilityPageInner() {
                       <RefreshCw className="h-3 w-3" />
                       Sync Selected
                     </Button>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="h-7 text-xs gap-1.5"
+                      onClick={() => startCheckRedirects(Array.from(selectedDomains))}
+                    >
+                      <ExternalLink className="h-3 w-3" />
+                      Check Redirects
+                    </Button>
                     <div className="relative">
                       <Button
                         size="sm"
@@ -1572,7 +1649,7 @@ function DeliverabilityPageInner() {
               )}
 
               {/* Table header */}
-              <div className="grid grid-cols-[28px_1fr_90px_70px_70px_70px_70px_90px] gap-2 px-4 py-2 text-xs text-muted-foreground font-medium">
+              <div className="grid grid-cols-[28px_1fr_180px_90px_70px_70px_70px_70px_90px] gap-2 px-4 py-2 text-xs text-muted-foreground font-medium">
                 <button
                   onClick={() => {
                     const allVisible = filteredDomains.map((d) => d.domain);
@@ -1593,34 +1670,44 @@ function DeliverabilityPageInner() {
                     <Check className="h-3 w-3" />
                   )}
                 </button>
-                {([
-                  { field: "domain" as const, label: "Domain", align: "text-left" },
-                  { field: "inbox_count" as const, label: "Inboxes", align: "text-center" },
-                  { field: "total_sent" as const, label: "Sent", align: "text-center" },
-                  { field: "total_replied" as const, label: "Replied", align: "text-center" },
-                  { field: "total_bounced" as const, label: "Bounced", align: "text-center" },
-                  { field: "daily_limit" as const, label: "Daily", align: "text-center" },
-                  { field: "warmup_days" as const, label: "Status", align: "text-center" },
-                ] as const).map((col) => (
-                  <button
-                    key={col.field}
-                    onClick={() => {
-                      if (sortField === col.field) {
-                        if (sortDir === "desc") setSortDir("asc");
-                        else { setSortField(null); setSortDir("desc"); }
-                      } else {
-                        setSortField(col.field);
-                        setSortDir("desc");
-                      }
-                    }}
-                    className={`${col.align} hover:text-foreground transition-colors flex items-center gap-0.5 ${col.align === "text-center" ? "justify-center" : ""}`}
-                  >
-                    {col.label}
-                    {sortField === col.field && (
-                      sortDir === "desc" ? <ChevronDown className="h-3 w-3" /> : <ChevronUp className="h-3 w-3" />
-                    )}
-                  </button>
-                ))}
+                {(() => {
+                  const cols = [
+                    { field: "domain" as const, label: "Domain", align: "text-left" },
+                    { field: "inbox_count" as const, label: "Inboxes", align: "text-center" },
+                    { field: "total_sent" as const, label: "Sent", align: "text-center" },
+                    { field: "total_replied" as const, label: "Replied", align: "text-center" },
+                    { field: "total_bounced" as const, label: "Bounced", align: "text-center" },
+                    { field: "daily_limit" as const, label: "Daily", align: "text-center" },
+                    { field: "warmup_days" as const, label: "Status", align: "text-center" },
+                  ];
+                  const renderSort = (col: (typeof cols)[number]) => (
+                    <button
+                      key={col.field}
+                      onClick={() => {
+                        if (sortField === col.field) {
+                          if (sortDir === "desc") setSortDir("asc");
+                          else { setSortField(null); setSortDir("desc"); }
+                        } else {
+                          setSortField(col.field);
+                          setSortDir("desc");
+                        }
+                      }}
+                      className={`${col.align} hover:text-foreground transition-colors flex items-center gap-0.5 ${col.align === "text-center" ? "justify-center" : ""}`}
+                    >
+                      {col.label}
+                      {sortField === col.field && (
+                        sortDir === "desc" ? <ChevronDown className="h-3 w-3" /> : <ChevronUp className="h-3 w-3" />
+                      )}
+                    </button>
+                  );
+                  return (
+                    <>
+                      {renderSort(cols[0])}
+                      <div className="text-left">Redirect URL</div>
+                      {cols.slice(1).map(renderSort)}
+                    </>
+                  );
+                })()}
               </div>
               {filteredDomains.map((d, domainIdx) => {
                 const daysOld = d.domain_created_at
@@ -1643,7 +1730,7 @@ function DeliverabilityPageInner() {
                   <div
                     key={d.domain}
                     onMouseEnter={() => handleDragEnter(domainIdx, filteredDomains)}
-                    className={`grid grid-cols-[28px_1fr_90px_70px_70px_70px_70px_90px] gap-2 items-center rounded-xl border px-4 py-3 transition-colors select-none ${
+                    className={`grid grid-cols-[28px_1fr_180px_90px_70px_70px_70px_70px_90px] gap-2 items-center rounded-xl border px-4 py-3 transition-colors select-none ${
                       isSelected
                         ? "bg-primary/5 border-primary/30"
                         : flagged
@@ -1694,6 +1781,31 @@ function DeliverabilityPageInner() {
                           <span key={t} className="text-[10px] bg-muted px-1.5 py-0.5 rounded text-muted-foreground">{t}</span>
                         ))}
                       </div>
+                    </div>
+
+                    {/* Redirect URL */}
+                    <div className="min-w-0 text-xs">
+                      {d.redirect_url ? (
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <a
+                              href={d.redirect_url}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="text-primary hover:underline truncate block max-w-[170px]"
+                            >
+                              {d.redirect_url.replace(/^https?:\/\//, "").replace(/\/$/, "")}
+                            </a>
+                          </TooltipTrigger>
+                          <TooltipContent side="top" className="max-w-md break-all">
+                            {d.redirect_url}
+                          </TooltipContent>
+                        </Tooltip>
+                      ) : d.redirect_checked_at ? (
+                        <span className="text-muted-foreground/60">no redirect</span>
+                      ) : (
+                        <span className="text-muted-foreground/40">—</span>
+                      )}
                     </div>
 
                     {/* Inbox counts */}
