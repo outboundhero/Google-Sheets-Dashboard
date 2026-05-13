@@ -15,6 +15,10 @@
     {
       "path": "/api/cron/inbox-orders-poll",
       "schedule": "0 */6 * * *"
+    },
+    {
+      "path": "/api/cron/campaigns",
+      "schedule": "0 17 * * *"
     }
   ]
 }
