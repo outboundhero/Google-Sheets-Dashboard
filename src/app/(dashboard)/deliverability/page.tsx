@@ -198,6 +198,7 @@ function DeliverabilityPageInner() {
   const [warmupSearch, setWarmupSearch] = useState("");
   const [typeFilter, setTypeFilter] = useState<"all" | "outlook" | "google">("all");
   const [showFlagged, setShowFlagged] = useState(() => searchParams.get("flagged") === "true");
+  const [showHealthy, setShowHealthy] = useState(() => searchParams.get("healthy") === "true");
   const [flagSubFilter, setFlagSubFilter] = useState<"all" | "reply" | "bounce">("all");
   const [showReserve, setShowReserve] = useState(false);
   const [warmupDaysFilter, setWarmupDaysFilter] = useState<string>("all");
@@ -872,6 +873,9 @@ function DeliverabilityPageInner() {
         result = result.filter(isDomainFlagged);
       }
     }
+    if (showHealthy) {
+      result = result.filter((d) => !isDomainFlagged(d));
+    }
     if (showReserve) {
       result = result.filter(isDomainReserve);
     }
@@ -924,9 +928,10 @@ function DeliverabilityPageInner() {
       });
     }
     return result;
-  }, [domains, tagFilters, domainSearch, typeFilter, showFlagged, flagSubFilter, showReserve, showAssigned, warmupDaysFilter, warmupDaysFrom, warmupDaysTo, sortField, sortDir, isDomainFlagged, hasReplyIssue, hasBounceIssue, isDomainReserve, isDomainAssigned, now]);
+  }, [domains, tagFilters, domainSearch, typeFilter, showFlagged, flagSubFilter, showHealthy, showReserve, showAssigned, warmupDaysFilter, warmupDaysFrom, warmupDaysTo, sortField, sortDir, isDomainFlagged, hasReplyIssue, hasBounceIssue, isDomainReserve, isDomainAssigned, now]);
 
   const flaggedCount = useMemo(() => domains.filter(isDomainFlagged).length, [domains, isDomainFlagged]);
+  const healthyCount = useMemo(() => domains.filter((d) => !isDomainFlagged(d)).length, [domains, isDomainFlagged]);
 
   // Warmup-specific reserve count (only warmup-complete domains)
   const warmupReserveCount = useMemo(() => {
@@ -1338,7 +1343,12 @@ function DeliverabilityPageInner() {
 
             {/* Flagged filter */}
             <button
-              onClick={() => { setShowFlagged((v) => !v); setFlagSubFilter("all"); }}
+              onClick={() => {
+                const next = !showFlagged;
+                setShowFlagged(next);
+                setFlagSubFilter("all");
+                if (next) setShowHealthy(false);
+              }}
               className={`text-xs px-3 py-1.5 rounded-full border transition-colors flex items-center gap-1.5 ${
                 showFlagged
                   ? "bg-destructive text-destructive-foreground border-destructive"
@@ -1352,6 +1362,30 @@ function DeliverabilityPageInner() {
                   showFlagged ? "bg-destructive-foreground/20" : "bg-destructive/15 text-destructive"
                 }`}>
                   {flaggedCount}
+                </span>
+              )}
+            </button>
+
+            {/* Healthy filter — opposite of Flagged */}
+            <button
+              onClick={() => {
+                const next = !showHealthy;
+                setShowHealthy(next);
+                if (next) { setShowFlagged(false); setFlagSubFilter("all"); }
+              }}
+              className={`text-xs px-3 py-1.5 rounded-full border transition-colors flex items-center gap-1.5 ${
+                showHealthy
+                  ? "bg-emerald-500 text-white border-emerald-500"
+                  : "border-border text-muted-foreground hover:border-foreground hover:text-foreground"
+              }`}
+            >
+              <CheckCircle2 className="h-3 w-3" />
+              Healthy
+              {healthyCount > 0 && (
+                <span className={`text-[10px] font-medium rounded-full px-1.5 ${
+                  showHealthy ? "bg-white/20" : "bg-emerald-500/15 text-emerald-600 dark:text-emerald-400"
+                }`}>
+                  {healthyCount}
                 </span>
               )}
             </button>
