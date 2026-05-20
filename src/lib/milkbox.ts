@@ -95,7 +95,6 @@ export async function createOrder(input: CreateOrderInput): Promise<MilkboxCreat
   }
   const email_senders = Array.from(uniqueSenders.values()).slice(0, Math.max(1, uniqueSenders.size));
   const body = {
-    type: "AUTOMATED" as const,
     slots_type: "MICROSOFT" as const,
     sequencer_id: sequencerId,
     domain_provider_id: domainProviderId,
@@ -186,7 +185,6 @@ export async function swapDomain(domainId: string, newDomain: string): Promise<M
     domain: newDomain,
     sequencer_id: sequencerId,
     domain_provider_id: domainProviderId,
-    order_type: "AUTOMATED" as const,
   };
   const raw = await call("POST", `/domains/${encodeURIComponent(domainId)}/swap`, { body });
   return { raw };
