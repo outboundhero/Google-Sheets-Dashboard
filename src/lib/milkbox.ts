@@ -48,24 +48,14 @@ async function call<T>(
     }
   }
   if (!res.ok) {
-    const obj = parsed && typeof parsed === "object" ? (parsed as Record<string, unknown>) : null;
-    const errorField = obj?.error;
-    const details = obj?.details ?? obj?.errors;
-
-    let summary: string;
-    if (typeof errorField === "string") {
-      summary = errorField;
-    } else if (errorField && typeof errorField === "object" && "message" in errorField) {
-      summary = String((errorField as { message?: unknown }).message ?? "");
-    } else {
-      summary = text.slice(0, 300) || `HTTP ${res.status}`;
-    }
-
-    const detailsStr =
-      details === undefined || details === null
-        ? ""
-        : ` — ${typeof details === "string" ? details : JSON.stringify(details)}`;
-    throw new Error(`MilkBox ${method} ${path}: ${summary}${detailsStr}`);
+    const msg =
+      (parsed &&
+        typeof parsed === "object" &&
+        ((parsed as { error?: { message?: string } | string }).error)) ||
+      text.slice(0, 300) ||
+      `HTTP ${res.status}`;
+    const flat = typeof msg === "string" ? msg : (msg as { message?: string }).message || JSON.stringify(msg);
+    throw new Error(`MilkBox ${method} ${path}: ${flat}`);
   }
   return (parsed ?? {}) as T;
 }
