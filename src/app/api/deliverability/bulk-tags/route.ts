@@ -1,12 +1,6 @@
 import { NextResponse } from "next/server";
 import { getSupabaseAdmin } from "@/lib/supabase";
-
-const API_BASE = "https://app.outboundhero.co/api";
-const API_KEY = process.env.OUTBOUNDHERO_API_KEY!;
-const apiHeaders = {
-  Authorization: `Bearer ${API_KEY}`,
-  "Content-Type": "application/json",
-};
+import { bisonFetch, resolveInstance } from "@/lib/bison";
 
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -15,20 +9,19 @@ interface Tag {
   name: string;
 }
 
-// GET — list all available tags from OutboundHero
-export async function GET() {
+// GET — list all available tags from the selected Bison instance
+export async function GET(request: Request) {
   try {
-    const res = await fetch(`${API_BASE}/tags`, {
-      headers: { Authorization: `Bearer ${API_KEY}` },
-      cache: "no-store",
-    });
+    const { searchParams } = new URL(request.url);
+    const instance = resolveInstance(searchParams.get("instance"));
+    const res = await bisonFetch(instance, `/tags`);
     if (!res.ok) throw new Error(`Failed to fetch tags: ${res.status}`);
     const json = await res.json();
     const tags: Tag[] = (json.data || []).map((t: Tag) => ({
       id: t.id,
       name: t.name,
     }));
-    return NextResponse.json({ tags });
+    return NextResponse.json({ tags, instance });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Failed";
     return NextResponse.json({ error: message }, { status: 500 });
@@ -38,6 +31,8 @@ export async function GET() {
 // POST — create tag, or add/remove tags from inboxes of selected domains
 export async function POST(request: Request) {
   try {
+    const { searchParams } = new URL(request.url);
+    const instance = resolveInstance(searchParams.get("instance"));
     const body = await request.json();
     const { action } = body as { action: string };
 
@@ -47,9 +42,9 @@ export async function POST(request: Request) {
       if (!tagName?.trim()) {
         return NextResponse.json({ error: "Tag name is required" }, { status: 400 });
       }
-      const res = await fetch(`${API_BASE}/tags`, {
+      const res = await bisonFetch(instance, `/tags`, {
         method: "POST",
-        headers: apiHeaders,
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ name: tagName.trim() }),
       });
       if (!res.ok) {
@@ -76,7 +71,7 @@ export async function POST(request: Request) {
 
     const supabase = getSupabaseAdmin();
 
-    // 1. Get all inbox IDs for the selected domains (paginate per domain to avoid 1000-row cap)
+    // 1. Get all inbox IDs for the selected domains (scoped to this instance, paginated)
     const inboxes: { id: number; domain: string; tags: Tag[] }[] = [];
     for (const domain of domains) {
       let offset = 0;
@@ -84,6 +79,7 @@ export async function POST(request: Request) {
         const { data, error: inboxError } = await supabase
           .from("deliverability_inboxes")
           .select("id, domain, tags")
+          .eq("instance", instance)
           .eq("domain", domain)
           .range(offset, offset + 999);
         if (inboxError) throw new Error(inboxError.message);
@@ -100,11 +96,11 @@ export async function POST(request: Request) {
 
     const senderEmailIds = inboxes.map((i) => i.id);
 
-    // 2. Call OutboundHero API to add or remove tags — batched with retry
+    // 2. Call Bison API to add or remove tags — batched with retry
     const endpoint =
       action === "add"
-        ? `${API_BASE}/tags/attach-to-sender-emails`
-        : `${API_BASE}/tags/remove-from-sender-emails`;
+        ? `/tags/attach-to-sender-emails`
+        : `/tags/remove-from-sender-emails`;
 
     const BATCH = 50;
     let updated = 0;
@@ -115,9 +111,9 @@ export async function POST(request: Request) {
       const batch = senderEmailIds.slice(i, i + BATCH);
 
       try {
-        const res = await fetch(endpoint, {
+        const res = await bisonFetch(instance, endpoint, {
           method: "POST",
-          headers: apiHeaders,
+          headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ tag_ids: tagIds, sender_email_ids: batch }),
         });
 
@@ -126,13 +122,13 @@ export async function POST(request: Request) {
           for (const id of batch) successIds.add(id);
         } else if (res.status === 422) {
           // Invalid IDs in batch — fall back to sub-batches of 10
-          console.warn(`[BULK-TAGS] Batch ${i}-${i + batch.length} got 422, retrying in sub-batches`);
+          console.warn(`[BULK-TAGS:${instance}] Batch ${i}-${i + batch.length} got 422, retrying in sub-batches`);
           for (let j = 0; j < batch.length; j += 10) {
             const sub = batch.slice(j, j + 10);
             try {
-              const subRes = await fetch(endpoint, {
+              const subRes = await bisonFetch(instance, endpoint, {
                 method: "POST",
-                headers: apiHeaders,
+                headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({ tag_ids: tagIds, sender_email_ids: sub }),
               });
               if (subRes.ok) {
@@ -142,13 +138,13 @@ export async function POST(request: Request) {
                 // Try one by one to isolate bad IDs
                 for (const id of sub) {
                   try {
-                    const singleRes = await fetch(endpoint, {
+                    const singleRes = await bisonFetch(instance, endpoint, {
                       method: "POST",
-                      headers: apiHeaders,
+                      headers: { "Content-Type": "application/json" },
                       body: JSON.stringify({ tag_ids: tagIds, sender_email_ids: [id] }),
                     });
                     if (singleRes.ok) { updated++; successIds.add(id); }
-                    else { failed++; console.warn(`[BULK-TAGS] Invalid inbox ID ${id}, skipping`); }
+                    else { failed++; console.warn(`[BULK-TAGS:${instance}] Invalid inbox ID ${id}, skipping`); }
                   } catch { failed++; }
                 }
               }
@@ -157,22 +153,19 @@ export async function POST(request: Request) {
           }
         } else {
           const errText = await res.text().catch(() => "");
-          console.error(`[BULK-TAGS] Batch ${i}-${i + batch.length}: ${res.status} ${errText.slice(0, 200)}`);
+          console.error(`[BULK-TAGS:${instance}] Batch ${i}-${i + batch.length}: ${res.status} ${errText.slice(0, 200)}`);
           failed += batch.length;
         }
       } catch (e) {
-        console.error(`[BULK-TAGS] Batch ${i}-${i + batch.length} network error:`, e);
+        console.error(`[BULK-TAGS:${instance}] Batch ${i}-${i + batch.length} network error:`, e);
         failed += batch.length;
       }
 
       if (i + BATCH < senderEmailIds.length) await delay(300);
     }
 
-    // 3. Fetch the tag objects for the IDs we're working with
-    const tagsRes = await fetch(`${API_BASE}/tags`, {
-      headers: { Authorization: `Bearer ${API_KEY}` },
-      cache: "no-store",
-    });
+    // 3. Fetch the tag objects for the IDs we're working with (from this instance)
+    const tagsRes = await bisonFetch(instance, `/tags`);
     const tagsJson = await tagsRes.json();
     const allTags: Tag[] = tagsJson.data || [];
     const tagMap = new Map(allTags.map((t) => [t.id, t]));
@@ -180,7 +173,7 @@ export async function POST(request: Request) {
       .map((id) => tagMap.get(id))
       .filter(Boolean) as Tag[];
 
-    // 4. Update local Supabase inbox tags (only for successfully updated inboxes)
+    // 4. Update local Supabase inbox tags (only for successfully updated inboxes, this instance)
     const inboxesToUpdate = updated > 0
       ? inboxes.filter((i) => successIds.has(i.id))
       : [];
@@ -203,15 +196,17 @@ export async function POST(request: Request) {
       await supabase
         .from("deliverability_inboxes")
         .update({ tags: updatedTags })
+        .eq("instance", instance)
         .eq("id", inbox.id);
     }
 
-    // 5. Re-aggregate domain tags from inboxes
+    // 5. Re-aggregate domain tags from inboxes (per-instance, per-domain)
     const affectedDomains = [...new Set(inboxes.map((i) => i.domain))];
     for (const domain of affectedDomains) {
       const { data: domainInboxes } = await supabase
         .from("deliverability_inboxes")
         .select("tags")
+        .eq("instance", instance)
         .eq("domain", domain);
 
       const tagSet = new Set<string>();
@@ -225,6 +220,7 @@ export async function POST(request: Request) {
       await supabase
         .from("deliverability_domains")
         .update({ tags: Array.from(tagSet).sort() })
+        .eq("instance", instance)
         .eq("domain", domain);
     }
 
@@ -233,6 +229,7 @@ export async function POST(request: Request) {
       inboxesAffected: updated,
       failed,
       total: senderEmailIds.length,
+      instance,
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Failed";

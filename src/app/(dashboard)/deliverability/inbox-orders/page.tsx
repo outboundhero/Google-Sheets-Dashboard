@@ -33,6 +33,8 @@ import {
 import { useInboxOrders } from "@/lib/hooks/use-inbox-orders";
 import type { InboxOrder, InboxOrderProvider } from "@/types/inbox-order";
 import { useAuth } from "@/lib/auth-context";
+import { useInstance } from "@/lib/instance-context";
+import { BISON_INSTANCES, type BisonInstanceSlug } from "@/lib/bison-instances";
 
 const PROVIDER_LABEL: Record<InboxOrderProvider, string> = {
   scaledmail: "ScaledMail",
@@ -56,13 +58,17 @@ function statusBadgeVariant(status: InboxOrder["status"]): "default" | "secondar
 export default function InboxOrdersPage() {
   const { role } = useAuth();
   const isAdmin = role === "admin";
-  const { orders, isLoading, mutate } = useInboxOrders(60_000);
+  const { instances: scopedInstances, instancesQuery } = useInstance();
+  const { orders, isLoading, mutate } = useInboxOrders(60_000, instancesQuery);
 
   const [createOpen, setCreateOpen] = useState(false);
   const [creating, setCreating] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
 
   const [provider, setProvider] = useState<InboxOrderProvider>("scaledmail");
+  const [orderInstance, setOrderInstance] = useState<BisonInstanceSlug>(
+    scopedInstances[0]?.slug ?? "outboundhero"
+  );
   const [domain, setDomain] = useState("");
   const [tag, setTag] = useState("");
   const [companyName, setCompanyName] = useState("");
@@ -99,6 +105,7 @@ export default function InboxOrdersPage() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           provider,
+          instance: orderInstance,
           domain: domain.trim().toLowerCase(),
           tag: tag.trim() || undefined,
           companyName: companyName.trim() || undefined,
@@ -240,6 +247,7 @@ export default function InboxOrdersPage() {
           <thead className="bg-muted/40">
             <tr>
               <th className="text-left p-2 font-medium">Domain</th>
+              <th className="text-left p-2 font-medium">Instance</th>
               <th className="text-left p-2 font-medium">Provider</th>
               <th className="text-left p-2 font-medium">Status</th>
               <th className="text-left p-2 font-medium">Mailboxes</th>
@@ -252,14 +260,14 @@ export default function InboxOrdersPage() {
           <tbody>
             {isLoading && (
               <tr>
-                <td colSpan={8} className="p-6 text-center text-muted-foreground">
+                <td colSpan={9} className="p-6 text-center text-muted-foreground">
                   <Loader2 className="inline h-4 w-4 animate-spin" /> Loading...
                 </td>
               </tr>
             )}
             {!isLoading && orders.length === 0 && (
               <tr>
-                <td colSpan={8} className="p-6 text-center text-muted-foreground">
+                <td colSpan={9} className="p-6 text-center text-muted-foreground">
                   No orders yet. Click "Create Order" to start.
                 </td>
               </tr>
@@ -276,6 +284,9 @@ export default function InboxOrdersPage() {
                   {order.flagged_at && (
                     <Badge variant="destructive" className="ml-2 text-[10px]">flagged</Badge>
                   )}
+                </td>
+                <td className="p-2 text-xs">
+                  {BISON_INSTANCES[order.instance]?.label ?? order.instance}
                 </td>
                 <td className="p-2">{PROVIDER_LABEL[order.provider]}</td>
                 <td className="p-2">
@@ -397,6 +408,22 @@ export default function InboxOrdersPage() {
                   <SelectItem value="inboxing">Inboxing (49 mailboxes)</SelectItem>
                 </SelectContent>
               </Select>
+            </div>
+            <div>
+              <label className="text-xs font-medium">Bison instance</label>
+              <Select value={orderInstance} onValueChange={(v) => setOrderInstance(v as BisonInstanceSlug)}>
+                <SelectTrigger><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  {Object.values(BISON_INSTANCES).map((inst) => (
+                    <SelectItem key={inst.slug} value={inst.slug}>
+                      {inst.label}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <p className="text-[11px] text-muted-foreground mt-1">
+                The Bison instance this order will be associated with.
+              </p>
             </div>
             <div>
               <label className="text-xs font-medium">Domain</label>

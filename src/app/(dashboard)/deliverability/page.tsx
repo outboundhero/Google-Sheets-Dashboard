@@ -22,6 +22,7 @@ import {
   Download,
   Copy,
   ExternalLink,
+  Tags,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -36,6 +37,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { useAuth } from "@/lib/auth-context";
+import { useInstance } from "@/lib/instance-context";
 
 interface DomainRow {
   domain: string;
@@ -180,6 +182,7 @@ function DeliverabilityPageInner() {
   const searchParams = useSearchParams();
   const { role } = useAuth();
   const isAdmin = role === "admin";
+  const { instancesQuery } = useInstance();
   const [domains, setDomains] = useState<DomainRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [syncing, setSyncing] = useState(false);
@@ -195,17 +198,19 @@ function DeliverabilityPageInner() {
   const [allTags, setAllTags] = useState<string[]>([]);
   const [savedPage, setSavedPage] = useState<number | null>(null);
   const [domainSearch, setDomainSearch] = useState("");
+  const [redirectSearch, setRedirectSearch] = useState("");
   const [warmupSearch, setWarmupSearch] = useState("");
   const [typeFilter, setTypeFilter] = useState<"all" | "outlook" | "google">("all");
   const [showFlagged, setShowFlagged] = useState(() => searchParams.get("flagged") === "true");
   const [showHealthy, setShowHealthy] = useState(() => searchParams.get("healthy") === "true");
+  const [showMultiClient, setShowMultiClient] = useState(() => searchParams.get("multiClient") === "true");
   const [flagSubFilter, setFlagSubFilter] = useState<"all" | "reply" | "bounce">("all");
   const [showReserve, setShowReserve] = useState(false);
   const [warmupDaysFilter, setWarmupDaysFilter] = useState<string>("all");
   const [warmupDaysFrom, setWarmupDaysFrom] = useState("");
   const [warmupDaysTo, setWarmupDaysTo] = useState("");
   const [showAssigned, setShowAssigned] = useState(false);
-  const [sortField, setSortField] = useState<"domain" | "inbox_count" | "total_sent" | "total_replied" | "total_bounced" | "daily_limit" | "warmup_days" | null>(null);
+  const [sortField, setSortField] = useState<"domain" | "redirect_url" | "inbox_count" | "total_sent" | "total_replied" | "total_bounced" | "daily_limit" | "warmup_days" | null>(null);
   const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
   const [attachDialogOpen, setAttachDialogOpen] = useState(false);
   const [clientTags, setClientTags] = useState<Set<string>>(new Set());
@@ -323,24 +328,26 @@ function DeliverabilityPageInner() {
   const loadDomains = useCallback(async () => {
     setLoading(true);
     try {
-      const res = await fetch("/api/deliverability/domains");
+      const res = await fetch(`/api/deliverability/domains?${instancesQuery}`);
       const data = await res.json();
       setDomains(Array.isArray(data) ? data : []);
     } catch { /* ignore */ } finally {
       setLoading(false);
     }
-  }, []);
+  }, [instancesQuery]);
 
   const loadStats = useCallback(async () => {
     try {
-      const res = await fetch("/api/deliverability/sync");
+      const res = await fetch(`/api/deliverability/sync?${instancesQuery}`);
       const data = await res.json();
       setSyncStats(data);
     } catch {/* ignore */}
-  }, []);
+  }, [instancesQuery]);
 
   const loadTags = useCallback(async () => {
     try {
+      // Tag list is shared across instances (Supabase RPC). Filtering by current
+      // instance is a future polish — for now show all tags.
       const res = await fetch("/api/deliverability/tags");
       const data = await res.json();
       if (Array.isArray(data)) setAllTags(data);
@@ -605,6 +612,20 @@ function DeliverabilityPageInner() {
   const isDomainAssigned = useCallback((d: DomainRow) => !isDomainReserve(d), [isDomainReserve]);
   const assignedCount = useMemo(() => domains.filter(isDomainAssigned).length, [domains, isDomainAssigned]);
 
+  // Multi-client = domain has 2+ tags that match a known client_tag (from tracked_sheets)
+  const isDomainMultiClient = useCallback((d: DomainRow) => {
+    if (clientTags.size === 0 || !d.tags) return false;
+    let count = 0;
+    for (const t of d.tags) {
+      if (clientTags.has(t)) {
+        count++;
+        if (count >= 2) return true;
+      }
+    }
+    return false;
+  }, [clientTags]);
+  const multiClientCount = useMemo(() => domains.filter(isDomainMultiClient).length, [domains, isDomainMultiClient]);
+
   const now = Date.now();
 
   const warmupDomains = useMemo(
@@ -854,10 +875,23 @@ function DeliverabilityPageInner() {
         d.tags && tagFilters.every((tag) => d.tags!.includes(tag))
       );
     }
-    if (domainSearch) {
-      result = result.filter((d) =>
-        d.domain.toLowerCase().includes(domainSearch.toLowerCase())
-      );
+    if (domainSearch.trim()) {
+      // Comma-separated: matches a domain if it contains ANY of the terms.
+      const terms = domainSearch
+        .toLowerCase()
+        .split(",")
+        .map((t) => t.trim())
+        .filter(Boolean);
+      if (terms.length > 0) {
+        result = result.filter((d) => {
+          const dom = d.domain.toLowerCase();
+          return terms.some((t) => dom.includes(t));
+        });
+      }
+    }
+    if (redirectSearch.trim()) {
+      const q = redirectSearch.toLowerCase().trim();
+      result = result.filter((d) => (d.redirect_url || "").toLowerCase().includes(q));
     }
     if (typeFilter === "outlook") {
       result = result.filter((d) => (d.outlook_count || 0) > 0);
@@ -881,6 +915,9 @@ function DeliverabilityPageInner() {
     }
     if (showAssigned) {
       result = result.filter(isDomainAssigned);
+    }
+    if (showMultiClient) {
+      result = result.filter(isDomainMultiClient);
     }
     if (warmupDaysFilter !== "all") {
       result = result.filter((d) => {
@@ -913,6 +950,10 @@ function DeliverabilityPageInner() {
         let av: number | string = 0, bv: number | string = 0;
         switch (sortField) {
           case "domain": av = a.domain; bv = b.domain; return dir * av.localeCompare(bv);
+          case "redirect_url":
+            av = (a.redirect_url || "").toLowerCase();
+            bv = (b.redirect_url || "").toLowerCase();
+            return dir * av.localeCompare(bv);
           case "inbox_count": av = a.inbox_count; bv = b.inbox_count; break;
           case "total_sent": av = a.total_sent || 0; bv = b.total_sent || 0; break;
           case "total_replied": av = a.total_replied || 0; bv = b.total_replied || 0; break;
@@ -928,7 +969,7 @@ function DeliverabilityPageInner() {
       });
     }
     return result;
-  }, [domains, tagFilters, domainSearch, typeFilter, showFlagged, flagSubFilter, showHealthy, showReserve, showAssigned, warmupDaysFilter, warmupDaysFrom, warmupDaysTo, sortField, sortDir, isDomainFlagged, hasReplyIssue, hasBounceIssue, isDomainReserve, isDomainAssigned, now]);
+  }, [domains, tagFilters, domainSearch, redirectSearch, typeFilter, showFlagged, flagSubFilter, showHealthy, showReserve, showAssigned, showMultiClient, warmupDaysFilter, warmupDaysFrom, warmupDaysTo, sortField, sortDir, isDomainFlagged, hasReplyIssue, hasBounceIssue, isDomainReserve, isDomainAssigned, isDomainMultiClient, now]);
 
   const flaggedCount = useMemo(() => domains.filter(isDomainFlagged).length, [domains, isDomainFlagged]);
   const healthyCount = useMemo(() => domains.filter((d) => !isDomainFlagged(d)).length, [domains, isDomainFlagged]);
@@ -1309,11 +1350,27 @@ function DeliverabilityPageInner() {
               <input
                 value={domainSearch}
                 onChange={(e) => setDomainSearch(e.target.value)}
-                placeholder="Search domains…"
+                placeholder="Search domains, comma separated"
                 className="flex-1 text-sm bg-transparent outline-none placeholder:text-muted-foreground"
               />
               {domainSearch && (
                 <button onClick={() => setDomainSearch("")}>
+                  <X className="h-3 w-3 text-muted-foreground hover:text-foreground" />
+                </button>
+              )}
+            </div>
+
+            {/* Redirect URL search */}
+            <div className="flex items-center gap-2 rounded-lg border bg-background px-3 py-1.5 min-w-[180px] max-w-[220px]">
+              <Search className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
+              <input
+                value={redirectSearch}
+                onChange={(e) => setRedirectSearch(e.target.value)}
+                placeholder="Search redirect URL"
+                className="flex-1 text-sm bg-transparent outline-none placeholder:text-muted-foreground"
+              />
+              {redirectSearch && (
+                <button onClick={() => setRedirectSearch("")}>
                   <X className="h-3 w-3 text-muted-foreground hover:text-foreground" />
                 </button>
               )}
@@ -1386,6 +1443,27 @@ function DeliverabilityPageInner() {
                   showHealthy ? "bg-white/20" : "bg-emerald-500/15 text-emerald-600 dark:text-emerald-400"
                 }`}>
                   {healthyCount}
+                </span>
+              )}
+            </button>
+
+            {/* Multi-client filter — domain has 2+ client tags */}
+            <button
+              onClick={() => setShowMultiClient((v) => !v)}
+              title="Show domains with 2 or more client tags attached"
+              className={`text-xs px-3 py-1.5 rounded-full border transition-colors flex items-center gap-1.5 ${
+                showMultiClient
+                  ? "bg-amber-500 text-white border-amber-500"
+                  : "border-border text-muted-foreground hover:border-foreground hover:text-foreground"
+              }`}
+            >
+              <Tags className="h-3 w-3" />
+              Multi-client
+              {multiClientCount > 0 && (
+                <span className={`text-[10px] font-medium rounded-full px-1.5 ${
+                  showMultiClient ? "bg-white/20" : "bg-amber-500/15 text-amber-600 dark:text-amber-400"
+                }`}>
+                  {multiClientCount}
                 </span>
               )}
             </button>
@@ -1707,6 +1785,7 @@ function DeliverabilityPageInner() {
                 {(() => {
                   const cols = [
                     { field: "domain" as const, label: "Domain", align: "text-left" },
+                    { field: "redirect_url" as const, label: "Redirect URL", align: "text-left" },
                     { field: "inbox_count" as const, label: "Inboxes", align: "text-center" },
                     { field: "total_sent" as const, label: "Sent", align: "text-center" },
                     { field: "total_replied" as const, label: "Replied", align: "text-center" },
@@ -1734,13 +1813,7 @@ function DeliverabilityPageInner() {
                       )}
                     </button>
                   );
-                  return (
-                    <>
-                      {renderSort(cols[0])}
-                      <div className="text-left">Redirect URL</div>
-                      {cols.slice(1).map(renderSort)}
-                    </>
-                  );
+                  return <>{cols.map(renderSort)}</>;
                 })()}
               </div>
               {filteredDomains.map((d, domainIdx) => {

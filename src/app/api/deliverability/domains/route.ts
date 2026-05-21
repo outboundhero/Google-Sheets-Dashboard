@@ -1,11 +1,13 @@
 import { NextResponse } from "next/server";
 import { getSupabaseAdmin } from "@/lib/supabase";
+import { resolveInstances } from "@/lib/bison";
 
 export async function GET(request: Request) {
   try {
     const supabase = getSupabaseAdmin();
     const { searchParams } = new URL(request.url);
     const tagsParam = searchParams.get("tags");
+    const instances = resolveInstances(searchParams);
 
     // Get total count first, then fetch all pages in parallel
     const PAGE = 1000;
@@ -17,6 +19,7 @@ export async function GET(request: Request) {
       let q = supabase
         .from("deliverability_domains")
         .select("*", { count: "exact" })
+        .in("instance", instances)
         .order("domain_created_at", { ascending: false, nullsFirst: false });
       if (tagNames.length > 0) q = q.overlaps("tags", tagNames);
       return q;
@@ -62,6 +65,7 @@ export async function GET(request: Request) {
             const { data: inboxData } = await supabase
               .from("deliverability_inboxes")
               .select("domain, daily_limit, warmup_daily_limit")
+              .in("instance", instances)
               .in("domain", batch)
               .range(offset, offset + 999);
 

@@ -1,16 +1,14 @@
 import { NextResponse } from "next/server";
 import { getSupabaseAdmin } from "@/lib/supabase";
-
-const API_BASE = "https://app.outboundhero.co/api";
-const API_KEY = process.env.OUTBOUNDHERO_API_KEY!;
-const headers = { Authorization: `Bearer ${API_KEY}` };
+import { bisonFetch, resolveInstance } from "@/lib/bison";
+import type { BisonInstanceSlug } from "@/lib/bison-instances";
 
 export const maxDuration = 300;
 
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-/** Get inbox IDs for given domains from Supabase */
-async function getInboxIdsForDomains(domains: string[]): Promise<number[]> {
+/** Get inbox IDs for given domains from Supabase (scoped to instance) */
+async function getInboxIdsForDomains(instance: BisonInstanceSlug, domains: string[]): Promise<number[]> {
   const supabase = getSupabaseAdmin();
   const ids: number[] = [];
   for (let i = 0; i < domains.length; i += 20) {
@@ -20,6 +18,7 @@ async function getInboxIdsForDomains(domains: string[]): Promise<number[]> {
       const { data } = await supabase
         .from("deliverability_inboxes")
         .select("id")
+        .eq("instance", instance)
         .in("domain", batch)
         .range(offset, offset + 999);
       if (!data || data.length === 0) break;
@@ -32,7 +31,7 @@ async function getInboxIdsForDomains(domains: string[]): Promise<number[]> {
 }
 
 /** Discover campaigns for a set of inbox IDs, returns campaign→inboxIds map */
-async function discoverCampaigns(inboxIds: number[]) {
+async function discoverCampaigns(instance: BisonInstanceSlug, inboxIds: number[]) {
   const campaignMap = new Map<number, { name: string; status: string; inboxIds: number[] }>();
   for (let i = 0; i < inboxIds.length; i += 5) {
     const batch = inboxIds.slice(i, i + 5);
@@ -41,9 +40,9 @@ async function discoverCampaigns(inboxIds: number[]) {
         const campaigns: { id: number; name: string; status: string }[] = [];
         let page = 1;
         while (true) {
-          const res = await fetch(
-            `${API_BASE}/sender-emails/${inboxId}/campaigns?page=${page}&per_page=100`,
-            { headers, cache: "no-store" }
+          const res = await bisonFetch(
+            instance,
+            `/sender-emails/${inboxId}/campaigns?page=${page}&per_page=100`,
           );
           if (!res.ok) break;
           const json = await res.json();
@@ -72,7 +71,7 @@ async function discoverCampaigns(inboxIds: number[]) {
 }
 
 /**
- * POST /api/deliverability/remove-from-campaigns
+ * POST /api/deliverability/remove-from-campaigns?instance=<slug>
  *
  * Phase 1 — Discover: { domains: string[], discover: true }
  *   Returns list of campaigns the inboxes are in (for user to select from)
@@ -82,6 +81,8 @@ async function discoverCampaigns(inboxIds: number[]) {
  */
 export async function POST(request: Request) {
   try {
+    const { searchParams } = new URL(request.url);
+    const instance = resolveInstance(searchParams.get("instance"));
     const body = await request.json();
     const { domains, discover, campaignIds } = body as {
       domains: string[];
@@ -93,12 +94,12 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "domains required" }, { status: 400 });
     }
 
-    const inboxIds = await getInboxIdsForDomains(domains);
+    const inboxIds = await getInboxIdsForDomains(instance, domains);
     if (inboxIds.length === 0) {
       return NextResponse.json(discover ? { campaigns: [], inboxCount: 0 } : { inboxes: 0, campaigns: 0, removed: 0 });
     }
 
-    const campaignMap = await discoverCampaigns(inboxIds);
+    const campaignMap = await discoverCampaigns(instance, inboxIds);
 
     // ─── Phase 1: Discover ───
     if (discover) {
@@ -111,7 +112,7 @@ export async function POST(request: Request) {
         }))
         .sort((a, b) => a.name.localeCompare(b.name));
 
-      return NextResponse.json({ campaigns, inboxCount: inboxIds.length });
+      return NextResponse.json({ campaigns, inboxCount: inboxIds.length, instance });
     }
 
     // ─── Phase 2: Remove from selected campaigns ───
@@ -130,16 +131,16 @@ export async function POST(request: Request) {
 
       try {
         if (wasActive) {
-          await fetch(`${API_BASE}/campaigns/${campaignId}/pause`, { method: "PATCH", headers, cache: "no-store" });
+          await bisonFetch(instance, `/campaigns/${campaignId}/pause`, { method: "PATCH" });
           await delay(500);
         }
 
         let removed = 0;
         for (let i = 0; i < info.inboxIds.length; i += 100) {
           const batch = info.inboxIds.slice(i, i + 100);
-          const res = await fetch(`${API_BASE}/campaigns/${campaignId}/remove-sender-emails`, {
+          const res = await bisonFetch(instance, `/campaigns/${campaignId}/remove-sender-emails`, {
             method: "DELETE",
-            headers: { ...headers, "Content-Type": "application/json" },
+            headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ sender_email_ids: batch }),
           });
           if (res.ok) removed += batch.length;
@@ -148,7 +149,7 @@ export async function POST(request: Request) {
 
         if (wasActive) {
           await delay(500);
-          await fetch(`${API_BASE}/campaigns/${campaignId}/resume`, { method: "PATCH", headers, cache: "no-store" });
+          await bisonFetch(instance, `/campaigns/${campaignId}/resume`, { method: "PATCH" });
         }
 
         totalRemoved += removed;
@@ -157,7 +158,7 @@ export async function POST(request: Request) {
         const msg = err instanceof Error ? err.message : String(err);
         details.push({ id: campaignId, name: info.name, removed: 0, error: msg });
         if (wasActive) {
-          try { await fetch(`${API_BASE}/campaigns/${campaignId}/resume`, { method: "PATCH", headers, cache: "no-store" }); } catch { /* best effort */ }
+          try { await bisonFetch(instance, `/campaigns/${campaignId}/resume`, { method: "PATCH" }); } catch { /* best effort */ }
         }
       }
     }
@@ -167,6 +168,7 @@ export async function POST(request: Request) {
       campaigns: details.length,
       removed: totalRemoved,
       details,
+      instance,
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Failed";

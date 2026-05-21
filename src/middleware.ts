@@ -43,8 +43,10 @@ export async function middleware(request: NextRequest) {
   // Create Supabase client (refreshes session cookies)
   const { supabase, response } = createMiddlewareSupabaseClient(request);
 
-  // Get authenticated user
-  const { data: { user }, error: authError } = await supabase.auth.getUser();
+  // Read session from the cookie (local validation, no network call to Supabase
+  // Auth — avoids hitting the auth rate limit on bursts of requests).
+  const { data: { session }, error: authError } = await supabase.auth.getSession();
+  const user = session?.user ?? null;
 
   // Auth error: log but don't block (session may have expired)
   if (authError) {

@@ -1,21 +1,18 @@
 import { NextResponse } from "next/server";
-
-const API_BASE = "https://app.outboundhero.co/api";
-const API_KEY = process.env.OUTBOUNDHERO_API_KEY!;
+import { bisonFetch, resolveInstance } from "@/lib/bison";
 
 export async function GET(
-  _request: Request,
+  request: Request,
   { params }: { params: Promise<{ id: string }> }
 ) {
   try {
     const { id } = await params;
+    const { searchParams } = new URL(request.url);
+    const instance = resolveInstance(searchParams.get("instance"));
     const today = new Date().toISOString().split("T")[0];
 
     // Fetch inbox info to get created_at as start_date
-    const inboxRes = await fetch(`${API_BASE}/sender-emails/${id}`, {
-      headers: { Authorization: `Bearer ${API_KEY}` },
-      cache: "no-store",
-    });
+    const inboxRes = await bisonFetch(instance, `/sender-emails/${id}`);
 
     let startDate = "2024-01-01";
     if (inboxRes.ok) {
@@ -24,12 +21,9 @@ export async function GET(
       if (createdAt) startDate = createdAt.split("T")[0];
     }
 
-    const warmupRes = await fetch(
-      `${API_BASE}/warmup/sender-emails/${id}?start_date=${startDate}&end_date=${today}`,
-      {
-        headers: { Authorization: `Bearer ${API_KEY}` },
-        cache: "no-store",
-      }
+    const warmupRes = await bisonFetch(
+      instance,
+      `/warmup/sender-emails/${id}?start_date=${startDate}&end_date=${today}`
     );
 
     if (!warmupRes.ok) {

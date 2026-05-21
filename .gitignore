@@ -46,3 +46,4 @@ sheets-config.json
 *.tsbuildinfo
 next-env.d.ts
 .vercel
+.env*.local

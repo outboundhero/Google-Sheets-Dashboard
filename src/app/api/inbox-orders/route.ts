@@ -9,6 +9,11 @@ import type {
   InboxOrderProvider,
 } from "@/types/inbox-order";
 import { MAILBOX_COUNT_BY_PROVIDER } from "@/types/inbox-order";
+import {
+  ALL_INSTANCE_SLUGS,
+  isInstanceSlug,
+  DEFAULT_INSTANCE,
+} from "@/lib/bison-instances";
 
 export const maxDuration = 60;
 
@@ -19,12 +24,20 @@ function isValidProvider(v: unknown): v is InboxOrderProvider {
   return v === "scaledmail" || v === "milkbox" || v === "inboxing";
 }
 
-export async function GET() {
+export async function GET(request: Request) {
   try {
+    const { searchParams } = new URL(request.url);
+    const instancesParam = searchParams.get("instances");
+    const instances = instancesParam
+      ? instancesParam.split(",").map((s) => s.trim()).filter(isInstanceSlug)
+      : [...ALL_INSTANCE_SLUGS];
+    const scoped = instances.length > 0 ? instances : [...ALL_INSTANCE_SLUGS];
+
     const supabase = getSupabaseAdmin();
     const { data, error } = await supabase
       .from("inbox_orders")
       .select("*")
+      .in("instance", scoped)
       .order("created_at", { ascending: false })
       .limit(500);
     if (error) throw new Error(error.message);
@@ -39,6 +52,7 @@ export async function POST(request: Request) {
   try {
     const body = await request.json().catch(() => ({}));
     const provider = body?.provider;
+    const instance = isInstanceSlug(body?.instance) ? body.instance : DEFAULT_INSTANCE;
     const domain = typeof body?.domain === "string" ? body.domain.trim().toLowerCase() : "";
     const tag = typeof body?.tag === "string" ? body.tag.slice(0, 20) : null;
     const companyName = typeof body?.companyName === "string" ? body.companyName.trim() : null;
@@ -89,6 +103,7 @@ export async function POST(request: Request) {
     const { data: inserted, error: insertErr } = await supabase
       .from("inbox_orders")
       .insert({
+        instance,
         provider,
         provider_order_id: providerOrderId,
         provider_domain_id: providerDomainId,

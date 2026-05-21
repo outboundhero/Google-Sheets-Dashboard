@@ -4,7 +4,7 @@ This file briefs future Claude sessions on this codebase. It covers what isn't o
 
 ## What this app is
 
-A Next.js 16 / React 19 / TypeScript dashboard called **LeadSync** for an agency (Outboundhero) that runs cold-email campaigns for cleaning/janitorial clients. It pulls leads from multiple Google Sheets, surfaces analytics, manages cold-email infrastructure (domains, inboxes, warmup, campaigns) on top of the Outboundhero/EmailBison API, discovers + registers `.info` domains via Porkbun + OpenAI, and provisions DFY inbox orders through three external providers (ScaledMail / MilkBox / Inboxing).
+A Next.js 16 / React 19 / TypeScript dashboard called **LeadSync** for an agency (Outboundhero) that runs cold-email campaigns for cleaning/janitorial clients. It pulls leads from multiple Google Sheets, surfaces analytics, manages cold-email infrastructure (domains, inboxes, warmup, campaigns) across **4 separate Bison/EmailBison instances** (OutboundHero, CleaningOutbound, FacilityReach, OutboundClean — organized into 2 viewing groups), discovers + registers `.info` domains via Porkbun + OpenAI, and provisions DFY inbox orders through three external providers (ScaledMail / MilkBox / Inboxing).
 
 ## Stack
 
@@ -35,6 +35,7 @@ src/
   components/
     ui/                   shadcn primitives
     dashboard/, deliverability/, campaigns/, clients/, leads-table/, layout/, shared/
+    layout/instance-switcher.tsx  header dropdown for picking the active Bison group
   lib/
     supabase.ts           browser/server/middleware/admin clients
     leads-store.ts        Redis/JSON store for synced leads + sync metadata
@@ -53,8 +54,13 @@ src/
     milkbox.ts            MilkBox provider client — 50 mailboxes/order
     inboxing.ts           Inboxing provider client — 49 mailboxes/order
     inbox-order-aliases.ts  alias generator for inbox orders
+    bison-instances.ts    registry of the 4 Bison instances (slug, label, group, tier, baseUrl, apiKeyEnv)
+    bison.ts              shared bisonFetch(instance, path) client + resolveInstance/resolveInstances helpers
+    client-tag-allocations.ts  reads the allocation Google Sheet → client_tag→group map (Redis-cached)
+    cron/                 shared per-instance cron handlers (sync-campaigns.ts, sync-deliverability.ts)
+    instance-context.tsx  React context: current group/tier + instances/instancesQuery for SWR
     auth-context.tsx      React context exposing useAuth()
-    hooks/                SWR hooks (use-leads, use-analytics, use-sheets, use-domains, use-not-delivered-today, ...)
+    hooks/                SWR hooks (use-leads, use-analytics, use-sheets, use-domains, use-not-delivered-today, use-inbox-orders, ...)
   types/
     lead.ts               Lead, LeadStatus, DashboardLead
     sheet.ts              TrackedSheet
@@ -69,12 +75,13 @@ Repo-root SQL files (`supabase-*.sql`) are migrations/utilities — sometimes ne
 
 - **Leads/data**: `GET /api/data/all`, `GET /api/sheets`, `GET /api/sheets/[id]`, `POST /api/sync`, `GET /api/cron/sync`, `GET /api/analytics`, `GET /api/leads/not-delivered-today`, `POST /api/leads/not-delivered-today` (dismiss)
 - **Sheets config**: `POST /api/sheets`, `DELETE /api/sheets/[id]`
+- **Client-tag allocations**: `GET /api/client-tag-allocations` (cached map), `POST /api/client-tag-allocations` (manual re-sync from the allocation sheet)
 - **Client tracker**: `GET /api/client-tracker`, `GET /api/client-tags`
 - **Deliverability**: `GET /api/deliverability/domains`, `GET /api/deliverability/tags`, `GET /api/deliverability/sync`, `POST /api/deliverability/sync` (+`PUT` rebuild), `POST /api/deliverability/bulk-tags`, `bulk-delete`, `bulk-limits`, `send-to-sheet`, `attach-domains-to-campaign`, `remove-from-campaigns`, `import-domain`, `inboxes/[id]/warmup`
 - **Campaigns**: `GET/POST /api/campaigns`, `GET/POST /api/campaigns/[id]`, `GET /api/campaigns/[id]/status`, `GET /api/campaigns/failed`
 - **Domain buyer**: `POST /api/domains/generate` (OpenAI), `POST /api/domains/check` (Porkbun, persists to `porkbun_domains`), `GET /api/domains/list`, `POST /api/domains/register-one` (Porkbun create + auto-renew off), `POST /api/domains/append-to-sheet`, `POST /api/domains/delete`
 - **Inbox orders (DFY provisioning)**: `GET /api/inbox-orders` (list), `POST /api/inbox-orders` (create — dispatches to ScaledMail/MilkBox/Inboxing), `GET/PATCH/DELETE /api/inbox-orders/[id]`, `POST /api/inbox-orders/[id]/refresh` (re-poll provider), `POST /api/inbox-orders/[id]/flag`, `POST /api/inbox-orders/[id]/swap`, `POST /api/inbox-orders/[id]/redirect`
-- **Cron jobs** (configured in `vercel.json`): `/api/cron/sync` (every 2d at 00:00 UTC, lead sync), `/api/cron/deliverability` (every 2d at 12:00 UTC, inbox/domain sync), `/api/cron/redirect-check` (every 2d at 06:00 UTC, refreshes `deliverability_domains.redirect_url`), `/api/cron/inbox-orders-poll` (every 6h, polls pending/swapping/deleting orders, batch of 100, ~50s budget), `/api/cron/campaigns` (daily at 17:00 UTC ≈ 10 AM Pacific, paginates Outboundhero campaigns and upserts into Supabase `campaigns` table)
+- **Cron jobs** (configured in `vercel.json`): `/api/cron/sync` (every 2d at 00:00 UTC, lead sync), `/api/cron/redirect-check` (every 2d at 06:00 UTC, refreshes `deliverability_domains.redirect_url`), `/api/cron/inbox-orders-poll` (every 6h, polls pending/swapping/deleting orders, batch of 100, ~50s budget), `/api/cron/client-tag-allocations` (daily at 08:00 UTC, refreshes the client_tag→group map), and **per-instance fan-out** for campaigns + deliverability — 8 routes total: `/api/cron/campaigns-{outboundhero,cleaningoutbound,facilityreach,outboundclean}` (daily, staggered 15 min apart from 17:00 UTC) and `/api/cron/deliverability-{outboundhero,cleaningoutbound,facilityreach,outboundclean}` (every 2d, staggered 30 min apart from 12:00 UTC). Each cron route is a thin shim that calls a shared handler in `src/lib/cron/` with the right instance slug.
 - **External (token-auth)**: `GET /api/external/tracked-sheets` — exempt from session middleware; uses `Authorization: Bearer ${EXTERNAL_API_TOKEN}` (fallback `outboundhero2024`)
 - **Misc**: `POST /api/cache` (clear), `/api/auth/...`
 
@@ -93,14 +100,40 @@ Repo-root SQL files (`supabase-*.sql`) are migrations/utilities — sometimes ne
 
 | Concern | Primary store | Notes |
 |---|---|---|
-| Tracked sheets config | Redis (`sheets-config`) — JSON fallback | Mirrored to Supabase `tracked_sheets` for the external API |
+| Tracked sheets config | Redis (`sheets-config`) — JSON fallback | Mirrored to Supabase `tracked_sheets` for the external API. Per-client lead spreadsheets — **not** related to Bison instances. |
+| Client-tag → group allocation | Redis (`client-tag-allocations`) | Parsed from ONE dedicated Google Sheet (Col A = Group 1 tags, Col C = Group 2 tags). Read by `src/lib/client-tag-allocations.ts`. Refreshed by daily cron `/api/cron/client-tag-allocations` + manual Sync button on Settings. This is the source of truth for "which client belongs to which Bison group". |
 | Lead rows | Redis (`leads-store:sheet:{id}`) — JSON fallback | Pulled from Google Sheets via chunked sync. `replyContent` and `ourLastReply` are blanked before storage (see `trimLeadForStorage`). |
 | Sync metadata | Redis (`leads-store:meta`) | Drives the dashboard "syncing… X/Y sheets" indicator |
-| Cold-email inboxes/domains | Supabase `deliverability_inboxes`, `deliverability_domains` | Synced from Outboundhero API via `/api/deliverability/sync` (POST chunks, PUT rebuilds domain stats via `rebuild_domain_stats` RPC) |
-| Campaigns | Supabase `campaigns` | Daily cron `/api/cron/campaigns` at 17:00 UTC paginates Outboundhero and upserts. `client_tag` is derived from the substring before `":"` in the campaign name. Users can also trigger a manual sync from the campaigns page. No live-API fallback by design. |
+| Cold-email inboxes/domains | Supabase `deliverability_inboxes`, `deliverability_domains` | **Per-instance**: composite PK `(instance, id)` on inboxes and `(instance, domain)` on domains. Synced from each Bison instance via `/api/deliverability/sync?instance=<slug>` and the 4 cron variants. `rebuild_domain_stats` RPC groups by `(instance, domain)`. |
+| Campaigns | Supabase `campaigns` | **Per-instance**: composite PK `(instance, id)`. 4 daily crons (`/api/cron/campaigns-{slug}`) paginate each Bison and upsert. `client_tag` is derived from the substring before `":"` in the campaign name. Users can also trigger a manual sync from the campaigns page. No live-API fallback by design. |
 | Porkbun discoveries | Supabase `porkbun_domains` | One row per domain ever checked, regardless of availability — dedupes future checks |
 | Dismissed "not delivered today" leads | Supabase `lead_not_received_dismissed` | PK `(sheet_id, lead_email)`; once dismissed, permanent |
-| Inbox orders (DFY) | Supabase `inbox_orders` | One row per provider order. `provider` enum: `scaledmail`/`milkbox`/`inboxing`. `status` enum: `pending`/`active`/`failed`/`swapping`/`swapped`/`deleting`/`deleted`. `parent_order_id` self-FK links swap replacements. Polled by `/api/cron/inbox-orders-poll`. |
+| Inbox orders (DFY) | Supabase `inbox_orders` | One row per provider order. Has `instance` column (Bison instance the order is associated with — admin picks on create). `provider` enum: `scaledmail`/`milkbox`/`inboxing`. `status` enum: `pending`/`active`/`failed`/`swapping`/`swapped`/`deleting`/`deleted`. `parent_order_id` self-FK links swap replacements. Polled by `/api/cron/inbox-orders-poll`. |
+
+## Multi-instance Bison (the big one)
+
+- **There are 4 Bison/EmailBison instances, organized into 2 groups.** The registry is the single source of truth at [src/lib/bison-instances.ts](src/lib/bison-instances.ts):
+
+  | Slug | Display label | Group | Tier | Base URL | API key env var |
+  |---|---|---|---|---|---|
+  | `outboundhero` | OutboundHero – B2B #1 | 1 | b2b | `https://app.outboundhero.co/api` | `OUTBOUNDHERO_API_KEY` |
+  | `cleaningoutbound` | OutboundHero – B2C #1 | 1 | b2c | `https://personal.cleaningoutbound.com/api` | `CLEANINGOUTBOUND_API_KEY` |
+  | `facilityreach` | OutboundHero – B2B #2 | 2 | b2b | `https://app.facilityreach.com/api` | `FACILITYREACH_API_KEY` |
+  | `outboundclean` | OutboundHero – B2C #2 | 2 | b2c | `https://personal.outboundclean.com/api` | `OUTBOUNDCLEAN_API_KEY` |
+
+- **Backend rule: always use `bisonFetch(instance, path)`** from [src/lib/bison.ts](src/lib/bison.ts). Never inline `fetch("https://app.outboundhero.co/api/...")`. The helper looks up the right base URL + API key per instance. Routes that talk to Bison read `?instance=<slug>` from the request URL and default to `outboundhero` for back-compat. Multi-instance read routes use `?instances=<csv>` (plural) and call `resolveInstances(searchParams)`.
+
+- **Frontend rule: scope every API call to the current group/tier** via `useInstance()` from [src/lib/instance-context.tsx](src/lib/instance-context.tsx). The context exposes `instances`, `instancesKey`, and `instancesQuery` (a ready-made `instances=a,b` string). Pass `instancesQuery` to your SWR fetch URL so the cache key changes when the user switches groups/tier.
+
+- **Group ≠ instance.** A group bundles 2 instances (B2B + B2C of the same number). The header switcher selects ONE group; the in-page tabs (ALL / B2B / B2C) narrow within that group. **The "ALL" tab does NOT mean "all 4 instances"** — it means "both tiers of the selected group." You can never see all 4 instances on one screen by design (the client uses Group 1 vs Group 2 as separate operational worlds).
+
+- **Writes route by row, not by selection.** In merged views (group ALL), each row carries an `instance` column so the user can see which Bison the row lives in. When they click an action (pause, swap, etc.), the write routes to that specific instance.
+
+- **Client-tag → group allocation is a separate system** ([src/lib/client-tag-allocations.ts](src/lib/client-tag-allocations.ts)). It reads ONE dedicated Google Sheet (env `CLIENT_TAG_ALLOCATION_SHEET_ID`) — Column A lists Group 1 client tags, Column C lists Group 2 client tags — and caches the `client_tag → group` map in Redis. **Do not** confuse this with the per-client tracked-sheets system; they are unrelated. The tracked-sheets "Add Sheet" flow has nothing to do with Bison grouping. Use `getGroupForClientTag(tag)` to look up a tag's group.
+
+- **Composite PKs on Bison-data tables**: `campaigns` and `deliverability_inboxes` use `(instance, id)`; `deliverability_domains` uses `(instance, domain)`. The FK `deliverability_inboxes.(instance, domain) → deliverability_domains` is composite + `ON DELETE CASCADE`.
+
+- **Sync pacing**: Bison rate-limits at ~10 concurrent requests. Both `/api/deliverability/sync` and `src/lib/cron/sync-deliverability.ts` use `CONCURRENT=3` + `BATCH_DELAY_MS=800` between page batches. On a 429 response from any page in a batch, the loop stops early to avoid advancing the cursor past unread pages (data integrity over completeness).
 
 ## Conventions and gotchas
 
@@ -126,7 +159,7 @@ Repo-root SQL files (`supabase-*.sql`) are migrations/utilities — sometimes ne
 ## External APIs
 
 - **Google Sheets** — `googleapis` SDK, service-account JWT auth (`GOOGLE_CLIENT_EMAIL` + `GOOGLE_PRIVATE_KEY`), scope `https://www.googleapis.com/auth/spreadsheets`.
-- **Outboundhero / EmailBison** — `https://app.outboundhero.co/api`, `Authorization: Bearer ${OUTBOUNDHERO_API_KEY}`.
+- **Outboundhero / EmailBison** — 4 separate instances. See "Multi-instance Bison" section above for the URL/API-key matrix. All calls go through `bisonFetch(instance, path)` from [src/lib/bison.ts](src/lib/bison.ts).
 - **Porkbun** — `https://api.porkbun.com/api/json/v3`, body auth with `apikey` + `secretapikey`.
 - **OpenAI** — `https://api.openai.com/v1/chat/completions`, model `gpt-4o-mini`, `response_format: { type: "json_object" }`. Raw fetch (no `openai` SDK).
 - **ScaledMail** — DFY inbox provider, 25 mailboxes/order. Auth via `SCALEDMAIL_API_KEY` + `SCALEDMAIL_ORGANIZATION_ID`. Also needs `SCALEDMAIL_PORKBUN_USERNAME` / `SCALEDMAIL_PORKBUN_PASSWORD` (Porkbun account credentials forwarded to ScaledMail for domain transfers/setup) and `SCALEDMAIL_OUTLOOK_*` config.
@@ -139,7 +172,7 @@ Repo-root SQL files (`supabase-*.sql`) are migrations/utilities — sometimes ne
 Required:
 - `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY`
 - `GOOGLE_CLIENT_EMAIL`, `GOOGLE_PRIVATE_KEY` (with `\n` escapes, decoded in code)
-- `OUTBOUNDHERO_API_KEY`
+- **All 4 Bison API keys**: `OUTBOUNDHERO_API_KEY`, `CLEANINGOUTBOUND_API_KEY`, `FACILITYREACH_API_KEY`, `OUTBOUNDCLEAN_API_KEY` (each maps to one instance in `bison-instances.ts`)
 
 Optional (feature-specific):
 - `KV_REST_API_URL` + `KV_REST_API_TOKEN` (or `UPSTASH_REDIS_REST_URL` / `_TOKEN`) — without these, the app falls back to local JSON files (dev only)
@@ -147,6 +180,7 @@ Optional (feature-specific):
 - `OPENAI_API_KEY` — domain buyer
 - `EXTERNAL_API_TOKEN` — overrides the public-API fallback token
 - `INBOX_ORDER_DEFAULT_REDIRECT_URL` — fallback redirect when an inbox order is created without an explicit redirect URL (defaults to `https://findlocalcommercialcleaning.com`)
+- `CLIENT_TAG_ALLOCATION_SHEET_ID` — Google Sheet ID for the client-tag → group allocation sheet (has a hardcoded default in `client-tag-allocations.ts`)
 - ScaledMail: `SCALEDMAIL_API_KEY`, `SCALEDMAIL_ORGANIZATION_ID`, `SCALEDMAIL_PORKBUN_USERNAME`, `SCALEDMAIL_PORKBUN_PASSWORD`, `SCALEDMAIL_OUTLOOK_*`
 - MilkBox: `MILKBOX_API_KEY`, `MILKBOX_DOMAIN_PROVIDER_ID`, `MILKBOX_SEQUENCER_ID`
 - Inboxing: `INBOXING_API_KEY`, `INBOXING_BASE_URL`, `INBOXING_CLOUDFLARE_CREDENTIAL_ID`, `INBOXING_REGISTRAR_CREDENTIAL_ID`

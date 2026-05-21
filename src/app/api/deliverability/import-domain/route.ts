@@ -1,9 +1,6 @@
 import { NextResponse } from "next/server";
 import { getSupabaseAdmin } from "@/lib/supabase";
-
-const API_BASE = "https://app.outboundhero.co/api";
-const API_KEY = process.env.OUTBOUNDHERO_API_KEY!;
-const headers = { Authorization: `Bearer ${API_KEY}` };
+import { bisonFetch, resolveInstance } from "@/lib/bison";
 
 interface SenderEmail {
   id: number;
@@ -22,9 +19,11 @@ interface SenderEmail {
   updated_at: string;
 }
 
-// POST — search EmailBison for inboxes matching given domains and import them
+// POST — search Bison for inboxes matching given domains and import them (scoped to instance)
 export async function POST(request: Request) {
   try {
+    const { searchParams } = new URL(request.url);
+    const instance = resolveInstance(searchParams.get("instance"));
     const { domains } = (await request.json()) as { domains: string[] };
     if (!domains?.length) {
       return NextResponse.json({ error: "domains required" }, { status: 400 });
@@ -33,7 +32,7 @@ export async function POST(request: Request) {
     const supabase = getSupabaseAdmin();
     const allInboxes: SenderEmail[] = [];
 
-    // Search EmailBison for each domain — try multiple search terms
+    // Search Bison for each domain — try multiple search terms
     for (const domain of domains) {
       const found = new Map<number, SenderEmail>();
 
@@ -45,9 +44,9 @@ export async function POST(request: Request) {
       for (const term of searchTerms) {
         let page = 1;
         while (true) {
-          const res = await fetch(
-            `${API_BASE}/sender-emails?search=${encodeURIComponent(term)}&page=${page}&per_page=15`,
-            { headers, cache: "no-store" }
+          const res = await bisonFetch(
+            instance,
+            `/sender-emails?search=${encodeURIComponent(term)}&page=${page}&per_page=15`,
           );
           if (!res.ok) break;
           const json = await res.json();
@@ -64,15 +63,15 @@ export async function POST(request: Request) {
         }
       }
 
-      console.log(`[IMPORT] ${domain}: found ${found.size} inboxes`);
+      console.log(`[IMPORT:${instance}] ${domain}: found ${found.size} inboxes`);
       allInboxes.push(...found.values());
     }
 
     if (allInboxes.length === 0) {
-      return NextResponse.json({ imported: 0, message: "No inboxes found on EmailBison for these domains" });
+      return NextResponse.json({ imported: 0, message: "No inboxes found on Bison for these domains", instance });
     }
 
-    // Ensure domains exist
+    // Ensure (instance, domain) rows exist
     const domainSet = new Map<string, string>();
     for (const inbox of allInboxes) {
       const d = inbox.email.split("@")[1]?.toLowerCase();
@@ -83,6 +82,7 @@ export async function POST(request: Request) {
     }
 
     const domainRows = Array.from(domainSet.entries()).map(([domain, created_at]) => ({
+      instance,
       domain,
       domain_created_at: created_at,
       warmup_status: "open",
@@ -91,11 +91,12 @@ export async function POST(request: Request) {
 
     await supabase
       .from("deliverability_domains")
-      .upsert(domainRows, { onConflict: "domain", ignoreDuplicates: true });
+      .upsert(domainRows, { onConflict: "instance,domain", ignoreDuplicates: true });
 
     // Upsert inboxes
     const inboxRows = allInboxes.map((inbox) => ({
       id: inbox.id,
+      instance,
       name: inbox.name,
       email: inbox.email,
       domain: inbox.email.split("@")[1]?.toLowerCase() || "",
@@ -116,15 +117,16 @@ export async function POST(request: Request) {
     for (let i = 0; i < inboxRows.length; i += 500) {
       await supabase
         .from("deliverability_inboxes")
-        .upsert(inboxRows.slice(i, i + 500), { onConflict: "id", ignoreDuplicates: false });
+        .upsert(inboxRows.slice(i, i + 500), { onConflict: "instance,id", ignoreDuplicates: false });
     }
 
-    // Rebuild stats for these domains via SQL
+    // Rebuild stats via SQL (works for all instances at once)
     await supabase.rpc("rebuild_domain_stats");
 
     return NextResponse.json({
       imported: allInboxes.length,
       domains: domainSet.size,
+      instance,
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Failed";

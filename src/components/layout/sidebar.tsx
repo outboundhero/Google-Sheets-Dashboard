@@ -18,6 +18,7 @@ import {
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { ThemeToggle } from "./theme-toggle";
+import { InstanceSwitcher } from "./instance-switcher";
 import {
   Tooltip,
   TooltipContent,
@@ -72,6 +73,9 @@ export function Sidebar({ collapsed, onToggle }: SidebarProps) {
           </span>
         )}
       </div>
+
+      {/* Instance switcher */}
+      <InstanceSwitcher collapsed={collapsed} />
 
       {/* Navigation */}
       <nav className="flex-1 space-y-1 px-2 py-4">

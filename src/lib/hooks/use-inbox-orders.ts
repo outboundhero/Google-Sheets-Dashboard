@@ -5,9 +5,10 @@ import type { InboxOrder } from "@/types/inbox-order";
 
 const fetcher = (url: string) => fetch(url).then((r) => r.json());
 
-export function useInboxOrders(refreshIntervalMs: number = 0) {
+export function useInboxOrders(refreshIntervalMs: number = 0, instancesQuery?: string) {
+  const url = instancesQuery ? `/api/inbox-orders?${instancesQuery}` : "/api/inbox-orders";
   const { data, error, isLoading, mutate } = useSWR<{ orders: InboxOrder[] }>(
-    "/api/inbox-orders",
+    url,
     fetcher,
     {
       revalidateOnFocus: false,

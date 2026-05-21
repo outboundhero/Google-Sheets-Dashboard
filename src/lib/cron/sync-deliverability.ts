@@ -1,12 +1,16 @@
 import { NextResponse } from "next/server";
 import { getSupabaseAdmin } from "@/lib/supabase";
+import { bisonFetch } from "@/lib/bison";
+import type { BisonInstanceSlug } from "@/lib/bison-instances";
 
-const API_BASE = "https://app.outboundhero.co/api";
-const API_KEY = process.env.OUTBOUNDHERO_API_KEY!;
 const PER_PAGE = 15;
-const CONCURRENT = 10;
-const CURSOR_KEY = "cron:deliverability:cursor";
+const CONCURRENT = 3;
+const BATCH_DELAY_MS = 800;
 const STATS_REBUILD_GRACE_MS = 8000;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 interface SenderEmail {
   id: number;
@@ -39,59 +43,76 @@ function getRedis() {
   return new Redis({ url, token });
 }
 
-async function getCursor(): Promise<number> {
+function cursorKey(instance: BisonInstanceSlug): string {
+  return `cron:deliverability:cursor:${instance}`;
+}
+
+async function getCursor(instance: BisonInstanceSlug): Promise<number> {
   const redis = getRedis();
   if (!redis) return 1;
-  const val = await redis.get<number>(CURSOR_KEY);
+  const val = await redis.get<number>(cursorKey(instance));
   return typeof val === "number" && val > 0 ? val : 1;
 }
 
-async function setCursor(page: number): Promise<void> {
+async function setCursor(instance: BisonInstanceSlug, page: number): Promise<void> {
   const redis = getRedis();
   if (!redis) return;
-  await redis.set(CURSOR_KEY, page);
+  await redis.set(cursorKey(instance), page);
 }
 
-async function fetchPage(page: number): Promise<{ data: SenderEmail[]; lastPage: number }> {
-  const res = await fetch(`${API_BASE}/sender-emails?page=${page}&per_page=${PER_PAGE}`, {
-    headers: { Authorization: `Bearer ${API_KEY}` },
-    cache: "no-store",
-  });
-  if (!res.ok) throw new Error(`Outboundhero ${res.status} on page ${page}`);
+async function fetchPage(
+  instance: BisonInstanceSlug,
+  page: number,
+): Promise<{ data: SenderEmail[]; lastPage: number }> {
+  const res = await bisonFetch(instance, `/sender-emails?page=${page}&per_page=${PER_PAGE}`);
+  if (!res.ok) throw new Error(`Bison ${res.status} on page ${page}`);
   const json = await res.json();
   const payload = Array.isArray(json) ? json[0] : json;
   return { data: payload.data || [], lastPage: payload.meta?.last_page || 1 };
 }
 
-export const maxDuration = 60;
-
-export async function GET() {
+export async function runDeliverabilitySync(instance: BisonInstanceSlug): Promise<NextResponse> {
   const t0 = Date.now();
   const deadline = t0 + 60_000 - STATS_REBUILD_GRACE_MS;
   const supabase = getSupabaseAdmin();
 
   try {
-    const startPage = await getCursor();
-    const first = await fetchPage(startPage);
+    const startPage = await getCursor(instance);
+    const first = await fetchPage(instance, startPage);
     const lastPage = first.lastPage;
     const collected: SenderEmail[] = [...first.data];
 
     let nextPage = startPage + 1;
+    let stoppedForRateLimit = false;
     while (nextPage <= lastPage && Date.now() < deadline) {
       const batchEnd = Math.min(nextPage + CONCURRENT - 1, lastPage);
       const pages: number[] = [];
       for (let p = nextPage; p <= batchEnd; p++) pages.push(p);
-      const results = await Promise.allSettled(pages.map((p) => fetchPage(p)));
+      const results = await Promise.allSettled(pages.map((p) => fetchPage(instance, p)));
+      let sawRateLimit = false;
       for (const r of results) {
-        if (r.status === "fulfilled") collected.push(...r.value.data);
-        else console.error("[cron/deliverability] page fetch failed:", r.reason);
+        if (r.status === "fulfilled") {
+          collected.push(...r.value.data);
+        } else {
+          const reasonStr = String(r.reason);
+          if (reasonStr.includes("429")) sawRateLimit = true;
+          else console.error(`[cron/deliverability:${instance}] page fetch failed:`, r.reason);
+        }
+      }
+      if (sawRateLimit) {
+        stoppedForRateLimit = true;
+        console.warn(`[cron/deliverability:${instance}] Bison rate-limited, pausing this run at page ${nextPage}`);
+        break;
       }
       nextPage = batchEnd + 1;
+      if (nextPage <= lastPage && Date.now() < deadline) {
+        await sleep(BATCH_DELAY_MS);
+      }
     }
 
-    const completedFullPass = nextPage > lastPage;
+    const completedFullPass = nextPage > lastPage && !stoppedForRateLimit;
 
-    // Upsert domains (insert-only — don't clobber inbox_count which is owned by rebuild_domain_stats)
+    // Upsert (instance, domain) — insert-only, don't clobber inbox_count owned by rebuild_domain_stats
     const domainEarliest = new Map<string, string>();
     for (const inbox of collected) {
       const domain = inbox.email?.split("@")[1]?.toLowerCase();
@@ -100,6 +121,7 @@ export async function GET() {
       if (!existing || inbox.created_at < existing) domainEarliest.set(domain, inbox.created_at);
     }
     const domainRows = Array.from(domainEarliest.entries()).map(([domain, created_at]) => ({
+      instance,
       domain,
       domain_created_at: created_at,
       warmup_status: "open",
@@ -108,8 +130,8 @@ export async function GET() {
     for (let i = 0; i < domainRows.length; i += 500) {
       const { error } = await supabase
         .from("deliverability_domains")
-        .upsert(domainRows.slice(i, i + 500), { onConflict: "domain", ignoreDuplicates: true });
-      if (error) console.error("[cron/deliverability] domain upsert failed:", error.message);
+        .upsert(domainRows.slice(i, i + 500), { onConflict: "instance,domain", ignoreDuplicates: true });
+      if (error) console.error(`[cron/deliverability:${instance}] domain upsert failed:`, error.message);
     }
 
     // Upsert inboxes
@@ -117,6 +139,7 @@ export async function GET() {
       .filter((i) => i.email?.includes("@"))
       .map((i) => ({
         id: i.id,
+        instance,
         name: i.name,
         email: i.email,
         domain: i.email.split("@")[1].toLowerCase(),
@@ -142,26 +165,27 @@ export async function GET() {
     for (let i = 0; i < inboxRows.length; i += 500) {
       const { error } = await supabase
         .from("deliverability_inboxes")
-        .upsert(inboxRows.slice(i, i + 500), { onConflict: "id", ignoreDuplicates: false });
-      if (error) console.error("[cron/deliverability] inbox upsert failed:", error.message);
+        .upsert(inboxRows.slice(i, i + 500), { onConflict: "instance,id", ignoreDuplicates: false });
+      if (error) console.error(`[cron/deliverability:${instance}] inbox upsert failed:`, error.message);
     }
 
-    // Advance cursor; rebuild stats only after a full pass.
+    // Advance cursor; rebuild stats only after a full pass for this instance.
     let statsRebuilt = false;
     if (completedFullPass) {
-      await setCursor(1);
+      await setCursor(instance, 1);
       const { error: rpcErr } = await supabase.rpc("rebuild_domain_stats");
-      if (rpcErr) console.error("[cron/deliverability] rebuild_domain_stats failed:", rpcErr.message);
+      if (rpcErr) console.error(`[cron/deliverability:${instance}] rebuild_domain_stats failed:`, rpcErr.message);
       else statsRebuilt = true;
     } else {
-      await setCursor(nextPage);
+      await setCursor(instance, nextPage);
     }
 
     const durationMs = Date.now() - t0;
     console.log(
-      `[cron/deliverability] pages=${startPage}-${nextPage - 1}/${lastPage} inboxes=${inboxRows.length} domains=${domainRows.length} fullPass=${completedFullPass} statsRebuilt=${statsRebuilt} duration=${durationMs}ms`
+      `[cron/deliverability:${instance}] pages=${startPage}-${nextPage - 1}/${lastPage} inboxes=${inboxRows.length} domains=${domainRows.length} fullPass=${completedFullPass} statsRebuilt=${statsRebuilt} duration=${durationMs}ms`,
     );
     return NextResponse.json({
+      instance,
       startPage,
       endPage: nextPage - 1,
       lastPage,
@@ -174,7 +198,7 @@ export async function GET() {
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Cron deliverability sync failed";
-    console.error("[cron/deliverability]", message);
-    return NextResponse.json({ error: message }, { status: 500 });
+    console.error(`[cron/deliverability:${instance}]`, message);
+    return NextResponse.json({ error: message, instance }, { status: 500 });
   }
 }

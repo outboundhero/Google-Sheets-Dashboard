@@ -1,20 +1,19 @@
 import { NextResponse } from "next/server";
-
-const API_BASE = "https://app.outboundhero.co/api";
-const API_KEY = process.env.OUTBOUNDHERO_API_KEY!;
-const headers = { Authorization: `Bearer ${API_KEY}` };
+import { bisonFetch, resolveInstance } from "@/lib/bison";
 
 export async function GET(
-  _request: Request,
+  request: Request,
   { params }: { params: Promise<{ id: string }> }
 ) {
   try {
     const { id } = await params;
+    const { searchParams } = new URL(request.url);
+    const instance = resolveInstance(searchParams.get("instance"));
 
     // Fetch campaign detail, stats, and sequence steps in parallel
     const [campaignRes, stepsRes] = await Promise.all([
-      fetch(`${API_BASE}/campaigns/${id}`, { headers, cache: "no-store" }),
-      fetch(`${API_BASE}/campaigns/v1.1/${id}/sequence-steps`, { headers, cache: "no-store" }),
+      bisonFetch(instance, `/campaigns/${id}`),
+      bisonFetch(instance, `/campaigns/v1.1/${id}/sequence-steps`),
     ]);
 
     if (!campaignRes.ok) throw new Error(`Campaign fetch failed: ${campaignRes.status}`);
@@ -26,11 +25,10 @@ export async function GET(
     const createdAt = campaign.created_at?.split("T")[0] || "2024-01-01";
     const now = new Date().toISOString().split("T")[0];
 
-    const statsRes = await fetch(`${API_BASE}/campaigns/${id}/stats`, {
+    const statsRes = await bisonFetch(instance, `/campaigns/${id}/stats`, {
       method: "POST",
-      headers: { ...headers, "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ start_date: createdAt, end_date: now }),
-      cache: "no-store",
     });
 
     // Parse steps
@@ -112,6 +110,7 @@ export async function GET(
       campaign,
       overallStats,
       steps: grouped,
+      instance,
     });
   } catch (error) {
     console.error("[CAMPAIGN DETAIL] Error:", error);

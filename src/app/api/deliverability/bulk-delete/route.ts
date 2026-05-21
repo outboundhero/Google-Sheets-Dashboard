@@ -1,20 +1,13 @@
 import { NextResponse } from "next/server";
 import { getSupabaseAdmin } from "@/lib/supabase";
+import { bisonFetch, resolveInstance } from "@/lib/bison";
+import type { BisonInstanceSlug } from "@/lib/bison-instances";
 
-const API_BASE = "https://app.outboundhero.co/api";
-const API_KEY = process.env.OUTBOUNDHERO_API_KEY!;
-const apiHeaders = {
-  Authorization: `Bearer ${API_KEY}`,
-  "Content-Type": "application/json",
-};
-
-const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
-
-async function deleteSenderEmail(id: number): Promise<boolean> {
+async function deleteSenderEmail(instance: BisonInstanceSlug, id: number): Promise<boolean> {
   try {
-    const res = await fetch(`${API_BASE}/sender-emails/${id}`, {
+    const res = await bisonFetch(instance, `/sender-emails/${id}`, {
       method: "DELETE",
-      headers: apiHeaders,
+      headers: { "Content-Type": "application/json" },
     });
     return res.ok || res.status === 404;
   } catch {
@@ -24,6 +17,8 @@ async function deleteSenderEmail(id: number): Promise<boolean> {
 
 export async function POST(request: Request) {
   try {
+    const { searchParams } = new URL(request.url);
+    const instance = resolveInstance(searchParams.get("instance"));
     const { domains } = (await request.json()) as { domains: string[] };
     if (!domains?.length) {
       return NextResponse.json({ error: "domains required" }, { status: 400 });
@@ -31,16 +26,21 @@ export async function POST(request: Request) {
 
     const supabase = getSupabaseAdmin();
 
-    // 1. Get all inbox IDs for the selected domains
+    // 1. Get all inbox IDs for the selected domains (scoped to this instance)
     const { data: inboxes, error: inboxError } = await supabase
       .from("deliverability_inboxes")
       .select("id, domain")
+      .eq("instance", instance)
       .in("domain", domains);
 
     if (inboxError) throw new Error(inboxError.message);
     if (!inboxes || inboxes.length === 0) {
       // No inboxes — just delete the domain records
-      await supabase.from("deliverability_domains").delete().in("domain", domains);
+      await supabase
+        .from("deliverability_domains")
+        .delete()
+        .eq("instance", instance)
+        .in("domain", domains);
       return NextResponse.json({ success: true, inboxesDeleted: 0, domainsDeleted: domains.length });
     }
 
@@ -54,7 +54,7 @@ export async function POST(request: Request) {
       const results = await Promise.all(
         batch.map(async (inbox) => ({
           id: inbox.id,
-          ok: await deleteSenderEmail(inbox.id),
+          ok: await deleteSenderEmail(instance, inbox.id),
         }))
       );
 
@@ -69,26 +69,33 @@ export async function POST(request: Request) {
       await supabase
         .from("deliverability_inboxes")
         .delete()
+        .eq("instance", instance)
         .in("id", deletedIds);
     }
 
-    // 4. For each affected domain, check if all inboxes are gone
+    // 4. For each affected domain, check if all inboxes are gone (within this instance)
     const domainsDeleted: string[] = [];
     for (const domain of domains) {
       const { count } = await supabase
         .from("deliverability_inboxes")
         .select("id", { count: "exact", head: true })
+        .eq("instance", instance)
         .eq("domain", domain);
 
       if (count === 0) {
         // All inboxes deleted — remove the domain record
-        await supabase.from("deliverability_domains").delete().eq("domain", domain);
+        await supabase
+          .from("deliverability_domains")
+          .delete()
+          .eq("instance", instance)
+          .eq("domain", domain);
         domainsDeleted.push(domain);
       } else {
         // Some inboxes remain — re-aggregate domain stats
         const { data: remaining } = await supabase
           .from("deliverability_inboxes")
           .select("tags, type, emails_sent_count, total_replied_count, bounced_count")
+          .eq("instance", instance)
           .eq("domain", domain);
 
         if (remaining) {
@@ -116,6 +123,7 @@ export async function POST(request: Request) {
               outlook_count: outlook,
               google_count: google,
             })
+            .eq("instance", instance)
             .eq("domain", domain);
         }
       }
@@ -126,6 +134,7 @@ export async function POST(request: Request) {
       inboxesDeleted: deletedIds.length,
       domainsDeleted: domainsDeleted.length,
       failed: failedIds.length,
+      instance,
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Failed";

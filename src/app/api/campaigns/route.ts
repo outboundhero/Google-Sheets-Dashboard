@@ -1,13 +1,12 @@
 import { NextResponse } from "next/server";
 import { getSupabaseAdmin } from "@/lib/supabase";
 import { getClientTrackerData } from "@/lib/google-sheets";
-
-const API_BASE = "https://app.outboundhero.co/api";
-const API_KEY = process.env.OUTBOUNDHERO_API_KEY!;
-const headers = { Authorization: `Bearer ${API_KEY}` };
+import { bisonFetch, resolveInstance, resolveInstances } from "@/lib/bison";
+import type { BisonInstanceSlug } from "@/lib/bison-instances";
 
 export interface CampaignData {
   id: number;
+  instance: BisonInstanceSlug;
   name: string;
   status: string;
   client_tag: string;
@@ -27,13 +26,14 @@ export interface CampaignData {
   updated_at: string;
 }
 
-// Try Supabase first, fall back to direct API
-async function getFromSupabase(): Promise<CampaignData[] | null> {
+// Try Supabase first, fall back to direct API. Returns rows from all requested instances.
+async function getFromSupabase(instances: BisonInstanceSlug[]): Promise<CampaignData[] | null> {
   try {
     const supabase = getSupabaseAdmin();
-    const { data, error } = await supabase
+    const { error } = await supabase
       .from("campaigns")
-      .select("*")
+      .select("id")
+      .in("instance", instances)
       .order("created_at", { ascending: false })
       .limit(1);
     if (error) return null; // table doesn't exist
@@ -44,6 +44,7 @@ async function getFromSupabase(): Promise<CampaignData[] | null> {
       const { data: page } = await supabase
         .from("campaigns")
         .select("*")
+        .in("instance", instances)
         .order("created_at", { ascending: false })
         .range(offset, offset + 999);
       if (!page || page.length === 0) break;
@@ -57,10 +58,10 @@ async function getFromSupabase(): Promise<CampaignData[] | null> {
   }
 }
 
-async function fetchFromAPI(): Promise<CampaignData[]> {
+async function fetchFromAPI(instance: BisonInstanceSlug): Promise<CampaignData[]> {
   const allCampaigns: CampaignData[] = [];
   // Fetch page 1 to get lastPage count
-  const firstRes = await fetch(`${API_BASE}/campaigns?page=1&per_page=100`, { headers, cache: "no-store" });
+  const firstRes = await bisonFetch(instance, `/campaigns?page=1&per_page=100`);
   if (!firstRes.ok) throw new Error(`API error: ${firstRes.status}`);
   const firstJson = await firstRes.json();
   const lastPage = firstJson.meta?.last_page || 1;
@@ -73,7 +74,7 @@ async function fetchFromAPI(): Promise<CampaignData[]> {
       const batch = pages.slice(i, i + 10);
       const results = await Promise.allSettled(
         batch.map((p) =>
-          fetch(`${API_BASE}/campaigns?page=${p}&per_page=100`, { headers, cache: "no-store" })
+          bisonFetch(instance, `/campaigns?page=${p}&per_page=100`)
             .then((r) => r.json())
             .then((j) => j.data || [])
         )
@@ -92,6 +93,7 @@ async function fetchFromAPI(): Promise<CampaignData[]> {
     const contacted = (c.total_leads_contacted as number) || 0;
     allCampaigns.push({
       id: c.id as number,
+      instance,
       name,
       status: c.status as string,
       client_tag: clientTag,
@@ -120,6 +122,7 @@ export async function GET(request: Request) {
     const { searchParams } = new URL(request.url);
     const debug = searchParams.get("debug") === "1";
     const showAll = searchParams.get("all") === "1";
+    const instances = resolveInstances(searchParams);
 
     // Get active client tags from Google Sheet (exclude churned clients with past churn date)
     const tracker = await getClientTrackerData().catch(() => []);
@@ -149,10 +152,11 @@ export async function GET(request: Request) {
     // Case-insensitive lookup set
     const activeClientsUpper = new Set(activeClientTags.map((t) => t.toUpperCase()));
 
-    // Try Supabase first, fall back to API
-    let campaigns = await getFromSupabase();
+    // Try Supabase first, fall back to direct API (per-instance, concat results)
+    let campaigns = await getFromSupabase(instances);
     if (!campaigns) {
-      campaigns = await fetchFromAPI();
+      const apiResults = await Promise.allSettled(instances.map((i) => fetchFromAPI(i)));
+      campaigns = apiResults.flatMap((r) => (r.status === "fulfilled" ? r.value : []));
     }
 
     // Collect all unique campaign client_tags for debugging
@@ -212,10 +216,12 @@ export async function GET(request: Request) {
 }
 
 // POST — sync from EmailBison API (try to save to Supabase if table exists)
-export async function POST() {
+export async function POST(request: Request) {
   const t0 = Date.now();
   try {
-    const campaigns = await fetchFromAPI();
+    const { searchParams } = new URL(request.url);
+    const instance = resolveInstance(searchParams.get("instance"));
+    const campaigns = await fetchFromAPI(instance);
 
     // Try to save to Supabase
     try {
@@ -225,15 +231,15 @@ export async function POST() {
           .from("campaigns")
           .upsert(
             campaigns.slice(i, i + 500).map((c) => ({ ...c, synced_at: new Date().toISOString() })),
-            { onConflict: "id", ignoreDuplicates: false }
+            { onConflict: "instance,id", ignoreDuplicates: false }
           );
       }
     } catch {
       // Supabase table might not exist — that's okay
     }
 
-    console.log(`[CAMPAIGNS] Synced ${campaigns.length} in ${Date.now() - t0}ms`);
-    return NextResponse.json({ synced: campaigns.length });
+    console.log(`[CAMPAIGNS:${instance}] Synced ${campaigns.length} in ${Date.now() - t0}ms`);
+    return NextResponse.json({ synced: campaigns.length, instance });
   } catch (error) {
     console.error("[CAMPAIGNS] Sync error:", error);
     const message = error instanceof Error ? error.message : "Failed";

@@ -1,8 +1,5 @@
 import { NextResponse } from "next/server";
-
-const API_BASE = "https://app.outboundhero.co/api";
-const API_KEY = process.env.OUTBOUNDHERO_API_KEY!;
-const headers = { Authorization: `Bearer ${API_KEY}` };
+import { bisonFetch, resolveInstance } from "@/lib/bison";
 
 const VALID_ACTIONS = ["resume", "pause", "archive"] as const;
 
@@ -12,6 +9,8 @@ export async function PATCH(
 ) {
   try {
     const { id } = await params;
+    const { searchParams } = new URL(request.url);
+    const instance = resolveInstance(searchParams.get("instance"));
     const { action } = await request.json();
 
     if (!VALID_ACTIONS.includes(action)) {
@@ -21,10 +20,8 @@ export async function PATCH(
       );
     }
 
-    const res = await fetch(`${API_BASE}/campaigns/${id}/${action}`, {
+    const res = await bisonFetch(instance, `/campaigns/${id}/${action}`, {
       method: "PATCH",
-      headers,
-      cache: "no-store",
     });
 
     if (!res.ok) {
@@ -35,7 +32,7 @@ export async function PATCH(
       );
     }
 
-    return NextResponse.json({ success: true, action });
+    return NextResponse.json({ success: true, action, instance });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Failed";
     return NextResponse.json({ error: message }, { status: 500 });

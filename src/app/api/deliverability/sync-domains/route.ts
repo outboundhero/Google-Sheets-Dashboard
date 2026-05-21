@@ -1,8 +1,6 @@
 import { NextResponse } from "next/server";
 import { getSupabaseAdmin } from "@/lib/supabase";
-
-const API_BASE = "https://app.outboundhero.co/api";
-const API_KEY = process.env.OUTBOUNDHERO_API_KEY!;
+import { bisonFetch, resolveInstance } from "@/lib/bison";
 
 export const maxDuration = 120;
 
@@ -30,21 +28,22 @@ interface SenderEmail {
 }
 
 /**
- * POST /api/deliverability/sync-domains
+ * POST /api/deliverability/sync-domains?instance=<slug>
  * Body: { domains: string[] }
  *
- * Syncs only the given domains by searching the EmailBison API for each.
+ * Syncs only the given domains by searching the Bison API for each.
  * Designed to be called in parallel streams from the frontend.
  */
 export async function POST(request: Request) {
   try {
+    const { searchParams } = new URL(request.url);
+    const instance = resolveInstance(searchParams.get("instance"));
     const { domains } = (await request.json()) as { domains: string[] };
     if (!domains?.length) {
       return NextResponse.json({ error: "domains required" }, { status: 400 });
     }
 
     const supabase = getSupabaseAdmin();
-    const headers = { Authorization: `Bearer ${API_KEY}` };
     const allInboxes: SenderEmail[] = [];
 
     // Fetch inboxes for each domain via search API
@@ -54,9 +53,9 @@ export async function POST(request: Request) {
 
       while (true) {
         try {
-          const res = await fetch(
-            `${API_BASE}/sender-emails?search=${encodeURIComponent(domain)}&page=${page}&per_page=15`,
-            { headers, cache: "no-store" }
+          const res = await bisonFetch(
+            instance,
+            `/sender-emails?search=${encodeURIComponent(domain)}&page=${page}&per_page=15`,
           );
           if (!res.ok) break;
           const json = await res.json();
@@ -81,10 +80,10 @@ export async function POST(request: Request) {
     }
 
     if (allInboxes.length === 0) {
-      return NextResponse.json({ synced: 0, domains: 0 });
+      return NextResponse.json({ synced: 0, domains: 0, instance });
     }
 
-    // Ensure domain rows exist
+    // Ensure (instance, domain) rows exist
     const domainSet = new Map<string, string>();
     for (const inbox of allInboxes) {
       const d = inbox.email.split("@")[1]?.toLowerCase();
@@ -95,6 +94,7 @@ export async function POST(request: Request) {
     }
 
     const domainRows = Array.from(domainSet.entries()).map(([domain, created_at]) => ({
+      instance,
       domain,
       domain_created_at: created_at,
       warmup_status: "open",
@@ -103,11 +103,12 @@ export async function POST(request: Request) {
 
     await supabase
       .from("deliverability_domains")
-      .upsert(domainRows, { onConflict: "domain", ignoreDuplicates: true });
+      .upsert(domainRows, { onConflict: "instance,domain", ignoreDuplicates: true });
 
     // Upsert inboxes with all fields including warmup data
     const inboxRows = allInboxes.map((inbox) => ({
       id: inbox.id,
+      instance,
       name: inbox.name,
       email: inbox.email,
       domain: inbox.email.split("@")[1]?.toLowerCase() || "",
@@ -134,12 +135,13 @@ export async function POST(request: Request) {
     for (let i = 0; i < inboxRows.length; i += 500) {
       await supabase
         .from("deliverability_inboxes")
-        .upsert(inboxRows.slice(i, i + 500), { onConflict: "id", ignoreDuplicates: false });
+        .upsert(inboxRows.slice(i, i + 500), { onConflict: "instance,id", ignoreDuplicates: false });
     }
 
     return NextResponse.json({
       synced: allInboxes.length,
       domains: domainSet.size,
+      instance,
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Failed";

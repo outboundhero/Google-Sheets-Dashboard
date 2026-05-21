@@ -14,9 +14,12 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { CampaignDetailDialog } from "@/components/campaigns/campaign-detail-dialog";
+import { useInstance } from "@/lib/instance-context";
+import type { BisonInstanceSlug } from "@/lib/bison-instances";
 
 interface Campaign {
   id: number;
+  instance: BisonInstanceSlug;
   name: string;
   status: string;
   client_tag: string;
@@ -56,6 +59,7 @@ const ChartTooltip = ({ active, payload }: { active?: boolean; payload?: Array<{
 };
 
 export default function CampaignsPage() {
+  const { instances, instancesQuery } = useInstance();
   const [campaigns, setCampaigns] = useState<Campaign[]>([]);
   const [loading, setLoading] = useState(true);
   const [syncing, setSyncing] = useState(false);
@@ -70,7 +74,7 @@ export default function CampaignsPage() {
 
   const loadCampaigns = useCallback(async () => {
     try {
-      const res = await fetch("/api/campaigns");
+      const res = await fetch(`/api/campaigns?${instancesQuery}`);
       const data = await res.json();
       if (data.campaigns && Array.isArray(data.campaigns)) {
         setCampaigns(data.campaigns);
@@ -78,15 +82,22 @@ export default function CampaignsPage() {
         setCampaigns(data);
       }
     } catch { /* ignore */ }
-  }, []);
+  }, [instancesQuery]);
 
   const loadFailedCampaigns = useCallback(async () => {
     try {
-      const res = await fetch("/api/campaigns/failed");
-      const data = await res.json();
-      if (Array.isArray(data)) setFailedCampaigns(data);
+      // Failed campaigns route is single-instance; fetch each and merge.
+      const results = await Promise.allSettled(
+        instances.map(async (inst) => {
+          const res = await fetch(`/api/campaigns/failed?instance=${inst.slug}`);
+          const data = await res.json();
+          return Array.isArray(data) ? data : [];
+        }),
+      );
+      const merged = results.flatMap((r) => (r.status === "fulfilled" ? r.value : []));
+      setFailedCampaigns(merged);
     } catch { /* ignore */ }
-  }, []);
+  }, [instances]);
 
   useEffect(() => {
     setLoading(true);
@@ -99,7 +110,10 @@ export default function CampaignsPage() {
   const handleSync = async () => {
     setSyncing(true);
     try {
-      await fetch("/api/campaigns", { method: "POST" });
+      // Sync each instance in the active group/tier in parallel
+      await Promise.allSettled(
+        instances.map((inst) => fetch(`/api/campaigns?instance=${inst.slug}`, { method: "POST" })),
+      );
       await loadCampaigns();
     } catch { /* ignore */ }
     setSyncing(false);

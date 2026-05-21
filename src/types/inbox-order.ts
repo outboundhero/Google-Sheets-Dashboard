@@ -1,3 +1,5 @@
+import type { BisonInstanceSlug } from "@/lib/bison-instances";
+
 export type InboxOrderProvider = "scaledmail" | "milkbox" | "inboxing";
 
 export type InboxOrderStatus =
@@ -17,6 +19,7 @@ export interface InboxOrderAlias {
 
 export interface InboxOrder {
   id: string;
+  instance: BisonInstanceSlug;
   provider: InboxOrderProvider;
   provider_order_id: string | null;
   provider_domain_id: string | null;

@@ -1,15 +1,13 @@
 import { NextResponse } from "next/server";
 import { getSupabaseAdmin } from "@/lib/supabase";
-
-const API_BASE = "https://app.outboundhero.co/api";
-const API_KEY = process.env.OUTBOUNDHERO_API_KEY!;
-const headers = { Authorization: `Bearer ${API_KEY}` };
-const BATCH_SIZE = 100;
+import { bisonFetch, resolveInstance } from "@/lib/bison";
 
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 export async function POST(request: Request) {
   try {
+    const { searchParams } = new URL(request.url);
+    const instance = resolveInstance(searchParams.get("instance"));
     const { campaign_id, domains } = (await request.json()) as {
       campaign_id: number;
       domains: string[];
@@ -21,7 +19,7 @@ export async function POST(request: Request) {
 
     const supabase = getSupabaseAdmin();
 
-    // 1. Get all inbox IDs for the selected domains (paginate past 1000-row limit)
+    // 1. Get all inbox IDs for the selected domains (paginate past 1000-row limit, scoped to this instance)
     const allInboxIds: number[] = [];
     for (let i = 0; i < domains.length; i += 20) {
       const batch = domains.slice(i, i + 20);
@@ -30,6 +28,7 @@ export async function POST(request: Request) {
         const { data } = await supabase
           .from("deliverability_inboxes")
           .select("id")
+          .eq("instance", instance)
           .in("domain", batch)
           .range(offset, offset + 999);
         if (!data || data.length === 0) break;
@@ -39,7 +38,7 @@ export async function POST(request: Request) {
       }
     }
 
-    console.log(`[ATTACH-DOMAIN] Campaign ${campaign_id}: found ${allInboxIds.length} inboxes across ${domains.length} domains`);
+    console.log(`[ATTACH-DOMAIN:${instance}] Campaign ${campaign_id}: found ${allInboxIds.length} inboxes across ${domains.length} domains`);
 
     if (allInboxIds.length === 0) {
       return NextResponse.json({ total_matched: 0, already_attached: 0, newly_attached: 0 });
@@ -49,9 +48,9 @@ export async function POST(request: Request) {
     const alreadyAttached = new Set<number>();
     let page = 1;
     while (true) {
-      const res = await fetch(
-        `${API_BASE}/campaigns/${campaign_id}/sender-emails?page=${page}&per_page=100`,
-        { headers, cache: "no-store" }
+      const res = await bisonFetch(
+        instance,
+        `/campaigns/${campaign_id}/sender-emails?page=${page}&per_page=100`,
       );
       if (!res.ok) break;
       const json = await res.json();
@@ -74,9 +73,9 @@ export async function POST(request: Request) {
       const batch = newIds.slice(i, i + ATTACH_BATCH);
 
       try {
-        const res = await fetch(`${API_BASE}/campaigns/${campaign_id}/attach-sender-emails`, {
+        const res = await bisonFetch(instance, `/campaigns/${campaign_id}/attach-sender-emails`, {
           method: "POST",
-          headers: { ...headers, "Content-Type": "application/json" },
+          headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ sender_email_ids: batch }),
         });
 
@@ -84,13 +83,13 @@ export async function POST(request: Request) {
           attached += batch.length;
         } else if (res.status === 422) {
           // Invalid IDs in batch — fall back to sub-batches of 10
-          console.warn(`[ATTACH-DOMAIN] Campaign ${campaign_id} batch ${i}-${i + batch.length} got 422, retrying in sub-batches`);
+          console.warn(`[ATTACH-DOMAIN:${instance}] Campaign ${campaign_id} batch ${i}-${i + batch.length} got 422, retrying in sub-batches`);
           for (let j = 0; j < batch.length; j += 10) {
             const sub = batch.slice(j, j + 10);
             try {
-              const subRes = await fetch(`${API_BASE}/campaigns/${campaign_id}/attach-sender-emails`, {
+              const subRes = await bisonFetch(instance, `/campaigns/${campaign_id}/attach-sender-emails`, {
                 method: "POST",
-                headers: { ...headers, "Content-Type": "application/json" },
+                headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({ sender_email_ids: sub }),
               });
               if (subRes.ok) {
@@ -99,13 +98,13 @@ export async function POST(request: Request) {
                 // Try one by one to skip individual bad IDs
                 for (const id of sub) {
                   try {
-                    const singleRes = await fetch(`${API_BASE}/campaigns/${campaign_id}/attach-sender-emails`, {
+                    const singleRes = await bisonFetch(instance, `/campaigns/${campaign_id}/attach-sender-emails`, {
                       method: "POST",
-                      headers: { ...headers, "Content-Type": "application/json" },
+                      headers: { "Content-Type": "application/json" },
                       body: JSON.stringify({ sender_email_ids: [id] }),
                     });
                     if (singleRes.ok) attached++;
-                    else { failed++; console.warn(`[ATTACH-DOMAIN] Invalid inbox ID ${id}, skipping`); }
+                    else { failed++; console.warn(`[ATTACH-DOMAIN:${instance}] Invalid inbox ID ${id}, skipping`); }
                   } catch { failed++; }
                 }
               }
@@ -114,11 +113,11 @@ export async function POST(request: Request) {
           }
         } else {
           const errText = await res.text().catch(() => "");
-          console.error(`[ATTACH-DOMAIN] Campaign ${campaign_id} batch ${i}-${i + batch.length}: ${res.status} ${errText.slice(0, 200)}`);
+          console.error(`[ATTACH-DOMAIN:${instance}] Campaign ${campaign_id} batch ${i}-${i + batch.length}: ${res.status} ${errText.slice(0, 200)}`);
           failed += batch.length;
         }
       } catch (e) {
-        console.error(`[ATTACH-DOMAIN] Campaign ${campaign_id} batch ${i}-${i + batch.length} network error:`, e);
+        console.error(`[ATTACH-DOMAIN:${instance}] Campaign ${campaign_id} batch ${i}-${i + batch.length} network error:`, e);
         failed += batch.length;
       }
 
@@ -130,6 +129,7 @@ export async function POST(request: Request) {
       already_attached: alreadyCount,
       newly_attached: attached,
       failed,
+      instance,
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Failed";

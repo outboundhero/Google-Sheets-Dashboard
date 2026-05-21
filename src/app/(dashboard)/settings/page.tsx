@@ -40,6 +40,10 @@ export default function SettingsPage() {
   const [resetPwUser, setResetPwUser] = useState<Profile | null>(null);
   const [newPassword, setNewPassword] = useState("");
 
+  // Client-tag allocation state
+  const [allocInfo, setAllocInfo] = useState<{ group1Count: number; group2Count: number; syncedAt: string } | null>(null);
+  const [allocSyncing, setAllocSyncing] = useState(false);
+
   const loadUsers = useCallback(async () => {
     setUsersLoading(true);
     try {
@@ -53,6 +57,34 @@ export default function SettingsPage() {
   useEffect(() => {
     if (currentRole === "admin") loadUsers();
   }, [currentRole, loadUsers]);
+
+  useEffect(() => {
+    fetch("/api/client-tag-allocations")
+      .then((r) => r.json())
+      .then((d) => {
+        if (d && typeof d.group1Count === "number") {
+          setAllocInfo({ group1Count: d.group1Count, group2Count: d.group2Count, syncedAt: d.syncedAt });
+        }
+      })
+      .catch(() => { /* ignore */ });
+  }, []);
+
+  const handleSyncAllocations = async () => {
+    setAllocSyncing(true);
+    try {
+      const res = await fetch("/api/client-tag-allocations", { method: "POST" });
+      const data = await res.json();
+      if (res.ok) {
+        setAllocInfo({ group1Count: data.group1Count, group2Count: data.group2Count, syncedAt: data.syncedAt });
+        toast.success(`Synced: ${data.group1Count} in Group 1, ${data.group2Count} in Group 2`);
+      } else {
+        toast.error(data.error || "Allocation sync failed");
+      }
+    } catch {
+      toast.error("Allocation sync failed");
+    }
+    setAllocSyncing(false);
+  };
 
   const handleInvite = async () => {
     if (!inviteEmail || !invitePassword) return;
@@ -190,6 +222,34 @@ export default function SettingsPage() {
                 </div>
                 <RefreshButton onRefresh={handleRefreshAll} isRefreshing={isSyncing} syncProgress={syncProgress} />
               </div>
+            </CardContent>
+          </Card>
+
+          {/* Client Group Allocations */}
+          <Card>
+            <CardContent className="p-4 space-y-3">
+              <div className="flex items-center justify-between">
+                <div>
+                  <p className="text-sm font-semibold">Client Group Allocations</p>
+                  <p className="text-xs text-muted-foreground mt-0.5">
+                    Which client tags belong to which Bison group
+                  </p>
+                </div>
+                <Button size="sm" variant="outline" onClick={handleSyncAllocations} disabled={allocSyncing}>
+                  {allocSyncing && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+                  Sync
+                </Button>
+              </div>
+              {allocInfo ? (
+                <div className="text-xs text-muted-foreground">
+                  Group 1: <span className="font-medium text-foreground">{allocInfo.group1Count}</span> tags ·{" "}
+                  Group 2: <span className="font-medium text-foreground">{allocInfo.group2Count}</span> tags
+                  <br />
+                  Last synced: {new Date(allocInfo.syncedAt).toLocaleString()}
+                </div>
+              ) : (
+                <p className="text-xs text-muted-foreground">Not synced yet — click Sync.</p>
+              )}
             </CardContent>
           </Card>
 
