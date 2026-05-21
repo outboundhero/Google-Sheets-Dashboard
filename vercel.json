@@ -5,14 +5,14 @@
     { "path": "/api/cron/inbox-orders-poll",     "schedule": "0 */6 * * *" },
     { "path": "/api/cron/client-tag-allocations","schedule": "0 8 * * *" },
 
-    { "path": "/api/cron/campaigns-outboundhero",     "schedule": "0  17 * * *" },
+    { "path": "/api/cron/campaigns-outboundhero",     "schedule": "0 17 * * *" },
     { "path": "/api/cron/campaigns-cleaningoutbound", "schedule": "15 17 * * *" },
     { "path": "/api/cron/campaigns-facilityreach",    "schedule": "30 17 * * *" },
     { "path": "/api/cron/campaigns-outboundclean",    "schedule": "45 17 * * *" },
 
-    { "path": "/api/cron/deliverability-outboundhero",     "schedule": "0  12 */2 * *" },
+    { "path": "/api/cron/deliverability-outboundhero",     "schedule": "0 12 */2 * *" },
     { "path": "/api/cron/deliverability-cleaningoutbound", "schedule": "30 12 */2 * *" },
-    { "path": "/api/cron/deliverability-facilityreach",    "schedule": "0  13 */2 * *" },
+    { "path": "/api/cron/deliverability-facilityreach",    "schedule": "0 13 */2 * *" },
     { "path": "/api/cron/deliverability-outboundclean",    "schedule": "30 13 */2 * *" }
   ]
 }
