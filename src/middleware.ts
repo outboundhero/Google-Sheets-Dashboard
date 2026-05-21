@@ -40,6 +40,21 @@ export async function middleware(request: NextRequest) {
     return NextResponse.next();
   }
 
+  // Allow webhook endpoints (called by Bison — no Supabase session)
+  if (pathname.startsWith("/api/webhooks")) {
+    return NextResponse.next();
+  }
+
+  // Allow inbound webhooks (Bison has no Supabase session; URL is the secret)
+  if (pathname.startsWith("/api/webhooks")) {
+    return NextResponse.next();
+  }
+
+  // Allow webhook endpoints (Bison and other providers; the URL itself is the secret)
+  if (pathname.startsWith("/api/webhooks")) {
+    return NextResponse.next();
+  }
+
   // Create Supabase client (refreshes session cookies)
   const { supabase, response } = createMiddlewareSupabaseClient(request);
 
