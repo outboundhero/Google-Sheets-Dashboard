@@ -491,6 +491,8 @@ function DeliverabilityPageInner() {
     setSyncing(true);
     const CHUNK = 20;
     const STREAMS = 4;
+    const syncStartedAt = new Date().toISOString();
+    let anyChunkFailed = false;
     progressRef.current = { synced: 0, pagesProcessed: 0, lastPage: 0 };
 
     const flushProgress = () => {
@@ -537,6 +539,7 @@ function DeliverabilityPageInner() {
           }
         }
         if (!success) {
+          anyChunkFailed = true;
           console.error(`[STREAM ${streamId}] FAILED at page ${page} after 3 attempts, skipping chunk`);
         }
         page += CHUNK;
@@ -587,6 +590,31 @@ function DeliverabilityPageInner() {
 
       localStorage.removeItem("deliverability_next_page");
       setSavedPage(null);
+
+      // Prune inboxes no longer in Bison — only after a clean full crawl from
+      // page 1 (a resumed or partially-failed sync can't prune safely).
+      if (resumeFrom === 1 && !anyChunkFailed) {
+        try {
+          console.log("[SYNC] Pruning stale inboxes...");
+          const pruneRes = await fetch("/api/deliverability/prune", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ instance: "outboundhero", before: syncStartedAt }),
+          });
+          const pruneData = await pruneRes.json();
+          if (pruneData.skipped) {
+            console.warn(`[SYNC] Prune skipped: ${pruneData.reason}`);
+          } else {
+            console.log(`[SYNC] Pruned ${pruneData.pruned} stale inboxes (of ${pruneData.total})`);
+          }
+        } catch (e) {
+          console.error("[SYNC] Prune failed:", e);
+        }
+      } else {
+        console.log(
+          `[SYNC] Prune skipped — ${resumeFrom !== 1 ? "resumed sync, not a full crawl" : "some chunks failed"}`,
+        );
+      }
 
       // Rebuild domain stats from all inboxes
       console.log("[SYNC] Rebuilding domain stats...");
