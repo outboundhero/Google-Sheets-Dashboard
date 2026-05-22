@@ -16,12 +16,11 @@ export const maxDuration = 30;
  *     "data": { "sender_email": { "id": 2, "email": "...", ... } } }
  *
  * One URL per instance (slug in the path tells us which Bison to call back):
- *   /api/webhooks/bison-reconnect/outboundhero
- *   /api/webhooks/bison-reconnect/cleaningoutbound
- *   /api/webhooks/bison-reconnect/facilityreach
- *   /api/webhooks/bison-reconnect/outboundclean
+ *   /api/webhooks/bison-reconnect/outboundhero  (etc.)
  *
  * No signature verification — Bison doesn't sign webhooks; the URL is the secret.
+ * Every meaningful outcome is recorded in the `reconnect_tag_log` table so it
+ * can be reviewed in the dashboard.
  */
 
 interface BisonReconnectPayload {
@@ -45,6 +44,31 @@ function isStoredTag(v: unknown): v is StoredTag {
   return typeof o.id === "number" && typeof o.name === "string";
 }
 
+/** Records one reconnect outcome. Never throws — logging must not break the webhook. */
+async function logReconnect(entry: {
+  instance: string;
+  senderId: number | null;
+  senderEmail: string | null;
+  tagsRestored: number;
+  tagsTotal: number;
+  status: "ok" | "skipped" | "failed";
+  error?: string | null;
+}): Promise<void> {
+  try {
+    await getSupabaseAdmin().from("reconnect_tag_log").insert({
+      instance: entry.instance,
+      sender_id: entry.senderId,
+      sender_email: entry.senderEmail,
+      tags_restored: entry.tagsRestored,
+      tags_total: entry.tagsTotal,
+      status: entry.status,
+      error: entry.error ?? null,
+    });
+  } catch (e) {
+    console.error("[webhook/reconnect] log write failed:", e);
+  }
+}
+
 export async function POST(
   request: Request,
   context: { params: Promise<{ instance: string }> },
@@ -55,6 +79,9 @@ export async function POST(
     return NextResponse.json({ error: `Unknown instance: ${instanceParam}` }, { status: 400 });
   }
   const instance = instanceParam;
+
+  let senderId: number | null = null;
+  let senderEmail: string | null = null;
 
   try {
     let payload: BisonReconnectPayload;
@@ -71,9 +98,9 @@ export async function POST(
       return NextResponse.json({ ok: true, skipped: `event=${eventType}` });
     }
 
-    const senderId = payload?.data?.sender_email?.id;
-    const senderEmail = payload?.data?.sender_email?.email ?? null;
-    if (typeof senderId !== "number") {
+    senderId = typeof payload?.data?.sender_email?.id === "number" ? payload.data.sender_email.id : null;
+    senderEmail = payload?.data?.sender_email?.email ?? null;
+    if (senderId === null) {
       console.error(
         `[webhook/reconnect:${instance}] missing data.sender_email.id`,
         JSON.stringify(payload).slice(0, 400),
@@ -95,6 +122,10 @@ export async function POST(
       console.log(
         `[webhook/reconnect:${instance}] sender ${senderId} (${senderEmail}) not synced yet — nothing to restore`,
       );
+      await logReconnect({
+        instance, senderId, senderEmail, tagsRestored: 0, tagsTotal: 0,
+        status: "skipped", error: "Sender not yet synced to LeadSync",
+      });
       return NextResponse.json({ ok: true, restored: 0, note: "Sender not yet synced" });
     }
 
@@ -104,6 +135,10 @@ export async function POST(
       console.log(
         `[webhook/reconnect:${instance}] sender ${senderId} (${senderEmail}) had no stored tags`,
       );
+      await logReconnect({
+        instance, senderId, senderEmail, tagsRestored: 0, tagsTotal: 0,
+        status: "skipped", error: "No stored tags to restore",
+      });
       return NextResponse.json({ ok: true, restored: 0 });
     }
 
@@ -143,6 +178,10 @@ export async function POST(
     }
 
     if (resolvedIds.length === 0) {
+      await logReconnect({
+        instance, senderId, senderEmail, tagsRestored: 0, tagsTotal: storedTags.length,
+        status: "skipped", error: "No tags could be resolved",
+      });
       return NextResponse.json({ ok: true, restored: 0, note: "no tags resolved" });
     }
 
@@ -160,6 +199,10 @@ export async function POST(
     console.log(
       `[webhook/reconnect:${instance}] restored ${resolvedIds.length} tag(s) to sender ${senderId} (${senderEmail})`,
     );
+    await logReconnect({
+      instance, senderId, senderEmail,
+      tagsRestored: resolvedIds.length, tagsTotal: storedTags.length, status: "ok",
+    });
     return NextResponse.json({
       ok: true,
       instance,
@@ -171,6 +214,10 @@ export async function POST(
   } catch (err) {
     const message = err instanceof Error ? err.message : "Webhook failed";
     console.error(`[webhook/reconnect:${instance}]`, message);
+    await logReconnect({
+      instance, senderId, senderEmail, tagsRestored: 0, tagsTotal: 0,
+      status: "failed", error: message,
+    });
     // 500 so Bison retries — a transient Bison/Supabase failure shouldn't lose the restore.
     return NextResponse.json({ ok: false, error: message }, { status: 500 });
   }

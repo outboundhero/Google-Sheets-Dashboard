@@ -44,6 +44,20 @@ export default function SettingsPage() {
   const [allocInfo, setAllocInfo] = useState<{ group1Count: number; group2Count: number; syncedAt: string } | null>(null);
   const [allocSyncing, setAllocSyncing] = useState(false);
 
+  // Reconnect tag-restore log state
+  interface ReconnectLogEvent {
+    id: number;
+    occurred_at: string;
+    instance: string;
+    sender_email: string | null;
+    tags_restored: number;
+    tags_total: number;
+    status: string;
+    error: string | null;
+  }
+  const [reconnectLog, setReconnectLog] = useState<ReconnectLogEvent[]>([]);
+  const [reconnectLoading, setReconnectLoading] = useState(true);
+
   const loadUsers = useCallback(async () => {
     setUsersLoading(true);
     try {
@@ -67,6 +81,16 @@ export default function SettingsPage() {
         }
       })
       .catch(() => { /* ignore */ });
+  }, []);
+
+  useEffect(() => {
+    fetch("/api/reconnect-log")
+      .then((r) => r.json())
+      .then((d) => {
+        if (d && Array.isArray(d.events)) setReconnectLog(d.events);
+      })
+      .catch(() => { /* ignore */ })
+      .finally(() => setReconnectLoading(false));
   }, []);
 
   const handleSyncAllocations = async () => {
@@ -249,6 +273,68 @@ export default function SettingsPage() {
                 </div>
               ) : (
                 <p className="text-xs text-muted-foreground">Not synced yet — click Sync.</p>
+              )}
+            </CardContent>
+          </Card>
+
+          {/* Tag Restore Log — reconnect webhook activity */}
+          <Card>
+            <CardContent className="p-4 space-y-3">
+              <div>
+                <p className="text-sm font-semibold">Tag Restore Log</p>
+                <p className="text-xs text-muted-foreground mt-0.5">
+                  Auto re-tagging when sender accounts reconnect
+                </p>
+              </div>
+              {reconnectLoading ? (
+                <p className="text-xs text-muted-foreground">Loading…</p>
+              ) : reconnectLog.length === 0 ? (
+                <p className="text-xs text-muted-foreground">No reconnect events recorded yet.</p>
+              ) : (
+                <>
+                  {(() => {
+                    const todayStr = new Date().toDateString();
+                    const today = reconnectLog.filter(
+                      (e) => new Date(e.occurred_at).toDateString() === todayStr,
+                    );
+                    const okToday = today.filter((e) => e.status === "ok").length;
+                    const failedToday = today.filter((e) => e.status === "failed").length;
+                    return (
+                      <div className="text-xs text-muted-foreground">
+                        Today: <span className="font-medium text-foreground">{okToday}</span> restored
+                        {failedToday > 0 && (
+                          <span className="text-destructive"> · {failedToday} failed</span>
+                        )}
+                      </div>
+                    );
+                  })()}
+                  <div className="max-h-64 overflow-y-auto border rounded-md divide-y">
+                    {reconnectLog.slice(0, 50).map((e) => (
+                      <div key={e.id} className="px-2.5 py-1.5 text-xs flex items-center gap-2">
+                        <span
+                          className={`shrink-0 rounded-full px-1.5 py-0.5 text-[10px] font-medium ${
+                            e.status === "ok"
+                              ? "bg-emerald-500/15 text-emerald-600 dark:text-emerald-400"
+                              : e.status === "failed"
+                                ? "bg-destructive/15 text-destructive"
+                                : "bg-muted text-muted-foreground"
+                          }`}
+                        >
+                          {e.status === "ok" ? `+${e.tags_restored}` : e.status}
+                        </span>
+                        <span className="truncate flex-1" title={e.sender_email || ""}>
+                          {e.sender_email || "(unknown sender)"}
+                        </span>
+                        <span className="shrink-0 text-muted-foreground/70">{e.instance}</span>
+                        <span className="shrink-0 text-muted-foreground/70">
+                          {new Date(e.occurred_at).toLocaleString(undefined, {
+                            month: "short", day: "numeric", hour: "2-digit", minute: "2-digit",
+                          })}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                </>
               )}
             </CardContent>
           </Card>
