@@ -195,7 +195,6 @@ function DeliverabilityPageInner() {
   const [warmupFilter, setWarmupFilter] = useState<"all" | "open" | "done">("open");
   const [warmupTypeFilter, setWarmupTypeFilter] = useState<"all" | "outlook" | "google">("all");
   const [activeTab, setActiveTab] = useState<"inboxes" | "warmup">("inboxes");
-  const [allTags, setAllTags] = useState<string[]>([]);
   const [savedPage, setSavedPage] = useState<number | null>(null);
   const [domainSearch, setDomainSearch] = useState("");
   const [redirectSearch, setRedirectSearch] = useState("");
@@ -232,6 +231,7 @@ function DeliverabilityPageInner() {
     tagLabel: string;
     tagAffected?: number;
     tagFailed?: number;
+    tagFailedInboxes?: { email: string; domain: string; reason: string }[];
     tagError?: string;
     campaignJobs: AttachJob[];
     campaignsDone: boolean;
@@ -244,6 +244,8 @@ function DeliverabilityPageInner() {
   }
   const [tagCampaignJob, setTagCampaignJob] = useState<TagCampaignJob | null>(null);
   const [domainsCopied, setDomainsCopied] = useState(false);
+  const [showSkippedList, setShowSkippedList] = useState(false);
+  const [skippedCopied, setSkippedCopied] = useState(false);
   const [showExportMenu, setShowExportMenu] = useState(false);
   const [exportCopied, setExportCopied] = useState(false);
   const [showSendToSheet, setShowSendToSheet] = useState(false);
@@ -344,16 +346,6 @@ function DeliverabilityPageInner() {
     } catch {/* ignore */}
   }, [instancesQuery]);
 
-  const loadTags = useCallback(async () => {
-    try {
-      // Tag list is shared across instances (Supabase RPC). Filtering by current
-      // instance is a future polish — for now show all tags.
-      const res = await fetch("/api/deliverability/tags");
-      const data = await res.json();
-      if (Array.isArray(data)) setAllTags(data);
-    } catch {/* ignore */}
-  }, []);
-
   const startBackgroundTagCampaign = useCallback(async (info: TagApplyInfo) => {
     const tagLabel = `${info.mode === "add" ? "Adding" : "Removing"} ${info.tagNames.join(", ")}`;
     const campaignJobs: AttachJob[] = info.campaigns.map((c) => ({ campaign: c.name, status: "pending" as const, newly: 0, existing: 0 }));
@@ -364,6 +356,7 @@ function DeliverabilityPageInner() {
     });
     setSelectedDomains(new Set());
     setDomainsCopied(false);
+    setShowSkippedList(false);
 
     // Run tags + campaigns + sheet append in parallel
     const tagPromise = fetch("/api/deliverability/bulk-tags", {
@@ -373,7 +366,7 @@ function DeliverabilityPageInner() {
     }).then(async (res) => {
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Failed");
-      setTagCampaignJob((prev) => prev ? { ...prev, tagStatus: "done", tagAffected: data.inboxesAffected || 0, tagFailed: data.failed || 0 } : prev);
+      setTagCampaignJob((prev) => prev ? { ...prev, tagStatus: "done", tagAffected: data.inboxesAffected || 0, tagFailed: data.failed || 0, tagFailedInboxes: data.failedInboxes || [] } : prev);
     }).catch((err) => {
       setTagCampaignJob((prev) => prev ? { ...prev, tagStatus: "error", tagError: err instanceof Error ? err.message : "Failed" } : prev);
     });
@@ -434,8 +427,7 @@ function DeliverabilityPageInner() {
 
     await Promise.all([tagPromise, campaignPromise, sheetPromise]);
     loadDomains();
-    loadTags();
-  }, [loadDomains, loadTags]);
+  }, [loadDomains]);
 
   const startBackgroundSheetAppend = useCallback(async (doms: string[], clientTag: string) => {
     setSheetAppendJob({ status: "running", label: `Sending ${doms.length} domains to ${clientTag} sheet...` });
@@ -465,8 +457,7 @@ function DeliverabilityPageInner() {
   useEffect(() => {
     loadDomains();
     loadStats();
-    loadTags();
-  }, [loadDomains, loadStats, loadTags]);
+  }, [loadDomains, loadStats]);
 
   // Use ref for progress so parallel stream closures always see latest values
   const progressRef = useRef({ synced: 0, pagesProcessed: 0, lastPage: 0 });
@@ -583,7 +574,6 @@ function DeliverabilityPageInner() {
 
       await loadDomains();
       await loadStats();
-      await loadTags();
     } finally {
       setSyncing(false);
       setSyncProgress(null);
@@ -974,6 +964,18 @@ function DeliverabilityPageInner() {
   const flaggedCount = useMemo(() => domains.filter(isDomainFlagged).length, [domains, isDomainFlagged]);
   const healthyCount = useMemo(() => domains.filter((d) => !isDomainFlagged(d)).length, [domains, isDomainFlagged]);
 
+  // Tag filter options — derived from the already-loaded domains so the dropdown
+  // is always populated (no dependency on a separate, sometimes-slow RPC call).
+  const allTags = useMemo(() => {
+    const set = new Set<string>();
+    for (const d of domains) {
+      for (const t of d.tags || []) {
+        if (t) set.add(t);
+      }
+    }
+    return Array.from(set).sort((a, b) => a.localeCompare(b));
+  }, [domains]);
+
   // Warmup-specific reserve count (only warmup-complete domains)
   const warmupReserveCount = useMemo(() => {
     return domains
@@ -1153,7 +1155,12 @@ function DeliverabilityPageInner() {
                 <span className="shrink-0 ml-auto text-emerald-500">
                   {tagCampaignJob.tagAffected} inboxes
                   {(tagCampaignJob.tagFailed ?? 0) > 0 && (
-                    <span className="text-amber-500"> ({tagCampaignJob.tagFailed} skipped)</span>
+                    <button
+                      onClick={() => setShowSkippedList((v) => !v)}
+                      className="text-amber-500 hover:underline"
+                    >
+                      {" "}({tagCampaignJob.tagFailed} skipped — {showSkippedList ? "hide" : "view"})
+                    </button>
                   )}
                 </span>
               )}
@@ -1190,6 +1197,37 @@ function DeliverabilityPageInner() {
               </div>
             )}
           </div>
+
+          {/* Skipped inboxes detail — disconnected / no-longer-existing accounts */}
+          {showSkippedList && (tagCampaignJob.tagFailedInboxes?.length ?? 0) > 0 && (
+            <div className="mt-2 rounded-lg border border-amber-500/30 bg-amber-500/5">
+              <div className="flex items-center justify-between px-3 py-1.5 border-b border-amber-500/20">
+                <span className="text-[11px] font-medium text-amber-500">
+                  {tagCampaignJob.tagFailedInboxes!.length} inboxes skipped — likely disconnected or no longer in the email tool
+                </span>
+                <button
+                  onClick={() => {
+                    navigator.clipboard.writeText(
+                      tagCampaignJob.tagFailedInboxes!.map((f) => f.email).join("\n")
+                    );
+                    setSkippedCopied(true);
+                    setTimeout(() => setSkippedCopied(false), 2000);
+                  }}
+                  className="text-[11px] text-primary hover:underline shrink-0 ml-2"
+                >
+                  {skippedCopied ? "Copied!" : "Copy emails"}
+                </button>
+              </div>
+              <div className="max-h-56 overflow-y-auto divide-y divide-amber-500/10">
+                {tagCampaignJob.tagFailedInboxes!.map((f, i) => (
+                  <div key={`${f.email}-${i}`} className="px-3 py-1.5">
+                    <div className="text-[11px] font-mono text-foreground/80 truncate">{f.email}</div>
+                    <div className="text-[10px] text-muted-foreground/70 truncate">{f.domain} · {f.reason}</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
         </div>
         );
       })()}
@@ -2279,7 +2317,6 @@ function DeliverabilityPageInner() {
         onSuccess={() => {
           loadDomains();
           loadStats();
-          loadTags();
           setSelectedDomains(new Set());
         }}
       />

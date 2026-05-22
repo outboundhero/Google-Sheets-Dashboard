@@ -72,13 +72,13 @@ export async function POST(request: Request) {
     const supabase = getSupabaseAdmin();
 
     // 1. Get all inbox IDs for the selected domains (scoped to this instance, paginated)
-    const inboxes: { id: number; domain: string; tags: Tag[] }[] = [];
+    const inboxes: { id: number; domain: string; email: string; tags: Tag[] }[] = [];
     for (const domain of domains) {
       let offset = 0;
       while (true) {
         const { data, error: inboxError } = await supabase
           .from("deliverability_inboxes")
-          .select("id, domain, tags")
+          .select("id, domain, email, tags")
           .eq("instance", instance)
           .eq("domain", domain)
           .range(offset, offset + 999);
@@ -91,10 +91,11 @@ export async function POST(request: Request) {
     }
 
     if (inboxes.length === 0) {
-      return NextResponse.json({ success: true, inboxesAffected: 0, failed: 0, total: 0 });
+      return NextResponse.json({ success: true, inboxesAffected: 0, failed: 0, total: 0, failedInboxes: [] });
     }
 
     const senderEmailIds = inboxes.map((i) => i.id);
+    const inboxById = new Map(inboxes.map((i) => [i.id, i]));
 
     // 2. Call Bison API to add or remove tags — batched with retry
     const endpoint =
@@ -104,8 +105,12 @@ export async function POST(request: Request) {
 
     const BATCH = 50;
     let updated = 0;
-    let failed = 0;
     const successIds = new Set<number>();
+    // Map of failed inbox id → reason, so we can return the exact skipped list.
+    const failReasons = new Map<number, string>();
+    const markFailed = (ids: number[], reason: string) => {
+      for (const id of ids) failReasons.set(id, reason.slice(0, 300));
+    };
 
     for (let i = 0; i < senderEmailIds.length; i += BATCH) {
       const batch = senderEmailIds.slice(i, i + BATCH);
@@ -144,25 +149,35 @@ export async function POST(request: Request) {
                       body: JSON.stringify({ tag_ids: tagIds, sender_email_ids: [id] }),
                     });
                     if (singleRes.ok) { updated++; successIds.add(id); }
-                    else { failed++; console.warn(`[BULK-TAGS:${instance}] Invalid inbox ID ${id}, skipping`); }
-                  } catch { failed++; }
+                    else {
+                      const sErr = await singleRes.text().catch(() => "");
+                      markFailed([id], `Bison ${singleRes.status}: ${sErr || "rejected (likely disconnected / no longer exists)"}`);
+                      console.warn(`[BULK-TAGS:${instance}] Invalid inbox ID ${id}, skipping`);
+                    }
+                  } catch (e) {
+                    markFailed([id], `Network error: ${e instanceof Error ? e.message : "request failed"}`);
+                  }
                 }
               }
-            } catch { failed += sub.length; }
+            } catch (e) {
+              markFailed(sub, `Network error: ${e instanceof Error ? e.message : "request failed"}`);
+            }
             await delay(200);
           }
         } else {
           const errText = await res.text().catch(() => "");
           console.error(`[BULK-TAGS:${instance}] Batch ${i}-${i + batch.length}: ${res.status} ${errText.slice(0, 200)}`);
-          failed += batch.length;
+          markFailed(batch, `Bison ${res.status}: ${errText || "batch rejected"}`);
         }
       } catch (e) {
         console.error(`[BULK-TAGS:${instance}] Batch ${i}-${i + batch.length} network error:`, e);
-        failed += batch.length;
+        markFailed(batch, `Network error: ${e instanceof Error ? e.message : "request failed"}`);
       }
 
       if (i + BATCH < senderEmailIds.length) await delay(300);
     }
+
+    const failed = failReasons.size;
 
     // 3. Fetch the tag objects for the IDs we're working with (from this instance)
     const tagsRes = await bisonFetch(instance, `/tags`);
@@ -224,12 +239,25 @@ export async function POST(request: Request) {
         .eq("domain", domain);
     }
 
+    // Build the skipped-inbox list (email + domain + reason) for the UI.
+    const failedInboxes = Array.from(failReasons.entries())
+      .map(([id, reason]) => {
+        const inbox = inboxById.get(id);
+        return {
+          email: inbox?.email || `inbox #${id}`,
+          domain: inbox?.domain || "",
+          reason,
+        };
+      })
+      .sort((a, b) => a.domain.localeCompare(b.domain) || a.email.localeCompare(b.email));
+
     return NextResponse.json({
       success: true,
       inboxesAffected: updated,
       failed,
       total: senderEmailIds.length,
       instance,
+      failedInboxes,
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Failed";
