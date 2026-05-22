@@ -182,7 +182,8 @@ function DeliverabilityPageInner() {
   const searchParams = useSearchParams();
   const { role } = useAuth();
   const isAdmin = role === "admin";
-  const { instancesQuery } = useInstance();
+  const { instancesQuery, instances } = useInstance();
+  const [bisonTags, setBisonTags] = useState<string[]>([]);
   const [domains, setDomains] = useState<DomainRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [syncing, setSyncing] = useState(false);
@@ -346,6 +347,28 @@ function DeliverabilityPageInner() {
     } catch {/* ignore */}
   }, [instancesQuery]);
 
+  // Pull the full tag list straight from each selected Bison instance — the
+  // authoritative source — so the filter dropdown shows every tag that exists,
+  // not just ones currently applied to loaded domains.
+  const loadTags = useCallback(async () => {
+    try {
+      const results = await Promise.all(
+        instances.map((inst) =>
+          fetch(`/api/deliverability/bulk-tags?instance=${encodeURIComponent(inst.slug)}`)
+            .then((r) => r.json())
+            .catch(() => ({ tags: [] }))
+        )
+      );
+      const set = new Set<string>();
+      for (const r of results) {
+        for (const t of (r?.tags || []) as { name?: string }[]) {
+          if (t?.name) set.add(t.name);
+        }
+      }
+      setBisonTags(Array.from(set));
+    } catch {/* ignore */}
+  }, [instances]);
+
   const startBackgroundTagCampaign = useCallback(async (info: TagApplyInfo) => {
     const tagLabel = `${info.mode === "add" ? "Adding" : "Removing"} ${info.tagNames.join(", ")}`;
     const campaignJobs: AttachJob[] = info.campaigns.map((c) => ({ campaign: c.name, status: "pending" as const, newly: 0, existing: 0 }));
@@ -427,7 +450,8 @@ function DeliverabilityPageInner() {
 
     await Promise.all([tagPromise, campaignPromise, sheetPromise]);
     loadDomains();
-  }, [loadDomains]);
+    loadTags();
+  }, [loadDomains, loadTags]);
 
   const startBackgroundSheetAppend = useCallback(async (doms: string[], clientTag: string) => {
     setSheetAppendJob({ status: "running", label: `Sending ${doms.length} domains to ${clientTag} sheet...` });
@@ -457,7 +481,8 @@ function DeliverabilityPageInner() {
   useEffect(() => {
     loadDomains();
     loadStats();
-  }, [loadDomains, loadStats]);
+    loadTags();
+  }, [loadDomains, loadStats, loadTags]);
 
   // Use ref for progress so parallel stream closures always see latest values
   const progressRef = useRef({ synced: 0, pagesProcessed: 0, lastPage: 0 });
@@ -964,17 +989,21 @@ function DeliverabilityPageInner() {
   const flaggedCount = useMemo(() => domains.filter(isDomainFlagged).length, [domains, isDomainFlagged]);
   const healthyCount = useMemo(() => domains.filter((d) => !isDomainFlagged(d)).length, [domains, isDomainFlagged]);
 
-  // Tag filter options — derived from the already-loaded domains so the dropdown
-  // is always populated (no dependency on a separate, sometimes-slow RPC call).
+  // Tag filter options — union of (a) every tag defined in the selected Bison
+  // instances and (b) tags on the currently-loaded domains as a fallback. This
+  // shows tags even when no loaded domain currently carries them.
   const allTags = useMemo(() => {
     const set = new Set<string>();
+    for (const t of bisonTags) {
+      if (t) set.add(t);
+    }
     for (const d of domains) {
       for (const t of d.tags || []) {
         if (t) set.add(t);
       }
     }
     return Array.from(set).sort((a, b) => a.localeCompare(b));
-  }, [domains]);
+  }, [bisonTags, domains]);
 
   // Warmup-specific reserve count (only warmup-complete domains)
   const warmupReserveCount = useMemo(() => {
