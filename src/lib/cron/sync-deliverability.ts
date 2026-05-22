@@ -60,6 +60,39 @@ async function setCursor(instance: BisonInstanceSlug, page: number): Promise<voi
   await redis.set(cursorKey(instance), page);
 }
 
+// --- Pruning-pass tracking ----------------------------------------------------
+// A "pass" = one full crawl of an instance's inboxes (cursor 1 -> lastPage),
+// which may span several cron runs. Every synced row is stamped with synced_at;
+// rows not re-stamped during a clean, complete pass are stale (deleted in
+// Bison) and get pruned. `clean` flips false if any page/upsert error occurs.
+interface PassState {
+  startedAt: string;
+  clean: boolean;
+}
+
+function passKey(instance: BisonInstanceSlug): string {
+  return `cron:deliverability:pass:${instance}`;
+}
+
+async function getPass(instance: BisonInstanceSlug): Promise<PassState | null> {
+  const redis = getRedis();
+  if (!redis) return null;
+  const val = await redis.get<PassState>(passKey(instance));
+  return val && typeof val.startedAt === "string" ? val : null;
+}
+
+async function setPass(instance: BisonInstanceSlug, state: PassState): Promise<void> {
+  const redis = getRedis();
+  if (!redis) return;
+  await redis.set(passKey(instance), state);
+}
+
+async function clearPass(instance: BisonInstanceSlug): Promise<void> {
+  const redis = getRedis();
+  if (!redis) return;
+  await redis.del(passKey(instance));
+}
+
 async function fetchPage(
   instance: BisonInstanceSlug,
   page: number,
@@ -78,12 +111,17 @@ export async function runDeliverabilitySync(instance: BisonInstanceSlug): Promis
 
   try {
     const startPage = await getCursor(instance);
+    // A cursor at page 1 starts a fresh pruning pass.
+    if (startPage === 1) {
+      await setPass(instance, { startedAt: new Date().toISOString(), clean: true });
+    }
     const first = await fetchPage(instance, startPage);
     const lastPage = first.lastPage;
     const collected: SenderEmail[] = [...first.data];
 
     let nextPage = startPage + 1;
     let stoppedForRateLimit = false;
+    let hadError = false;
     while (nextPage <= lastPage && Date.now() < deadline) {
       const batchEnd = Math.min(nextPage + CONCURRENT - 1, lastPage);
       const pages: number[] = [];
@@ -96,7 +134,10 @@ export async function runDeliverabilitySync(instance: BisonInstanceSlug): Promis
         } else {
           const reasonStr = String(r.reason);
           if (reasonStr.includes("429")) sawRateLimit = true;
-          else console.error(`[cron/deliverability:${instance}] page fetch failed:`, r.reason);
+          else {
+            hadError = true;
+            console.error(`[cron/deliverability:${instance}] page fetch failed:`, r.reason);
+          }
         }
       }
       if (sawRateLimit) {
@@ -166,23 +207,70 @@ export async function runDeliverabilitySync(instance: BisonInstanceSlug): Promis
       const { error } = await supabase
         .from("deliverability_inboxes")
         .upsert(inboxRows.slice(i, i + 500), { onConflict: "instance,id", ignoreDuplicates: false });
-      if (error) console.error(`[cron/deliverability:${instance}] inbox upsert failed:`, error.message);
+      if (error) {
+        hadError = true;
+        console.error(`[cron/deliverability:${instance}] inbox upsert failed:`, error.message);
+      }
     }
 
-    // Advance cursor; rebuild stats only after a full pass for this instance.
+    // Advance cursor; prune stale rows + rebuild stats after a full pass.
     let statsRebuilt = false;
+    let pruned = 0;
     if (completedFullPass) {
       await setCursor(instance, 1);
+
+      // Prune inboxes that no longer exist in Bison: rows for this instance not
+      // re-stamped during this pass (synced_at older than the pass start).
+      // Only runs after a clean, error-free pass, and bails if it would delete
+      // an implausibly large share — a guard against a bad/partial Bison crawl.
+      const pass = await getPass(instance);
+      if (pass?.startedAt && pass.clean && !hadError) {
+        const { count: totalCount } = await supabase
+          .from("deliverability_inboxes")
+          .select("id", { count: "exact", head: true })
+          .eq("instance", instance);
+        const { count: staleCount } = await supabase
+          .from("deliverability_inboxes")
+          .select("id", { count: "exact", head: true })
+          .eq("instance", instance)
+          .lt("synced_at", pass.startedAt);
+        const total = totalCount ?? 0;
+        const stale = staleCount ?? 0;
+        if (stale > 0 && total > 0 && stale / total <= 0.4) {
+          const { error: delErr, count: delCount } = await supabase
+            .from("deliverability_inboxes")
+            .delete({ count: "exact" })
+            .eq("instance", instance)
+            .lt("synced_at", pass.startedAt);
+          if (delErr) console.error(`[cron/deliverability:${instance}] prune failed:`, delErr.message);
+          else pruned = delCount ?? 0;
+        } else if (stale > 0) {
+          console.warn(
+            `[cron/deliverability:${instance}] prune skipped — ${stale}/${total} stale exceeds 40% safety cap`,
+          );
+        }
+      } else if (pass) {
+        console.warn(`[cron/deliverability:${instance}] prune skipped — pass had fetch/upsert errors`);
+      }
+      await clearPass(instance);
+
+      // rebuild_domain_stats recomputes inbox_count and drops orphan domains —
+      // run it AFTER the prune so counts reflect the cleaned-up inbox set.
       const { error: rpcErr } = await supabase.rpc("rebuild_domain_stats");
       if (rpcErr) console.error(`[cron/deliverability:${instance}] rebuild_domain_stats failed:`, rpcErr.message);
       else statsRebuilt = true;
     } else {
       await setCursor(instance, nextPage);
+      // Carry an error forward so the run that completes the pass skips pruning.
+      if (hadError) {
+        const pass = await getPass(instance);
+        if (pass && pass.clean) await setPass(instance, { ...pass, clean: false });
+      }
     }
 
     const durationMs = Date.now() - t0;
     console.log(
-      `[cron/deliverability:${instance}] pages=${startPage}-${nextPage - 1}/${lastPage} inboxes=${inboxRows.length} domains=${domainRows.length} fullPass=${completedFullPass} statsRebuilt=${statsRebuilt} duration=${durationMs}ms`,
+      `[cron/deliverability:${instance}] pages=${startPage}-${nextPage - 1}/${lastPage} inboxes=${inboxRows.length} domains=${domainRows.length} fullPass=${completedFullPass} pruned=${pruned} statsRebuilt=${statsRebuilt} duration=${durationMs}ms`,
     );
     return NextResponse.json({
       instance,
@@ -192,6 +280,7 @@ export async function runDeliverabilitySync(instance: BisonInstanceSlug): Promis
       inboxes: inboxRows.length,
       domains: domainRows.length,
       completedFullPass,
+      pruned,
       statsRebuilt,
       nextCursor: completedFullPass ? 1 : nextPage,
       durationMs,
