@@ -1,4 +1,7 @@
-const PER_DOMAIN_TIMEOUT_MS = 8000;
+// Total wall-clock budget for resolving ONE domain (across every hop and both
+// schemes). Keeps a batch of these well under the 60s serverless limit.
+const TOTAL_BUDGET_MS = 10000;
+const PER_HOP_CAP_MS = 7000;
 const MAX_HOPS = 6;
 // A real browser UA — Cloudflare-fronted forwarding domains challenge/block
 // obvious bot agents, which would hide the redirect entirely.
@@ -26,13 +29,15 @@ function hostOf(url: string): string | null {
  * already in the first hop's Location header, so we never need to load the
  * (possibly blocked) destination.
  */
-async function walkRedirects(startUrl: string): Promise<string> {
+async function walkRedirects(startUrl: string, deadline: number): Promise<string> {
   let currentUrl = startUrl;
   for (let hop = 0; hop < MAX_HOPS; hop++) {
+    const remaining = deadline - Date.now();
+    if (remaining <= 250) break; // out of budget — stop with whatever we have
     const res = await fetch(currentUrl, {
       method: "GET",
       redirect: "manual",
-      signal: AbortSignal.timeout(PER_DOMAIN_TIMEOUT_MS),
+      signal: AbortSignal.timeout(Math.min(PER_HOP_CAP_MS, remaining)),
       headers: {
         "User-Agent": BROWSER_UA,
         Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
@@ -56,12 +61,14 @@ async function walkRedirects(startUrl: string): Promise<string> {
 export async function resolveRedirect(rawDomain: string): Promise<ResolveResult> {
   const domain = rawDomain.trim().toLowerCase();
   const startHost = hostOf(`http://${domain}`);
+  const deadline = Date.now() + TOTAL_BUDGET_MS;
   let reachable = false;
   let lastError = "Could not reach domain";
 
   for (const scheme of ["https", "http"] as const) {
+    if (Date.now() >= deadline) break;
     try {
-      const finalUrl = await walkRedirects(`${scheme}://${domain}`);
+      const finalUrl = await walkRedirects(`${scheme}://${domain}`, deadline);
       const finalHost = hostOf(finalUrl);
       if (finalHost && startHost && finalHost !== startHost) {
         return { domain, redirectUrl: finalUrl, error: null };

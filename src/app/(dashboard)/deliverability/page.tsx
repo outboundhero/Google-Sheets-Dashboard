@@ -812,12 +812,13 @@ function DeliverabilityPageInner() {
     setRedirectCheckJob({ status: "running", checked: 0, total: domainList.length, redirects: 0 });
     setSelectedDomains(new Set());
 
-    const CHUNK = 50;
+    const CHUNK = 25;
     let checked = 0;
     let redirects = 0;
-    try {
-      for (let i = 0; i < domainList.length; i += CHUNK) {
-        const slice = domainList.slice(i, i + CHUNK);
+    let failedChunks = 0;
+    for (let i = 0; i < domainList.length; i += CHUNK) {
+      const slice = domainList.slice(i, i + CHUNK);
+      try {
         const res = await fetch("/api/deliverability/check-redirects", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -831,14 +832,22 @@ function DeliverabilityPageInner() {
         const results: { redirectUrl: string | null }[] = data.results || [];
         checked += results.length;
         redirects += results.filter((r) => r.redirectUrl).length;
-        setRedirectCheckJob({ status: "running", checked, total: domainList.length, redirects });
+      } catch {
+        // A chunk failing (timeout, network) shouldn't abort the whole run —
+        // count it and keep going so the rest still get checked.
+        failedChunks++;
+        checked += slice.length;
       }
-      setRedirectCheckJob({ status: "done", checked, total: domainList.length, redirects });
-      loadDomains();
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : "Failed";
-      setRedirectCheckJob({ status: "error", checked, total: domainList.length, redirects, error: msg });
+      setRedirectCheckJob({ status: "running", checked, total: domainList.length, redirects });
     }
+    setRedirectCheckJob({
+      status: failedChunks > 0 ? "error" : "done",
+      checked,
+      total: domainList.length,
+      redirects,
+      error: failedChunks > 0 ? `${failedChunks} batch${failedChunks !== 1 ? "es" : ""} failed — re-run to retry those` : undefined,
+    });
+    loadDomains();
   }, [loadDomains]);
 
   // Drag-to-select: track by index range so fast scrolling doesn't skip rows
