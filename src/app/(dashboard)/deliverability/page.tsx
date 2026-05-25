@@ -334,8 +334,9 @@ function DeliverabilityPageInner() {
 
   const loadDomains = useCallback(async () => {
     setLoading(true);
+    setDomains([]);
     try {
-      const res = await fetch(`/api/deliverability/domains?${instancesQuery}`);
+      const res = await fetch(`/api/deliverability/domains?${instancesQuery}`, { cache: "no-store" });
       const data = await res.json();
       setDomains(Array.isArray(data) ? data : []);
     } catch { /* ignore */ } finally {
@@ -344,8 +345,9 @@ function DeliverabilityPageInner() {
   }, [instancesQuery]);
 
   const loadStats = useCallback(async () => {
+    setSyncStats(null);
     try {
-      const res = await fetch(`/api/deliverability/sync?${instancesQuery}`);
+      const res = await fetch(`/api/deliverability/sync?${instancesQuery}`, { cache: "no-store" });
       const data = await res.json();
       setSyncStats(data);
     } catch {/* ignore */}
