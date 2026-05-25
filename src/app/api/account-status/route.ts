@@ -84,6 +84,10 @@ export async function buildAccountStatusReport(pstDate: string): Promise<Account
     .order("detected_at", { ascending: true });
   if (dErr) throw new Error(`disconnect_events: ${dErr.message}`);
 
+  // reconnect_tag_log is populated by the existing /api/webhooks/bison-reconnect
+  // handler. If the table doesn't exist yet (or rows haven't been written), treat
+  // reconnects as empty so the dashboard still renders — everything will just
+  // show as "failed" until the table is created and reconnects start landing.
   const { data: reconnects, error: rErr } = await supabase
     .from("reconnect_tag_log")
     .select("id, instance, sender_id, sender_email, status, occurred_at")
@@ -91,7 +95,9 @@ export async function buildAccountStatusReport(pstDate: string): Promise<Account
     .gte("occurred_at", startUtc)
     .lt("occurred_at", endUtc)
     .order("occurred_at", { ascending: true });
-  if (rErr) throw new Error(`reconnect_tag_log: ${rErr.message}`);
+  if (rErr) {
+    console.warn(`[account-status] reconnect_tag_log unavailable: ${rErr.message} — treating reconnects as empty`);
+  }
 
   // Index reconnects by (instance, sender_id) → earliest reconnect of the day.
   const reconnectByKey = new Map<string, ReconnectRow>();
