@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { getSupabaseAdmin } from "@/lib/supabase";
-import { bisonFetch, resolveInstance } from "@/lib/bison";
-import type { BisonInstanceSlug } from "@/lib/bison-instances";
+import { bisonFetch, resolveInstances } from "@/lib/bison";
+import { isInstanceSlug, type BisonInstanceSlug } from "@/lib/bison-instances";
 
 export const maxDuration = 300;
 
@@ -71,104 +71,129 @@ async function discoverCampaigns(instance: BisonInstanceSlug, inboxIds: number[]
 }
 
 /**
- * POST /api/deliverability/remove-from-campaigns?instance=<slug>
+ * POST /api/deliverability/remove-from-campaigns?instances=<csv>
  *
  * Phase 1 — Discover: { domains: string[], discover: true }
- *   Returns list of campaigns the inboxes are in (for user to select from)
+ *   Returns list of campaigns the inboxes are in across the requested instances.
+ *   Each returned campaign carries its source instance.
  *
- * Phase 2 — Remove: { domains: string[], campaignIds: number[] }
- *   Removes inboxes from the selected campaigns (pause → remove → resume)
+ * Phase 2 — Remove: { domains: string[], campaigns: { id: number; instance: string }[] }
+ *   Removes inboxes from the selected campaigns on each campaign's own instance
+ *   (pause → remove → resume).
  */
 export async function POST(request: Request) {
   try {
     const { searchParams } = new URL(request.url);
-    const instance = resolveInstance(searchParams.get("instance"));
+    const instances = resolveInstances(searchParams);
     const body = await request.json();
-    const { domains, discover, campaignIds } = body as {
+    const { domains, discover, campaigns: removeCampaigns } = body as {
       domains: string[];
       discover?: boolean;
-      campaignIds?: number[];
+      campaigns?: { id: number; instance: string }[];
     };
 
     if (!domains?.length) {
       return NextResponse.json({ error: "domains required" }, { status: 400 });
     }
 
-    const inboxIds = await getInboxIdsForDomains(instance, domains);
-    if (inboxIds.length === 0) {
-      return NextResponse.json(discover ? { campaigns: [], inboxCount: 0 } : { inboxes: 0, campaigns: 0, removed: 0 });
-    }
-
-    const campaignMap = await discoverCampaigns(instance, inboxIds);
-
-    // ─── Phase 1: Discover ───
+    // Discover phase: scan each instance for inboxes + campaigns, merge results.
     if (discover) {
-      const campaigns = Array.from(campaignMap.entries())
-        .map(([id, info]) => ({
-          id,
-          name: info.name,
-          status: info.status,
-          inboxCount: info.inboxIds.length,
-        }))
-        .sort((a, b) => a.name.localeCompare(b.name));
-
-      return NextResponse.json({ campaigns, inboxCount: inboxIds.length, instance });
+      type Discovered = {
+        id: number;
+        instance: BisonInstanceSlug;
+        name: string;
+        status: string;
+        inboxCount: number;
+      };
+      const all: Discovered[] = [];
+      let totalInboxes = 0;
+      for (const inst of instances) {
+        const inboxIds = await getInboxIdsForDomains(inst, domains);
+        if (inboxIds.length === 0) continue;
+        totalInboxes += inboxIds.length;
+        const campaignMap = await discoverCampaigns(inst, inboxIds);
+        for (const [id, info] of campaignMap) {
+          all.push({
+            id,
+            instance: inst,
+            name: info.name,
+            status: info.status,
+            inboxCount: info.inboxIds.length,
+          });
+        }
+      }
+      all.sort((a, b) => a.name.localeCompare(b.name));
+      return NextResponse.json({ campaigns: all, inboxCount: totalInboxes });
     }
 
     // ─── Phase 2: Remove from selected campaigns ───
-    if (!campaignIds?.length) {
-      return NextResponse.json({ error: "campaignIds required" }, { status: 400 });
+    if (!removeCampaigns?.length) {
+      return NextResponse.json({ error: "campaigns required" }, { status: 400 });
     }
 
-    const selectedCampaignIds = new Set(campaignIds);
     let totalRemoved = 0;
+    let totalInboxes = 0;
     const details: { id: number; name: string; removed: number; error?: string }[] = [];
 
-    for (const [campaignId, info] of campaignMap) {
-      if (!selectedCampaignIds.has(campaignId)) continue;
+    // Group selected campaigns by their instance, then process each instance once.
+    const byInstance = new Map<BisonInstanceSlug, Set<number>>();
+    for (const c of removeCampaigns) {
+      if (!isInstanceSlug(c.instance)) continue;
+      if (!byInstance.has(c.instance)) byInstance.set(c.instance, new Set());
+      byInstance.get(c.instance)!.add(c.id);
+    }
 
-      const wasActive = info.status.toLowerCase() === "active";
+    for (const [inst, selectedIds] of byInstance) {
+      const inboxIds = await getInboxIdsForDomains(inst, domains);
+      if (inboxIds.length === 0) continue;
+      totalInboxes += inboxIds.length;
+      const campaignMap = await discoverCampaigns(inst, inboxIds);
 
-      try {
-        if (wasActive) {
-          await bisonFetch(instance, `/campaigns/${campaignId}/pause`, { method: "PATCH" });
-          await delay(500);
-        }
+      for (const [campaignId, info] of campaignMap) {
+        if (!selectedIds.has(campaignId)) continue;
 
-        let removed = 0;
-        for (let i = 0; i < info.inboxIds.length; i += 100) {
-          const batch = info.inboxIds.slice(i, i + 100);
-          const res = await bisonFetch(instance, `/campaigns/${campaignId}/remove-sender-emails`, {
-            method: "DELETE",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ sender_email_ids: batch }),
-          });
-          if (res.ok) removed += batch.length;
-          if (i + 100 < info.inboxIds.length) await delay(200);
-        }
+        const wasActive = info.status.toLowerCase() === "active";
 
-        if (wasActive) {
-          await delay(500);
-          await bisonFetch(instance, `/campaigns/${campaignId}/resume`, { method: "PATCH" });
-        }
+        try {
+          if (wasActive) {
+            await bisonFetch(inst, `/campaigns/${campaignId}/pause`, { method: "PATCH" });
+            await delay(500);
+          }
 
-        totalRemoved += removed;
-        details.push({ id: campaignId, name: info.name, removed });
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        details.push({ id: campaignId, name: info.name, removed: 0, error: msg });
-        if (wasActive) {
-          try { await bisonFetch(instance, `/campaigns/${campaignId}/resume`, { method: "PATCH" }); } catch { /* best effort */ }
+          let removed = 0;
+          for (let i = 0; i < info.inboxIds.length; i += 100) {
+            const batch = info.inboxIds.slice(i, i + 100);
+            const res = await bisonFetch(inst, `/campaigns/${campaignId}/remove-sender-emails`, {
+              method: "DELETE",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ sender_email_ids: batch }),
+            });
+            if (res.ok) removed += batch.length;
+            if (i + 100 < info.inboxIds.length) await delay(200);
+          }
+
+          if (wasActive) {
+            await delay(500);
+            await bisonFetch(inst, `/campaigns/${campaignId}/resume`, { method: "PATCH" });
+          }
+
+          totalRemoved += removed;
+          details.push({ id: campaignId, name: info.name, removed });
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          details.push({ id: campaignId, name: info.name, removed: 0, error: msg });
+          if (wasActive) {
+            try { await bisonFetch(inst, `/campaigns/${campaignId}/resume`, { method: "PATCH" }); } catch { /* best effort */ }
+          }
         }
       }
     }
 
     return NextResponse.json({
-      inboxes: inboxIds.length,
+      inboxes: totalInboxes,
       campaigns: details.length,
       removed: totalRemoved,
       details,
-      instance,
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Failed";

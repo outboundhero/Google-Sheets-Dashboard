@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { getSupabaseAdmin } from "@/lib/supabase";
 import { bisonFetch, resolveInstance } from "@/lib/bison";
-import type { BisonInstanceSlug } from "@/lib/bison-instances";
+import { isInstanceSlug, type BisonInstanceSlug } from "@/lib/bison-instances";
 
 const PER_PAGE = 15;
 const CONCURRENT = 3;
@@ -201,8 +201,28 @@ export async function PUT() {
 export async function GET(request: Request) {
   try {
     const { searchParams } = new URL(request.url);
+    const instancesParam = searchParams.get("instances");
     const instanceParam = searchParams.get("instance");
     const supabase = getSupabaseAdmin();
+
+    // Multi-instance: ?instances=outboundhero,cleaningoutbound
+    if (instancesParam) {
+      const slugs = instancesParam
+        .split(",")
+        .map((s) => s.trim())
+        .filter(isInstanceSlug);
+      if (slugs.length > 0) {
+        const { count: inboxCount } = await supabase
+          .from("deliverability_inboxes")
+          .select("*", { count: "exact", head: true })
+          .in("instance", slugs);
+        const { count: domainCount } = await supabase
+          .from("deliverability_domains")
+          .select("*", { count: "exact", head: true })
+          .in("instance", slugs);
+        return NextResponse.json({ inboxCount, domainCount, instances: slugs });
+      }
+    }
 
     if (instanceParam) {
       const instance = resolveInstance(instanceParam);

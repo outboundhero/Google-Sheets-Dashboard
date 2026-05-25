@@ -7,6 +7,8 @@ import {
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { AlertTriangle, Check, CheckCircle2, Loader2, Search, X, XCircle } from "lucide-react";
+import { useInstance } from "@/lib/instance-context";
+import type { BisonInstanceSlug } from "@/lib/bison-instances";
 
 interface Props {
   open: boolean;
@@ -17,6 +19,7 @@ interface Props {
 
 interface CampaignInfo {
   id: number;
+  instance: BisonInstanceSlug;
   name: string;
   status: string;
   inboxCount: number;
@@ -39,6 +42,7 @@ const STATUS_COLORS: Record<string, string> = {
 };
 
 export function RemoveFromCampaignsDialog({ open, onOpenChange, selectedDomains, onComplete }: Props) {
+  const { instancesQuery } = useInstance();
   const [phase, setPhase] = useState<Phase>("loading");
   const [campaigns, setCampaigns] = useState<CampaignInfo[]>([]);
   const [selectedCampaignIds, setSelectedCampaignIds] = useState<Set<number>>(new Set());
@@ -56,7 +60,7 @@ export function RemoveFromCampaignsDialog({ open, onOpenChange, selectedDomains,
     setResult(null);
     setError("");
 
-    fetch("/api/deliverability/remove-from-campaigns", {
+    fetch(`/api/deliverability/remove-from-campaigns?${instancesQuery}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ domains: selectedDomains, discover: true }),
@@ -70,7 +74,7 @@ export function RemoveFromCampaignsDialog({ open, onOpenChange, selectedDomains,
         setPhase(camps.length === 0 ? "done" : "select");
       })
       .catch((err) => { setError(err.message || "Failed to discover campaigns"); setPhase("done"); });
-  }, [open, selectedDomains]);
+  }, [open, selectedDomains, instancesQuery]);
 
   const filtered = useMemo(() => {
     if (!search) return campaigns;
@@ -111,12 +115,12 @@ export function RemoveFromCampaignsDialog({ open, onOpenChange, selectedDomains,
     setResult(null);
 
     try {
-      const res = await fetch("/api/deliverability/remove-from-campaigns", {
+      const res = await fetch(`/api/deliverability/remove-from-campaigns?${instancesQuery}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           domains: selectedDomains,
-          campaignIds: Array.from(selectedCampaignIds),
+          campaigns: selectedCampaigns.map((c) => ({ id: c.id, instance: c.instance })),
         }),
       });
       const data = await res.json();
