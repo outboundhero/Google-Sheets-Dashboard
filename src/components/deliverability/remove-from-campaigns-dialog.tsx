@@ -6,7 +6,7 @@ import {
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { AlertTriangle, Check, CheckCircle2, Loader2, Search, X, XCircle } from "lucide-react";
+import { AlertTriangle, Check, CheckCircle2, Loader2, Plus, Search, X, XCircle } from "lucide-react";
 import { useInstance } from "@/lib/instance-context";
 import type { BisonInstanceSlug } from "@/lib/bison-instances";
 
@@ -22,7 +22,15 @@ interface CampaignInfo {
   instance: BisonInstanceSlug;
   name: string;
   status: string;
-  inboxCount: number;
+  inboxCount: number; // 0 for manually-added (unknown until removal)
+  source: "auto" | "manual";
+}
+
+interface AllCampaign {
+  id: number;
+  instance: BisonInstanceSlug;
+  name: string;
+  status: string;
 }
 
 interface Result {
@@ -44,47 +52,88 @@ const STATUS_COLORS: Record<string, string> = {
 export function RemoveFromCampaignsDialog({ open, onOpenChange, selectedDomains, onComplete }: Props) {
   const { instancesQuery } = useInstance();
   const [phase, setPhase] = useState<Phase>("loading");
-  const [campaigns, setCampaigns] = useState<CampaignInfo[]>([]);
+  const [autoCampaigns, setAutoCampaigns] = useState<CampaignInfo[]>([]);
+  const [manualCampaigns, setManualCampaigns] = useState<CampaignInfo[]>([]);
+  const [allCampaigns, setAllCampaigns] = useState<AllCampaign[]>([]);
   const [selectedCampaignIds, setSelectedCampaignIds] = useState<Set<number>>(new Set());
   const [search, setSearch] = useState("");
   const [result, setResult] = useState<Result | null>(null);
   const [error, setError] = useState("");
 
-  // Discover campaigns when dialog opens
+  // On open: auto-discover campaigns the domains are attached to, AND load the full
+  // campaign list for the current group so the user can manually add ones the
+  // discovery missed.
   useEffect(() => {
     if (!open || selectedDomains.length === 0) return;
     setPhase("loading");
-    setCampaigns([]);
+    setAutoCampaigns([]);
+    setManualCampaigns([]);
+    setAllCampaigns([]);
     setSelectedCampaignIds(new Set());
     setSearch("");
     setResult(null);
     setError("");
 
-    fetch(`/api/deliverability/remove-from-campaigns?${instancesQuery}`, {
+    const discoverP = fetch(`/api/deliverability/remove-from-campaigns?${instancesQuery}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ domains: selectedDomains, discover: true }),
     })
       .then((r) => r.json())
       .then((data) => {
-        if (data.error) { setError(data.error); setPhase("done"); return; }
-        const camps = data.campaigns || [];
-        setCampaigns(camps);
-        setSelectedCampaignIds(new Set(camps.map((c: CampaignInfo) => c.id)));
-        setPhase(camps.length === 0 ? "done" : "select");
+        if (data.error) throw new Error(data.error);
+        const camps: CampaignInfo[] = (data.campaigns || []).map(
+          (c: Omit<CampaignInfo, "source">) => ({ ...c, source: "auto" as const })
+        );
+        setAutoCampaigns(camps);
+        setSelectedCampaignIds(new Set(camps.map((c) => c.id)));
+      });
+
+    const allP = fetch(`/api/campaigns?all=1&${instancesQuery}`)
+      .then((r) => r.json())
+      .then((data) => {
+        const camps: AllCampaign[] = (data.campaigns || []).map((c: AllCampaign) => ({
+          id: c.id, instance: c.instance, name: c.name, status: c.status,
+        }));
+        setAllCampaigns(camps);
       })
-      .catch((err) => { setError(err.message || "Failed to discover campaigns"); setPhase("done"); });
+      .catch(() => { /* manual search just won't have anything to show */ });
+
+    Promise.allSettled([discoverP, allP]).then(([d]) => {
+      if (d.status === "rejected") {
+        setError((d.reason as Error)?.message || "Failed to discover campaigns");
+        setPhase("done");
+        return;
+      }
+      // Always go to select — user may want to manually add even if auto found nothing
+      setPhase("select");
+    });
   }, [open, selectedDomains, instancesQuery]);
 
+  const allListed = useMemo<CampaignInfo[]>(
+    () => [...autoCampaigns, ...manualCampaigns],
+    [autoCampaigns, manualCampaigns]
+  );
+
   const filtered = useMemo(() => {
-    if (!search) return campaigns;
+    if (!search) return allListed;
     const q = search.toLowerCase();
-    return campaigns.filter((c) => c.name.toLowerCase().includes(q));
-  }, [campaigns, search]);
+    return allListed.filter((c) => c.name.toLowerCase().includes(q));
+  }, [allListed, search]);
+
+  // Manual-add candidates: campaigns matching the search that aren't already in the list
+  const searchResults = useMemo(() => {
+    if (!search.trim()) return [];
+    const q = search.toLowerCase();
+    const existingIds = new Set(allListed.map((c) => c.id));
+    return allCampaigns
+      .filter((c) => !existingIds.has(c.id) && c.name.toLowerCase().includes(q))
+      .slice(0, 20);
+  }, [search, allCampaigns, allListed]);
 
   const selectedCampaigns = useMemo(
-    () => campaigns.filter((c) => selectedCampaignIds.has(c.id)),
-    [campaigns, selectedCampaignIds]
+    () => allListed.filter((c) => selectedCampaignIds.has(c.id)),
+    [allListed, selectedCampaignIds]
   );
 
   const totalInboxesToRemove = useMemo(
@@ -109,6 +158,14 @@ export function RemoveFromCampaignsDialog({ open, onOpenChange, selectedDomains,
     }
   };
 
+  const addManually = (c: AllCampaign) => {
+    setManualCampaigns((prev) => [
+      ...prev,
+      { id: c.id, instance: c.instance, name: c.name, status: c.status, inboxCount: 0, source: "manual" },
+    ]);
+    setSelectedCampaignIds((prev) => new Set([...prev, c.id]));
+  };
+
   const handleRemove = async () => {
     setPhase("running");
     setError("");
@@ -120,7 +177,9 @@ export function RemoveFromCampaignsDialog({ open, onOpenChange, selectedDomains,
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           domains: selectedDomains,
-          campaigns: selectedCampaigns.map((c) => ({ id: c.id, instance: c.instance })),
+          campaigns: selectedCampaigns.map((c) => ({
+            id: c.id, instance: c.instance, name: c.name, status: c.status,
+          })),
         }),
       });
       const data = await res.json();
@@ -161,57 +220,99 @@ export function RemoveFromCampaignsDialog({ open, onOpenChange, selectedDomains,
         {phase === "select" && (
           <div className="flex flex-col gap-3 mt-2 flex-1 overflow-hidden">
             <p className="text-sm text-muted-foreground">
-              Found {campaigns.length} campaign{campaigns.length !== 1 ? "s" : ""}. Select which to remove inboxes from:
+              {autoCampaigns.length > 0
+                ? `Auto-detected ${autoCampaigns.length} campaign${autoCampaigns.length !== 1 ? "s" : ""}. Search to add more manually.`
+                : "No campaigns auto-detected for these domains. Use search to add manually."}
             </p>
 
-            {/* Search */}
+            {/* Search — filters list above AND surfaces addable matches below */}
             <div className="flex items-center gap-2 rounded-lg border bg-background px-3 py-1.5">
               <Search className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
               <input
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
-                placeholder="Search campaigns..."
+                placeholder="Search campaigns by name..."
                 className="flex-1 text-sm bg-transparent outline-none placeholder:text-muted-foreground"
               />
               {search && <button onClick={() => setSearch("")}><X className="h-3 w-3 text-muted-foreground hover:text-foreground" /></button>}
             </div>
 
-            {/* Select all */}
-            <div className="flex items-center justify-between">
-              <span className="text-xs text-muted-foreground">
-                {selectedCampaignIds.size} of {campaigns.length} selected
-              </span>
-              <button onClick={toggleAll} className="text-xs text-primary hover:underline">
-                {selectedCampaignIds.size === filtered.length ? "Deselect all" : "Select all"}
-              </button>
+            {allListed.length > 0 && (
+              <div className="flex items-center justify-between">
+                <span className="text-xs text-muted-foreground">
+                  {selectedCampaignIds.size} of {allListed.length} selected
+                </span>
+                <button onClick={toggleAll} className="text-xs text-primary hover:underline">
+                  {selectedCampaignIds.size === filtered.length ? "Deselect all" : "Select all"}
+                </button>
+              </div>
+            )}
+
+            {/* To-remove list (auto + manual combined) */}
+            <div className="flex-1 overflow-y-auto rounded-lg border divide-y min-h-[100px]">
+              {filtered.length === 0 && allListed.length === 0 && !search ? (
+                <div className="px-3 py-6 text-center text-xs text-muted-foreground">
+                  No campaigns selected yet. Search above to add some.
+                </div>
+              ) : filtered.length === 0 ? (
+                <div className="px-3 py-4 text-center text-xs text-muted-foreground">
+                  No selected campaigns match your search.
+                </div>
+              ) : (
+                filtered.map((c) => {
+                  const selected = selectedCampaignIds.has(c.id);
+                  return (
+                    <button
+                      key={c.id}
+                      onClick={() => toggleCampaign(c.id)}
+                      className={`flex items-center gap-3 w-full px-3 py-2.5 text-sm transition-colors ${
+                        selected ? "bg-primary/5" : "hover:bg-muted/50"
+                      }`}
+                    >
+                      <div className={`h-4 w-4 rounded border flex items-center justify-center shrink-0 transition-colors ${
+                        selected ? "bg-primary border-primary text-primary-foreground" : "border-muted-foreground/30"
+                      }`}>
+                        {selected && <Check className="h-3 w-3" />}
+                      </div>
+                      <span className="truncate flex-1 text-left">{c.name}</span>
+                      {c.source === "manual" && (
+                        <Badge variant="outline" className="text-[9px] px-1.5 py-0 shrink-0 border-blue-500/30 text-blue-400">
+                          manual
+                        </Badge>
+                      )}
+                      <Badge variant="outline" className={`text-[9px] px-1.5 py-0 shrink-0 ${STATUS_COLORS[c.status.toLowerCase()] || ""}`}>
+                        {c.status}
+                      </Badge>
+                      {c.source === "auto" && (
+                        <span className="text-[10px] text-muted-foreground shrink-0 tabular-nums">{c.inboxCount} inboxes</span>
+                      )}
+                    </button>
+                  );
+                })
+              )}
             </div>
 
-            {/* Campaign list */}
-            <div className="flex-1 overflow-y-auto rounded-lg border divide-y">
-              {filtered.map((c) => {
-                const selected = selectedCampaignIds.has(c.id);
-                return (
-                  <button
-                    key={c.id}
-                    onClick={() => toggleCampaign(c.id)}
-                    className={`flex items-center gap-3 w-full px-3 py-2.5 text-sm transition-colors ${
-                      selected ? "bg-primary/5" : "hover:bg-muted/50"
-                    }`}
-                  >
-                    <div className={`h-4 w-4 rounded border flex items-center justify-center shrink-0 transition-colors ${
-                      selected ? "bg-primary border-primary text-primary-foreground" : "border-muted-foreground/30"
-                    }`}>
-                      {selected && <Check className="h-3 w-3" />}
-                    </div>
-                    <span className="truncate flex-1 text-left">{c.name}</span>
-                    <Badge variant="outline" className={`text-[9px] px-1.5 py-0 shrink-0 ${STATUS_COLORS[c.status.toLowerCase()] || ""}`}>
-                      {c.status}
-                    </Badge>
-                    <span className="text-[10px] text-muted-foreground shrink-0 tabular-nums">{c.inboxCount} inboxes</span>
-                  </button>
-                );
-              })}
-            </div>
+            {/* Manual-add results — only show when search has matches not already added */}
+            {searchResults.length > 0 && (
+              <div className="space-y-1.5">
+                <p className="text-xs text-muted-foreground">Add manually:</p>
+                <div className="max-h-40 overflow-y-auto rounded-lg border divide-y">
+                  {searchResults.map((c) => (
+                    <button
+                      key={c.id}
+                      onClick={() => addManually(c)}
+                      className="flex items-center gap-3 w-full px-3 py-2 text-sm hover:bg-muted/50 transition-colors text-left"
+                    >
+                      <Plus className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
+                      <span className="truncate flex-1">{c.name}</span>
+                      <Badge variant="outline" className={`text-[9px] px-1.5 py-0 shrink-0 ${STATUS_COLORS[c.status.toLowerCase()] || ""}`}>
+                        {c.status}
+                      </Badge>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
 
             {/* Actions */}
             <div className="flex justify-end gap-2 pt-1">
@@ -236,7 +337,8 @@ export function RemoveFromCampaignsDialog({ open, onOpenChange, selectedDomains,
               <div className="text-sm">
                 <p className="font-medium text-amber-200">Confirm removal</p>
                 <p className="text-amber-400/80 mt-1 text-xs">
-                  This will remove ~{totalInboxesToRemove} inbox{totalInboxesToRemove !== 1 ? "es" : ""} from {selectedCampaigns.length} campaign{selectedCampaigns.length !== 1 ? "s" : ""}.
+                  This will remove inboxes from {selectedCampaigns.length} campaign{selectedCampaigns.length !== 1 ? "s" : ""}{totalInboxesToRemove > 0 ? ` (~${totalInboxesToRemove} inboxes detected)` : ""}.
+                  Manually-added campaigns will only have inboxes removed if your selected domains are actually attached.
                   Active campaigns will be paused during removal, then resumed automatically.
                 </p>
               </div>
@@ -247,8 +349,13 @@ export function RemoveFromCampaignsDialog({ open, onOpenChange, selectedDomains,
                 <div key={c.id} className="flex items-center justify-between px-3 py-2">
                   <span className="text-xs truncate flex-1">{c.name}</span>
                   <div className="flex items-center gap-2 shrink-0 ml-2">
+                    {c.source === "manual" && (
+                      <Badge variant="outline" className="text-[9px] px-1.5 py-0 border-blue-500/30 text-blue-400">manual</Badge>
+                    )}
                     <Badge variant="outline" className={`text-[9px] px-1.5 py-0 ${STATUS_COLORS[c.status.toLowerCase()] || ""}`}>{c.status}</Badge>
-                    <span className="text-[10px] text-muted-foreground tabular-nums">{c.inboxCount}</span>
+                    {c.source === "auto" && (
+                      <span className="text-[10px] text-muted-foreground tabular-nums">{c.inboxCount}</span>
+                    )}
                   </div>
                 </div>
               ))}
