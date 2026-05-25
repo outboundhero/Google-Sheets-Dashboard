@@ -13,6 +13,8 @@
     { "path": "/api/cron/deliverability-outboundhero",     "schedule": "0 12 */2 * *" },
     { "path": "/api/cron/deliverability-cleaningoutbound", "schedule": "30 12 */2 * *" },
     { "path": "/api/cron/deliverability-facilityreach",    "schedule": "0 13 */2 * *" },
-    { "path": "/api/cron/deliverability-outboundclean",    "schedule": "30 13 */2 * *" }
+    { "path": "/api/cron/deliverability-outboundclean",    "schedule": "30 13 */2 * *" },
+
+    { "path": "/api/cron/daily-account-status-report",     "schedule": "55 7 * * *" }
   ]
 }

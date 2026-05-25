@@ -2,7 +2,7 @@ import { NextResponse, type NextRequest } from "next/server";
 import { createMiddlewareSupabaseClient } from "@/lib/supabase";
 
 // Viewer-allowed page paths
-const VIEWER_PAGES = ["/clients", "/deliverability"];
+const VIEWER_PAGES = ["/clients", "/deliverability", "/account-status"];
 // Viewer-allowed API paths (GET only)
 const VIEWER_API_GETS = [
   "/api/data/all",
@@ -16,6 +16,7 @@ const VIEWER_API_GETS = [
   "/api/client-tags",
   "/api/campaigns",
   "/api/leads/not-delivered-today",
+  "/api/account-status",
 ];
 
 export async function middleware(request: NextRequest) {
