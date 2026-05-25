@@ -332,23 +332,30 @@ function DeliverabilityPageInner() {
       .catch(() => {});
   }, []);
 
+  const domainsSeqRef = useRef(0);
+  const statsSeqRef = useRef(0);
+
   const loadDomains = useCallback(async () => {
+    const seq = ++domainsSeqRef.current;
     setLoading(true);
     setDomains([]);
     try {
       const res = await fetch(`/api/deliverability/domains?${instancesQuery}`, { cache: "no-store" });
       const data = await res.json();
+      if (seq !== domainsSeqRef.current) return;
       setDomains(Array.isArray(data) ? data : []);
     } catch { /* ignore */ } finally {
-      setLoading(false);
+      if (seq === domainsSeqRef.current) setLoading(false);
     }
   }, [instancesQuery]);
 
   const loadStats = useCallback(async () => {
+    const seq = ++statsSeqRef.current;
     setSyncStats(null);
     try {
       const res = await fetch(`/api/deliverability/sync?${instancesQuery}`, { cache: "no-store" });
       const data = await res.json();
+      if (seq !== statsSeqRef.current) return;
       setSyncStats(data);
     } catch {/* ignore */}
   }, [instancesQuery]);
