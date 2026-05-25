@@ -23,6 +23,7 @@ import { BulkTagDialog, type TagApplyInfo } from "@/components/deliverability/bu
 import { BulkDeleteDialog } from "@/components/deliverability/bulk-delete-dialog";
 import { AttachToCampaignsDialog } from "@/components/deliverability/attach-to-campaigns-dialog";
 import { RemoveFromCampaignsDialog } from "@/components/deliverability/remove-from-campaigns-dialog";
+import type { BisonInstanceSlug } from "@/lib/bison-instances";
 import {
   Select,
   SelectContent,
@@ -561,7 +562,7 @@ function ClientDomainsDialog({
         const campaign = info.campaigns[i];
         setTagCampaignJob((prev) => prev ? { ...prev, campaignJobs: prev.campaignJobs.map((j, idx) => idx === i ? { ...j, status: "running" } : j) } : prev);
         try {
-          const res = await fetch("/api/deliverability/attach-domains-to-campaign", {
+          const res = await fetch(`/api/deliverability/attach-domains-to-campaign?instance=${campaign.instance}`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ campaign_id: campaign.id, domains: info.domains }),
@@ -619,13 +620,13 @@ function ClientDomainsDialog({
     });
   };
 
-  const startBackgroundAttach = useCallback(async (campaigns: { id: number; name: string }[], domainsList: string[]) => {
+  const startBackgroundAttach = useCallback(async (campaigns: { id: number; name: string; instance: BisonInstanceSlug }[], domainsList: string[]) => {
     attachDomainsRef.current = domainsList;
     setSelectedDomains(new Set());
     for (const campaign of campaigns) {
       for (let attempt = 1; attempt <= 3; attempt++) {
         try {
-          const res = await fetch("/api/deliverability/attach-domains-to-campaign", {
+          const res = await fetch(`/api/deliverability/attach-domains-to-campaign?instance=${campaign.instance}`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ campaign_id: campaign.id, domains: attachDomainsRef.current }),

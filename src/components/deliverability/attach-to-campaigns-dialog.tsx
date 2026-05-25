@@ -7,17 +7,23 @@ import {
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Loader2, Search, X, Check } from "lucide-react";
+import { useInstance } from "@/lib/instance-context";
+import type { BisonInstanceSlug } from "@/lib/bison-instances";
 
 interface Props {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   selectedDomains: string[];
   /** Called with the selected campaigns when user clicks Attach — parent handles the actual work */
-  onAttach: (campaigns: { id: number; name: string }[], domains: string[]) => void;
+  onAttach: (
+    campaigns: { id: number; name: string; instance: BisonInstanceSlug }[],
+    domains: string[],
+  ) => void;
 }
 
 interface Campaign {
   id: number;
+  instance: BisonInstanceSlug;
   name: string;
   status: string;
   client_tag: string;
@@ -32,6 +38,7 @@ const STATUS_COLORS: Record<string, string> = {
 };
 
 export function AttachToCampaignsDialog({ open, onOpenChange, selectedDomains, onAttach }: Props) {
+  const { instancesQuery } = useInstance();
   const [phase, setPhase] = useState<"select-tag" | "select-campaigns">("select-tag");
   const [clientTags, setClientTags] = useState<string[]>([]);
   const [campaigns, setCampaigns] = useState<Campaign[]>([]);
@@ -48,7 +55,7 @@ export function AttachToCampaignsDialog({ open, onOpenChange, selectedDomains, o
     setTagSearch("");
 
     setLoading(true);
-    fetch("/api/campaigns?all=1")
+    fetch(`/api/campaigns?all=1&${instancesQuery}`)
       .then((r) => r.json())
       .then((data) => {
         const camps: Campaign[] = data.campaigns || (Array.isArray(data) ? data : []);
@@ -61,7 +68,7 @@ export function AttachToCampaignsDialog({ open, onOpenChange, selectedDomains, o
       })
       .catch(() => {})
       .finally(() => setLoading(false));
-  }, [open]);
+  }, [open, instancesQuery]);
 
   const matchingCampaigns = useMemo(() => {
     if (!selectedTag) return [];
@@ -112,7 +119,7 @@ export function AttachToCampaignsDialog({ open, onOpenChange, selectedDomains, o
   const handleStart = () => {
     // Pass selected campaigns + domains to parent, close dialog immediately
     onAttach(
-      selectedCampaigns.map((c) => ({ id: c.id, name: c.name })),
+      selectedCampaigns.map((c) => ({ id: c.id, name: c.name, instance: c.instance })),
       [...selectedDomains]
     );
     onOpenChange(false);

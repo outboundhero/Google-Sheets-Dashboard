@@ -7,9 +7,11 @@ import {
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Search, X, Check, Plus, Loader2 } from "lucide-react";
+import { useInstance } from "@/lib/instance-context";
+import type { BisonInstanceSlug } from "@/lib/bison-instances";
 
 interface Tag { id: number; name: string }
-interface Campaign { id: number; name: string; status: string; client_tag: string }
+interface Campaign { id: number; instance: BisonInstanceSlug; name: string; status: string; client_tag: string }
 
 export interface TagApplyInfo {
   mode: "add" | "remove";
@@ -17,7 +19,7 @@ export interface TagApplyInfo {
   tagNames: string[];
   domains: string[];
   /** Campaigns to attach domains to (empty if skipped) */
-  campaigns: { id: number; name: string }[];
+  campaigns: { id: number; name: string; instance: BisonInstanceSlug }[];
   /** If set, also append domains to this client's Domains sheet */
   sheetAppend?: { clientTag: string } | null;
 }
@@ -42,6 +44,7 @@ const STATUS_COLORS: Record<string, string> = {
 export function BulkTagDialog({
   mode, open, onOpenChange, selectedDomains, existingTags, availableTags, onApply,
 }: BulkTagDialogProps) {
+  const { instancesQuery } = useInstance();
   const [phase, setPhase] = useState<"tags" | "campaigns" | "sheet">("tags");
   const [allTags, setAllTags] = useState<Tag[]>([]);
   const [loading, setLoading] = useState(false);
@@ -62,7 +65,7 @@ export function BulkTagDialog({
   const [savedTagNames, setSavedTagNames] = useState<string[]>([]);
 
   // Sheet append selection
-  const [savedCampaigns, setSavedCampaigns] = useState<{ id: number; name: string }[]>([]);
+  const [savedCampaigns, setSavedCampaigns] = useState<{ id: number; name: string; instance: BisonInstanceSlug }[]>([]);
   const [availableSheets, setAvailableSheets] = useState<{ clientTag: string; sheetName: string }[]>([]);
   const [sheetsLoading, setSheetsLoading] = useState(false);
   const [selectedSheetTag, setSelectedSheetTag] = useState<string | null>(null);
@@ -145,7 +148,7 @@ export function BulkTagDialog({
     setCampaignsLoading(true);
     setPhase("campaigns");
     try {
-      const res = await fetch("/api/campaigns?all=1");
+      const res = await fetch(`/api/campaigns?all=1&${instancesQuery}`);
       const data = await res.json();
       const allCampaigns: Campaign[] = data.campaigns || (Array.isArray(data) ? data : []);
       const allRelevantTags = new Set([...(existingTags || []), ...newTagNames]);
@@ -156,7 +159,7 @@ export function BulkTagDialog({
       setSelectedCampaignIds(new Set(matching.map((c) => c.id)));
     } catch { setCampaigns([]); }
     finally { setCampaignsLoading(false); }
-  }, [existingTags]);
+  }, [existingTags, instancesQuery]);
 
   const filteredCampaigns = useMemo(() => {
     if (!campaignSearch) return campaigns;
@@ -176,7 +179,7 @@ export function BulkTagDialog({
     setSelectedCampaignIds((prev) => { const n = new Set(prev); if (n.has(id)) n.delete(id); else n.add(id); return n; });
   };
 
-  const transitionToSheet = (camps: { id: number; name: string }[]) => {
+  const transitionToSheet = (camps: { id: number; name: string; instance: BisonInstanceSlug }[]) => {
     setSavedCampaigns(camps);
     setSheetsLoading(true);
     setPhase("sheet");
@@ -199,7 +202,7 @@ export function BulkTagDialog({
   };
 
   const handleConfirmAll = () => {
-    const selectedCamps = campaigns.filter((c) => selectedCampaignIds.has(c.id)).map((c) => ({ id: c.id, name: c.name }));
+    const selectedCamps = campaigns.filter((c) => selectedCampaignIds.has(c.id)).map((c) => ({ id: c.id, name: c.name, instance: c.instance }));
     transitionToSheet(selectedCamps);
   };
 

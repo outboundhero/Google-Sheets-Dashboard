@@ -38,6 +38,7 @@ import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { useAuth } from "@/lib/auth-context";
 import { useInstance } from "@/lib/instance-context";
+import { ALL_INSTANCE_SLUGS, BISON_INSTANCES, type BisonInstanceSlug } from "@/lib/bison-instances";
 
 interface DomainRow {
   domain: string;
@@ -61,6 +62,9 @@ interface SyncProgress {
   page: number;
   lastPage: number | null;
   streams?: number;
+  instanceLabel?: string;
+  instanceIdx?: number;
+  instanceTotal?: number;
 }
 
 // ---------- Tag Multi-Select Dropdown ----------
@@ -274,7 +278,7 @@ function DeliverabilityPageInner() {
   const dragSelectMode = useRef<boolean>(true); // true = selecting, false = deselecting
 
 
-  const startBackgroundAttach = useCallback(async (campaigns: { id: number; name: string }[], domains: string[]) => {
+  const startBackgroundAttach = useCallback(async (campaigns: { id: number; name: string; instance: BisonInstanceSlug }[], domains: string[]) => {
     attachDomainsRef.current = domains;
     const jobs: AttachJob[] = campaigns.map((c) => ({ campaign: c.name, status: "pending" as const, newly: 0, existing: 0 }));
     setAttachJobs(jobs);
@@ -289,7 +293,7 @@ function DeliverabilityPageInner() {
       let lastError = "";
       for (let attempt = 1; attempt <= 3; attempt++) {
         try {
-          const res = await fetch("/api/deliverability/attach-domains-to-campaign", {
+          const res = await fetch(`/api/deliverability/attach-domains-to-campaign?instance=${campaign.instance}`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ campaign_id: campaign.id, domains: attachDomainsRef.current }),
@@ -403,7 +407,7 @@ function DeliverabilityPageInner() {
         } : prev);
 
         try {
-          const res = await fetch("/api/deliverability/attach-domains-to-campaign", {
+          const res = await fetch(`/api/deliverability/attach-domains-to-campaign?instance=${campaign.instance}`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ campaign_id: campaign.id, domains: info.domains }),
@@ -491,86 +495,96 @@ function DeliverabilityPageInner() {
     setSyncing(true);
     const CHUNK = 20;
     const STREAMS = 4;
-    const syncStartedAt = new Date().toISOString();
-    let anyChunkFailed = false;
-    progressRef.current = { synced: 0, pagesProcessed: 0, lastPage: 0 };
+    localStorage.removeItem("deliverability_next_page");
+    setSavedPage(null);
 
-    const flushProgress = () => {
-      const p = progressRef.current;
-      setSyncProgress({
-        synced: p.synced,
-        page: p.pagesProcessed,
-        lastPage: p.lastPage,
-        streams: STREAMS,
-      });
-    };
+    // Crawl one Bison instance end-to-end (parallel streams + per-instance prune).
+    // Returns whether all chunks for this instance succeeded.
+    const syncOneInstance = async (
+      instance: BisonInstanceSlug,
+      idx: number,
+      total: number,
+    ): Promise<boolean> => {
+      const label = BISON_INSTANCES[instance].label;
+      const syncStartedAt = new Date().toISOString();
+      let anyChunkFailed = false;
+      progressRef.current = { synced: 0, pagesProcessed: 0, lastPage: 0 };
 
-    // Single stream worker with retry
-    const runStream = async (streamId: number, start: number, end: number) => {
-      let page = start;
-      console.log(`[STREAM ${streamId}] Starting pages ${start}-${end}`);
-      while (page <= end) {
-        let success = false;
-        for (let attempt = 1; attempt <= 3; attempt++) {
-          const t0 = performance.now();
-          try {
-            const res = await fetch("/api/deliverability/sync", {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ startPage: page, pagesPerChunk: CHUNK }),
-            });
-            if (!res.ok) {
-              console.warn(`[STREAM ${streamId}] Page ${page} attempt ${attempt}: ${res.status}`);
+      const flushProgress = () => {
+        const p = progressRef.current;
+        setSyncProgress({
+          synced: p.synced,
+          page: p.pagesProcessed,
+          lastPage: p.lastPage,
+          streams: STREAMS,
+          instanceLabel: label,
+          instanceIdx: idx,
+          instanceTotal: total,
+        });
+      };
+
+      const runStream = async (streamId: number, start: number, end: number) => {
+        let page = start;
+        console.log(`[${instance}:STREAM ${streamId}] Starting pages ${start}-${end}`);
+        while (page <= end) {
+          let success = false;
+          for (let attempt = 1; attempt <= 3; attempt++) {
+            const t0 = performance.now();
+            try {
+              const res = await fetch(`/api/deliverability/sync?instance=${instance}`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ startPage: page, pagesPerChunk: CHUNK }),
+              });
+              if (!res.ok) {
+                console.warn(`[${instance}:STREAM ${streamId}] Page ${page} attempt ${attempt}: ${res.status}`);
+                if (attempt < 3) await new Promise((r) => setTimeout(r, 2000 * attempt));
+                continue;
+              }
+              const result = await res.json();
+              const ms = Math.round(performance.now() - t0);
+              const pagesInChunk = Math.min(CHUNK, end - page + 1);
+              progressRef.current.synced += result.synced || 0;
+              progressRef.current.pagesProcessed += pagesInChunk;
+              flushProgress();
+              console.log(`[${instance}:STREAM ${streamId}] Pages ${page}-${page + pagesInChunk - 1}: ${result.synced} inboxes, ${result.domains} domains in ${ms}ms`);
+              success = true;
+              break;
+            } catch (e) {
+              console.warn(`[${instance}:STREAM ${streamId}] Page ${page} attempt ${attempt} error:`, e);
               if (attempt < 3) await new Promise((r) => setTimeout(r, 2000 * attempt));
-              continue;
             }
-            const result = await res.json();
-            const ms = Math.round(performance.now() - t0);
-            const pagesInChunk = Math.min(CHUNK, end - page + 1);
-            progressRef.current.synced += result.synced || 0;
-            progressRef.current.pagesProcessed += pagesInChunk;
-            flushProgress();
-            console.log(`[STREAM ${streamId}] Pages ${page}-${page + pagesInChunk - 1}: ${result.synced} inboxes, ${result.domains} domains in ${ms}ms`);
-            success = true;
-            break;
-          } catch (e) {
-            console.warn(`[STREAM ${streamId}] Page ${page} attempt ${attempt} error:`, e);
-            if (attempt < 3) await new Promise((r) => setTimeout(r, 2000 * attempt));
           }
+          if (!success) {
+            anyChunkFailed = true;
+            console.error(`[${instance}:STREAM ${streamId}] FAILED at page ${page} after 3 attempts, skipping chunk`);
+          }
+          page += CHUNK;
         }
-        if (!success) {
-          anyChunkFailed = true;
-          console.error(`[STREAM ${streamId}] FAILED at page ${page} after 3 attempts, skipping chunk`);
-        }
-        page += CHUNK;
-      }
-      console.log(`[STREAM ${streamId}] Done`);
-    };
+        console.log(`[${instance}:STREAM ${streamId}] Done`);
+      };
 
-    try {
-      // First fetch to discover lastPage
-      const syncStart = performance.now();
-      const resumeFrom = savedPage ?? 1;
-      console.log(`[SYNC] Starting from page ${resumeFrom}, chunk=${CHUNK}, streams=${STREAMS}`);
-      const firstRes = await fetch("/api/deliverability/sync", {
+      console.log(`[SYNC ${idx}/${total}:${instance}] Starting, chunk=${CHUNK}, streams=${STREAMS}`);
+      const firstRes = await fetch(`/api/deliverability/sync?instance=${instance}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ startPage: resumeFrom, pagesPerChunk: CHUNK }),
+        body: JSON.stringify({ startPage: 1, pagesPerChunk: CHUNK }),
       });
-      if (!firstRes.ok) { console.error("[SYNC] First chunk failed"); setSyncing(false); return; }
+      if (!firstRes.ok) {
+        console.error(`[SYNC ${idx}/${total}:${instance}] First chunk failed`);
+        return false;
+      }
       const firstResult = await firstRes.json();
       const lastPage = firstResult.lastPage || 1;
-      console.log(`[SYNC] First chunk done: ${firstResult.synced} inboxes, lastPage=${lastPage}, total pages=${lastPage - resumeFrom + 1}`);
+      console.log(`[SYNC ${idx}/${total}:${instance}] First chunk done: ${firstResult.synced} inboxes, lastPage=${lastPage}`);
       progressRef.current = {
         synced: firstResult.synced || 0,
-        pagesProcessed: CHUNK,
-        lastPage: lastPage - resumeFrom + 1,
+        pagesProcessed: Math.min(CHUNK, lastPage),
+        lastPage,
       };
       flushProgress();
 
-      const startAfterFirst = resumeFrom + CHUNK;
-      const totalPages = lastPage - resumeFrom + 1;
-      progressRef.current.lastPage = totalPages;
+      const startAfterFirst = 1 + CHUNK;
       const remaining = lastPage - startAfterFirst + 1;
 
       if (remaining > 0) {
@@ -579,51 +593,52 @@ function DeliverabilityPageInner() {
           start: startAfterFirst + i * perStream,
           end: Math.min(startAfterFirst + (i + 1) * perStream - 1, lastPage),
         })).filter((r) => r.start <= lastPage);
-
-        // Save progress for resume
-        localStorage.setItem("deliverability_next_page", String(startAfterFirst));
-        setSavedPage(startAfterFirst);
-
-        console.log(`[SYNC] Launching ${ranges.length} streams:`, ranges.map((r) => `${r.start}-${r.end}`).join(", "));
+        console.log(`[SYNC ${idx}/${total}:${instance}] Launching ${ranges.length} streams:`, ranges.map((r) => `${r.start}-${r.end}`).join(", "));
         await Promise.all(ranges.map((r, i) => runStream(i + 1, r.start, r.end)));
       }
 
-      localStorage.removeItem("deliverability_next_page");
-      setSavedPage(null);
-
-      // Prune inboxes no longer in Bison — only after a clean full crawl from
-      // page 1 (a resumed or partially-failed sync can't prune safely).
-      if (resumeFrom === 1 && !anyChunkFailed) {
+      // Prune stale inboxes for this instance — only after a clean full crawl.
+      if (!anyChunkFailed) {
         try {
-          console.log("[SYNC] Pruning stale inboxes...");
+          console.log(`[SYNC ${idx}/${total}:${instance}] Pruning stale inboxes...`);
           const pruneRes = await fetch("/api/deliverability/prune", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ instance: "outboundhero", before: syncStartedAt }),
+            body: JSON.stringify({ instance, before: syncStartedAt }),
           });
           const pruneData = await pruneRes.json();
           if (pruneData.skipped) {
-            console.warn(`[SYNC] Prune skipped: ${pruneData.reason}`);
+            console.warn(`[SYNC ${idx}/${total}:${instance}] Prune skipped: ${pruneData.reason}`);
           } else {
-            console.log(`[SYNC] Pruned ${pruneData.pruned} stale inboxes (of ${pruneData.total})`);
+            console.log(`[SYNC ${idx}/${total}:${instance}] Pruned ${pruneData.pruned} stale inboxes (of ${pruneData.total})`);
           }
         } catch (e) {
-          console.error("[SYNC] Prune failed:", e);
+          console.error(`[SYNC ${idx}/${total}:${instance}] Prune failed:`, e);
         }
       } else {
-        console.log(
-          `[SYNC] Prune skipped — ${resumeFrom !== 1 ? "resumed sync, not a full crawl" : "some chunks failed"}`,
-        );
+        console.log(`[SYNC ${idx}/${total}:${instance}] Prune skipped — some chunks failed`);
       }
 
-      // Rebuild domain stats from all inboxes
+      return !anyChunkFailed;
+    };
+
+    try {
+      const syncStart = performance.now();
+      const total = ALL_INSTANCE_SLUGS.length;
+      let totalSynced = 0;
+      for (let i = 0; i < ALL_INSTANCE_SLUGS.length; i++) {
+        await syncOneInstance(ALL_INSTANCE_SLUGS[i], i + 1, total);
+        totalSynced += progressRef.current.synced;
+      }
+
+      // Rebuild domain stats — single call covers all instances (SQL groups by instance,domain).
       console.log("[SYNC] Rebuilding domain stats...");
       const rebuildRes = await fetch("/api/deliverability/sync", { method: "PUT" });
       const rebuildData = await rebuildRes.json();
       console.log(`[SYNC] Domain rebuild: ${rebuildData.domains} domains from ${rebuildData.inboxes} inboxes`);
 
       const totalSec = ((performance.now() - syncStart) / 1000).toFixed(1);
-      console.log(`[SYNC] COMPLETE in ${totalSec}s — ${progressRef.current.synced} total inboxes`);
+      console.log(`[SYNC] COMPLETE in ${totalSec}s across ${total} instances — ${totalSynced} total inboxes`);
 
       await loadDomains();
       await loadStats();
@@ -1102,7 +1117,7 @@ function DeliverabilityPageInner() {
                 className="gap-2"
               >
                 <RefreshCw className={`h-4 w-4 ${syncing ? "animate-spin" : ""}`} />
-                {syncing ? "Syncing…" : savedPage && savedPage > 1 ? `Resume (page ${savedPage.toLocaleString()})` : "Sync Inboxes"}
+                {syncing ? "Syncing…" : "Sync Inboxes"}
               </Button>
             </>
           )}
@@ -1116,6 +1131,9 @@ function DeliverabilityPageInner() {
             <div className="flex items-center gap-3">
               <RefreshCw className="h-4 w-4 animate-spin text-primary" />
               <span>
+                {syncProgress.instanceLabel && syncProgress.instanceIdx && syncProgress.instanceTotal
+                  ? `[${syncProgress.instanceIdx}/${syncProgress.instanceTotal}] ${syncProgress.instanceLabel} — `
+                  : ""}
                 {syncProgress.synced.toLocaleString()} inboxes synced
                 {syncProgress.streams && syncProgress.streams > 1
                   ? ` — ${syncProgress.streams} parallel streams`
