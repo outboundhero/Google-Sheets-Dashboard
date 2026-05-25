@@ -15,6 +15,7 @@ interface AccountEvent {
   sender_name: string | null;
   detected_at: string;
   reconnected_at?: string;
+  reconnect_source?: "webhook" | "current_status";
 }
 
 interface AccountStatusReport {
@@ -24,6 +25,7 @@ interface AccountStatusReport {
   disconnectedAccounts: AccountEvent[];
   reconnectedAccounts: AccountEvent[];
   failedAccounts: AccountEvent[];
+  reconnectSources?: { webhook: number; current_status: number };
 }
 
 const PST_OFFSET_MS = 8 * 60 * 60 * 1000;
@@ -113,6 +115,13 @@ export default function AccountStatusPage() {
 
       {report && (
         <>
+          {/* Note on detection method when we relied on cached status */}
+          {(report.reconnectSources?.current_status ?? 0) > 0 && (
+            <div className="rounded-lg border border-blue-500/30 bg-blue-950/20 px-3 py-2 text-xs text-blue-200">
+              <strong>{report.reconnectSources?.current_status}</strong> reconnect{(report.reconnectSources?.current_status ?? 0) !== 1 ? "s" : ""} inferred from current Bison status (cached). These accounts were marked disconnected today but Bison's most recent sync shows them as connected. For real-time accuracy, run a fresh <em>Sync Inboxes</em> from the Deliverability page.
+            </div>
+          )}
+
           {/* Top summary cards */}
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
             <Card className="border-amber-500/30">
@@ -230,6 +239,11 @@ function AccountColumn({
               <div key={`${a.instance}-${a.sender_id}`} className="px-2 py-2 text-sm">
                 <div className="flex items-center justify-between gap-2">
                   <span className="truncate font-medium">{a.sender_email ?? `Sender ${a.sender_id}`}</span>
+                  {showReconnected && a.reconnect_source === "current_status" && (
+                    <Badge variant="outline" className="text-[9px] px-1.5 py-0 shrink-0 border-blue-500/30 text-blue-300">
+                      inferred
+                    </Badge>
+                  )}
                 </div>
                 <div className="flex items-center justify-between text-xs text-muted-foreground mt-0.5">
                   <span className="truncate">{BISON_INSTANCES[a.instance]?.label ?? a.instance}</span>

@@ -61,6 +61,12 @@ export interface AccountEvent {
   sender_name: string | null;
   detected_at: string;
   reconnected_at?: string;
+  /** How we determined this account was reconnected — only set on reconnected entries.
+   *   - "webhook": reconnect_tag_log entry from /api/webhooks/bison-reconnect
+   *   - "current_status": cached Bison status (deliverability_inboxes.status) no longer
+   *     reads as disconnected — used when the reconnect webhook didn't fire or was lost
+   */
+  reconnect_source?: "webhook" | "current_status";
 }
 
 export interface AccountStatusReport {
@@ -70,6 +76,8 @@ export interface AccountStatusReport {
   disconnectedAccounts: AccountEvent[];
   reconnectedAccounts: AccountEvent[];
   failedAccounts: AccountEvent[];
+  /** Counts how the reconnects were classified — useful for surfacing in the UI */
+  reconnectSources: { webhook: number; current_status: number };
 }
 
 export async function buildAccountStatusReport(pstDate: string): Promise<AccountStatusReport> {
@@ -114,14 +122,62 @@ export async function buildAccountStatusReport(pstDate: string): Promise<Account
     if (!disconnectByKey.has(key)) disconnectByKey.set(key, d);
   }
 
+  // Cross-reference with the cached Bison status (deliverability_inboxes.status).
+  // If a sender is currently disconnected on Bison, the cached status reads as
+  // something containing "disconnect" / "reconnection required" / "login failed".
+  // Anything else means Bison currently sees them as connected, even if our
+  // reconnect webhook didn't fire (or fired before reconnect_tag_log existed).
+  // Senders not found in the table at all (e.g. very new sender, not yet synced)
+  // are NOT auto-reconnected — we only flip when we have evidence they're up.
+  const senderIdsByInstance = new Map<string, number[]>();
+  for (const d of disconnectByKey.values()) {
+    const arr = senderIdsByInstance.get(d.instance);
+    if (arr) arr.push(d.sender_id);
+    else senderIdsByInstance.set(d.instance, [d.sender_id]);
+  }
+
+  const inboxStatusByKey = new Map<string, string>();
+  for (const [inst, ids] of senderIdsByInstance) {
+    for (let i = 0; i < ids.length; i += 200) {
+      const chunk = ids.slice(i, i + 200);
+      const { data, error: sErr } = await supabase
+        .from("deliverability_inboxes")
+        .select("id, status")
+        .eq("instance", inst)
+        .in("id", chunk);
+      if (sErr) {
+        console.warn(`[account-status] could not read deliverability_inboxes.status for ${inst}: ${sErr.message}`);
+        continue;
+      }
+      for (const row of (data ?? []) as { id: number; status: string | null }[]) {
+        inboxStatusByKey.set(`${inst}:${row.id}`, (row.status ?? "").toLowerCase());
+      }
+    }
+  }
+
+  function looksDisconnected(status: string): boolean {
+    return (
+      status.includes("disconnect") ||
+      status.includes("reconnection") ||
+      status.includes("login failed") ||
+      status.includes("auth failed")
+    );
+  }
+
   const disconnectedAccounts: AccountEvent[] = [];
   const reconnectedAccounts: AccountEvent[] = [];
   const failedAccounts: AccountEvent[] = [];
+  let webhookCount = 0;
+  let currentStatusCount = 0;
 
   for (const d of disconnectByKey.values()) {
     const key = `${d.instance}:${d.sender_id}`;
     const r = reconnectByKey.get(key);
     const reconnectAfterDisconnect = r && r.occurred_at >= d.detected_at;
+    const cachedStatus = inboxStatusByKey.get(key);
+    const inferredReconnected =
+      cachedStatus !== undefined && !looksDisconnected(cachedStatus);
+
     const base: AccountEvent = {
       instance: d.instance,
       sender_id: d.sender_id,
@@ -130,8 +186,13 @@ export async function buildAccountStatusReport(pstDate: string): Promise<Account
       detected_at: d.detected_at,
     };
     disconnectedAccounts.push(base);
+
     if (reconnectAfterDisconnect) {
-      reconnectedAccounts.push({ ...base, reconnected_at: r.occurred_at });
+      reconnectedAccounts.push({ ...base, reconnected_at: r.occurred_at, reconnect_source: "webhook" });
+      webhookCount++;
+    } else if (inferredReconnected) {
+      reconnectedAccounts.push({ ...base, reconnect_source: "current_status" });
+      currentStatusCount++;
     } else {
       failedAccounts.push(base);
     }
@@ -160,6 +221,7 @@ export async function buildAccountStatusReport(pstDate: string): Promise<Account
     disconnectedAccounts,
     reconnectedAccounts,
     failedAccounts,
+    reconnectSources: { webhook: webhookCount, current_status: currentStatusCount },
   };
 }
 
