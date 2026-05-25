@@ -57,14 +57,14 @@ interface DomainRow {
   redirect_checked_at?: string | null;
 }
 
-interface SyncProgress {
+interface InstanceSyncProgress {
+  slug: BisonInstanceSlug;
+  label: string;
   synced: number;
   page: number;
-  lastPage: number | null;
-  streams?: number;
-  instanceLabel?: string;
-  instanceIdx?: number;
-  instanceTotal?: number;
+  lastPage: number;
+  status: "pending" | "running" | "done" | "failed";
+  error?: string;
 }
 
 // ---------- Tag Multi-Select Dropdown ----------
@@ -191,7 +191,7 @@ function DeliverabilityPageInner() {
   const [domains, setDomains] = useState<DomainRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [syncing, setSyncing] = useState(false);
-  const [syncProgress, setSyncProgress] = useState<SyncProgress | null>(null);
+  const [syncProgresses, setSyncProgresses] = useState<InstanceSyncProgress[] | null>(null);
   const [syncStats, setSyncStats] = useState<{ inboxCount: number; domainCount: number } | null>(null);
   const [tagFilters, setTagFilters] = useState<string[]>(() => {
     const t = searchParams.get("tags");
@@ -497,9 +497,6 @@ function DeliverabilityPageInner() {
     loadTags();
   }, [loadDomains, loadStats, loadTags]);
 
-  // Use ref for progress so parallel stream closures always see latest values
-  const progressRef = useRef({ synced: 0, pagesProcessed: 0, lastPage: 0 });
-
   const handleSync = async () => {
     setSyncing(true);
     const CHUNK = 20;
@@ -507,30 +504,28 @@ function DeliverabilityPageInner() {
     localStorage.removeItem("deliverability_next_page");
     setSavedPage(null);
 
-    // Crawl one Bison instance end-to-end (parallel streams + per-instance prune).
-    // Returns whether all chunks for this instance succeeded.
-    const syncOneInstance = async (
-      instance: BisonInstanceSlug,
-      idx: number,
-      total: number,
-    ): Promise<boolean> => {
-      const label = BISON_INSTANCES[instance].label;
+    const initial: InstanceSyncProgress[] = ALL_INSTANCE_SLUGS.map((slug) => ({
+      slug,
+      label: BISON_INSTANCES[slug].label,
+      synced: 0,
+      page: 0,
+      lastPage: 0,
+      status: "pending",
+    }));
+    setSyncProgresses(initial);
+
+    const patchInstance = (slug: BisonInstanceSlug, patch: Partial<InstanceSyncProgress>) => {
+      setSyncProgresses((prev) => prev?.map((p) => p.slug === slug ? { ...p, ...patch } : p) ?? null);
+    };
+    const incInstance = (slug: BisonInstanceSlug, syncedDelta: number, pagesDelta: number) => {
+      setSyncProgresses((prev) => prev?.map((p) => p.slug === slug ? { ...p, synced: p.synced + syncedDelta, page: p.page + pagesDelta } : p) ?? null);
+    };
+
+    // Crawl one Bison instance end-to-end (parallel page streams + per-instance prune).
+    const syncOneInstance = async (instance: BisonInstanceSlug): Promise<boolean> => {
+      patchInstance(instance, { status: "running" });
       const syncStartedAt = new Date().toISOString();
       let anyChunkFailed = false;
-      progressRef.current = { synced: 0, pagesProcessed: 0, lastPage: 0 };
-
-      const flushProgress = () => {
-        const p = progressRef.current;
-        setSyncProgress({
-          synced: p.synced,
-          page: p.pagesProcessed,
-          lastPage: p.lastPage,
-          streams: STREAMS,
-          instanceLabel: label,
-          instanceIdx: idx,
-          instanceTotal: total,
-        });
-      };
 
       const runStream = async (streamId: number, start: number, end: number) => {
         let page = start;
@@ -553,9 +548,7 @@ function DeliverabilityPageInner() {
               const result = await res.json();
               const ms = Math.round(performance.now() - t0);
               const pagesInChunk = Math.min(CHUNK, end - page + 1);
-              progressRef.current.synced += result.synced || 0;
-              progressRef.current.pagesProcessed += pagesInChunk;
-              flushProgress();
+              incInstance(instance, result.synced || 0, pagesInChunk);
               console.log(`[${instance}:STREAM ${streamId}] Pages ${page}-${page + pagesInChunk - 1}: ${result.synced} inboxes, ${result.domains} domains in ${ms}ms`);
               success = true;
               break;
@@ -573,72 +566,74 @@ function DeliverabilityPageInner() {
         console.log(`[${instance}:STREAM ${streamId}] Done`);
       };
 
-      console.log(`[SYNC ${idx}/${total}:${instance}] Starting, chunk=${CHUNK}, streams=${STREAMS}`);
-      const firstRes = await fetch(`/api/deliverability/sync?instance=${instance}`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ startPage: 1, pagesPerChunk: CHUNK }),
-      });
-      if (!firstRes.ok) {
-        console.error(`[SYNC ${idx}/${total}:${instance}] First chunk failed`);
+      try {
+        console.log(`[SYNC:${instance}] Starting, chunk=${CHUNK}, streams=${STREAMS}`);
+        const firstRes = await fetch(`/api/deliverability/sync?instance=${instance}`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ startPage: 1, pagesPerChunk: CHUNK }),
+        });
+        if (!firstRes.ok) {
+          console.error(`[SYNC:${instance}] First chunk failed`);
+          patchInstance(instance, { status: "failed", error: `HTTP ${firstRes.status}` });
+          return false;
+        }
+        const firstResult = await firstRes.json();
+        const lastPage = firstResult.lastPage || 1;
+        console.log(`[SYNC:${instance}] First chunk done: ${firstResult.synced} inboxes, lastPage=${lastPage}`);
+        patchInstance(instance, {
+          synced: firstResult.synced || 0,
+          page: Math.min(CHUNK, lastPage),
+          lastPage,
+        });
+
+        const startAfterFirst = 1 + CHUNK;
+        const remaining = lastPage - startAfterFirst + 1;
+        if (remaining > 0) {
+          const perStream = Math.ceil(remaining / STREAMS);
+          const ranges = Array.from({ length: STREAMS }, (_, i) => ({
+            start: startAfterFirst + i * perStream,
+            end: Math.min(startAfterFirst + (i + 1) * perStream - 1, lastPage),
+          })).filter((r) => r.start <= lastPage);
+          console.log(`[SYNC:${instance}] Launching ${ranges.length} streams:`, ranges.map((r) => `${r.start}-${r.end}`).join(", "));
+          await Promise.all(ranges.map((r, i) => runStream(i + 1, r.start, r.end)));
+        }
+
+        if (!anyChunkFailed) {
+          try {
+            console.log(`[SYNC:${instance}] Pruning stale inboxes...`);
+            const pruneRes = await fetch("/api/deliverability/prune", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ instance, before: syncStartedAt }),
+            });
+            const pruneData = await pruneRes.json();
+            if (pruneData.skipped) {
+              console.warn(`[SYNC:${instance}] Prune skipped: ${pruneData.reason}`);
+            } else {
+              console.log(`[SYNC:${instance}] Pruned ${pruneData.pruned} stale inboxes (of ${pruneData.total})`);
+            }
+          } catch (e) {
+            console.error(`[SYNC:${instance}] Prune failed:`, e);
+          }
+        } else {
+          console.log(`[SYNC:${instance}] Prune skipped — some chunks failed`);
+        }
+
+        patchInstance(instance, { status: anyChunkFailed ? "failed" : "done" });
+        return !anyChunkFailed;
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        console.error(`[SYNC:${instance}] Unhandled error:`, e);
+        patchInstance(instance, { status: "failed", error: msg });
         return false;
       }
-      const firstResult = await firstRes.json();
-      const lastPage = firstResult.lastPage || 1;
-      console.log(`[SYNC ${idx}/${total}:${instance}] First chunk done: ${firstResult.synced} inboxes, lastPage=${lastPage}`);
-      progressRef.current = {
-        synced: firstResult.synced || 0,
-        pagesProcessed: Math.min(CHUNK, lastPage),
-        lastPage,
-      };
-      flushProgress();
-
-      const startAfterFirst = 1 + CHUNK;
-      const remaining = lastPage - startAfterFirst + 1;
-
-      if (remaining > 0) {
-        const perStream = Math.ceil(remaining / STREAMS);
-        const ranges = Array.from({ length: STREAMS }, (_, i) => ({
-          start: startAfterFirst + i * perStream,
-          end: Math.min(startAfterFirst + (i + 1) * perStream - 1, lastPage),
-        })).filter((r) => r.start <= lastPage);
-        console.log(`[SYNC ${idx}/${total}:${instance}] Launching ${ranges.length} streams:`, ranges.map((r) => `${r.start}-${r.end}`).join(", "));
-        await Promise.all(ranges.map((r, i) => runStream(i + 1, r.start, r.end)));
-      }
-
-      // Prune stale inboxes for this instance — only after a clean full crawl.
-      if (!anyChunkFailed) {
-        try {
-          console.log(`[SYNC ${idx}/${total}:${instance}] Pruning stale inboxes...`);
-          const pruneRes = await fetch("/api/deliverability/prune", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ instance, before: syncStartedAt }),
-          });
-          const pruneData = await pruneRes.json();
-          if (pruneData.skipped) {
-            console.warn(`[SYNC ${idx}/${total}:${instance}] Prune skipped: ${pruneData.reason}`);
-          } else {
-            console.log(`[SYNC ${idx}/${total}:${instance}] Pruned ${pruneData.pruned} stale inboxes (of ${pruneData.total})`);
-          }
-        } catch (e) {
-          console.error(`[SYNC ${idx}/${total}:${instance}] Prune failed:`, e);
-        }
-      } else {
-        console.log(`[SYNC ${idx}/${total}:${instance}] Prune skipped — some chunks failed`);
-      }
-
-      return !anyChunkFailed;
     };
 
     try {
       const syncStart = performance.now();
-      const total = ALL_INSTANCE_SLUGS.length;
-      let totalSynced = 0;
-      for (let i = 0; i < ALL_INSTANCE_SLUGS.length; i++) {
-        await syncOneInstance(ALL_INSTANCE_SLUGS[i], i + 1, total);
-        totalSynced += progressRef.current.synced;
-      }
+      // Run all 4 Bison instances in parallel — each Bison has its own rate limit.
+      await Promise.all(ALL_INSTANCE_SLUGS.map((slug) => syncOneInstance(slug)));
 
       // Rebuild domain stats — single call covers all instances (SQL groups by instance,domain).
       console.log("[SYNC] Rebuilding domain stats...");
@@ -647,13 +642,13 @@ function DeliverabilityPageInner() {
       console.log(`[SYNC] Domain rebuild: ${rebuildData.domains} domains from ${rebuildData.inboxes} inboxes`);
 
       const totalSec = ((performance.now() - syncStart) / 1000).toFixed(1);
-      console.log(`[SYNC] COMPLETE in ${totalSec}s across ${total} instances — ${totalSynced} total inboxes`);
+      console.log(`[SYNC] COMPLETE in ${totalSec}s across ${ALL_INSTANCE_SLUGS.length} instances`);
 
       await loadDomains();
       await loadStats();
     } finally {
       setSyncing(false);
-      setSyncProgress(null);
+      setSyncProgresses(null);
     }
   };
 
@@ -1133,39 +1128,53 @@ function DeliverabilityPageInner() {
         </div>
       </PageHeader>
 
-      {/* Sync Progress */}
-      {syncProgress && (
+      {/* Sync Progress — one row per Bison instance, all 4 in parallel */}
+      {syncProgresses && (
         <div className="rounded-lg border bg-muted/30 px-4 py-3 space-y-2">
-          <div className="flex items-center justify-between text-sm">
-            <div className="flex items-center gap-3">
-              <RefreshCw className="h-4 w-4 animate-spin text-primary" />
-              <span>
-                {syncProgress.instanceLabel && syncProgress.instanceIdx && syncProgress.instanceTotal
-                  ? `[${syncProgress.instanceIdx}/${syncProgress.instanceTotal}] ${syncProgress.instanceLabel} — `
-                  : ""}
-                {syncProgress.synced.toLocaleString()} inboxes synced
-                {syncProgress.streams && syncProgress.streams > 1
-                  ? ` — ${syncProgress.streams} parallel streams`
-                  : ""}
-              </span>
-            </div>
-            {syncProgress.lastPage && syncProgress.lastPage > 0 && (
-              <span className="text-muted-foreground">
-                {syncProgress.page.toLocaleString()} / {syncProgress.lastPage.toLocaleString()} pages
-                {" "}({Math.round((syncProgress.page / syncProgress.lastPage) * 100)}%)
-              </span>
-            )}
+          <div className="text-xs text-muted-foreground">
+            Syncing {syncProgresses.length} Bison instances in parallel
           </div>
-          {syncProgress.lastPage && syncProgress.lastPage > 0 && (
-            <div className="h-1.5 rounded-full bg-muted overflow-hidden">
-              <div
-                className="h-full rounded-full bg-primary transition-all duration-300"
-                style={{
-                  width: `${Math.min(100, (syncProgress.page / syncProgress.lastPage) * 100)}%`,
-                }}
-              />
-            </div>
-          )}
+          {syncProgresses.map((p) => {
+            const pct = p.lastPage > 0 ? Math.min(100, (p.page / p.lastPage) * 100) : 0;
+            return (
+              <div key={p.slug} className="space-y-1">
+                <div className="flex items-center justify-between text-sm">
+                  <div className="flex items-center gap-2 min-w-0">
+                    {p.status === "running" && <RefreshCw className="h-3.5 w-3.5 animate-spin text-primary shrink-0" />}
+                    {p.status === "done" && <CheckCircle2 className="h-3.5 w-3.5 text-emerald-500 shrink-0" />}
+                    {p.status === "failed" && <AlertTriangle className="h-3.5 w-3.5 text-red-500 shrink-0" />}
+                    {p.status === "pending" && <Clock className="h-3.5 w-3.5 text-muted-foreground/50 shrink-0" />}
+                    <span className={`truncate ${p.status === "pending" ? "text-muted-foreground" : ""}`}>
+                      {p.label}
+                    </span>
+                    <span className="text-xs text-muted-foreground shrink-0">
+                      {p.synced.toLocaleString()} inboxes
+                    </span>
+                  </div>
+                  {p.lastPage > 0 && (
+                    <span className="text-xs text-muted-foreground shrink-0 tabular-nums">
+                      {p.page.toLocaleString()}/{p.lastPage.toLocaleString()} pages ({Math.round(pct)}%)
+                    </span>
+                  )}
+                </div>
+                <div className="h-1 rounded-full bg-muted overflow-hidden">
+                  <div
+                    className={`h-full rounded-full transition-all duration-300 ${
+                      p.status === "done"
+                        ? "bg-emerald-500"
+                        : p.status === "failed"
+                          ? "bg-red-500"
+                          : "bg-primary"
+                    }`}
+                    style={{ width: `${p.status === "done" ? 100 : pct}%` }}
+                  />
+                </div>
+                {p.error && (
+                  <p className="text-xs text-red-400">{p.error}</p>
+                )}
+              </div>
+            );
+          })}
         </div>
       )}
 
