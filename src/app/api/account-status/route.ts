@@ -1,6 +1,9 @@
 import { NextResponse } from "next/server";
 import { getSupabaseAdmin } from "@/lib/supabase";
 import { ALL_INSTANCE_SLUGS, type BisonInstanceSlug } from "@/lib/bison-instances";
+import { bisonFetch } from "@/lib/bison";
+
+export const maxDuration = 120;
 
 /**
  * GET /api/account-status?date=YYYY-MM-DD
@@ -65,8 +68,10 @@ export interface AccountEvent {
    *   - "webhook": reconnect_tag_log entry from /api/webhooks/bison-reconnect
    *   - "current_status": cached Bison status (deliverability_inboxes.status) no longer
    *     reads as disconnected — used when the reconnect webhook didn't fire or was lost
+   *   - "live_bison": verified by hitting Bison's /sender-emails/{id} directly — the
+   *     most authoritative source. Only set when ?verify=1 is passed.
    */
-  reconnect_source?: "webhook" | "current_status";
+  reconnect_source?: "webhook" | "current_status" | "live_bison";
 }
 
 export interface AccountStatusReport {
@@ -77,10 +82,70 @@ export interface AccountStatusReport {
   reconnectedAccounts: AccountEvent[];
   failedAccounts: AccountEvent[];
   /** Counts how the reconnects were classified — useful for surfacing in the UI */
-  reconnectSources: { webhook: number; current_status: number };
+  reconnectSources: { webhook: number; current_status: number; live_bison: number };
+  /** True if ?verify=1 was passed and we live-checked the failed accounts against Bison */
+  liveVerified?: boolean;
 }
 
-export async function buildAccountStatusReport(pstDate: string): Promise<AccountStatusReport> {
+/**
+ * Live-check Bison for each (instance, sender_id) — returns the set of sender keys
+ * whose current Bison status reads as a "disconnected"-like value. Anything not in
+ * the returned set is treated as currently connected on Bison. Runs requests in
+ * parallel within each instance, with a soft per-instance concurrency limit so we
+ * don't blow through Bison's per-account rate limit.
+ */
+async function liveCheckBisonStatus(
+  perInstance: Map<BisonInstanceSlug, number[]>,
+): Promise<{ stillDisconnected: Set<string>; checked: Set<string> }> {
+  const stillDisconnected = new Set<string>();
+  const checked = new Set<string>();
+  const CONCURRENCY = 8;
+
+  for (const [inst, ids] of perInstance) {
+    for (let i = 0; i < ids.length; i += CONCURRENCY) {
+      const batch = ids.slice(i, i + CONCURRENCY);
+      const results = await Promise.allSettled(
+        batch.map(async (id) => {
+          const res = await bisonFetch(inst, `/sender-emails/${id}`);
+          if (!res.ok) throw new Error(`HTTP ${res.status}`);
+          const json = await res.json();
+          const data = json.data ?? json;
+          const status = (data?.status ?? "").toString().toLowerCase();
+          return { id, status };
+        }),
+      );
+      for (let j = 0; j < results.length; j++) {
+        const r = results[j];
+        const id = batch[j];
+        const key = `${inst}:${id}`;
+        if (r.status === "fulfilled") {
+          checked.add(key);
+          if (looksDisconnected(r.value.status)) stillDisconnected.add(key);
+        } else {
+          // If Bison returns 404 the sender no longer exists on Bison — treat as not
+          // currently disconnected (it can't be connected and not exist either, but
+          // for our purposes anything we can't verify stays in Failed via "not checked").
+          console.warn(`[account-status:liveCheck:${inst}] sender ${id} failed: ${r.reason}`);
+        }
+      }
+    }
+  }
+  return { stillDisconnected, checked };
+}
+
+function looksDisconnected(status: string): boolean {
+  return (
+    status.includes("disconnect") ||
+    status.includes("reconnection") ||
+    status.includes("login failed") ||
+    status.includes("auth failed")
+  );
+}
+
+export async function buildAccountStatusReport(
+  pstDate: string,
+  options: { verify?: boolean } = {},
+): Promise<AccountStatusReport> {
   const supabase = getSupabaseAdmin();
   const [startUtc, endUtc] = pstDayRange(pstDate);
 
@@ -155,13 +220,26 @@ export async function buildAccountStatusReport(pstDate: string): Promise<Account
     }
   }
 
-  function looksDisconnected(status: string): boolean {
-    return (
-      status.includes("disconnect") ||
-      status.includes("reconnection") ||
-      status.includes("login failed") ||
-      status.includes("auth failed")
-    );
+  // Optional live verification against Bison — authoritative but slower. Only
+  // covers senders we'd otherwise drop into Failed (neither webhook nor cached
+  // status confirmed them as reconnected).
+  let liveStillDisconnected: Set<string> = new Set();
+  let liveChecked: Set<string> = new Set();
+  if (options.verify) {
+    const needsCheck = new Map<BisonInstanceSlug, number[]>();
+    for (const d of disconnectByKey.values()) {
+      const key = `${d.instance}:${d.sender_id}`;
+      const r = reconnectByKey.get(key);
+      if (r && r.occurred_at >= d.detected_at) continue;
+      const cachedStatus = inboxStatusByKey.get(key);
+      if (cachedStatus !== undefined && !looksDisconnected(cachedStatus)) continue;
+      const arr = needsCheck.get(d.instance);
+      if (arr) arr.push(d.sender_id);
+      else needsCheck.set(d.instance, [d.sender_id]);
+    }
+    const res = await liveCheckBisonStatus(needsCheck);
+    liveStillDisconnected = res.stillDisconnected;
+    liveChecked = res.checked;
   }
 
   const disconnectedAccounts: AccountEvent[] = [];
@@ -169,6 +247,7 @@ export async function buildAccountStatusReport(pstDate: string): Promise<Account
   const failedAccounts: AccountEvent[] = [];
   let webhookCount = 0;
   let currentStatusCount = 0;
+  let liveBisonCount = 0;
 
   for (const d of disconnectByKey.values()) {
     const key = `${d.instance}:${d.sender_id}`;
@@ -177,6 +256,7 @@ export async function buildAccountStatusReport(pstDate: string): Promise<Account
     const cachedStatus = inboxStatusByKey.get(key);
     const inferredReconnected =
       cachedStatus !== undefined && !looksDisconnected(cachedStatus);
+    const liveOk = liveChecked.has(key) && !liveStillDisconnected.has(key);
 
     const base: AccountEvent = {
       instance: d.instance,
@@ -193,6 +273,9 @@ export async function buildAccountStatusReport(pstDate: string): Promise<Account
     } else if (inferredReconnected) {
       reconnectedAccounts.push({ ...base, reconnect_source: "current_status" });
       currentStatusCount++;
+    } else if (liveOk) {
+      reconnectedAccounts.push({ ...base, reconnect_source: "live_bison" });
+      liveBisonCount++;
     } else {
       failedAccounts.push(base);
     }
@@ -221,7 +304,8 @@ export async function buildAccountStatusReport(pstDate: string): Promise<Account
     disconnectedAccounts,
     reconnectedAccounts,
     failedAccounts,
-    reconnectSources: { webhook: webhookCount, current_status: currentStatusCount },
+    reconnectSources: { webhook: webhookCount, current_status: currentStatusCount, live_bison: liveBisonCount },
+    liveVerified: options.verify === true,
   };
 }
 
@@ -229,12 +313,13 @@ export async function GET(request: Request) {
   try {
     const { searchParams } = new URL(request.url);
     const date = searchParams.get("date") || todayPstDateString();
+    const verify = searchParams.get("verify") === "1";
 
     if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
       return NextResponse.json({ error: "Invalid date — expected YYYY-MM-DD" }, { status: 400 });
     }
 
-    const report = await buildAccountStatusReport(date);
+    const report = await buildAccountStatusReport(date, { verify });
     return NextResponse.json(report);
   } catch (error) {
     const message = error instanceof Error ? error.message : "Failed";

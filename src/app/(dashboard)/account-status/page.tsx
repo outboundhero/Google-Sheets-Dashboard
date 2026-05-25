@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { AlertTriangle, CheckCircle2, Loader2, RefreshCw, XCircle } from "lucide-react";
+import { AlertTriangle, CheckCircle2, Loader2, RefreshCw, ShieldCheck, XCircle } from "lucide-react";
 import { PageHeader } from "@/components/shared/page-header";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -15,7 +15,7 @@ interface AccountEvent {
   sender_name: string | null;
   detected_at: string;
   reconnected_at?: string;
-  reconnect_source?: "webhook" | "current_status";
+  reconnect_source?: "webhook" | "current_status" | "live_bison";
 }
 
 interface AccountStatusReport {
@@ -25,7 +25,8 @@ interface AccountStatusReport {
   disconnectedAccounts: AccountEvent[];
   reconnectedAccounts: AccountEvent[];
   failedAccounts: AccountEvent[];
-  reconnectSources?: { webhook: number; current_status: number };
+  reconnectSources?: { webhook: number; current_status: number; live_bison: number };
+  liveVerified?: boolean;
 }
 
 const PST_OFFSET_MS = 8 * 60 * 60 * 1000;
@@ -48,21 +49,27 @@ export default function AccountStatusPage() {
   const [date, setDate] = useState<string>(todayPstDateString());
   const [report, setReport] = useState<AccountStatusReport | null>(null);
   const [loading, setLoading] = useState(false);
+  const [verifying, setVerifying] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const load = useCallback(async (d: string) => {
-    setLoading(true);
+  const load = useCallback(async (d: string, verify = false) => {
+    if (verify) setVerifying(true);
+    else setLoading(true);
     setError(null);
     try {
-      const res = await fetch(`/api/account-status?date=${d}`, { cache: "no-store" });
+      const url = verify
+        ? `/api/account-status?date=${d}&verify=1`
+        : `/api/account-status?date=${d}`;
+      const res = await fetch(url, { cache: "no-store" });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
       setReport(data);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to load report");
-      setReport(null);
+      if (!verify) setReport(null);
     } finally {
       setLoading(false);
+      setVerifying(false);
     }
   }, []);
 
@@ -93,9 +100,20 @@ export default function AccountStatusPage() {
               Today
             </Button>
           )}
-          <Button variant="outline" size="sm" onClick={() => load(date)} disabled={loading} className="gap-2">
+          <Button variant="outline" size="sm" onClick={() => load(date)} disabled={loading || verifying} className="gap-2">
             <RefreshCw className={`h-4 w-4 ${loading ? "animate-spin" : ""}`} />
             Refresh
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => load(date, true)}
+            disabled={loading || verifying || !report || report.totals.failed === 0}
+            className="gap-2"
+            title="Live-check each Failed account against Bison's current status"
+          >
+            {verifying ? <Loader2 className="h-4 w-4 animate-spin" /> : <ShieldCheck className="h-4 w-4" />}
+            {verifying ? "Verifying…" : "Verify with Bison"}
           </Button>
         </div>
       </PageHeader>
@@ -118,7 +136,17 @@ export default function AccountStatusPage() {
           {/* Note on detection method when we relied on cached status */}
           {(report.reconnectSources?.current_status ?? 0) > 0 && (
             <div className="rounded-lg border border-blue-500/30 bg-blue-950/20 px-3 py-2 text-xs text-blue-200">
-              <strong>{report.reconnectSources?.current_status}</strong> reconnect{(report.reconnectSources?.current_status ?? 0) !== 1 ? "s" : ""} inferred from current Bison status (cached). These accounts were marked disconnected today but Bison's most recent sync shows them as connected. For real-time accuracy, run a fresh <em>Sync Inboxes</em> from the Deliverability page.
+              <strong>{report.reconnectSources?.current_status}</strong> reconnect{(report.reconnectSources?.current_status ?? 0) !== 1 ? "s" : ""} inferred from <em>cached</em> Bison status. These were marked disconnected today but the last sync shows them as connected. Click <em>Verify with Bison</em> for a live check.
+            </div>
+          )}
+          {(report.reconnectSources?.live_bison ?? 0) > 0 && (
+            <div className="rounded-lg border border-emerald-500/30 bg-emerald-950/20 px-3 py-2 text-xs text-emerald-200">
+              <strong>{report.reconnectSources?.live_bison}</strong> reconnect{(report.reconnectSources?.live_bison ?? 0) !== 1 ? "s" : ""} verified live against Bison just now.
+            </div>
+          )}
+          {report.liveVerified && report.totals.failed > 0 && (
+            <div className="rounded-lg border border-amber-500/30 bg-amber-950/20 px-3 py-2 text-xs text-amber-200">
+              {report.totals.failed} account{report.totals.failed !== 1 ? "s" : ""} were live-checked and Bison still reports them as disconnected.
             </div>
           )}
 
@@ -242,6 +270,11 @@ function AccountColumn({
                   {showReconnected && a.reconnect_source === "current_status" && (
                     <Badge variant="outline" className="text-[9px] px-1.5 py-0 shrink-0 border-blue-500/30 text-blue-300">
                       inferred
+                    </Badge>
+                  )}
+                  {showReconnected && a.reconnect_source === "live_bison" && (
+                    <Badge variant="outline" className="text-[9px] px-1.5 py-0 shrink-0 border-emerald-500/30 text-emerald-300">
+                      verified
                     </Badge>
                   )}
                 </div>
