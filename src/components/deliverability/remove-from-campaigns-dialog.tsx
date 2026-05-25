@@ -40,7 +40,7 @@ interface Result {
   details?: { id: number; name: string; removed: number; error?: string }[];
 }
 
-type Phase = "loading" | "select" | "confirm" | "running" | "done";
+type Phase = "select" | "confirm" | "running" | "done";
 
 const STATUS_COLORS: Record<string, string> = {
   active: "bg-emerald-500/10 text-emerald-500 border-emerald-500/20",
@@ -51,7 +51,7 @@ const STATUS_COLORS: Record<string, string> = {
 
 export function RemoveFromCampaignsDialog({ open, onOpenChange, selectedDomains, onComplete }: Props) {
   const { instancesQuery } = useInstance();
-  const [phase, setPhase] = useState<Phase>("loading");
+  const [phase, setPhase] = useState<Phase>("select");
   const [autoCampaigns, setAutoCampaigns] = useState<CampaignInfo[]>([]);
   const [manualCampaigns, setManualCampaigns] = useState<CampaignInfo[]>([]);
   const [allCampaigns, setAllCampaigns] = useState<AllCampaign[]>([]);
@@ -59,13 +59,14 @@ export function RemoveFromCampaignsDialog({ open, onOpenChange, selectedDomains,
   const [search, setSearch] = useState("");
   const [result, setResult] = useState<Result | null>(null);
   const [error, setError] = useState("");
+  const [discovering, setDiscovering] = useState(false);
+  const [allLoading, setAllLoading] = useState(false);
 
-  // On open: auto-discover campaigns the domains are attached to, AND load the full
-  // campaign list for the current group so the user can manually add ones the
-  // discovery missed.
+  // On open: kick off auto-discovery + full campaign list in background — the user
+  // can interact with the search bar immediately while these load.
   useEffect(() => {
     if (!open || selectedDomains.length === 0) return;
-    setPhase("loading");
+    setPhase("select");
     setAutoCampaigns([]);
     setManualCampaigns([]);
     setAllCampaigns([]);
@@ -74,7 +75,8 @@ export function RemoveFromCampaignsDialog({ open, onOpenChange, selectedDomains,
     setResult(null);
     setError("");
 
-    const discoverP = fetch(`/api/deliverability/remove-from-campaigns?${instancesQuery}`, {
+    setDiscovering(true);
+    fetch(`/api/deliverability/remove-from-campaigns?${instancesQuery}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ domains: selectedDomains, discover: true }),
@@ -86,10 +88,17 @@ export function RemoveFromCampaignsDialog({ open, onOpenChange, selectedDomains,
           (c: Omit<CampaignInfo, "source">) => ({ ...c, source: "auto" as const })
         );
         setAutoCampaigns(camps);
-        setSelectedCampaignIds(new Set(camps.map((c) => c.id)));
-      });
+        setSelectedCampaignIds((prev) => {
+          const next = new Set(prev);
+          for (const c of camps) next.add(c.id);
+          return next;
+        });
+      })
+      .catch((err) => { setError(err instanceof Error ? err.message : "Failed to discover campaigns"); })
+      .finally(() => setDiscovering(false));
 
-    const allP = fetch(`/api/campaigns?all=1&${instancesQuery}`)
+    setAllLoading(true);
+    fetch(`/api/campaigns?all=1&${instancesQuery}`)
       .then((r) => r.json())
       .then((data) => {
         const camps: AllCampaign[] = (data.campaigns || []).map((c: AllCampaign) => ({
@@ -97,17 +106,8 @@ export function RemoveFromCampaignsDialog({ open, onOpenChange, selectedDomains,
         }));
         setAllCampaigns(camps);
       })
-      .catch(() => { /* manual search just won't have anything to show */ });
-
-    Promise.allSettled([discoverP, allP]).then(([d]) => {
-      if (d.status === "rejected") {
-        setError((d.reason as Error)?.message || "Failed to discover campaigns");
-        setPhase("done");
-        return;
-      }
-      // Always go to select — user may want to manually add even if auto found nothing
-      setPhase("select");
-    });
+      .catch(() => { /* manual search just won't have anything to show */ })
+      .finally(() => setAllLoading(false));
   }, [open, selectedDomains, instancesQuery]);
 
   const allListed = useMemo<CampaignInfo[]>(
@@ -208,32 +208,27 @@ export function RemoveFromCampaignsDialog({ open, onOpenChange, selectedDomains,
           </p>
         </DialogHeader>
 
-        {/* Loading */}
-        {phase === "loading" && (
-          <div className="flex flex-col items-center justify-center py-12 gap-3">
-            <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
-            <p className="text-sm text-muted-foreground">Finding campaigns for these domains...</p>
-          </div>
-        )}
-
-        {/* Select campaigns */}
+        {/* Select campaigns — search bar is always live; auto-discovery + full list load in background */}
         {phase === "select" && (
           <div className="flex flex-col gap-3 mt-2 flex-1 overflow-hidden">
             <p className="text-sm text-muted-foreground">
-              {autoCampaigns.length > 0
-                ? `Auto-detected ${autoCampaigns.length} campaign${autoCampaigns.length !== 1 ? "s" : ""}. Search to add more manually.`
-                : "No campaigns auto-detected for these domains. Use search to add manually."}
+              {discovering
+                ? "Detecting campaigns for these domains…"
+                : autoCampaigns.length > 0
+                  ? `Auto-detected ${autoCampaigns.length} campaign${autoCampaigns.length !== 1 ? "s" : ""}. Search to add more manually.`
+                  : "No campaigns auto-detected for these domains. Use search to add manually."}
             </p>
 
-            {/* Search — filters list above AND surfaces addable matches below */}
+            {/* Search — filters list above AND surfaces addable matches below. Always live. */}
             <div className="flex items-center gap-2 rounded-lg border bg-background px-3 py-1.5">
               <Search className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
               <input
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
-                placeholder="Search campaigns by name..."
+                placeholder={allLoading ? "Loading all campaigns…" : "Search campaigns by name..."}
                 className="flex-1 text-sm bg-transparent outline-none placeholder:text-muted-foreground"
               />
+              {allLoading && <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground shrink-0" />}
               {search && <button onClick={() => setSearch("")}><X className="h-3 w-3 text-muted-foreground hover:text-foreground" /></button>}
             </div>
 
@@ -250,7 +245,12 @@ export function RemoveFromCampaignsDialog({ open, onOpenChange, selectedDomains,
 
             {/* To-remove list (auto + manual combined) */}
             <div className="flex-1 overflow-y-auto rounded-lg border divide-y min-h-[100px]">
-              {filtered.length === 0 && allListed.length === 0 && !search ? (
+              {discovering && allListed.length === 0 ? (
+                <div className="flex flex-col items-center justify-center py-6 gap-2">
+                  <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
+                  <span className="text-xs text-muted-foreground">Finding campaigns for these domains…</span>
+                </div>
+              ) : filtered.length === 0 && allListed.length === 0 && !search ? (
                 <div className="px-3 py-6 text-center text-xs text-muted-foreground">
                   No campaigns selected yet. Search above to add some.
                 </div>
