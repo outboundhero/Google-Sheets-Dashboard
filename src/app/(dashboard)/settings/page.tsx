@@ -58,6 +58,20 @@ export default function SettingsPage() {
   const [reconnectLog, setReconnectLog] = useState<ReconnectLogEvent[]>([]);
   const [reconnectLoading, setReconnectLoading] = useState(true);
 
+  // Conform Tags log state — recent batches of bulk tag-conformance runs
+  interface ConformBatchSummary {
+    batchId: string;
+    startedAt: string;
+    finishedAt: string;
+    instances: string[];
+    attachmentsOk: number;
+    attachmentsFailed: number;
+    senderCount: number;
+    tagsCount: number;
+  }
+  const [conformBatches, setConformBatches] = useState<ConformBatchSummary[]>([]);
+  const [conformLoading, setConformLoading] = useState(true);
+
   const loadUsers = useCallback(async () => {
     setUsersLoading(true);
     try {
@@ -92,6 +106,59 @@ export default function SettingsPage() {
       .catch(() => { /* ignore */ })
       .finally(() => setReconnectLoading(false));
   }, []);
+
+  useEffect(() => {
+    fetch("/api/conform-tag-log")
+      .then((r) => r.json())
+      .then((d) => {
+        if (d && Array.isArray(d.batches)) setConformBatches(d.batches);
+      })
+      .catch(() => { /* ignore */ })
+      .finally(() => setConformLoading(false));
+  }, []);
+
+  const downloadBatchCsv = async (batchId: string) => {
+    try {
+      const res = await fetch(`/api/conform-tag-log?batch=${batchId}`);
+      const data = await res.json();
+      const events: { applied_at: string; instance: string; sender_email: string | null; sender_id: number; domain: string | null; tag_name: string; status: string; error: string | null }[] =
+        data.events || [];
+      // One row per (sender, tag). Group by sender for the CSV columns
+      // (instance, domain, sender_email, sender_id, applied_tags, failed_tags, errors).
+      const bySender = new Map<string, { instance: string; domain: string; email: string; id: number; ok: string[]; failed: string[]; errors: string[] }>();
+      for (const e of events) {
+        const key = `${e.instance}:${e.sender_id}`;
+        let row = bySender.get(key);
+        if (!row) {
+          row = { instance: e.instance, domain: e.domain ?? "", email: e.sender_email ?? "", id: e.sender_id, ok: [], failed: [], errors: [] };
+          bySender.set(key, row);
+        }
+        if (e.status === "ok") row.ok.push(e.tag_name);
+        else { row.failed.push(e.tag_name); if (e.error) row.errors.push(e.error); }
+      }
+      const header = "instance,domain,sender_email,sender_id,applied_tags,failed_tags,errors";
+      const lines = [...bySender.values()].map((r) =>
+        [
+          r.instance,
+          r.domain,
+          r.email,
+          r.id,
+          `"${r.ok.join("; ")}"`,
+          `"${r.failed.join("; ")}"`,
+          `"${r.errors.join(" | ").replace(/"/g, "'")}"`,
+        ].join(","),
+      );
+      const blob = new Blob([header + "\n" + lines.join("\n")], { type: "text/csv" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `conform-tags-${batchId.slice(0, 8)}.csv`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    } catch { /* ignore */ }
+  };
 
   const handleSyncAllocations = async () => {
     setAllocSyncing(true);
@@ -335,6 +402,59 @@ export default function SettingsPage() {
                     ))}
                   </div>
                 </>
+              )}
+            </CardContent>
+          </Card>
+
+          {/* Tag Conformance Log — Conform Tags activity */}
+          <Card>
+            <CardContent className="p-4 space-y-3">
+              <div>
+                <p className="text-sm font-semibold">Tag Conformance Log</p>
+                <p className="text-xs text-muted-foreground mt-0.5">
+                  Recent bulk Conform Tags runs from the Deliverability page
+                </p>
+              </div>
+              {conformLoading ? (
+                <p className="text-xs text-muted-foreground">Loading…</p>
+              ) : conformBatches.length === 0 ? (
+                <p className="text-xs text-muted-foreground">
+                  No Conform Tags runs recorded yet. Run one from Deliverability → Conform Tags.
+                </p>
+              ) : (
+                <div className="max-h-64 overflow-y-auto border rounded-md divide-y">
+                  {conformBatches.map((b) => (
+                    <div key={b.batchId} className="px-2.5 py-2 text-xs space-y-1">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="font-medium">
+                          {b.senderCount} sender{b.senderCount !== 1 ? "s" : ""}
+                          {" · "}
+                          {b.attachmentsOk} tag{b.attachmentsOk !== 1 ? "s" : ""} attached
+                          {b.attachmentsFailed > 0 && (
+                            <span className="text-destructive"> · {b.attachmentsFailed} failed</span>
+                          )}
+                        </span>
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          className="h-6 text-[10px] px-2"
+                          onClick={() => downloadBatchCsv(b.batchId)}
+                          title="Download every sender + tag from this run as CSV"
+                        >
+                          CSV
+                        </Button>
+                      </div>
+                      <div className="flex items-center justify-between gap-2 text-muted-foreground">
+                        <span className="truncate">{b.instances.join(", ")}</span>
+                        <span className="shrink-0">
+                          {new Date(b.finishedAt).toLocaleString(undefined, {
+                            month: "short", day: "numeric", hour: "2-digit", minute: "2-digit",
+                          })}
+                        </span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
               )}
             </CardContent>
           </Card>
