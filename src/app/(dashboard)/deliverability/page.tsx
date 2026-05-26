@@ -32,6 +32,7 @@ import { BulkTagDialog, type TagApplyInfo } from "@/components/deliverability/bu
 import { BulkDeleteDialog } from "@/components/deliverability/bulk-delete-dialog";
 import { AttachToCampaignsDialog } from "@/components/deliverability/attach-to-campaigns-dialog";
 import { RemoveFromCampaignsDialog } from "@/components/deliverability/remove-from-campaigns-dialog";
+import { ConformTagsDialog } from "@/components/deliverability/conform-tags-dialog";
 import { SendToSheetDialog } from "@/components/deliverability/send-to-sheet-dialog";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip";
@@ -217,6 +218,7 @@ function DeliverabilityPageInner() {
   const [sortField, setSortField] = useState<"domain" | "redirect_url" | "inbox_count" | "total_sent" | "total_replied" | "total_bounced" | "daily_limit" | "warmup_days" | null>(null);
   const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
   const [attachDialogOpen, setAttachDialogOpen] = useState(false);
+  const [conformTagsOpen, setConformTagsOpen] = useState(false);
   const [clientTags, setClientTags] = useState<Set<string>>(new Set());
   const [selectedDomains, setSelectedDomains] = useState<Set<string>>(new Set());
   const [bulkTagMode, setBulkTagMode] = useState<"add" | "remove" | null>(null);
@@ -1112,6 +1114,16 @@ function DeliverabilityPageInner() {
               >
                 <Link2 className="h-4 w-4" />
                 Attach to Campaigns
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => setConformTagsOpen(true)}
+                className="gap-2"
+                title="Push each domain's tags down to every sender on that domain"
+              >
+                <Tags className="h-4 w-4" />
+                Conform Tags
               </Button>
               <Button
                 variant="outline"
@@ -2437,6 +2449,14 @@ function DeliverabilityPageInner() {
         onOpenChange={setShowRemoveFromCampaigns}
         selectedDomains={Array.from(selectedDomains)}
         onComplete={() => setSelectedDomains(new Set())}
+      />
+
+      {/* Conform Tags Dialog — pushes each domain's tags down to its senders */}
+      <ConformTagsDialog
+        open={conformTagsOpen}
+        onOpenChange={setConformTagsOpen}
+        instancesQuery={instancesQuery}
+        onComplete={() => { loadDomains(); loadTags(); }}
       />
 
       {/* Send to Sheet Dialog */}
