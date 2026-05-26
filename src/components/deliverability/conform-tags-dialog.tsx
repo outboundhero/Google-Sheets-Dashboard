@@ -31,10 +31,18 @@ import {
   Tags,
   XCircle,
 } from "lucide-react";
-import { BISON_INSTANCES, type BisonInstanceSlug } from "@/lib/bison-instances";
+import { BISON_INSTANCES, isInstanceSlug, type BisonInstanceSlug } from "@/lib/bison-instances";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 
 interface PerInstance {
   instance: BisonInstanceSlug;
+  domainsScanned?: number;
   domainsAffected: number;
   sendersAffected: number;
   attachmentsPlanned: number;
@@ -50,7 +58,8 @@ interface PlanRow {
 
 interface PlanResponse {
   dryRun: true;
-  totals: { domainsAffected: number; sendersAffected: number; attachmentsPlanned: number };
+  live?: boolean;
+  totals: { domainsScanned?: number; domainsAffected: number; sendersAffected: number; attachmentsPlanned: number };
   perInstance: PerInstance[];
   sample: PlanRow[];
 }
@@ -77,14 +86,30 @@ export function ConformTagsDialog({ open, onOpenChange, instancesQuery, onComple
   const [plan, setPlan] = useState<PlanResponse | null>(null);
   const [result, setResult] = useState<ApplyResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // "all" = every instance in the current group; otherwise a single Bison slug.
+  const [selectedSlug, setSelectedSlug] = useState<"all" | BisonInstanceSlug>("all");
 
-  const loadPlan = async () => {
+  // Parse the slugs available in the current group from the parent's instancesQuery
+  // ("instances=outboundhero,cleaningoutbound" → ["outboundhero", "cleaningoutbound"]).
+  const availableSlugs = useMemo<BisonInstanceSlug[]>(() => {
+    const m = instancesQuery.match(/instances=([^&]+)/);
+    if (!m) return [];
+    return m[1].split(",").filter(isInstanceSlug);
+  }, [instancesQuery]);
+
+  // Effective query to send to the API — narrowed to one instance if the user picked one.
+  const effectiveQuery = useMemo(() => {
+    if (selectedSlug === "all") return instancesQuery;
+    return `instances=${selectedSlug}`;
+  }, [selectedSlug, instancesQuery]);
+
+  const loadPlan = async (q: string) => {
     setPhase("planning");
     setError(null);
     setPlan(null);
     setResult(null);
     try {
-      const res = await fetch(`/api/deliverability/conform-tags?${instancesQuery}`, {
+      const res = await fetch(`/api/deliverability/conform-tags?${q}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ dryRun: true, skipDisconnected: true }),
@@ -99,16 +124,22 @@ export function ConformTagsDialog({ open, onOpenChange, instancesQuery, onComple
     }
   };
 
+  // Reset to "all" when the dialog opens, then auto-scan with whatever the
+  // effective query is.
   useEffect(() => {
-    if (open) loadPlan();
+    if (open) setSelectedSlug("all");
+  }, [open]);
+
+  useEffect(() => {
+    if (open) loadPlan(effectiveQuery);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, instancesQuery]);
+  }, [open, effectiveQuery]);
 
   const apply = async () => {
     setPhase("applying");
     setError(null);
     try {
-      const res = await fetch(`/api/deliverability/conform-tags?${instancesQuery}`, {
+      const res = await fetch(`/api/deliverability/conform-tags?${effectiveQuery}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ dryRun: false, skipDisconnected: true }),
@@ -145,16 +176,45 @@ export function ConformTagsDialog({ open, onOpenChange, instancesQuery, onComple
             Conform Tags
           </DialogTitle>
           <DialogDescription>
-            Push each domain&apos;s tags down to every sender on that domain. LeadSync
-            is the source of truth — any sender missing a tag their domain has
-            will get it applied via Bison.
+            Push each domain&apos;s tags down to every sender on that domain.
+            LeadSync&apos;s domain tags are the source of truth. The scan queries
+            Bison live for each domain&apos;s current senders, so deleted /
+            disconnected senders that linger in the LeadSync cache are skipped.
           </DialogDescription>
         </DialogHeader>
 
+        {/* Instance scope — lets the user run one Bison at a time first */}
+        {availableSlugs.length > 1 && (
+          <div className="flex items-center gap-2">
+            <label className="text-xs font-medium shrink-0">Scope</label>
+            <Select
+              value={selectedSlug}
+              onValueChange={(v) => setSelectedSlug(v as "all" | BisonInstanceSlug)}
+              disabled={phase === "applying" || phase === "planning"}
+            >
+              <SelectTrigger className="text-xs h-8"><SelectValue /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">All in current group ({availableSlugs.length} instances)</SelectItem>
+                {availableSlugs.map((slug) => (
+                  <SelectItem key={slug} value={slug}>
+                    Only {BISON_INSTANCES[slug]?.label ?? slug}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+        )}
+
         {phase === "planning" && (
-          <div className="flex items-center justify-center py-12 gap-3">
+          <div className="flex flex-col items-center justify-center py-12 gap-3">
             <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
-            <span className="text-sm text-muted-foreground">Scanning senders for missing tags…</span>
+            <span className="text-sm text-muted-foreground">Scanning Bison live for missing tags…</span>
+            <span className="text-xs text-muted-foreground/70">
+              {selectedSlug === "all"
+                ? "One lookup per tagged domain across all selected Bisons in parallel."
+                : `One lookup per tagged domain on ${BISON_INSTANCES[selectedSlug]?.label ?? selectedSlug}.`}
+              {" "}May take 30–60s.
+            </span>
           </div>
         )}
 
@@ -282,7 +342,7 @@ export function ConformTagsDialog({ open, onOpenChange, instancesQuery, onComple
         <DialogFooter>
           {phase === "review" && (
             <>
-              <Button variant="outline" onClick={loadPlan} className="gap-1">
+              <Button variant="outline" onClick={() => loadPlan(effectiveQuery)} className="gap-1">
                 <RefreshCw className="h-3.5 w-3.5" /> Rescan
               </Button>
               <Button variant="ghost" onClick={() => onOpenChange(false)}>Cancel</Button>

@@ -8,22 +8,16 @@ export const maxDuration = 300;
 /**
  * POST /api/deliverability/conform-tags?instances=<csv>
  *
- * For every (instance, domain) in scope, ensure every sender on that domain
- * has every tag that the domain has in LeadSync — i.e. push domain.tags down
- * to all of its senders so the whole domain is tag-consistent.
+ * LeadSync's deliverability_domains.tags is the source of truth for what tags
+ * a domain should have. For every domain in scope, this route queries Bison
+ * LIVE for the senders currently on that domain (so deleted/disconnected senders
+ * that linger in our cache don't get false-positive plans), and for each live
+ * sender it computes which of the domain's wanted tags they're missing and
+ * attaches them.
  *
- * LeadSync is the source of truth (the domain row's tags column is built by
- * rebuild_domain_stats() from every sender's tags). This route walks each
- * sender, finds tags they're missing relative to their domain, and attaches
- * those tags via Bison's /tags/attach-to-sender-emails endpoint.
- *
- * This is essentially the bulk, on-demand equivalent of what
- * /api/webhooks/bison-reconnect does for a single sender on reconnect.
- *
- * Phase 1 — Plan: { dryRun: true } returns counts + a sample without writing
- *   anything to Bison.
- * Phase 2 — Apply: { dryRun: false } actually performs the attachments,
- *   one Bison call per (instance, tag) batch.
+ * Phase 1 — Plan: { dryRun: true } returns counts + a 100-row sample.
+ * Phase 2 — Apply: { dryRun: false } actually attaches the tags via Bison
+ *   /tags/attach-to-sender-emails, grouped by (instance, tag).
  */
 
 interface DomainRow {
@@ -32,19 +26,19 @@ interface DomainRow {
   tags: string[] | null;
 }
 
-interface InboxRow {
-  id: number;
-  instance: BisonInstanceSlug;
-  domain: string;
-  email: string | null;
-  status: string | null;
-  tags: { id: number; name: string }[] | null;
-}
-
 interface BisonTag { id: number; name: string }
+
+interface BisonSender {
+  id: number;
+  email: string;
+  name?: string;
+  status?: string;
+  tags?: BisonTag[];
+}
 
 interface PerInstance {
   instance: BisonInstanceSlug;
+  domainsScanned: number;
   domainsAffected: number;
   sendersAffected: number;
   attachmentsPlanned: number;
@@ -53,9 +47,69 @@ interface PerInstance {
 interface PlanSampleRow {
   instance: BisonInstanceSlug;
   domain: string;
-  sender_email: string | null;
+  sender_email: string;
   sender_id: number;
   missing_tags: string[];
+}
+
+/** Fetch every sender on a given domain from Bison, paginated. The search param
+ *  filters by free-text; we double-check the returned senders' email domain
+ *  matches exactly to guard against fuzzy matches (e.g. "acme.com" matching
+ *  "acme.com.au"). */
+async function fetchLiveSendersByDomain(
+  instance: BisonInstanceSlug,
+  domain: string,
+): Promise<BisonSender[]> {
+  const out: BisonSender[] = [];
+  const target = domain.toLowerCase();
+  let page = 1;
+  for (;;) {
+    const res = await bisonFetch(
+      instance,
+      `/sender-emails?search=${encodeURIComponent(domain)}&per_page=100&page=${page}`,
+    );
+    if (!res.ok) {
+      throw new Error(`Bison /sender-emails ${res.status} for ${domain}`);
+    }
+    const json = await res.json();
+    const items: BisonSender[] = json.data || [];
+    for (const s of items) {
+      const senderDomain = s.email?.split("@")[1]?.toLowerCase();
+      if (senderDomain === target) out.push(s);
+    }
+    const lastPage = json.meta?.last_page || 1;
+    if (page >= lastPage) break;
+    page++;
+  }
+  return out;
+}
+
+function looksDisconnected(status: string): boolean {
+  return (
+    status.includes("disconnect") ||
+    status.includes("reconnection") ||
+    status.includes("login failed") ||
+    status.includes("auth failed")
+  );
+}
+
+/** Run an async fn on items with a fixed concurrency cap. */
+async function pool<T, R>(
+  items: T[],
+  concurrency: number,
+  fn: (item: T) => Promise<R>,
+): Promise<R[]> {
+  const results: R[] = new Array(items.length);
+  let idx = 0;
+  const workers = Array.from({ length: Math.min(concurrency, items.length) }, async () => {
+    while (true) {
+      const i = idx++;
+      if (i >= items.length) return;
+      results[i] = await fn(items[i]);
+    }
+  });
+  await Promise.all(workers);
+  return results;
 }
 
 export async function POST(request: Request) {
@@ -63,8 +117,8 @@ export async function POST(request: Request) {
     const { searchParams } = new URL(request.url);
     const instances = resolveInstances(searchParams);
     const body = await request.json().catch(() => ({}));
-    const dryRun = body?.dryRun !== false; // default to dry-run for safety
-    const skipDisconnected = body?.skipDisconnected !== false; // default true
+    const dryRun = body?.dryRun !== false;
+    const skipDisconnected = body?.skipDisconnected !== false;
     const supabase = getSupabaseAdmin();
 
     // 1. Domains with non-empty tags, scoped to requested instances.
@@ -74,118 +128,101 @@ export async function POST(request: Request) {
       .in("instance", instances);
     if (dErr) throw new Error(`domains: ${dErr.message}`);
     const domains = (rawDomains || []).filter(
-      (d): d is DomainRow => Array.isArray((d as DomainRow).tags) && ((d as DomainRow).tags?.length ?? 0) > 0,
+      (d): d is DomainRow =>
+        Array.isArray((d as DomainRow).tags) && ((d as DomainRow).tags?.length ?? 0) > 0,
     );
-    // Map: instance → domain → wantedTagSet (uppercased for case-insensitive compare)
-    const wantedByInstance = new Map<BisonInstanceSlug, Map<string, Set<string>>>();
+
+    // Group domains by instance for parallel processing per Bison.
+    const domainsByInstance = new Map<BisonInstanceSlug, DomainRow[]>();
+    for (const inst of instances) domainsByInstance.set(inst, []);
     for (const d of domains) {
-      let domMap = wantedByInstance.get(d.instance);
-      if (!domMap) {
-        domMap = new Map();
-        wantedByInstance.set(d.instance, domMap);
-      }
-      domMap.set(d.domain, new Set((d.tags ?? []).map((t) => t.toUpperCase())));
+      const arr = domainsByInstance.get(d.instance);
+      if (arr) arr.push(d);
     }
 
-    // 2. Inboxes for those (instance, domain) pairs. Paginate per instance.
-    const inboxesByInstance = new Map<BisonInstanceSlug, InboxRow[]>();
-    for (const inst of instances) {
-      const all: InboxRow[] = [];
-      let offset = 0;
-      while (true) {
-        const { data, error } = await supabase
-          .from("deliverability_inboxes")
-          .select("id, instance, domain, email, status, tags")
-          .eq("instance", inst)
-          .range(offset, offset + 999);
-        if (error) throw new Error(`inboxes: ${error.message}`);
-        if (!data || data.length === 0) break;
-        all.push(...(data as InboxRow[]));
-        if (data.length < 1000) break;
-        offset += 1000;
-      }
-      inboxesByInstance.set(inst, all);
-    }
-
-    // 3. For each instance, compute the plan: tagName → senderIds-that-need-it
-    //    Also collect per-instance + per-domain stats.
+    // 2. For each (instance, domain): fetch live senders from Bison, diff against
+    //    the domain's wanted tags, accumulate a plan.
     const planByInstanceTag = new Map<BisonInstanceSlug, Map<string, Set<number>>>();
     const perInstanceStats = new Map<BisonInstanceSlug, PerInstance>();
     const sample: PlanSampleRow[] = [];
     let totalAttachments = 0;
 
-    for (const inst of instances) {
-      const domMap = wantedByInstance.get(inst);
-      if (!domMap) {
-        perInstanceStats.set(inst, { instance: inst, domainsAffected: 0, sendersAffected: 0, attachmentsPlanned: 0 });
-        continue;
-      }
-      const inboxes = inboxesByInstance.get(inst) || [];
-      const tagToSenders = new Map<string, Set<number>>();
-      const affectedDomains = new Set<string>();
-      const affectedSenders = new Set<number>();
-      let instAttachments = 0;
+    // Run all 4 instances in parallel; within each instance, 5 domain lookups in flight.
+    await Promise.all(
+      instances.map(async (inst) => {
+        const instDomains = domainsByInstance.get(inst) || [];
+        const tagToSenders = new Map<string, Set<number>>();
+        const affectedDomains = new Set<string>();
+        const affectedSenders = new Set<number>();
+        let instAttachments = 0;
 
-      for (const sender of inboxes) {
-        if (skipDisconnected && looksDisconnected((sender.status ?? "").toLowerCase())) continue;
-        const wanted = domMap.get(sender.domain);
-        if (!wanted || wanted.size === 0) continue;
-        const has = new Set<string>(
-          Array.isArray(sender.tags)
-            ? sender.tags.map((t) => (t?.name ?? "").toUpperCase()).filter(Boolean)
-            : [],
-        );
-        const missing: string[] = [];
-        for (const w of wanted) {
-          if (!has.has(w)) missing.push(w);
-        }
-        if (missing.length === 0) continue;
+        await pool(instDomains, 5, async (dRow) => {
+          const wanted = new Set((dRow.tags ?? []).map((t) => t.toUpperCase()));
+          if (wanted.size === 0) return;
 
-        // Stats
-        affectedDomains.add(sender.domain);
-        affectedSenders.add(sender.id);
-        instAttachments += missing.length;
+          let liveSenders: BisonSender[];
+          try {
+            liveSenders = await fetchLiveSendersByDomain(inst, dRow.domain);
+          } catch (e) {
+            // Skip this domain on Bison error; record it in stats? Keep silent for now.
+            console.warn(`[conform-tags:${inst}] ${dRow.domain}: ${(e as Error).message}`);
+            return;
+          }
 
-        // Plan: tag → senders
-        // Use the ORIGINAL casing from the domain row, not the uppercased compare key.
-        for (const tagU of missing) {
-          // Find the original-case name from the wanted set (the set holds uppercased,
-          // but we have the original from the domain row tags — fetch it).
-          // For simplicity, use the uppercased version; resolveBisonTagIds below will
-          // match by lowercased name and create if missing, so casing is tolerated.
-          let bag = tagToSenders.get(tagU);
-          if (!bag) { bag = new Set(); tagToSenders.set(tagU, bag); }
-          bag.add(sender.id);
-        }
+          for (const sender of liveSenders) {
+            if (skipDisconnected && looksDisconnected((sender.status ?? "").toLowerCase())) continue;
+            const has = new Set(
+              (sender.tags || [])
+                .map((t) => (t?.name ?? "").toUpperCase())
+                .filter(Boolean),
+            );
+            const missing: string[] = [];
+            for (const w of wanted) {
+              if (!has.has(w)) missing.push(w);
+            }
+            if (missing.length === 0) continue;
 
-        // Sample for the preview UI — keep first 100 rows so the dialog stays light
-        if (sample.length < 100) {
-          sample.push({
-            instance: inst,
-            domain: sender.domain,
-            sender_email: sender.email,
-            sender_id: sender.id,
-            missing_tags: missing,
-          });
-        }
-      }
+            affectedDomains.add(dRow.domain);
+            affectedSenders.add(sender.id);
+            instAttachments += missing.length;
 
-      planByInstanceTag.set(inst, tagToSenders);
-      totalAttachments += instAttachments;
-      perInstanceStats.set(inst, {
-        instance: inst,
-        domainsAffected: affectedDomains.size,
-        sendersAffected: affectedSenders.size,
-        attachmentsPlanned: instAttachments,
-      });
-    }
+            for (const tagU of missing) {
+              let bag = tagToSenders.get(tagU);
+              if (!bag) { bag = new Set(); tagToSenders.set(tagU, bag); }
+              bag.add(sender.id);
+            }
 
-    // ─── Dry run: stop here, return the plan ───
+            if (sample.length < 100) {
+              sample.push({
+                instance: inst,
+                domain: dRow.domain,
+                sender_email: sender.email,
+                sender_id: sender.id,
+                missing_tags: missing,
+              });
+            }
+          }
+        });
+
+        planByInstanceTag.set(inst, tagToSenders);
+        totalAttachments += instAttachments;
+        perInstanceStats.set(inst, {
+          instance: inst,
+          domainsScanned: instDomains.length,
+          domainsAffected: affectedDomains.size,
+          sendersAffected: affectedSenders.size,
+          attachmentsPlanned: instAttachments,
+        });
+      }),
+    );
+
     if (dryRun) {
       return NextResponse.json({
         dryRun: true,
+        live: true,
         instances,
         totals: {
+          domainsScanned: [...perInstanceStats.values()].reduce((s, p) => s + p.domainsScanned, 0),
           domainsAffected: [...perInstanceStats.values()].reduce((s, p) => s + p.domainsAffected, 0),
           sendersAffected: [...perInstanceStats.values()].reduce((s, p) => s + p.sendersAffected, 0),
           attachmentsPlanned: totalAttachments,
@@ -195,7 +232,7 @@ export async function POST(request: Request) {
       });
     }
 
-    // ─── Apply: resolve tag IDs per instance (creating any that don't exist), then attach ───
+    // ─── Apply phase ─── resolve tag IDs per instance (creating if missing), then attach.
     let applied = 0;
     let failed = 0;
     const failures: { instance: string; tag: string; reason: string }[] = [];
@@ -203,7 +240,6 @@ export async function POST(request: Request) {
     for (const [inst, tagToSenders] of planByInstanceTag) {
       if (tagToSenders.size === 0) continue;
 
-      // List current Bison tags (one call) to resolve name → id.
       const tagsRes = await bisonFetch(inst, `/tags`);
       if (!tagsRes.ok) {
         const reason = `Failed to list tags: ${tagsRes.status}`;
@@ -220,7 +256,6 @@ export async function POST(request: Request) {
       for (const [tagU, senderIdSet] of tagToSenders) {
         let resolved = byUpperName.get(tagU);
         if (!resolved) {
-          // Recreate — Bison sometimes drops orphan tags. Use first uppercase variant.
           const createRes = await bisonFetch(inst, `/tags`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -241,7 +276,6 @@ export async function POST(request: Request) {
           }
         }
 
-        // Attach in batches of 100 senders per call.
         const ids = [...senderIdSet];
         let okThisTag = 0;
         for (let i = 0; i < ids.length; i += 100) {
@@ -269,6 +303,7 @@ export async function POST(request: Request) {
 
     return NextResponse.json({
       dryRun: false,
+      live: true,
       instances,
       applied,
       failed,
@@ -279,13 +314,4 @@ export async function POST(request: Request) {
     const message = error instanceof Error ? error.message : "Failed";
     return NextResponse.json({ error: message }, { status: 500 });
   }
-}
-
-function looksDisconnected(status: string): boolean {
-  return (
-    status.includes("disconnect") ||
-    status.includes("reconnection") ||
-    status.includes("login failed") ||
-    status.includes("auth failed")
-  );
 }
