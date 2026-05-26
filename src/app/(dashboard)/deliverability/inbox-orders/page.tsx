@@ -10,7 +10,9 @@ import {
   Flag,
   Loader2,
   ExternalLink,
+  Upload,
 } from "lucide-react";
+import { BulkCreateInboxOrdersDialog } from "@/components/deliverability/bulk-create-inbox-orders-dialog";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
@@ -62,6 +64,7 @@ export default function InboxOrdersPage() {
   const { orders, isLoading, mutate } = useInboxOrders(60_000, instancesQuery);
 
   const [createOpen, setCreateOpen] = useState(false);
+  const [bulkOpen, setBulkOpen] = useState(false);
   const [creating, setCreating] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
 
@@ -227,6 +230,9 @@ export default function InboxOrdersPage() {
       <div className="flex flex-wrap items-center gap-2">
         <Button onClick={() => setCreateOpen(true)}>
           <Plus className="mr-1 h-4 w-4" /> Create Order
+        </Button>
+        <Button variant="outline" onClick={() => setBulkOpen(true)}>
+          <Upload className="mr-1 h-4 w-4" /> Bulk Import
         </Button>
         <Button variant="outline" onClick={() => mutate()}>
           <RefreshCw className="mr-1 h-4 w-4" /> Refresh List
@@ -539,6 +545,14 @@ export default function InboxOrdersPage() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {/* Bulk import dialog (CSV / paste) */}
+      <BulkCreateInboxOrdersDialog
+        open={bulkOpen}
+        onOpenChange={setBulkOpen}
+        onComplete={() => mutate()}
+        defaultInstance={orderInstance}
+      />
     </div>
   );
 }
