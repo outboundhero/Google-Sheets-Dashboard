@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { randomUUID } from "crypto";
 import { getSupabaseAdmin } from "@/lib/supabase";
 import { bisonFetch, resolveInstances } from "@/lib/bison";
 import type { BisonInstanceSlug } from "@/lib/bison-instances";
@@ -143,6 +144,9 @@ export async function POST(request: Request) {
     // 2. For each (instance, domain): fetch live senders from Bison, diff against
     //    the domain's wanted tags, accumulate a plan.
     const planByInstanceTag = new Map<BisonInstanceSlug, Map<string, Set<number>>>();
+    // Keep sender metadata so the apply phase can emit a per-sender result
+    // and persist conform_tag_events rows.
+    const senderMetaByKey = new Map<string, { instance: BisonInstanceSlug; domain: string; email: string | null }>();
     const perInstanceStats = new Map<BisonInstanceSlug, PerInstance>();
     const sample: PlanSampleRow[] = [];
     let totalAttachments = 0;
@@ -185,6 +189,11 @@ export async function POST(request: Request) {
             affectedDomains.add(dRow.domain);
             affectedSenders.add(sender.id);
             instAttachments += missing.length;
+            senderMetaByKey.set(`${inst}:${sender.id}`, {
+              instance: inst,
+              domain: dRow.domain,
+              email: sender.email ?? null,
+            });
 
             for (const tagU of missing) {
               let bag = tagToSenders.get(tagU);
@@ -233,9 +242,29 @@ export async function POST(request: Request) {
     }
 
     // ─── Apply phase ─── resolve tag IDs per instance (creating if missing), then attach.
+    // Also track per-sender applied tags so we can return + persist the list.
+    const batchId = randomUUID();
     let applied = 0;
     let failed = 0;
     const failures: { instance: string; tag: string; reason: string }[] = [];
+    // Per (instance, sender_id) → applied tag names
+    const appliedBySender = new Map<
+      string,
+      { instance: BisonInstanceSlug; sender_id: number; sender_email: string | null; domain: string; applied_tags: string[] }
+    >();
+    // Event rows to insert into conform_tag_events at the end (one per attempt).
+    type EventRow = {
+      batch_id: string;
+      instance: string;
+      sender_id: number;
+      sender_email: string | null;
+      domain: string | null;
+      tag_id: number | null;
+      tag_name: string;
+      status: "ok" | "failed";
+      error: string | null;
+    };
+    const eventRows: EventRow[] = [];
 
     for (const [inst, tagToSenders] of planByInstanceTag) {
       if (tagToSenders.size === 0) continue;
@@ -287,13 +316,53 @@ export async function POST(request: Request) {
           });
           if (attachRes.ok) {
             okThisTag += batch.length;
+            // Record successes
+            for (const senderId of batch) {
+              const key = `${inst}:${senderId}`;
+              const meta = senderMetaByKey.get(key);
+              let entry = appliedBySender.get(key);
+              if (!entry) {
+                entry = {
+                  instance: inst,
+                  sender_id: senderId,
+                  sender_email: meta?.email ?? null,
+                  domain: meta?.domain ?? "",
+                  applied_tags: [],
+                };
+                appliedBySender.set(key, entry);
+              }
+              entry.applied_tags.push(resolved.name);
+              eventRows.push({
+                batch_id: batchId,
+                instance: inst,
+                sender_id: senderId,
+                sender_email: meta?.email ?? null,
+                domain: meta?.domain ?? null,
+                tag_id: resolved.id,
+                tag_name: resolved.name,
+                status: "ok",
+                error: null,
+              });
+            }
           } else {
             const txt = await attachRes.text().catch(() => "");
-            failures.push({
-              instance: inst,
-              tag: resolved.name,
-              reason: `attach batch ${i}-${i + batch.length}: ${attachRes.status} ${txt.slice(0, 150)}`,
-            });
+            const reason = `attach batch ${i}-${i + batch.length}: ${attachRes.status} ${txt.slice(0, 150)}`;
+            failures.push({ instance: inst, tag: resolved.name, reason });
+            // Record failures
+            for (const senderId of batch) {
+              const meta = senderMetaByKey.get(`${inst}:${senderId}`);
+              eventRows.push({
+                batch_id: batchId,
+                instance: inst,
+                sender_id: senderId,
+                sender_email: meta?.email ?? null,
+                domain: meta?.domain ?? null,
+                tag_id: resolved.id,
+                tag_name: resolved.name,
+                status: "failed",
+                error: reason,
+              });
+            }
           }
         }
         applied += okThisTag;
@@ -301,14 +370,35 @@ export async function POST(request: Request) {
       }
     }
 
+    // Persist events to Supabase. Soft-fail if the table doesn't exist yet —
+    // the apply already happened on Bison, and we don't want to fail the
+    // whole response over a logging miss. The SQL is in
+    // supabase-conform-tag-events.sql for the operator to run.
+    if (eventRows.length > 0) {
+      try {
+        for (let i = 0; i < eventRows.length; i += 500) {
+          const batch = eventRows.slice(i, i + 500);
+          const { error: insErr } = await supabase.from("conform_tag_events").insert(batch);
+          if (insErr) {
+            console.warn(`[conform-tags] failed to write events (${insErr.message}) — run supabase-conform-tag-events.sql`);
+            break;
+          }
+        }
+      } catch (e) {
+        console.warn(`[conform-tags] event log write threw:`, e);
+      }
+    }
+
     return NextResponse.json({
       dryRun: false,
       live: true,
       instances,
+      batchId,
       applied,
       failed,
       failures: failures.slice(0, 50),
       perInstance: [...perInstanceStats.values()],
+      appliedSenders: [...appliedBySender.values()],
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Failed";

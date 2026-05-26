@@ -26,6 +26,8 @@ import { Badge } from "@/components/ui/badge";
 import {
   AlertTriangle,
   CheckCircle2,
+  Copy,
+  Download,
   Loader2,
   RefreshCw,
   Tags,
@@ -64,12 +66,22 @@ interface PlanResponse {
   sample: PlanRow[];
 }
 
+interface AppliedSender {
+  instance: BisonInstanceSlug;
+  sender_id: number;
+  sender_email: string | null;
+  domain: string;
+  applied_tags: string[];
+}
+
 interface ApplyResponse {
   dryRun: false;
+  batchId?: string;
   applied: number;
   failed: number;
   failures: { instance: string; tag: string; reason: string }[];
   perInstance: PerInstance[];
+  appliedSenders?: AppliedSender[];
 }
 
 type Phase = "planning" | "review" | "applying" | "done" | "error";
@@ -299,17 +311,23 @@ export function ConformTagsDialog({ open, onOpenChange, instancesQuery, onComple
         )}
 
         {phase === "done" && result && (
-          <div className="flex flex-col gap-3">
+          <div className="flex flex-col gap-3 flex-1 overflow-hidden">
             <div className="flex items-start gap-3 rounded-md border border-emerald-500/30 bg-emerald-950/20 px-3 py-2">
               <CheckCircle2 className="h-4 w-4 text-emerald-500 mt-0.5 shrink-0" />
-              <div className="text-sm">
+              <div className="text-sm flex-1">
                 <p className="font-medium text-emerald-200">Conformance complete</p>
                 <p className="text-emerald-400/80 text-xs mt-0.5">
                   Applied {result.applied} tag attachment{result.applied !== 1 ? "s" : ""}
+                  {" "}across {result.appliedSenders?.length ?? 0} sender{(result.appliedSenders?.length ?? 0) !== 1 ? "s" : ""}
                   {result.failed > 0 ? ` · ${result.failed} failed` : ""}
                 </p>
               </div>
             </div>
+
+            {result.appliedSenders && result.appliedSenders.length > 0 && (
+              <AppliedSendersBlock senders={result.appliedSenders} batchId={result.batchId} />
+            )}
+
             {result.failures.length > 0 && (
               <div className="rounded-md border max-h-[200px] overflow-y-auto">
                 <div className="bg-muted/50 px-3 py-1.5 text-xs flex items-center gap-2">
@@ -374,6 +392,98 @@ function StatCard({ label, value }: { label: string; value: number }) {
     <div className="rounded-md border bg-muted/30 px-3 py-2">
       <div className="text-[10px] uppercase tracking-wider text-muted-foreground">{label}</div>
       <div className="text-2xl font-semibold tabular-nums">{value.toLocaleString()}</div>
+    </div>
+  );
+}
+
+function AppliedSendersBlock({
+  senders,
+  batchId,
+}: {
+  senders: AppliedSender[];
+  batchId?: string;
+}) {
+  const [copied, setCopied] = useState(false);
+
+  const grouped = useMemo(() => {
+    const m = new Map<string, { key: string; domain: string; instance: BisonInstanceSlug; senders: AppliedSender[] }>();
+    for (const s of senders) {
+      const key = `${s.instance}::${s.domain}`;
+      let g = m.get(key);
+      if (!g) { g = { key, domain: s.domain, instance: s.instance, senders: [] }; m.set(key, g); }
+      g.senders.push(s);
+    }
+    return [...m.values()];
+  }, [senders]);
+
+  const copyEmails = () => {
+    const emails = senders.map((s) => s.sender_email).filter(Boolean).join("\n");
+    navigator.clipboard.writeText(emails).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    });
+  };
+
+  const downloadCsv = () => {
+    const header = "instance,domain,sender_email,sender_id,applied_tags";
+    const rows = senders.map((s) =>
+      [
+        s.instance,
+        s.domain,
+        s.sender_email ?? "",
+        s.sender_id,
+        `"${s.applied_tags.join("; ")}"`,
+      ].join(","),
+    );
+    const blob = new Blob([header + "\n" + rows.join("\n")], { type: "text/csv" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    const dateStr = new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-");
+    a.download = `conform-tags-${dateStr}${batchId ? `-${batchId.slice(0, 8)}` : ""}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
+
+  return (
+    <div className="rounded-md border flex-1 overflow-hidden flex flex-col min-h-0">
+      <div className="flex items-center justify-between bg-muted/50 px-3 py-1.5 text-xs">
+        <span>Senders tagged ({senders.length})</span>
+        <div className="flex items-center gap-1">
+          <Button size="sm" variant="ghost" className="h-6 text-[11px] gap-1 px-2" onClick={copyEmails}>
+            <Copy className="h-3 w-3" />
+            {copied ? "Copied" : "Copy emails"}
+          </Button>
+          <Button size="sm" variant="ghost" className="h-6 text-[11px] gap-1 px-2" onClick={downloadCsv}>
+            <Download className="h-3 w-3" />
+            CSV
+          </Button>
+        </div>
+      </div>
+      <div className="flex-1 overflow-y-auto divide-y">
+        {grouped.map((g) => (
+          <div key={g.key} className="px-3 py-2">
+            <div className="flex items-center justify-between text-xs">
+              <span className="font-medium truncate">{g.domain}</span>
+              <span className="text-muted-foreground">{BISON_INSTANCES[g.instance]?.label ?? g.instance}</span>
+            </div>
+            <div className="mt-1 space-y-0.5">
+              {g.senders.map((s) => (
+                <div key={s.sender_id} className="flex items-center justify-between gap-2 text-[11px]">
+                  <span className="text-muted-foreground truncate">{s.sender_email ?? `Sender ${s.sender_id}`}</span>
+                  <div className="flex gap-1 shrink-0 flex-wrap justify-end">
+                    {s.applied_tags.map((t) => (
+                      <Badge key={t} variant="outline" className="text-[9px] px-1.5 py-0">{t}</Badge>
+                    ))}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        ))}
+      </div>
     </div>
   );
 }
