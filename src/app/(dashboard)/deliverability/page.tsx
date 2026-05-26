@@ -33,6 +33,7 @@ import { BulkDeleteDialog } from "@/components/deliverability/bulk-delete-dialog
 import { AttachToCampaignsDialog } from "@/components/deliverability/attach-to-campaigns-dialog";
 import { RemoveFromCampaignsDialog } from "@/components/deliverability/remove-from-campaigns-dialog";
 import { ConformTagsDialog } from "@/components/deliverability/conform-tags-dialog";
+import { ChangeRedirectDialog } from "@/components/deliverability/change-redirect-dialog";
 import { SendToSheetDialog } from "@/components/deliverability/send-to-sheet-dialog";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip";
@@ -219,6 +220,7 @@ function DeliverabilityPageInner() {
   const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
   const [attachDialogOpen, setAttachDialogOpen] = useState(false);
   const [conformTagsOpen, setConformTagsOpen] = useState(false);
+  const [changeRedirectOpen, setChangeRedirectOpen] = useState(false);
   const [clientTags, setClientTags] = useState<Set<string>>(new Set());
   const [selectedDomains, setSelectedDomains] = useState<Set<string>>(new Set());
   const [bulkTagMode, setBulkTagMode] = useState<"add" | "remove" | null>(null);
@@ -1855,6 +1857,16 @@ function DeliverabilityPageInner() {
                       <ExternalLink className="h-3 w-3" />
                       Check Redirects
                     </Button>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="h-7 text-xs gap-1.5"
+                      onClick={() => setChangeRedirectOpen(true)}
+                      title="Bulk-change the redirect URL via each domain's provider (MilkBox / Inboxing / ScaledMail)"
+                    >
+                      <Link2 className="h-3 w-3" />
+                      Change Redirect
+                    </Button>
                     <div className="relative">
                       <Button
                         size="sm"
@@ -2457,6 +2469,14 @@ function DeliverabilityPageInner() {
         onOpenChange={setConformTagsOpen}
         instancesQuery={instancesQuery}
         onComplete={() => { loadDomains(); loadTags(); }}
+      />
+
+      {/* Change Redirect Dialog — bulk redirect URL update via each domain's provider */}
+      <ChangeRedirectDialog
+        open={changeRedirectOpen}
+        onOpenChange={setChangeRedirectOpen}
+        selectedDomains={Array.from(selectedDomains)}
+        onComplete={() => loadDomains()}
       />
 
       {/* Send to Sheet Dialog */}
