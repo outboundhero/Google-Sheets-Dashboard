@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useMemo, useCallback } from "react";
+import { useState, useEffect, useMemo, useCallback, useRef } from "react";
 import {
   Search, X, Send, Mail, Reply, AlertTriangle, CheckCircle2,
   ChevronDown, ChevronUp, RefreshCw, Loader2,
@@ -72,10 +72,19 @@ export default function CampaignsPage() {
   const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
   const [failedCampaigns, setFailedCampaigns] = useState<{ id: number; name: string; status: string }[]>([]);
 
+  // Sequence numbers so a late response from a previous instances scope
+  // (e.g. the brief Group 1 default on refresh before localStorage hydrates
+  // to Group 2) doesn't overwrite the current scope's data.
+  const campaignsSeqRef = useRef(0);
+  const failedSeqRef = useRef(0);
+
   const loadCampaigns = useCallback(async () => {
+    const seq = ++campaignsSeqRef.current;
+    setCampaigns([]);
     try {
-      const res = await fetch(`/api/campaigns?${instancesQuery}`);
+      const res = await fetch(`/api/campaigns?${instancesQuery}`, { cache: "no-store" });
       const data = await res.json();
+      if (seq !== campaignsSeqRef.current) return;
       if (data.campaigns && Array.isArray(data.campaigns)) {
         setCampaigns(data.campaigns);
       } else if (Array.isArray(data)) {
@@ -85,15 +94,18 @@ export default function CampaignsPage() {
   }, [instancesQuery]);
 
   const loadFailedCampaigns = useCallback(async () => {
+    const seq = ++failedSeqRef.current;
+    setFailedCampaigns([]);
     try {
       // Failed campaigns route is single-instance; fetch each and merge.
       const results = await Promise.allSettled(
         instances.map(async (inst) => {
-          const res = await fetch(`/api/campaigns/failed?instance=${inst.slug}`);
+          const res = await fetch(`/api/campaigns/failed?instance=${inst.slug}`, { cache: "no-store" });
           const data = await res.json();
           return Array.isArray(data) ? data : [];
         }),
       );
+      if (seq !== failedSeqRef.current) return;
       const merged = results.flatMap((r) => (r.status === "fulfilled" ? r.value : []));
       setFailedCampaigns(merged);
     } catch { /* ignore */ }
@@ -125,15 +137,22 @@ export default function CampaignsPage() {
     return Array.from(tags).sort();
   }, [campaigns]);
 
+  // Bison sometimes returns status with different casing / trailing whitespace;
+  // normalise once here so the filter buttons and the filter logic always agree.
+  const normStatus = (s: string | null | undefined) => (s ?? "").trim().toLowerCase();
+
   const statusCounts = useMemo(() => {
     const counts: Record<string, number> = {};
-    for (const c of campaigns) counts[c.status] = (counts[c.status] || 0) + 1;
+    for (const c of campaigns) {
+      const key = normStatus(c.status) || "unknown";
+      counts[key] = (counts[key] || 0) + 1;
+    }
     return counts;
   }, [campaigns]);
 
   const filtered = useMemo(() => {
     let result = campaigns;
-    if (statusFilter !== "all") result = result.filter((c) => c.status === statusFilter);
+    if (statusFilter !== "all") result = result.filter((c) => normStatus(c.status) === statusFilter);
     if (clientFilter !== "all") result = result.filter((c) => c.client_tag === clientFilter);
     if (search) {
       const q = search.toLowerCase();
@@ -152,7 +171,7 @@ export default function CampaignsPage() {
   const lowLeadsClients = useMemo(() => {
     const map = new Map<string, { remaining: number; campaigns: Campaign[] }>();
     for (const c of campaigns) {
-      if (c.status !== "active" || !c.client_tag) continue;
+      if (normStatus(c.status) !== "active" || !c.client_tag) continue;
       if (!map.has(c.client_tag)) map.set(c.client_tag, { remaining: 0, campaigns: [] });
       const entry = map.get(c.client_tag)!;
       entry.remaining += c.remaining_leads;
@@ -166,7 +185,7 @@ export default function CampaignsPage() {
 
   const stats = useMemo(() => ({
     total: campaigns.length,
-    active: campaigns.filter((c) => c.status === "active").length,
+    active: campaigns.filter((c) => normStatus(c.status) === "active").length,
     totalSent: campaigns.reduce((s, c) => s + c.emails_sent, 0),
     totalReplied: campaigns.reduce((s, c) => s + c.replied, 0),
   }), [campaigns]);
@@ -405,7 +424,7 @@ export default function CampaignsPage() {
                   <div className="text-center">
                     <Badge variant="outline" className={`text-[9px] px-1.5 py-0 ${STATUS_COLORS[c.status] || ""}`}>{c.status}</Badge>
                   </div>
-                  <p className={`text-center text-sm tabular-nums ${c.remaining_leads < 1500 && c.status === "active" ? "text-amber-500 font-medium" : ""}`}>
+                  <p className={`text-center text-sm tabular-nums ${c.remaining_leads < 1500 && normStatus(c.status) === "active" ? "text-amber-500 font-medium" : ""}`}>
                     {c.remaining_leads.toLocaleString()}
                   </p>
                   <p className="text-center text-sm tabular-nums">{c.emails_sent.toLocaleString()}</p>
