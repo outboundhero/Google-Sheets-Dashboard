@@ -167,6 +167,39 @@ export async function getOrderStatus(orderId: string): Promise<MilkboxOrderStatu
   return { ...derived, domainId };
 }
 
+export interface MilkboxListedDomain {
+  id: string;
+  name: string;
+}
+
+/**
+ * List every domain on the MilkBox account. Cursor-paginated. Used by the
+ * bulk change-redirect route to resolve a domain name → MilkBox UUID when
+ * the domain isn't tracked in our inbox_orders cache (e.g. it was ordered
+ * outside LeadSync).
+ */
+export async function listDomains(): Promise<MilkboxListedDomain[]> {
+  const all: MilkboxListedDomain[] = [];
+  let cursor: string | null = null;
+  // Hard upper bound just in case the API never returns a null next_cursor.
+  for (let safety = 0; safety < 500; safety++) {
+    const path: string = cursor
+      ? `/domains?cursor=${encodeURIComponent(cursor)}`
+      : `/domains`;
+    const result: {
+      data?: Array<{ id: string | number; name: string }>;
+      pagination?: { next_cursor?: string | null };
+    } = await call("GET", path);
+    for (const d of result.data || []) {
+      if (d?.id !== undefined && d?.name) all.push({ id: String(d.id), name: d.name });
+    }
+    const next: string | null | undefined = result.pagination?.next_cursor;
+    if (!next) break;
+    cursor = next;
+  }
+  return all;
+}
+
 export async function getDomain(domainId: string): Promise<{ id: number; name: string; redirect_url?: string | null } | null> {
   const result = await call<MilkboxOrderEnvelope<{ id: number; name: string; redirect_url?: string | null }>>(
     "GET",

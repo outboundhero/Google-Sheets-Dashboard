@@ -139,23 +139,52 @@ async function buildRouting(
     providerIdByKey.set(`${r.provider}:${r.domain}`, r.provider_domain_id);
   }
 
+  // Build initial routing. For Inboxing we always pass the domain name as the
+  // identifier (its API accepts UUID or name). For MilkBox we need a UUID;
+  // use the cached one if available, otherwise mark for live lookup below.
   const routing: DomainRouting[] = domains.map((domain) => {
     const tags = tagsByDomain.get(domain) ?? [];
     const { provider, skipReason } = detectProvider(tags);
     let providerDomainId: string | null = null;
-    let finalSkipReason = skipReason;
-    if (provider === "milkbox" || provider === "inboxing") {
-      providerDomainId = providerIdByKey.get(`${provider}:${domain}`) ?? null;
-      if (!providerDomainId) finalSkipReason = "No provider record in LeadSync";
+    if (provider === "inboxing") {
+      // Inboxing accepts domain name in the path (same as its GET endpoint).
+      providerDomainId = domain;
+    } else if (provider === "milkbox") {
+      providerDomainId = providerIdByKey.get(`milkbox:${domain}`) ?? null;
     }
     return {
       domain,
       tags,
       provider,
       providerDomainId,
-      skipReason: finalSkipReason,
+      skipReason,
     };
   });
+
+  // Live lookup pass for MilkBox: any milkbox domain still missing an ID
+  // triggers one paginated /api/v1/domains fetch, after which we resolve all
+  // of them at once. Only fired if there's actually something to resolve.
+  const milkboxNeedsLookup = routing.filter(
+    (r) => r.provider === "milkbox" && !r.skipReason && !r.providerDomainId,
+  );
+  if (milkboxNeedsLookup.length > 0) {
+    try {
+      const list = await milkbox.listDomains();
+      const byName = new Map<string, string>();
+      for (const d of list) byName.set(d.name.toLowerCase(), d.id);
+      for (const r of milkboxNeedsLookup) {
+        const id = byName.get(r.domain.toLowerCase());
+        if (id) r.providerDomainId = id;
+        else r.skipReason = "Domain not found on MilkBox";
+      }
+    } catch (e) {
+      // If the list call fails, mark every MilkBox lookup as skipped with the reason.
+      const reason = `MilkBox list failed: ${e instanceof Error ? e.message : "unknown"}`;
+      for (const r of milkboxNeedsLookup) {
+        r.skipReason = reason;
+      }
+    }
+  }
 
   return routing;
 }
