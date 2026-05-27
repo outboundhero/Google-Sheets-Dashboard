@@ -94,7 +94,12 @@ export function ChangeRedirectDialog({
   const [error, setError] = useState<string | null>(null);
   const [newUrl, setNewUrl] = useState("");
 
-  // Plan once when dialog opens
+  // Plan once when dialog opens. We intentionally DON'T depend on
+  // selectedDomains here: the parent rebuilds that array on every render
+  // (Array.from(selectedDomains)), so onComplete → parent rerender would
+  // otherwise wipe the result view and re-run the dry-run scan while the
+  // user is still reading the result. Snapshot the selection once via the
+  // open transition instead.
   useEffect(() => {
     if (!open) {
       // reset on close
@@ -125,7 +130,8 @@ export function ChangeRedirectDialog({
         setError(e instanceof Error ? e.message : "Failed");
         setPhase("error");
       });
-  }, [open, selectedDomains]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open]);
 
   const urlValid = useMemo(() => /^https?:\/\/.+/i.test(newUrl.trim()), [newUrl]);
 
