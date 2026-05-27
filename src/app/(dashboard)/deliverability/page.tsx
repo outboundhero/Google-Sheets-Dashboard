@@ -216,7 +216,7 @@ function DeliverabilityPageInner() {
   const [warmupDaysFrom, setWarmupDaysFrom] = useState("");
   const [warmupDaysTo, setWarmupDaysTo] = useState("");
   const [showAssigned, setShowAssigned] = useState(false);
-  const [sortField, setSortField] = useState<"domain" | "redirect_url" | "inbox_count" | "total_sent" | "total_replied" | "total_bounced" | "daily_limit" | "warmup_days" | null>(null);
+  const [sortField, setSortField] = useState<"domain" | "redirect_url" | "inbox_count" | "total_sent" | "total_replied" | "reply_rate" | "total_bounced" | "bounce_rate" | "daily_limit" | "warmup_days" | null>(null);
   const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
   const [attachDialogOpen, setAttachDialogOpen] = useState(false);
   const [conformTagsOpen, setConformTagsOpen] = useState(false);
@@ -1032,7 +1032,15 @@ function DeliverabilityPageInner() {
           case "inbox_count": av = a.inbox_count; bv = b.inbox_count; break;
           case "total_sent": av = a.total_sent || 0; bv = b.total_sent || 0; break;
           case "total_replied": av = a.total_replied || 0; bv = b.total_replied || 0; break;
+          case "reply_rate":
+            av = (a.total_replied || 0) / (a.total_sent || 1);
+            bv = (b.total_replied || 0) / (b.total_sent || 1);
+            break;
           case "total_bounced": av = a.total_bounced || 0; bv = b.total_bounced || 0; break;
+          case "bounce_rate":
+            av = (a.total_bounced || 0) / (a.total_sent || 1);
+            bv = (b.total_bounced || 0) / (b.total_sent || 1);
+            break;
           case "daily_limit": av = a.daily_limit_total || 0; bv = b.daily_limit_total || 0; break;
           case "warmup_days": {
             const aDays = a.domain_created_at ? Math.max(0, 21 - Math.floor((now - new Date(a.domain_created_at).getTime()) / 86400000)) : 0;
@@ -1925,7 +1933,7 @@ function DeliverabilityPageInner() {
               )}
 
               {/* Table header */}
-              <div className="grid grid-cols-[28px_1fr_180px_90px_70px_70px_70px_70px_90px] gap-2 px-4 py-2 text-xs text-muted-foreground font-medium">
+              <div className="grid grid-cols-[28px_1fr_180px_90px_70px_70px_80px_70px_80px_70px_90px] gap-2 px-4 py-2 text-xs text-muted-foreground font-medium">
                 <button
                   onClick={() => {
                     const allVisible = filteredDomains.map((d) => d.domain);
@@ -1953,7 +1961,9 @@ function DeliverabilityPageInner() {
                     { field: "inbox_count" as const, label: "Inboxes", align: "text-center" },
                     { field: "total_sent" as const, label: "Sent", align: "text-center" },
                     { field: "total_replied" as const, label: "Replied", align: "text-center" },
+                    { field: "reply_rate" as const, label: "Reply Rate", align: "text-center" },
                     { field: "total_bounced" as const, label: "Bounced", align: "text-center" },
+                    { field: "bounce_rate" as const, label: "Bounce Rate", align: "text-center" },
                     { field: "daily_limit" as const, label: "Daily", align: "text-center" },
                     { field: "warmup_days" as const, label: "Status", align: "text-center" },
                   ];
@@ -1988,6 +1998,11 @@ function DeliverabilityPageInner() {
                 const replyRate = (d.total_sent || 0) > 0
                   ? ((d.total_replied || 0) / (d.total_sent || 1) * 100).toFixed(1)
                   : "0.0";
+                const bounceRate = (d.total_sent || 0) > 0
+                  ? ((d.total_bounced || 0) / (d.total_sent || 1) * 100).toFixed(1)
+                  : "0.0";
+                const lowReply = (d.total_sent || 0) > 100 && (d.total_replied || 0) / (d.total_sent || 1) < 0.01;
+                const highBounce = (d.total_sent || 0) > 100 && (d.total_bounced || 0) / (d.total_sent || 1) > 0.03;
 
                 // Flagging rules
                 const isGoogleDomain = (d.google_count || 0) > 0 && (d.outlook_count || 0) === 0;
@@ -2001,7 +2016,7 @@ function DeliverabilityPageInner() {
                   <div
                     key={d.domain}
                     onMouseEnter={() => handleDragEnter(domainIdx, filteredDomains)}
-                    className={`grid grid-cols-[28px_1fr_180px_90px_70px_70px_70px_70px_90px] gap-2 items-center rounded-xl border px-4 py-3 transition-colors select-none ${
+                    className={`grid grid-cols-[28px_1fr_180px_90px_70px_70px_80px_70px_80px_70px_90px] gap-2 items-center rounded-xl border px-4 py-3 transition-colors select-none ${
                       isSelected
                         ? "bg-primary/5 border-primary/30"
                         : flagged
@@ -2100,20 +2115,23 @@ function DeliverabilityPageInner() {
                     </div>
 
                     {/* Replied */}
-                    <div className="text-center">
-                      <div className={`text-sm font-medium ${
-                        (d.total_sent || 0) > 100 && (d.total_replied || 0) / (d.total_sent || 1) < 0.01
-                          ? "text-destructive" : ""
-                      }`}>{(d.total_replied || 0).toLocaleString()}</div>
-                      <div className="text-[10px] text-muted-foreground">{replyRate}%</div>
+                    <div className={`text-center text-sm font-medium ${lowReply ? "text-destructive" : ""}`}>
+                      {(d.total_replied || 0).toLocaleString()}
+                    </div>
+
+                    {/* Reply Rate */}
+                    <div className={`text-center text-sm tabular-nums ${lowReply ? "text-destructive" : "text-muted-foreground"}`}>
+                      {replyRate}%
                     </div>
 
                     {/* Bounced */}
-                    <div className={`text-center text-sm font-medium ${
-                      (d.total_sent || 0) > 100 && (d.total_bounced || 0) / (d.total_sent || 1) > 0.03
-                        ? "text-destructive" : ""
-                    }`}>
+                    <div className={`text-center text-sm font-medium ${highBounce ? "text-destructive" : ""}`}>
                       {(d.total_bounced || 0).toLocaleString()}
+                    </div>
+
+                    {/* Bounce Rate */}
+                    <div className={`text-center text-sm tabular-nums ${highBounce ? "text-destructive" : "text-muted-foreground"}`}>
+                      {bounceRate}%
                     </div>
 
                     {/* Daily Limit */}
