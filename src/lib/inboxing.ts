@@ -143,6 +143,28 @@ export async function updateRedirect(domainId: string, redirectUrl: string | nul
   await call("PUT", `/domains/${encodeURIComponent(domainId)}/redirect`, body);
 }
 
+/**
+ * Look up a domain on Inboxing by name. Uses GET /domains?search=<name>
+ * (paginated). Returns the matched domain or null. Used by the bulk
+ * change-redirect route to resolve a domain name → UUID when we don't have
+ * a cached inbox_orders.provider_domain_id (the PUT redirect endpoint only
+ * accepts the UUID, unlike GET which accepts UUID or name).
+ */
+export async function findDomainByName(
+  name: string,
+): Promise<{ id: string; domain: string } | null> {
+  const target = name.toLowerCase();
+  const result = await call<{
+    data?: Array<{ id: string; domain: string }>;
+  }>("GET", `/domains?search=${encodeURIComponent(name)}&per_page=50`);
+  for (const d of result.data || []) {
+    if ((d.domain || "").toLowerCase() === target) {
+      return { id: String(d.id), domain: d.domain };
+    }
+  }
+  return null;
+}
+
 export async function deleteDomain(domainId: string): Promise<void> {
   await call("DELETE", `/domains/${encodeURIComponent(domainId)}`);
 }

@@ -139,18 +139,15 @@ async function buildRouting(
     providerIdByKey.set(`${r.provider}:${r.domain}`, r.provider_domain_id);
   }
 
-  // Build initial routing. For Inboxing we always pass the domain name as the
-  // identifier (its API accepts UUID or name). For MilkBox we need a UUID;
-  // use the cached one if available, otherwise mark for live lookup below.
+  // Build initial routing. Both MilkBox and Inboxing's PUT redirect endpoints
+  // require their internal UUID; the cached value from inbox_orders is used
+  // when present, and missing rows get a live lookup pass below.
   const routing: DomainRouting[] = domains.map((domain) => {
     const tags = tagsByDomain.get(domain) ?? [];
     const { provider, skipReason } = detectProvider(tags);
     let providerDomainId: string | null = null;
-    if (provider === "inboxing") {
-      // Inboxing accepts domain name in the path (same as its GET endpoint).
-      providerDomainId = domain;
-    } else if (provider === "milkbox") {
-      providerDomainId = providerIdByKey.get(`milkbox:${domain}`) ?? null;
+    if (provider === "milkbox" || provider === "inboxing") {
+      providerDomainId = providerIdByKey.get(`${provider}:${domain}`) ?? null;
     }
     return {
       domain,
@@ -161,9 +158,9 @@ async function buildRouting(
     };
   });
 
-  // Live lookup pass for MilkBox: any milkbox domain still missing an ID
-  // triggers one paginated /api/v1/domains fetch, after which we resolve all
-  // of them at once. Only fired if there's actually something to resolve.
+  // Live lookup pass for MilkBox: one paginated /api/v1/domains fetch resolves
+  // every milkbox domain that's missing an ID. Only fired if there's anything
+  // to resolve.
   const milkboxNeedsLookup = routing.filter(
     (r) => r.provider === "milkbox" && !r.skipReason && !r.providerDomainId,
   );
@@ -178,12 +175,36 @@ async function buildRouting(
         else r.skipReason = "Domain not found on MilkBox";
       }
     } catch (e) {
-      // If the list call fails, mark every MilkBox lookup as skipped with the reason.
       const reason = `MilkBox list failed: ${e instanceof Error ? e.message : "unknown"}`;
       for (const r of milkboxNeedsLookup) {
         r.skipReason = reason;
       }
     }
+  }
+
+  // Live lookup pass for Inboxing: its GET /domains?search= endpoint lets us
+  // look up by name one-at-a-time (cheap). The PUT redirect endpoint requires
+  // the UUID even though GET accepts either, so we need this step.
+  const inboxingNeedsLookup = routing.filter(
+    (r) => r.provider === "inboxing" && !r.skipReason && !r.providerDomainId,
+  );
+  if (inboxingNeedsLookup.length > 0) {
+    // 5 in flight to stay polite — same as the apply concurrency below.
+    const POOL = 5;
+    let idx = 0;
+    async function worker() {
+      while (idx < inboxingNeedsLookup.length) {
+        const r = inboxingNeedsLookup[idx++];
+        try {
+          const match = await inboxing.findDomainByName(r.domain);
+          if (match) r.providerDomainId = match.id;
+          else r.skipReason = "Domain not found on Inboxing";
+        } catch (e) {
+          r.skipReason = `Inboxing lookup failed: ${e instanceof Error ? e.message : "unknown"}`;
+        }
+      }
+    }
+    await Promise.all(Array.from({ length: Math.min(POOL, inboxingNeedsLookup.length) }, () => worker()));
   }
 
   return routing;
