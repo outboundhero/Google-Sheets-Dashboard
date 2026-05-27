@@ -264,12 +264,23 @@ export async function POST(request: Request) {
         const attempt = await withRetry(() => callProviderUpdateRedirect(r, newUrl), 3);
         if (attempt.ok) {
           results[idx] = { domain: r.domain, provider: r.provider, status: "updated", attempts: attempt.attempts };
-          // Best-effort cache update — don't fail the result if it errors.
+          // Best-effort cache updates — don't fail the result if either errors.
+          // Two tables to keep in sync:
+          //   - inbox_orders.redirect_url (for the Inbox Orders page)
+          //   - deliverability_domains.redirect_url (for the Deliverability "Redirect URL" column)
+          // Without the second update the user wouldn't see the change until the
+          // /api/cron/redirect-check sweep runs and re-resolves the redirect.
           try {
             await supabase
               .from("inbox_orders")
               .update({ redirect_url: newUrl })
               .eq("provider", r.provider)
+              .eq("domain", r.domain);
+          } catch { /* ignore */ }
+          try {
+            await supabase
+              .from("deliverability_domains")
+              .update({ redirect_url: newUrl, redirect_checked_at: new Date().toISOString() })
               .eq("domain", r.domain);
           } catch { /* ignore */ }
         } else {
