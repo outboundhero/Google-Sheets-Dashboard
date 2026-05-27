@@ -2414,7 +2414,7 @@ function DeliverabilityPageInner() {
       )}
 
       {/* Attach Campaigns Dialog */}
-      <AttachCampaignsDialog open={attachDialogOpen} onOpenChange={setAttachDialogOpen} />
+      <AttachCampaignsDialog open={attachDialogOpen} onOpenChange={setAttachDialogOpen} instancesQuery={instancesQuery} />
 
       {/* Bulk Tag Dialog */}
       {bulkTagMode && (

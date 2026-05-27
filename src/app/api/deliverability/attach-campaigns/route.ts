@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { getSupabaseAdmin } from "@/lib/supabase";
-import { bisonFetch, resolveInstance } from "@/lib/bison";
+import { bisonFetch, resolveInstance, resolveInstances } from "@/lib/bison";
 import type { BisonInstanceSlug } from "@/lib/bison-instances";
 
 const DELAY_MS = 150;
@@ -85,39 +85,58 @@ async function fetchCampaignSenderEmails(instance: BisonInstanceSlug, campaignId
   return allIds;
 }
 
-// GET: preview — list campaigns with matching tags (live from Bison, no Supabase)
+// GET: preview — list campaigns with matching tags across the requested
+// instances (live from Bison). Supports both single-instance legacy callers
+// via ?instance= and multi-instance callers via ?instances=<csv>.
 export async function GET(request: Request) {
   try {
     const { searchParams } = new URL(request.url);
-    const instance = resolveInstance(searchParams.get("instance"));
-    const [tagMap, campaigns] = await Promise.all([
-      fetchTags(instance),
-      fetchAllCampaigns(instance),
-    ]);
+    // Multi-instance path: ?instances=<csv> takes precedence. Fall back to the
+    // single ?instance= param for back-compat with any older clients.
+    const instances = searchParams.get("instances")
+      ? resolveInstances(searchParams)
+      : [resolveInstance(searchParams.get("instance"))];
 
-    // For preview, just check if the tag exists — count will be fetched during POST
-    const preview = campaigns.map((c) => {
-      const clientTag = c.name.split(":")[0].trim();
-      const tagId = tagMap.get(clientTag);
-      return {
-        campaign_id: c.id,
-        instance,
-        campaign_name: c.name,
-        client_tag: clientTag,
-        tag_id: tagId || null,
-        has_tag: !!tagId,
-        campaign_status: c.status,
-      };
-    }).filter((c) => c.has_tag);
-
-    // Sort: Active first, then by name
     const statusOrder: Record<string, number> = { Active: 0, Launching: 1, Queued: 2, Draft: 3, Paused: 4, Completed: 5 };
-    preview.sort((a, b) => {
-      const oa = statusOrder[a.campaign_status] ?? 99;
-      const ob = statusOrder[b.campaign_status] ?? 99;
-      if (oa !== ob) return oa - ob;
-      return a.campaign_name.localeCompare(b.campaign_name);
-    });
+
+    // Per-instance fetch + merge. Each row carries its instance slug so the
+    // frontend can drive per-row POSTs at the right Bison.
+    const results = await Promise.all(
+      instances.map(async (instance) => {
+        try {
+          const [tagMap, campaigns] = await Promise.all([
+            fetchTags(instance),
+            fetchAllCampaigns(instance),
+          ]);
+          return campaigns.map((c) => {
+            const clientTag = c.name.split(":")[0].trim();
+            const tagId = tagMap.get(clientTag);
+            return {
+              campaign_id: c.id,
+              instance,
+              campaign_name: c.name,
+              client_tag: clientTag,
+              tag_id: tagId || null,
+              has_tag: !!tagId,
+              campaign_status: c.status,
+            };
+          });
+        } catch (e) {
+          console.error(`Attach campaigns GET[${instance}]:`, e);
+          return [];
+        }
+      })
+    );
+
+    const preview = results
+      .flat()
+      .filter((c) => c.has_tag)
+      .sort((a, b) => {
+        const oa = statusOrder[a.campaign_status] ?? 99;
+        const ob = statusOrder[b.campaign_status] ?? 99;
+        if (oa !== ob) return oa - ob;
+        return a.campaign_name.localeCompare(b.campaign_name);
+      });
 
     return NextResponse.json(preview);
   } catch (error) {
