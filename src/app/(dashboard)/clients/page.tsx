@@ -5,6 +5,7 @@ import { Search } from "lucide-react";
 import { useAllLeads } from "@/lib/hooks/use-leads";
 import { useSheets } from "@/lib/hooks/use-sheets";
 import { useAuth } from "@/lib/auth-context";
+import { useInstance } from "@/lib/instance-context";
 import { PageHeader } from "@/components/shared/page-header";
 import { ClientCard } from "@/components/clients/client-card";
 import { RefreshButton } from "@/components/shared/refresh-button";
@@ -37,13 +38,20 @@ export default function ClientsPage() {
   const { sheets } = useSheets();
   const { role } = useAuth();
   const isAdmin = role === "admin";
+  const { group } = useInstance();
   const [search, setSearch] = useState("");
   const [deliverabilityDomains, setDeliverabilityDomains] = useState<DomainRow[]>([]);
+  // Client-tag → group (1|2) allocation map (UPPERCASE keys). Drives group filtering.
+  const [allocations, setAllocations] = useState<Record<string, number>>({});
 
   useEffect(() => {
     fetch("/api/deliverability/domains")
       .then((r) => r.json())
       .then((data) => { if (Array.isArray(data)) setDeliverabilityDomains(data); })
+      .catch(() => {});
+    fetch("/api/client-tag-allocations")
+      .then((r) => r.json())
+      .then((data) => { if (data?.map) setAllocations(data.map); })
       .catch(() => {});
   }, []);
 
@@ -183,14 +191,25 @@ export default function ClientsPage() {
       .sort((a, b) => b.totalLeads - a.totalLeads);
   }, [leads, sheets]);
 
-  // Count unique clientTags
-  const uniqueClients = new Set(sheets.map((s) => s.clientTag)).size;
+  // Filter by the selected Bison group. The allocation sheet maps each client
+  // tag to group 1 or 2; tags NOT in the sheet are unallocated and show in both.
+  const groupFiltered = useMemo(
+    () =>
+      clientStats.filter((c) => {
+        const g = allocations[c.clientTag.trim().toUpperCase()];
+        return g === undefined || g === group;
+      }),
+    [clientStats, allocations, group]
+  );
+
+  // Count unique clientTags shown for the selected group.
+  const uniqueClients = groupFiltered.length;
 
   const filtered = search
-    ? clientStats.filter((c) =>
+    ? groupFiltered.filter((c) =>
         c.clientTag.toLowerCase().includes(search.toLowerCase())
       )
-    : clientStats;
+    : groupFiltered;
 
   if (isLoading) {
     return (
