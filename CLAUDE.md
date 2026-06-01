@@ -37,7 +37,7 @@ Supabase tables that hold Bison data are keyed by `(instance, …)`:
 
 **Upserts MUST include `onConflict: "instance,id"` (or `"instance,domain"`)** — never just `id` / `domain`. Same for `.eq("instance", ...)` filters on reads/updates/deletes.
 
-⚠️ **The manual "Sync Inboxes" button on the deliverability page only syncs `outboundhero`** — the route reads `?instance=` and falls back to `DEFAULT_INSTANCE`. Other instances rely on their cron. If you add an instance picker to that button, route the call through `?instance=<slug>`.
+⚠️ **The manual "Sync Inboxes" button on the deliverability page is a dropdown picker** ([deliverability/page.tsx](src/app/(dashboard)/deliverability/page.tsx) `handleSync(slugs)`): pick "All 4 instances" or a single instance. It crawls the chosen `slugs` in parallel (each `POST /api/deliverability/sync?instance=<slug>` + per-instance `prune`), then one `PUT /api/deliverability/sync` rebuilds domain stats for all instances. The per-instance sync route reads `?instance=` and falls back to `DEFAULT_INSTANCE`, so always pass the slug.
 
 ## Repo layout
 

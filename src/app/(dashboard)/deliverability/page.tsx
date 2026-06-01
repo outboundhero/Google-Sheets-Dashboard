@@ -38,6 +38,14 @@ import { SendToSheetDialog } from "@/components/deliverability/send-to-sheet-dia
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import {
+  DropdownMenu,
+  DropdownMenuTrigger,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+} from "@/components/ui/dropdown-menu";
 import { useAuth } from "@/lib/auth-context";
 import { useInstance } from "@/lib/instance-context";
 import { ALL_INSTANCE_SLUGS, BISON_INSTANCES, type BisonInstanceSlug } from "@/lib/bison-instances";
@@ -501,14 +509,15 @@ function DeliverabilityPageInner() {
     loadTags();
   }, [loadDomains, loadStats, loadTags]);
 
-  const handleSync = async () => {
+  const handleSync = async (slugs: BisonInstanceSlug[] = [...ALL_INSTANCE_SLUGS]) => {
+    if (syncing) return;
     setSyncing(true);
     const CHUNK = 20;
     const STREAMS = 4;
     localStorage.removeItem("deliverability_next_page");
     setSavedPage(null);
 
-    const initial: InstanceSyncProgress[] = ALL_INSTANCE_SLUGS.map((slug) => ({
+    const initial: InstanceSyncProgress[] = slugs.map((slug) => ({
       slug,
       label: BISON_INSTANCES[slug].label,
       synced: 0,
@@ -636,8 +645,8 @@ function DeliverabilityPageInner() {
 
     try {
       const syncStart = performance.now();
-      // Run all 4 Bison instances in parallel — each Bison has its own rate limit.
-      await Promise.all(ALL_INSTANCE_SLUGS.map((slug) => syncOneInstance(slug)));
+      // Run the selected Bison instances in parallel — each Bison has its own rate limit.
+      await Promise.all(slugs.map((slug) => syncOneInstance(slug)));
 
       // Rebuild domain stats — single call covers all instances (SQL groups by instance,domain).
       console.log("[SYNC] Rebuilding domain stats...");
@@ -646,7 +655,7 @@ function DeliverabilityPageInner() {
       console.log(`[SYNC] Domain rebuild: ${rebuildData.domains} domains from ${rebuildData.inboxes} inboxes`);
 
       const totalSec = ((performance.now() - syncStart) / 1000).toFixed(1);
-      console.log(`[SYNC] COMPLETE in ${totalSec}s across ${ALL_INSTANCE_SLUGS.length} instances`);
+      console.log(`[SYNC] COMPLETE in ${totalSec}s across ${slugs.length} instance(s)`);
 
       await loadDomains();
       await loadStats();
@@ -1135,16 +1144,32 @@ function DeliverabilityPageInner() {
                 <Tags className="h-4 w-4" />
                 Conform Tags
               </Button>
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={handleSync}
-                disabled={syncing}
-                className="gap-2"
-              >
-                <RefreshCw className={`h-4 w-4 ${syncing ? "animate-spin" : ""}`} />
-                {syncing ? "Syncing…" : "Sync Inboxes"}
-              </Button>
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    disabled={syncing}
+                    className="gap-2"
+                  >
+                    <RefreshCw className={`h-4 w-4 ${syncing ? "animate-spin" : ""}`} />
+                    {syncing ? "Syncing…" : "Sync Inboxes"}
+                    <ChevronDown className="h-3.5 w-3.5 opacity-70" />
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end" className="w-56">
+                  <DropdownMenuLabel>Sync which instance?</DropdownMenuLabel>
+                  <DropdownMenuItem onClick={() => handleSync([...ALL_INSTANCE_SLUGS])}>
+                    All {ALL_INSTANCE_SLUGS.length} instances
+                  </DropdownMenuItem>
+                  <DropdownMenuSeparator />
+                  {ALL_INSTANCE_SLUGS.map((slug) => (
+                    <DropdownMenuItem key={slug} onClick={() => handleSync([slug])}>
+                      {BISON_INSTANCES[slug].label}
+                    </DropdownMenuItem>
+                  ))}
+                </DropdownMenuContent>
+              </DropdownMenu>
             </>
           )}
         </div>
@@ -1154,7 +1179,9 @@ function DeliverabilityPageInner() {
       {syncProgresses && (
         <div className="rounded-lg border bg-muted/30 px-4 py-3 space-y-2">
           <div className="text-xs text-muted-foreground">
-            Syncing {syncProgresses.length} Bison instances in parallel
+            {syncProgresses.length === 1
+              ? `Syncing ${syncProgresses[0].label}`
+              : `Syncing ${syncProgresses.length} Bison instances in parallel`}
           </div>
           {syncProgresses.map((p) => {
             const pct = p.lastPage > 0 ? Math.min(100, (p.page / p.lastPage) * 100) : 0;
