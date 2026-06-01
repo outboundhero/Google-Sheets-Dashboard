@@ -15,7 +15,6 @@ interface Campaign { id: number; instance: BisonInstanceSlug; name: string; stat
 
 export interface TagApplyInfo {
   mode: "add" | "remove";
-  tagIds: number[];
   tagNames: string[];
   domains: string[];
   /** Campaigns to attach domains to (empty if skipped) */
@@ -44,14 +43,16 @@ const STATUS_COLORS: Record<string, string> = {
 export function BulkTagDialog({
   mode, open, onOpenChange, selectedDomains, existingTags, availableTags, onApply,
 }: BulkTagDialogProps) {
-  const { instancesQuery } = useInstance();
+  const { instances, instancesQuery } = useInstance();
   const [phase, setPhase] = useState<"tags" | "campaigns" | "sheet">("tags");
-  const [allTags, setAllTags] = useState<Tag[]>([]);
+  // Tag names (deduped across all selected instances). Bison tag IDs are
+  // instance-scoped, so selection is by NAME — the backend resolves/creates the
+  // matching tag per instance at apply time.
+  const [allTagNames, setAllTagNames] = useState<string[]>([]);
   const [loading, setLoading] = useState(false);
-  const [selectedTagIds, setSelectedTagIds] = useState<Set<number>>(new Set());
+  const [selectedTagNames, setSelectedTagNames] = useState<Set<string>>(new Set());
   const [search, setSearch] = useState("");
   const [newTagName, setNewTagName] = useState("");
-  const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   // Campaign selection
@@ -61,7 +62,6 @@ export function BulkTagDialog({
   const [campaignsLoading, setCampaignsLoading] = useState(false);
 
   // Saved tag selection
-  const [savedTagIds, setSavedTagIds] = useState<number[]>([]);
   const [savedTagNames, setSavedTagNames] = useState<string[]>([]);
 
   // Sheet append selection
@@ -74,7 +74,7 @@ export function BulkTagDialog({
   useEffect(() => {
     if (!open) return;
     setPhase("tags");
-    setSelectedTagIds(new Set());
+    setSelectedTagNames(new Set());
     setSearch("");
     setNewTagName("");
     setError(null);
@@ -84,60 +84,64 @@ export function BulkTagDialog({
     setSheetSearch("");
     setSelectedSheetTag(null);
 
+    // Pull tags from every selected Bison instance and union by name — the
+    // dialog can span instances when tier = "all".
     setLoading(true);
-    fetch("/api/deliverability/bulk-tags")
-      .then((r) => r.json())
-      .then((data) => { if (data.tags) setAllTags(data.tags); })
+    Promise.all(
+      instances.map((inst) =>
+        fetch(`/api/deliverability/bulk-tags?instance=${encodeURIComponent(inst.slug)}`)
+          .then((r) => r.json())
+          .catch(() => ({ tags: [] }))
+      )
+    )
+      .then((results) => {
+        const set = new Set<string>();
+        for (const r of results) {
+          for (const t of ((r?.tags || []) as Tag[])) {
+            if (t?.name) set.add(t.name);
+          }
+        }
+        setAllTagNames(Array.from(set).sort((a, b) => a.localeCompare(b)));
+      })
       .catch(() => setError("Failed to load tags"))
       .finally(() => setLoading(false));
-  }, [open]);
+  }, [open, instances]);
 
   const availableNames = useMemo(() => new Set((availableTags || []).map((t) => t.name)), [availableTags]);
-  const tags = useMemo(() => mode === "add" ? allTags : allTags.filter((t) => availableNames.has(t.name)), [mode, allTags, availableNames]);
+  const tagNamesList = useMemo(
+    () => (mode === "add" ? allTagNames : allTagNames.filter((n) => availableNames.has(n))),
+    [mode, allTagNames, availableNames]
+  );
   const filtered = useMemo(() => {
-    if (!search) return tags;
+    if (!search) return tagNamesList;
     const q = search.toLowerCase();
-    return tags.filter((t) => t.name.toLowerCase().includes(q));
-  }, [tags, search]);
-  const selectedNames = tags.filter((t) => selectedTagIds.has(t.id)).map((t) => t.name);
+    return tagNamesList.filter((n) => n.toLowerCase().includes(q));
+  }, [tagNamesList, search]);
+  const selectedNames = tagNamesList.filter((n) => selectedTagNames.has(n));
 
-  const toggleTag = (id: number) => {
-    setSelectedTagIds((prev) => { const n = new Set(prev); if (n.has(id)) n.delete(id); else n.add(id); return n; });
+  const toggleTag = (name: string) => {
+    setSelectedTagNames((prev) => { const n = new Set(prev); if (n.has(name)) n.delete(name); else n.add(name); return n; });
   };
 
-  const handleCreateTag = async () => {
-    if (!newTagName.trim()) return;
-    setCreating(true);
+  // "Create" just stages the name locally — the backend auto-creates the tag in
+  // each target instance at apply time (so it lands in the right Bison instance).
+  const handleCreateTag = () => {
+    const name = newTagName.trim();
+    if (!name) return;
     setError(null);
-    try {
-      const res = await fetch("/api/deliverability/bulk-tags", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: "create", tagName: newTagName.trim() }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || "Failed");
-      const newTag: Tag = data.tag;
-      setAllTags((prev) => [...prev, newTag].sort((a, b) => a.name.localeCompare(b.name)));
-      setSelectedTagIds((prev) => new Set([...prev, newTag.id]));
-      setNewTagName("");
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to create tag");
-    } finally {
-      setCreating(false);
-    }
+    setAllTagNames((prev) => (prev.includes(name) ? prev : [...prev, name].sort((a, b) => a.localeCompare(b))));
+    setSelectedTagNames((prev) => new Set([...prev, name]));
+    setNewTagName("");
   };
 
   const handleTagsConfirmed = () => {
-    if (selectedTagIds.size === 0) return;
-    const ids = Array.from(selectedTagIds);
-    const names = tags.filter((t) => selectedTagIds.has(t.id)).map((t) => t.name);
-    setSavedTagIds(ids);
+    if (selectedTagNames.size === 0) return;
+    const names = Array.from(selectedTagNames);
     setSavedTagNames(names);
 
     if (mode === "remove") {
       // Remove mode: close immediately, no campaign step
-      onApply({ mode, tagIds: ids, tagNames: names, domains: [...selectedDomains], campaigns: [] });
+      onApply({ mode, tagNames: names, domains: [...selectedDomains], campaigns: [] });
       onOpenChange(false);
     } else {
       loadCampaignsForTags(names);
@@ -211,12 +215,12 @@ export function BulkTagDialog({
   };
 
   const handleSheetConfirm = () => {
-    onApply({ mode, tagIds: savedTagIds, tagNames: savedTagNames, domains: [...selectedDomains], campaigns: savedCampaigns, sheetAppend: selectedSheetTag ? { clientTag: selectedSheetTag } : null });
+    onApply({ mode, tagNames: savedTagNames, domains: [...selectedDomains], campaigns: savedCampaigns, sheetAppend: selectedSheetTag ? { clientTag: selectedSheetTag } : null });
     onOpenChange(false);
   };
 
   const handleSheetSkip = () => {
-    onApply({ mode, tagIds: savedTagIds, tagNames: savedTagNames, domains: [...selectedDomains], campaigns: savedCampaigns, sheetAppend: null });
+    onApply({ mode, tagNames: savedTagNames, domains: [...selectedDomains], campaigns: savedCampaigns, sheetAppend: null });
     onOpenChange(false);
   };
 
@@ -244,8 +248,8 @@ export function BulkTagDialog({
                     onKeyDown={(e) => e.key === "Enter" && handleCreateTag()}
                     placeholder="Create new tag…" className="flex-1 text-sm bg-transparent outline-none placeholder:text-muted-foreground" />
                 </div>
-                <Button size="sm" variant="outline" disabled={!newTagName.trim() || creating} onClick={handleCreateTag}>
-                  {creating ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : "Create"}
+                <Button size="sm" variant="outline" disabled={!newTagName.trim()} onClick={handleCreateTag}>
+                  Create
                 </Button>
               </div>
             )}
@@ -261,15 +265,15 @@ export function BulkTagDialog({
               <div className="text-center py-6 text-sm text-muted-foreground">{search ? "No tags match" : "No tags available"}</div>
             ) : (
               <div className="flex-1 overflow-y-auto rounded-lg border divide-y">
-                {filtered.map((tag) => {
-                  const selected = selectedTagIds.has(tag.id);
+                {filtered.map((name) => {
+                  const selected = selectedTagNames.has(name);
                   return (
-                    <button key={tag.id} onClick={() => toggleTag(tag.id)}
+                    <button key={name} onClick={() => toggleTag(name)}
                       className={`flex items-center gap-2.5 w-full px-3 py-2 text-sm text-left transition-colors ${selected ? "bg-primary/10" : "hover:bg-muted/50"}`}>
                       <div className={`h-4 w-4 rounded border flex items-center justify-center shrink-0 transition-colors ${selected ? "bg-primary border-primary text-primary-foreground" : "border-muted-foreground/30"}`}>
                         {selected && <Check className="h-3 w-3" />}
                       </div>
-                      <span className="truncate">{tag.name}</span>
+                      <span className="truncate">{name}</span>
                     </button>
                   );
                 })}
@@ -284,10 +288,10 @@ export function BulkTagDialog({
             )}
             {error && <div className="text-xs text-destructive">{error}</div>}
             <div className="flex items-center justify-between pt-1">
-              <span className="text-xs text-muted-foreground">{selectedTagIds.size} tag{selectedTagIds.size !== 1 ? "s" : ""} selected</span>
+              <span className="text-xs text-muted-foreground">{selectedTagNames.size} tag{selectedTagNames.size !== 1 ? "s" : ""} selected</span>
               <div className="flex items-center gap-2">
                 <Button variant="ghost" size="sm" onClick={() => onOpenChange(false)}>Cancel</Button>
-                <Button size="sm" disabled={selectedTagIds.size === 0} onClick={handleTagsConfirmed}
+                <Button size="sm" disabled={selectedTagNames.size === 0} onClick={handleTagsConfirmed}
                   variant={mode === "remove" ? "destructive" : "default"}>
                   {mode === "add" ? "Next" : "Remove Tags"}
                 </Button>

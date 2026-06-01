@@ -402,7 +402,7 @@ function DeliverabilityPageInner() {
     const tagPromise = fetch("/api/deliverability/bulk-tags", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ action: info.mode, tagIds: info.tagIds, domains: info.domains }),
+      body: JSON.stringify({ action: info.mode, tagNames: info.tagNames, domains: info.domains }),
     }).then(async (res) => {
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Failed");
