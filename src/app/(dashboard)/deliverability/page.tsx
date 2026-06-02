@@ -23,6 +23,8 @@ import {
   Copy,
   ExternalLink,
   Tags,
+  SlidersHorizontal,
+  Plus,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -65,7 +67,89 @@ interface DomainRow {
   warmup_limit_total?: number;
   redirect_url?: string | null;
   redirect_checked_at?: string | null;
+  // Trailing reply/bounce rates (%), null until enough snapshot history exists
+  reply_10?: number | null;
+  reply_15?: number | null;
+  bounce_10?: number | null;
+  bounce_15?: number | null;
 }
+
+// --- Numeric multi-condition filter (up to 5, combined with AND or OR) -------
+type FilterField =
+  | "inbox_count" | "total_sent" | "total_replied" | "reply_rate"
+  | "total_bounced" | "bounce_rate" | "daily_limit_total"
+  | "reply_10" | "reply_15" | "bounce_10" | "bounce_15";
+type FilterOp = ">=" | ">" | "=" | "<" | "<=";
+interface FilterCondition { id: number; field: FilterField; op: FilterOp; value: string; }
+
+const FILTER_FIELDS: { value: FilterField; label: string }[] = [
+  { value: "total_sent", label: "Emails sent" },
+  { value: "total_replied", label: "Replies" },
+  { value: "total_bounced", label: "Bounces" },
+  { value: "inbox_count", label: "Inboxes" },
+  { value: "daily_limit_total", label: "Daily limit" },
+  { value: "reply_rate", label: "Reply rate % (all)" },
+  { value: "bounce_rate", label: "Bounce rate % (all)" },
+  { value: "reply_10", label: "Reply rate % (10d)" },
+  { value: "reply_15", label: "Reply rate % (15d)" },
+  { value: "bounce_10", label: "Bounce rate % (10d)" },
+  { value: "bounce_15", label: "Bounce rate % (15d)" },
+];
+const FILTER_OPS: FilterOp[] = [">=", ">", "=", "<", "<="];
+
+// Resolve a domain's numeric value for a filter field (null = not evaluable).
+function filterFieldValue(d: DomainRow, field: FilterField): number | null {
+  switch (field) {
+    case "inbox_count": return d.inbox_count ?? 0;
+    case "total_sent": return d.total_sent ?? 0;
+    case "total_replied": return d.total_replied ?? 0;
+    case "total_bounced": return d.total_bounced ?? 0;
+    case "daily_limit_total": return d.daily_limit_total ?? 0;
+    case "reply_rate": return (d.total_sent || 0) > 0 ? (d.total_replied || 0) / (d.total_sent || 1) * 100 : 0;
+    case "bounce_rate": return (d.total_sent || 0) > 0 ? (d.total_bounced || 0) / (d.total_sent || 1) * 100 : 0;
+    case "reply_10": return d.reply_10 ?? null;
+    case "reply_15": return d.reply_15 ?? null;
+    case "bounce_10": return d.bounce_10 ?? null;
+    case "bounce_15": return d.bounce_15 ?? null;
+  }
+}
+
+function evalCondition(d: DomainRow, c: FilterCondition): boolean {
+  if (c.value.trim() === "") return true; // empty value → ignore this row's condition
+  const target = parseFloat(c.value);
+  if (isNaN(target)) return true;
+  const v = filterFieldValue(d, c.field);
+  if (v == null) return false; // trailing not available yet → cannot match
+  switch (c.op) {
+    case ">=": return v >= target;
+    case ">": return v > target;
+    case "=": return v === target;
+    case "<": return v < target;
+    case "<=": return v <= target;
+  }
+}
+
+// --- Table columns (single source of truth for header, rows, grid template,
+// and the show/hide toggle). `field` doubles as the sort key + visibility key.
+// Domain is non-toggleable (always shown). ---
+type ColField =
+  | "domain" | "redirect_url" | "inbox_count" | "total_sent" | "total_replied"
+  | "reply_rate" | "reply_trailing" | "total_bounced" | "bounce_rate"
+  | "bounce_trailing" | "daily_limit" | "warmup_days";
+const TABLE_COLUMNS: { field: ColField; label: string; align: string; width: string; toggleable: boolean }[] = [
+  { field: "domain", label: "Domain", align: "text-left", width: "1fr", toggleable: false },
+  { field: "redirect_url", label: "Redirect URL", align: "text-left", width: "180px", toggleable: true },
+  { field: "inbox_count", label: "Inboxes", align: "text-center", width: "90px", toggleable: true },
+  { field: "total_sent", label: "Sent", align: "text-center", width: "70px", toggleable: true },
+  { field: "total_replied", label: "Replied", align: "text-center", width: "70px", toggleable: true },
+  { field: "reply_rate", label: "Reply Rate", align: "text-center", width: "80px", toggleable: true },
+  { field: "reply_trailing", label: "Reply 10/15d", align: "text-center", width: "96px", toggleable: true },
+  { field: "total_bounced", label: "Bounced", align: "text-center", width: "70px", toggleable: true },
+  { field: "bounce_rate", label: "Bounce Rate", align: "text-center", width: "80px", toggleable: true },
+  { field: "bounce_trailing", label: "Bounce 10/15d", align: "text-center", width: "96px", toggleable: true },
+  { field: "daily_limit", label: "Daily", align: "text-center", width: "70px", toggleable: true },
+  { field: "warmup_days", label: "Status", align: "text-center", width: "90px", toggleable: true },
+];
 
 interface InstanceSyncProgress {
   slug: BisonInstanceSlug;
@@ -199,6 +283,8 @@ function DeliverabilityPageInner() {
   const { instancesQuery, instances } = useInstance();
   const [bisonTags, setBisonTags] = useState<string[]>([]);
   const [domains, setDomains] = useState<DomainRow[]>([]);
+  // Days of snapshot history collected (drives the trailing-rate warm-up note)
+  const [trailingDaysCollected, setTrailingDaysCollected] = useState(0);
   const [loading, setLoading] = useState(true);
   const [syncing, setSyncing] = useState(false);
   const [syncProgresses, setSyncProgresses] = useState<InstanceSyncProgress[] | null>(null);
@@ -224,7 +310,15 @@ function DeliverabilityPageInner() {
   const [warmupDaysFrom, setWarmupDaysFrom] = useState("");
   const [warmupDaysTo, setWarmupDaysTo] = useState("");
   const [showAssigned, setShowAssigned] = useState(false);
-  const [sortField, setSortField] = useState<"domain" | "redirect_url" | "inbox_count" | "total_sent" | "total_replied" | "reply_rate" | "total_bounced" | "bounce_rate" | "daily_limit" | "warmup_days" | null>(null);
+  // Multi-condition numeric filter (up to 5, combined via AND or OR)
+  const [filterConditions, setFilterConditions] = useState<FilterCondition[]>([]);
+  const [filterMatchMode, setFilterMatchMode] = useState<"all" | "any">("all");
+  const [showFilterBuilder, setShowFilterBuilder] = useState(false);
+  const filterIdRef = useRef(1);
+  // Column show/hide (persisted). Missing key = visible.
+  const [columnVisibility, setColumnVisibility] = useState<Record<string, boolean>>({});
+  const [showColumnMenu, setShowColumnMenu] = useState(false);
+  const [sortField, setSortField] = useState<"domain" | "redirect_url" | "inbox_count" | "total_sent" | "total_replied" | "reply_rate" | "reply_trailing" | "total_bounced" | "bounce_rate" | "bounce_trailing" | "daily_limit" | "warmup_days" | null>(null);
   const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
   const [attachDialogOpen, setAttachDialogOpen] = useState(false);
   const [conformTagsOpen, setConformTagsOpen] = useState(false);
@@ -352,10 +446,31 @@ function DeliverabilityPageInner() {
     setLoading(true);
     setDomains([]);
     try {
-      const res = await fetch(`/api/deliverability/domains?${instancesQuery}`, { cache: "no-store" });
+      // Domains + trailing rates in parallel; trailing is best-effort.
+      const [res, trailingRes] = await Promise.all([
+        fetch(`/api/deliverability/domains?${instancesQuery}`, { cache: "no-store" }),
+        fetch(`/api/deliverability/trailing?${instancesQuery}`, { cache: "no-store" }).catch(() => null),
+      ]);
       const data = await res.json();
       if (seq !== domainsSeqRef.current) return;
-      setDomains(Array.isArray(data) ? data : []);
+
+      // Build a domain → trailing-rates map (keyed by domain; domains are unique per view).
+      const trailingByDomain = new Map<string, { reply_10: number | null; reply_15: number | null; bounce_10: number | null; bounce_15: number | null }>();
+      if (trailingRes && trailingRes.ok) {
+        try {
+          const t = await trailingRes.json();
+          for (const r of (t?.rates || []) as { domain: string; reply_10: number | null; reply_15: number | null; bounce_10: number | null; bounce_15: number | null }[]) {
+            trailingByDomain.set(r.domain, { reply_10: r.reply_10, reply_15: r.reply_15, bounce_10: r.bounce_10, bounce_15: r.bounce_15 });
+          }
+          setTrailingDaysCollected(typeof t?.daysCollected === "number" ? t.daysCollected : 0);
+        } catch { /* ignore trailing parse errors */ }
+      }
+
+      const merged: DomainRow[] = (Array.isArray(data) ? data : []).map((d: DomainRow) => {
+        const t = trailingByDomain.get(d.domain);
+        return t ? { ...d, ...t } : d;
+      });
+      setDomains(merged);
     } catch { /* ignore */ } finally {
       if (seq === domainsSeqRef.current) setLoading(false);
     }
@@ -769,7 +884,8 @@ function DeliverabilityPageInner() {
     const selected = domains.filter((d) => selectedDomains.has(d.domain));
     let csv: string;
     if (withStats) {
-      const header = "Domain,Date Added,Inboxes,Sent,Replied,Bounced,Daily Limit,Tags";
+      const header = "Domain,Date Added,Inboxes,Sent,Replied,Bounced,Reply Rate 10d,Reply Rate 15d,Bounce Rate 10d,Bounce Rate 15d,Daily Limit,Tags";
+      const pct = (v: number | null | undefined) => (v != null ? `${v}%` : "");
       const rows = selected.map((d) => {
         let dateAdded = "";
         if (d.domain_created_at) {
@@ -778,7 +894,7 @@ function DeliverabilityPageInner() {
           const dd = String(dt.getDate()).padStart(2, "0");
           dateAdded = `${mm}-${dd}-${dt.getFullYear()}`;
         }
-        return `${d.domain},${dateAdded},${d.inbox_count},${d.total_sent || 0},${d.total_replied || 0},${d.total_bounced || 0},${d.daily_limit_total || 0},"${(d.tags || []).join(", ")}"`;
+        return `${d.domain},${dateAdded},${d.inbox_count},${d.total_sent || 0},${d.total_replied || 0},${d.total_bounced || 0},${pct(d.reply_10)},${pct(d.reply_15)},${pct(d.bounce_10)},${pct(d.bounce_15)},${d.daily_limit_total || 0},"${(d.tags || []).join(", ")}"`;
       });
       csv = [header, ...rows].join("\n");
     } else {
@@ -1027,6 +1143,15 @@ function DeliverabilityPageInner() {
         return daysLeft >= from && daysLeft <= to;
       });
     }
+    // Multi-condition numeric filter (AND = every / OR = some)
+    const activeConditions = filterConditions.filter((c) => c.value.trim() !== "");
+    if (activeConditions.length > 0) {
+      result = result.filter((d) =>
+        filterMatchMode === "all"
+          ? activeConditions.every((c) => evalCondition(d, c))
+          : activeConditions.some((c) => evalCondition(d, c))
+      );
+    }
     // Sort
     if (sortField) {
       const dir = sortDir === "asc" ? 1 : -1;
@@ -1045,11 +1170,13 @@ function DeliverabilityPageInner() {
             av = (a.total_replied || 0) / (a.total_sent || 1);
             bv = (b.total_replied || 0) / (b.total_sent || 1);
             break;
+          case "reply_trailing": av = a.reply_10 ?? -1; bv = b.reply_10 ?? -1; break;
           case "total_bounced": av = a.total_bounced || 0; bv = b.total_bounced || 0; break;
           case "bounce_rate":
             av = (a.total_bounced || 0) / (a.total_sent || 1);
             bv = (b.total_bounced || 0) / (b.total_sent || 1);
             break;
+          case "bounce_trailing": av = a.bounce_10 ?? -1; bv = b.bounce_10 ?? -1; break;
           case "daily_limit": av = a.daily_limit_total || 0; bv = b.daily_limit_total || 0; break;
           case "warmup_days": {
             const aDays = a.domain_created_at ? Math.max(0, 21 - Math.floor((now - new Date(a.domain_created_at).getTime()) / 86400000)) : 0;
@@ -1061,10 +1188,30 @@ function DeliverabilityPageInner() {
       });
     }
     return result;
-  }, [domains, tagFilters, domainSearch, redirectSearch, typeFilter, showFlagged, flagSubFilter, showHealthy, showReserve, showAssigned, showMultiClient, warmupDaysFilter, warmupDaysFrom, warmupDaysTo, sortField, sortDir, isDomainFlagged, hasReplyIssue, hasBounceIssue, isDomainReserve, isDomainAssigned, isDomainMultiClient, now]);
+  }, [domains, tagFilters, domainSearch, redirectSearch, typeFilter, showFlagged, flagSubFilter, showHealthy, showReserve, showAssigned, showMultiClient, warmupDaysFilter, warmupDaysFrom, warmupDaysTo, filterConditions, filterMatchMode, sortField, sortDir, isDomainFlagged, hasReplyIssue, hasBounceIssue, isDomainReserve, isDomainAssigned, isDomainMultiClient, now]);
 
   const flaggedCount = useMemo(() => domains.filter(isDomainFlagged).length, [domains, isDomainFlagged]);
   const healthyCount = useMemo(() => domains.filter((d) => !isDomainFlagged(d)).length, [domains, isDomainFlagged]);
+
+  // --- Column show/hide persistence + derived visible columns / grid template ---
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem("deliverabilityColumns");
+      if (raw) setColumnVisibility(JSON.parse(raw));
+    } catch { /* ignore */ }
+  }, []);
+  useEffect(() => {
+    try { localStorage.setItem("deliverabilityColumns", JSON.stringify(columnVisibility)); } catch { /* ignore */ }
+  }, [columnVisibility]);
+  const isColVisible = useCallback((field: string) => columnVisibility[field] !== false, [columnVisibility]);
+  const visibleColumns = useMemo(
+    () => TABLE_COLUMNS.filter((c) => !c.toggleable || columnVisibility[c.field] !== false),
+    [columnVisibility],
+  );
+  const gridTemplateColumns = useMemo(
+    () => `28px ${visibleColumns.map((c) => c.width).join(" ")}`,
+    [visibleColumns],
+  );
 
   // Tag filter options — union of (a) every tag defined in the selected Bison
   // instances and (b) tags on the currently-loaded domains as a fallback. This
@@ -1587,6 +1734,150 @@ function DeliverabilityPageInner() {
               </button>
             ))}
 
+            {/* Multi-condition numeric filter */}
+            {(() => {
+              const activeCount = filterConditions.filter((c) => c.value.trim() !== "").length;
+              return (
+                <button
+                  onClick={() => setShowFilterBuilder((s) => !s)}
+                  className={`text-xs px-3 py-1.5 rounded-full border transition-colors flex items-center gap-1.5 ${
+                    activeCount > 0
+                      ? "bg-primary text-primary-foreground border-primary"
+                      : "border-border text-muted-foreground hover:border-foreground hover:text-foreground"
+                  }`}
+                >
+                  <SlidersHorizontal className="h-3 w-3" />
+                  Filters
+                  {activeCount > 0 && (
+                    <span className="text-[10px] font-medium rounded-full px-1.5 bg-primary-foreground/20">
+                      {activeCount}
+                    </span>
+                  )}
+                </button>
+              );
+            })()}
+
+            {/* Column show/hide */}
+            <div className="relative">
+              <button
+                onClick={() => setShowColumnMenu((s) => !s)}
+                className="text-xs px-3 py-1.5 rounded-full border border-border text-muted-foreground hover:border-foreground hover:text-foreground transition-colors flex items-center gap-1.5"
+              >
+                <SlidersHorizontal className="h-3 w-3 rotate-90" />
+                Columns
+              </button>
+              {showColumnMenu && (
+                <>
+                  <div className="fixed inset-0 z-10" onClick={() => setShowColumnMenu(false)} />
+                  <div className="absolute z-20 mt-1 left-0 w-52 rounded-xl border bg-background p-2 shadow-lg">
+                    <p className="text-[11px] text-muted-foreground px-1.5 pb-1">Show columns</p>
+                    {TABLE_COLUMNS.filter((c) => c.toggleable).map((c) => (
+                      <button
+                        key={c.field}
+                        onClick={() => setColumnVisibility((prev) => ({ ...prev, [c.field]: prev[c.field] === false }))}
+                        className="w-full flex items-center gap-2 px-1.5 py-1 rounded-lg hover:bg-muted text-xs"
+                      >
+                        <span className={`h-3.5 w-3.5 rounded border flex items-center justify-center shrink-0 ${columnVisibility[c.field] !== false ? "bg-primary border-primary text-primary-foreground" : "border-muted-foreground/30"}`}>
+                          {columnVisibility[c.field] !== false && <Check className="h-2.5 w-2.5" />}
+                        </span>
+                        {c.label}
+                      </button>
+                    ))}
+                  </div>
+                </>
+              )}
+            </div>
+
+            {/* Trailing-rate warm-up note */}
+            {trailingDaysCollected > 0 && trailingDaysCollected < 15 && (
+              <span className="text-[11px] text-muted-foreground self-center">
+                Trailing rates warming up — day {trailingDaysCollected}/15
+              </span>
+            )}
+
+            {/* Filter builder panel (own line via w-full inside the flex-wrap row) */}
+            {showFilterBuilder && (
+              <div className="w-full mt-1 rounded-xl border bg-background p-3 space-y-2">
+                <div className="flex items-center gap-2 text-xs">
+                  <span className="text-muted-foreground">Match</span>
+                  <div className="flex rounded-lg border overflow-hidden">
+                    {(["all", "any"] as const).map((m) => (
+                      <button
+                        key={m}
+                        onClick={() => setFilterMatchMode(m)}
+                        className={`px-2.5 py-1 transition-colors ${
+                          filterMatchMode === m
+                            ? "bg-primary text-primary-foreground"
+                            : "text-muted-foreground hover:text-foreground"
+                        }`}
+                      >
+                        {m === "all" ? "ALL (AND)" : "ANY (OR)"}
+                      </button>
+                    ))}
+                  </div>
+                  <span className="text-muted-foreground">of these conditions:</span>
+                </div>
+
+                {filterConditions.length === 0 && (
+                  <p className="text-xs text-muted-foreground/70">No conditions yet — add one below.</p>
+                )}
+
+                {filterConditions.map((c) => (
+                  <div key={c.id} className="flex items-center gap-2 flex-wrap">
+                    <select
+                      value={c.field}
+                      onChange={(e) => setFilterConditions((prev) => prev.map((x) => x.id === c.id ? { ...x, field: e.target.value as FilterField } : x))}
+                      className="text-xs rounded-lg border bg-background px-2 py-1.5 outline-none"
+                    >
+                      {FILTER_FIELDS.map((f) => <option key={f.value} value={f.value}>{f.label}</option>)}
+                    </select>
+                    <select
+                      value={c.op}
+                      onChange={(e) => setFilterConditions((prev) => prev.map((x) => x.id === c.id ? { ...x, op: e.target.value as FilterOp } : x))}
+                      className="text-xs rounded-lg border bg-background px-2 py-1.5 outline-none"
+                    >
+                      {FILTER_OPS.map((o) => <option key={o} value={o}>{o}</option>)}
+                    </select>
+                    <input
+                      type="number"
+                      value={c.value}
+                      onChange={(e) => setFilterConditions((prev) => prev.map((x) => x.id === c.id ? { ...x, value: e.target.value } : x))}
+                      placeholder="value"
+                      className="text-xs rounded-lg border bg-background px-2 py-1.5 w-24 outline-none"
+                    />
+                    <button
+                      onClick={() => setFilterConditions((prev) => prev.filter((x) => x.id !== c.id))}
+                      className="text-muted-foreground hover:text-destructive"
+                      title="Remove condition"
+                    >
+                      <X className="h-3.5 w-3.5" />
+                    </button>
+                  </div>
+                ))}
+
+                <div className="flex items-center gap-3 pt-1">
+                  {filterConditions.length < 5 ? (
+                    <button
+                      onClick={() => setFilterConditions((prev) => [...prev, { id: filterIdRef.current++, field: "total_sent", op: ">=", value: "" }])}
+                      className="text-xs px-2.5 py-1 rounded-lg border text-muted-foreground hover:text-foreground hover:border-foreground flex items-center gap-1"
+                    >
+                      <Plus className="h-3 w-3" /> Add condition
+                    </button>
+                  ) : (
+                    <span className="text-[11px] text-muted-foreground">Max 5 conditions</span>
+                  )}
+                  {filterConditions.length > 0 && (
+                    <button
+                      onClick={() => setFilterConditions([])}
+                      className="text-xs px-2.5 py-1 rounded-lg text-muted-foreground hover:text-destructive"
+                    >
+                      Clear all
+                    </button>
+                  )}
+                </div>
+              </div>
+            )}
+
             {/* Flagged filter */}
             <button
               onClick={() => {
@@ -1960,7 +2251,7 @@ function DeliverabilityPageInner() {
               )}
 
               {/* Table header */}
-              <div className="grid grid-cols-[28px_1fr_180px_90px_70px_70px_80px_70px_80px_70px_90px] gap-2 px-4 py-2 text-xs text-muted-foreground font-medium">
+              <div className="grid gap-2 px-4 py-2 text-xs text-muted-foreground font-medium" style={{ gridTemplateColumns }}>
                 <button
                   onClick={() => {
                     const allVisible = filteredDomains.map((d) => d.domain);
@@ -1982,18 +2273,7 @@ function DeliverabilityPageInner() {
                   )}
                 </button>
                 {(() => {
-                  const cols = [
-                    { field: "domain" as const, label: "Domain", align: "text-left" },
-                    { field: "redirect_url" as const, label: "Redirect URL", align: "text-left" },
-                    { field: "inbox_count" as const, label: "Inboxes", align: "text-center" },
-                    { field: "total_sent" as const, label: "Sent", align: "text-center" },
-                    { field: "total_replied" as const, label: "Replied", align: "text-center" },
-                    { field: "reply_rate" as const, label: "Reply Rate", align: "text-center" },
-                    { field: "total_bounced" as const, label: "Bounced", align: "text-center" },
-                    { field: "bounce_rate" as const, label: "Bounce Rate", align: "text-center" },
-                    { field: "daily_limit" as const, label: "Daily", align: "text-center" },
-                    { field: "warmup_days" as const, label: "Status", align: "text-center" },
-                  ];
+                  const cols = visibleColumns;
                   const renderSort = (col: (typeof cols)[number]) => (
                     <button
                       key={col.field}
@@ -2043,7 +2323,8 @@ function DeliverabilityPageInner() {
                   <div
                     key={d.domain}
                     onMouseEnter={() => handleDragEnter(domainIdx, filteredDomains)}
-                    className={`grid grid-cols-[28px_1fr_180px_90px_70px_70px_80px_70px_80px_70px_90px] gap-2 items-center rounded-xl border px-4 py-3 transition-colors select-none ${
+                    style={{ gridTemplateColumns }}
+                    className={`grid gap-2 items-center rounded-xl border px-4 py-3 transition-colors select-none ${
                       isSelected
                         ? "bg-primary/5 border-primary/30"
                         : flagged
@@ -2097,6 +2378,7 @@ function DeliverabilityPageInner() {
                     </div>
 
                     {/* Redirect URL */}
+                    {isColVisible("redirect_url") && (
                     <div className="min-w-0 text-xs">
                       {d.redirect_url ? (
                         <Tooltip>
@@ -2120,8 +2402,10 @@ function DeliverabilityPageInner() {
                         <span className="text-muted-foreground/40">—</span>
                       )}
                     </div>
+                    )}
 
                     {/* Inbox counts */}
+                    {isColVisible("inbox_count") && (
                     <div className="text-center text-sm">
                       <span className="font-medium">{d.inbox_count}</span>
                       {((d.outlook_count || 0) > 0 || (d.google_count || 0) > 0) && (
@@ -2135,38 +2419,78 @@ function DeliverabilityPageInner() {
                         </div>
                       )}
                     </div>
+                    )}
 
                     {/* Sent */}
+                    {isColVisible("total_sent") && (
                     <div className="text-center text-sm font-medium">
                       {(d.total_sent || 0).toLocaleString()}
                     </div>
+                    )}
 
                     {/* Replied */}
+                    {isColVisible("total_replied") && (
                     <div className={`text-center text-sm font-medium ${lowReply ? "text-destructive" : ""}`}>
                       {(d.total_replied || 0).toLocaleString()}
                     </div>
+                    )}
 
                     {/* Reply Rate */}
+                    {isColVisible("reply_rate") && (
                     <div className={`text-center text-sm tabular-nums ${lowReply ? "text-destructive" : "text-muted-foreground"}`}>
                       {replyRate}%
                     </div>
+                    )}
+
+                    {/* Trailing reply rate (10d / 15d) */}
+                    {isColVisible("reply_trailing") && (
+                    <div className="text-center text-xs tabular-nums text-muted-foreground">
+                      <span className={d.reply_10 != null && d.reply_10 < 2 ? "text-destructive" : ""}>
+                        {d.reply_10 != null ? `${d.reply_10}%` : "—"}
+                      </span>
+                      <span className="text-muted-foreground/40"> / </span>
+                      <span className={d.reply_15 != null && d.reply_15 < 2 ? "text-destructive" : ""}>
+                        {d.reply_15 != null ? `${d.reply_15}%` : "—"}
+                      </span>
+                    </div>
+                    )}
 
                     {/* Bounced */}
+                    {isColVisible("total_bounced") && (
                     <div className={`text-center text-sm font-medium ${highBounce ? "text-destructive" : ""}`}>
                       {(d.total_bounced || 0).toLocaleString()}
                     </div>
+                    )}
 
                     {/* Bounce Rate */}
+                    {isColVisible("bounce_rate") && (
                     <div className={`text-center text-sm tabular-nums ${highBounce ? "text-destructive" : "text-muted-foreground"}`}>
                       {bounceRate}%
                     </div>
+                    )}
+
+                    {/* Trailing bounce rate (10d / 15d) */}
+                    {isColVisible("bounce_trailing") && (
+                    <div className="text-center text-xs tabular-nums text-muted-foreground">
+                      <span className={d.bounce_10 != null && d.bounce_10 > 5 ? "text-destructive" : ""}>
+                        {d.bounce_10 != null ? `${d.bounce_10}%` : "—"}
+                      </span>
+                      <span className="text-muted-foreground/40"> / </span>
+                      <span className={d.bounce_15 != null && d.bounce_15 > 5 ? "text-destructive" : ""}>
+                        {d.bounce_15 != null ? `${d.bounce_15}%` : "—"}
+                      </span>
+                    </div>
+                    )}
 
                     {/* Daily Limit */}
+                    {isColVisible("daily_limit") && (
                     <div className="text-center text-sm tabular-nums text-muted-foreground">
                       {d.daily_limit_total || 0}
                     </div>
+                    )}
 
                     {/* Warmup status */}
+                    {isColVisible("warmup_days") && (
                     <div className="text-center">
                       {warmupDaysLeft > 0 ? (
                         <Badge className="bg-amber-500/15 text-amber-400 border-amber-500/30 text-[10px]">
@@ -2182,6 +2506,7 @@ function DeliverabilityPageInner() {
                         </Badge>
                       )}
                     </div>
+                    )}
                   </div>
                 );
               })}
