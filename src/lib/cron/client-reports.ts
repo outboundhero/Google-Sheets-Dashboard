@@ -52,10 +52,23 @@ export async function getClientTierMap(): Promise<Map<string, TrackerEntry>> {
   const statusI = hdr.indexOf("status");
   const map = new Map<string, TrackerEntry>();
   for (const r of rows.slice(1)) {
-    const abbr = String(r[abbrI] || "").trim().toUpperCase();
-    if (!abbr) continue;
+    const abbrCell = String(r[abbrI] || "").trim();
+    if (!abbrCell) continue;
     const plan = String(r[planI] || "").trim();
-    map.set(abbr, { plan, status: String(r[statusI] || "").trim(), bucket: tierBucketFromPlan(plan) });
+    const entry: TrackerEntry = { plan, status: String(r[statusI] || "").trim(), bucket: tierBucketFromPlan(plan) };
+    // Register the whole cell AND each individual market abbreviation, so a
+    // combined tracker client like "DBSM & DBSA & DBSF" or "JPCHI & JPCIN"
+    // also matches a lead sheet tagged "DBSM / DBSA / …" or "JPCIN / JPCHI".
+    const keys = new Set<string>([abbrCell.toUpperCase()]);
+    for (const slash of abbrCell.split("/")) {
+      for (const amp of slash.split(" & ")) {
+        const v = amp.trim().toUpperCase();
+        if (v) keys.add(v);
+      }
+    }
+    for (const k of keys) {
+      if (!map.has(k)) map.set(k, entry); // explicit standalone rows win over a split part
+    }
   }
   return map;
 }
@@ -150,35 +163,61 @@ function fmt(n: number): string {
   return Number.isInteger(n) ? String(n) : n.toFixed(1);
 }
 
+// ---------- HTML helpers (inline styles — email-client safe) ----------
+const BRAND = "#4f46e5";
+function esc(s: string): string {
+  return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+function htmlShell(title: string, subtitle: string, inner: string): string {
+  return `<!doctype html><html><body style="margin:0;padding:0;background:#f4f5f7;">
+  <div style="max-width:640px;margin:0 auto;padding:24px 12px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;color:#1f2937;">
+    <div style="background:#ffffff;border:1px solid #e5e7eb;border-radius:14px;overflow:hidden;">
+      <div style="background:${BRAND};padding:20px 24px;">
+        <div style="color:#ffffff;font-size:18px;font-weight:700;">${esc(title)}</div>
+        <div style="color:#c7d2fe;font-size:13px;margin-top:3px;">${esc(subtitle)}</div>
+      </div>
+      <div style="padding:20px 24px;">${inner}</div>
+    </div>
+    <div style="color:#9ca3af;font-size:11px;text-align:center;margin-top:14px;">Automated report · OutboundHero</div>
+  </div></body></html>`;
+}
+function pill(text: string, ok: boolean): string {
+  const bg = ok ? "#dcfce7" : "#fee2e2", fg = ok ? "#166534" : "#991b1b";
+  return `<span style="display:inline-block;padding:2px 9px;border-radius:999px;background:${bg};color:${fg};font-size:11px;font-weight:600;">${esc(text)}</span>`;
+}
+function callout(text: string): string {
+  return `<div style="margin-top:16px;padding:10px 12px;background:#fffbeb;border:1px solid #fde68a;border-radius:8px;color:#92400e;font-size:12px;line-height:1.5;">⚠️ ${esc(text)}</div>`;
+}
+
 // ---------- DAILY ----------
-export interface DailyReport { subject: string; text: string; date: string }
+export interface DailyReport { subject: string; text: string; html: string; date: string }
 
 export async function buildDailyReport(dateStr: string): Promise<DailyReport> {
   const { clients, unmapped } = await buildLeadUniverse();
   const weekend = isWeekend(dateStr);
-
-  const lines: string[] = [];
   const niceDate = new Date(`${dateStr}T12:00:00Z`).toLocaleDateString("en-US", {
     weekday: "long", month: "long", day: "numeric", year: "numeric", timeZone: "UTC",
   });
-  lines.push(`Daily Meeting-Ready Lead Report — ${niceDate} (PT)`);
-  lines.push(weekend ? "(Weekend — targets at 50% of a weekday)" : "");
-  lines.push("");
 
-  let grandActual = 0;
-  for (const bucket of ["T0.5/1", "T2"] as TierBucket[]) {
+  const buckets = (["T0.5/1", "T2"] as TierBucket[]).map((bucket) => {
     const inBucket = clients.filter((c) => c.bucket === bucket);
     const actual = inBucket.reduce(
       (n, c) => n + c.leads.filter((l) => isMeetingReady(l) && leadDeliveredOn(l, dateStr)).length, 0);
-    grandActual += actual;
+    const perWeekday = TARGETS[bucket].mrMonthly / WEIGHTED_DAYS_PER_MONTH;
+    const target = inBucket.length * (weekend ? perWeekday / 2 : perWeekday);
+    return { label: BUCKET_LABEL[bucket], count: inBucket.length, actual, target, onPace: actual >= target };
+  });
+  const grandActual = buckets.reduce((n, b) => n + b.actual, 0);
 
-    const perClientWeekday = TARGETS[bucket].mrMonthly / WEIGHTED_DAYS_PER_MONTH;
-    const perClientToday = weekend ? perClientWeekday / 2 : perClientWeekday;
-    const target = inBucket.length * perClientToday;
-
-    lines.push(`${BUCKET_LABEL[bucket]}  (${inBucket.length} clients)`);
-    lines.push(`  Meeting-ready delivered today: ${actual}`);
-    lines.push(`  Target today: ${fmt(target)}   (${actual >= target ? "on/above pace ✅" : "below pace ⚠️"})`);
+  // Plain-text body
+  const lines: string[] = [];
+  lines.push(`Daily Meeting-Ready Lead Report — ${niceDate} (PT)`);
+  if (weekend) lines.push("(Weekend — targets at 50% of a weekday)");
+  lines.push("");
+  for (const b of buckets) {
+    lines.push(`${b.label}  (${b.count} clients)`);
+    lines.push(`  Meeting-ready delivered today: ${b.actual}`);
+    lines.push(`  Target today: ${fmt(b.target)}   (${b.onPace ? "on/above pace ✅" : "below pace ⚠️"})`);
     lines.push("");
   }
   lines.push(`Total meeting-ready delivered today: ${grandActual}`);
@@ -187,11 +226,24 @@ export async function buildDailyReport(dateStr: string): Promise<DailyReport> {
     lines.push(`⚠️ ${unmapped.length} client sheet(s) have no tier in the Client Tracker (not counted): ${unmapped.map((u) => u.clientTag).join(", ")}`);
   }
 
-  return { subject: `Daily Lead Report — ${niceDate}`, text: lines.join("\n"), date: dateStr };
+  // HTML body
+  const cards = buckets.map((b) => `
+    <div style="border:1px solid #e5e7eb;border-radius:10px;padding:14px 16px;margin-bottom:12px;">
+      <div style="font-size:13px;color:#6b7280;font-weight:600;">${esc(b.label)} <span style="color:#9ca3af;font-weight:400;">· ${b.count} clients</span></div>
+      <table width="100%" style="margin-top:6px;"><tr>
+        <td style="vertical-align:bottom;"><span style="font-size:28px;font-weight:700;color:#111827;">${b.actual}</span> <span style="font-size:13px;color:#6b7280;">delivered today</span></td>
+        <td style="text-align:right;vertical-align:bottom;font-size:12px;color:#6b7280;">target ${fmt(b.target)}<br/>${pill(b.onPace ? "on pace" : "below pace", b.onPace)}</td>
+      </tr></table>
+    </div>`).join("");
+  const totalHtml = `<div style="margin-top:4px;padding-top:12px;border-top:1px solid #e5e7eb;font-size:15px;"><b>Total meeting-ready delivered today:</b> ${grandActual}</div>`;
+  const unmappedHtml = unmapped.length ? callout(`${unmapped.length} client sheet(s) have no tier in the Client Tracker (not counted): ${unmapped.map((u) => u.clientTag).join(", ")}`) : "";
+  const html = htmlShell("Daily Meeting-Ready Lead Report", `${niceDate} (PT)${weekend ? " · weekend targets at 50%" : ""}`, cards + totalHtml + unmappedHtml);
+
+  return { subject: `Daily Lead Report — ${niceDate}`, text: lines.join("\n"), html, date: dateStr };
 }
 
 // ---------- WEEKLY ----------
-export interface WeeklyReport { subject: string; text: string; startDate: string; endDate: string; flaggedCount: number }
+export interface WeeklyReport { subject: string; text: string; html: string; startDate: string; endDate: string; flaggedCount: number }
 
 export async function buildWeeklyReport(endDateStr: string): Promise<WeeklyReport> {
   const { clients, unmapped } = await buildLeadUniverse();
@@ -234,15 +286,18 @@ export async function buildWeeklyReport(endDateStr: string): Promise<WeeklyRepor
   lines.push("");
 
   // Totals by bucket
-  for (const bucket of ["T0.5/1", "T2"] as TierBucket[]) {
+  const bucketTotals = (["T0.5/1", "T2"] as TierBucket[]).map((bucket) => {
     const inB = rows.filter((r) => r.bucket === bucket);
-    const mr = inB.reduce((n, r) => n + r.mr, 0);
-    const ql = inB.reduce((n, r) => n + r.ql, 0);
-    const mrT = inB.reduce((n, r) => n + r.mrTarget, 0);
-    const qlT = inB.reduce((n, r) => n + r.qlTarget, 0);
-    lines.push(`${BUCKET_LABEL[bucket]}  (${inB.length} clients)`);
-    lines.push(`  Meeting-ready: ${mr} (target ${fmt(mrT)})`);
-    lines.push(`  Quality leads: ${ql} (target ${fmt(qlT)})`);
+    return {
+      label: BUCKET_LABEL[bucket], count: inB.length,
+      mr: inB.reduce((n, r) => n + r.mr, 0), ql: inB.reduce((n, r) => n + r.ql, 0),
+      mrT: inB.reduce((n, r) => n + r.mrTarget, 0), qlT: inB.reduce((n, r) => n + r.qlTarget, 0),
+    };
+  });
+  for (const b of bucketTotals) {
+    lines.push(`${b.label}  (${b.count} clients)`);
+    lines.push(`  Meeting-ready: ${b.mr} (target ${fmt(b.mrT)})`);
+    lines.push(`  Quality leads: ${b.ql} (target ${fmt(b.qlT)})`);
     lines.push("");
   }
 
@@ -259,7 +314,39 @@ export async function buildWeeklyReport(endDateStr: string): Promise<WeeklyRepor
     lines.push(`⚠️ ${unmapped.length} client sheet(s) unmapped to a tier (excluded — please add to Client Tracker): ${unmapped.map((u) => u.clientTag).join(", ")}`);
   }
 
-  return { subject: `Weekly Lead Report — ${range}`, text: lines.join("\n"), startDate: startDateStr, endDate: endDateStr, flaggedCount: flagged.length };
+  // HTML body
+  const summaryCards = bucketTotals.map((b) => `
+    <div style="border:1px solid #e5e7eb;border-radius:10px;padding:14px 16px;margin-bottom:12px;">
+      <div style="font-size:13px;color:#6b7280;font-weight:600;">${esc(b.label)} <span style="color:#9ca3af;font-weight:400;">· ${b.count} clients</span></div>
+      <table width="100%" style="margin-top:8px;font-size:14px;">
+        <tr><td>Meeting-ready</td><td style="text-align:right;"><b>${b.mr}</b> <span style="color:#9ca3af;">/ ${fmt(b.mrT)}</span></td></tr>
+        <tr><td style="padding-top:2px;">Quality leads</td><td style="padding-top:2px;text-align:right;"><b>${b.ql}</b> <span style="color:#9ca3af;">/ ${fmt(b.qlT)}</span></td></tr>
+      </table>
+    </div>`).join("");
+
+  const cellHtml = (act: number, t: number, behind: boolean) =>
+    `<span style="color:${behind ? "#dc2626" : "#111827"};font-weight:${behind ? 700 : 400};">${act}</span> <span style="color:#9ca3af;">/ ${fmt(t)}</span>`;
+  const flaggedHtml = flagged.length === 0
+    ? `<div style="padding:12px;background:#dcfce7;border-radius:8px;color:#166534;font-size:14px;">All clients on pace this week 🎉</div>`
+    : `<table width="100%" style="border-collapse:collapse;font-size:13px;">
+        <thead><tr style="color:#6b7280;border-bottom:2px solid #e5e7eb;">
+          <th style="padding:6px 8px;text-align:left;">Client</th>
+          <th style="padding:6px 8px;text-align:left;">Tier</th>
+          <th style="padding:6px 8px;text-align:right;">Meeting-ready</th>
+          <th style="padding:6px 8px;text-align:right;">Quality leads</th>
+        </tr></thead><tbody>
+        ${flagged.map((r, i) => `<tr style="border-bottom:1px solid #f3f4f6;background:${i % 2 ? "#fafafa" : "#ffffff"};">
+          <td style="padding:6px 8px;font-weight:600;">${esc(r.clientTag)}</td>
+          <td style="padding:6px 8px;color:#6b7280;">${esc(BUCKET_LABEL[r.bucket])}</td>
+          <td style="padding:6px 8px;text-align:right;">${cellHtml(r.mr, r.mrTarget, r.mr < FLAG_THRESHOLD * r.mrTarget)}</td>
+          <td style="padding:6px 8px;text-align:right;">${cellHtml(r.ql, r.qlTarget, r.ql < FLAG_THRESHOLD * r.qlTarget)}</td>
+        </tr>`).join("")}
+        </tbody></table>`;
+  const flaggedHeader = `<div style="font-size:15px;font-weight:700;margin:18px 0 8px;">Flagged clients <span style="color:#dc2626;">(${flagged.length})</span><div style="font-weight:400;color:#9ca3af;font-size:12px;margin-top:2px;">≥25% behind weekly pace on meeting-ready or quality leads</div></div>`;
+  const unmappedHtml = unmapped.length ? callout(`${unmapped.length} client sheet(s) unmapped to a tier (excluded — please add to Client Tracker): ${unmapped.map((u) => u.clientTag).join(", ")}`) : "";
+  const html = htmlShell("Weekly Lead Performance Report", `${range} (PT) · last 7 days`, summaryCards + flaggedHeader + flaggedHtml + unmappedHtml);
+
+  return { subject: `Weekly Lead Report — ${range}`, text: lines.join("\n"), html, startDate: startDateStr, endDate: endDateStr, flaggedCount: flagged.length };
 }
 
 // ---------- DELIVERY ----------
