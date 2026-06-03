@@ -11,10 +11,13 @@ import type { Lead } from "@/types/lead";
 const CLIENT_TRACKER_SHEET_ID = "1MGqSgGNoeN6WgjZnT7_Ij_nZftyyj7Z9DT77rVYLKuQ";
 const CLIENT_TRACKER_TAB = "Client Tracker";
 
-// Average weighted days in a month: weekdays count 1, weekends 0.5.
-// 30.44 cal days/month × (5/7 + 0.5×2/7) = 30.44 × 6/7 ≈ 26.1
-const WEIGHTED_DAYS_PER_MONTH = 26.1;
 const DAYS_PER_MONTH = 30.44;
+// Saturday & Sunday are expected at 10% of a weekday (per Spencer) — deliberately
+// low to surface weekends that delivered more than the (minimal) expectation.
+const WEEKEND_WEIGHT = 0.1;
+// Weighted days in a month: each weekday counts 1, each weekend day WEEKEND_WEIGHT.
+// 30.44 × (5 + 2×0.1)/7 ≈ 22.6 — used to derive the weekday daily target.
+const WEIGHTED_DAYS_PER_MONTH = (DAYS_PER_MONTH * (5 + 2 * WEEKEND_WEIGHT)) / 7;
 const FLAG_THRESHOLD = 0.75; // flagged when actual < 75% of pace (i.e. ≥25% behind)
 
 export type TierBucket = "T0.5/1" | "T2";
@@ -233,15 +236,15 @@ export async function buildDailyReport(dateStr: string): Promise<DailyReport> {
     const actual = inBucket.reduce(
       (n, c) => n + c.leads.filter((l) => isMeetingReady(l) && leadDeliveredOn(l, dateStr)).length, 0);
     const perWeekday = TARGETS[bucket].mrMonthly / WEIGHTED_DAYS_PER_MONTH;
-    const target = inBucket.length * (weekend ? perWeekday / 2 : perWeekday);
+    const target = inBucket.length * (weekend ? perWeekday * WEEKEND_WEIGHT : perWeekday);
     return { label: BUCKET_LABEL[bucket], count: inBucket.length, actual, target, onPace: actual >= target };
   });
   const grandActual = buckets.reduce((n, b) => n + b.actual, 0);
 
   // Plain-text body
   const lines: string[] = [];
-  lines.push(`Daily Meeting-Ready Lead Report — ${niceDate} (PT)`);
-  if (weekend) lines.push("(Weekend — targets at 50% of a weekday)");
+  lines.push(`Daily Meeting-Ready Lead Report — ${niceDate} (PST)`);
+  if (weekend) lines.push("(Weekend — targets at 10% of a weekday)");
   lines.push("");
   for (const b of buckets) {
     lines.push(`${b.label}  (${b.count} clients)`);
@@ -271,7 +274,7 @@ export async function buildDailyReport(dateStr: string): Promise<DailyReport> {
   const totalHtml = `<div style="margin-top:4px;padding-top:12px;border-top:1px solid #e5e7eb;font-size:15px;"><b>Total meeting-ready delivered today:</b> ${grandActual}</div>`;
   const failedHtml = failedSheets.length ? calloutRed(`${failedSheets.length} sheet(s) could not be read this run — totals may be incomplete: ${failedSheets.join(", ")}`) : "";
   const unmappedHtml = unmapped.length ? callout(`${unmapped.length} client sheet(s) have no tier in the Client Tracker (not counted): ${unmapped.map((u) => u.clientTag).join(", ")}`) : "";
-  const html = htmlShell("Daily Meeting-Ready Lead Report", `${niceDate} (PT)${weekend ? " · weekend targets at 50%" : ""}`, cards + totalHtml + failedHtml + unmappedHtml);
+  const html = htmlShell("Daily Meeting-Ready Lead Report", `${niceDate} (PST)${weekend ? " · weekend targets at 10%" : ""}`, cards + totalHtml + failedHtml + unmappedHtml);
 
   return { subject: `Daily Lead Report — ${niceDate}`, text: lines.join("\n"), html, date: dateStr };
 }
@@ -316,7 +319,7 @@ export async function buildWeeklyReport(endDateStr: string): Promise<WeeklyRepor
 
   const lines: string[] = [];
   const range = `${new Date(`${startDateStr}T12:00:00Z`).toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: "UTC" })} – ${new Date(`${endDateStr}T12:00:00Z`).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric", timeZone: "UTC" })}`;
-  lines.push(`Weekly Lead Performance Report — ${range} (PT, last 7 days)`);
+  lines.push(`Weekly Lead Performance Report — ${range} (PST, last 7 days)`);
   lines.push("");
 
   // Totals by bucket
@@ -383,7 +386,7 @@ export async function buildWeeklyReport(endDateStr: string): Promise<WeeklyRepor
   const flaggedHeader = `<div style="font-size:15px;font-weight:700;margin:18px 0 8px;">Flagged clients <span style="color:#dc2626;">(${flagged.length})</span><div style="font-weight:400;color:#9ca3af;font-size:12px;margin-top:2px;">≥25% behind weekly pace on meeting-ready or quality leads</div></div>`;
   const failedHtml = failedSheets.length ? calloutRed(`${failedSheets.length} sheet(s) could not be read this run — totals may be incomplete: ${failedSheets.join(", ")}`) : "";
   const unmappedHtml = unmapped.length ? callout(`${unmapped.length} client sheet(s) unmapped to a tier (excluded — please add to Client Tracker): ${unmapped.map((u) => u.clientTag).join(", ")}`) : "";
-  const html = htmlShell("Weekly Lead Performance Report", `${range} (PT) · last 7 days`, summaryCards + flaggedHeader + flaggedHtml + failedHtml + unmappedHtml);
+  const html = htmlShell("Weekly Lead Performance Report", `${range} (PST) · last 7 days`, summaryCards + flaggedHeader + flaggedHtml + failedHtml + unmappedHtml);
 
   return { subject: `Weekly Lead Report — ${range}`, text: lines.join("\n"), html, startDate: startDateStr, endDate: endDateStr, flaggedCount: flagged.length };
 }
