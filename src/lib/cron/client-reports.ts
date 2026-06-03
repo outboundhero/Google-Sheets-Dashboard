@@ -128,6 +128,27 @@ interface LeadUniverse {
   clients: ReportClient[];
   unmapped: { clientTag: string; name: string }[];   // no tier match
   inactive: number;                                   // resolved but not Active
+  failedSheets: string[];                             // could not be read (excluded — run is incomplete)
+}
+
+const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
+// Read one sheet with retries. Returns null only if every attempt failed —
+// callers MUST treat null as "unknown", never as "zero leads", otherwise a
+// transient read failure would silently undercount and mis-flag a client.
+async function readSheetWithRetry(
+  s: { id: string; sheetName?: string; clientTag: string },
+  retries = 2,
+): Promise<Lead[] | null> {
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      return await getLeadsFromSheet(s.id, s.sheetName || "Leads", s.clientTag);
+    } catch {
+      if (attempt === retries) return null;
+      await sleep(1200 * (attempt + 1));
+    }
+  }
+  return null;
 }
 
 // Read every tracked sheet fresh (so daily counts aren't stale vs the 2-day
@@ -136,14 +157,13 @@ async function buildLeadUniverse(): Promise<LeadUniverse> {
   const [config, tierMap] = await Promise.all([getConfig(), getClientTierMap()]);
   const clients: ReportClient[] = [];
   const unmapped: { clientTag: string; name: string }[] = [];
+  const failedSheets: string[] = [];
   let inactive = 0;
 
-  const BATCH = 25;
+  const BATCH = 20;
   for (let i = 0; i < config.sheets.length; i += BATCH) {
     const batch = config.sheets.slice(i, i + BATCH);
-    const results = await Promise.allSettled(
-      batch.map((s) => getLeadsFromSheet(s.id, s.sheetName || "Leads", s.clientTag)),
-    );
+    const results = await Promise.all(batch.map((s) => readSheetWithRetry(s)));
     for (let j = 0; j < results.length; j++) {
       const s = batch[j];
       const entry = resolveTier(s.clientTag || "", tierMap);
@@ -152,11 +172,17 @@ async function buildLeadUniverse(): Promise<LeadUniverse> {
         continue;
       }
       if (!/active/i.test(entry.status)) { inactive++; continue; }
-      const leads = results[j].status === "fulfilled" ? (results[j] as PromiseFulfilledResult<Lead[]>).value : [];
+      const leads = results[j];
+      if (leads === null) {
+        // Read failed after retries — exclude rather than count as 0, and flag the run.
+        failedSheets.push(s.clientTag || s.name);
+        continue;
+      }
       clients.push({ clientTag: s.clientTag, name: s.name, bucket: entry.bucket, leads });
     }
+    if (i + BATCH < config.sheets.length) await sleep(400); // pace to stay under read quota
   }
-  return { clients, unmapped, inactive };
+  return { clients, unmapped, inactive, failedSheets };
 }
 
 function fmt(n: number): string {
@@ -188,12 +214,15 @@ function pill(text: string, ok: boolean): string {
 function callout(text: string): string {
   return `<div style="margin-top:16px;padding:10px 12px;background:#fffbeb;border:1px solid #fde68a;border-radius:8px;color:#92400e;font-size:12px;line-height:1.5;">⚠️ ${esc(text)}</div>`;
 }
+function calloutRed(text: string): string {
+  return `<div style="margin-top:16px;padding:10px 12px;background:#fef2f2;border:1px solid #fecaca;border-radius:8px;color:#991b1b;font-size:12px;line-height:1.5;font-weight:600;">‼️ ${esc(text)}</div>`;
+}
 
 // ---------- DAILY ----------
 export interface DailyReport { subject: string; text: string; html: string; date: string }
 
 export async function buildDailyReport(dateStr: string): Promise<DailyReport> {
-  const { clients, unmapped } = await buildLeadUniverse();
+  const { clients, unmapped, failedSheets } = await buildLeadUniverse();
   const weekend = isWeekend(dateStr);
   const niceDate = new Date(`${dateStr}T12:00:00Z`).toLocaleDateString("en-US", {
     weekday: "long", month: "long", day: "numeric", year: "numeric", timeZone: "UTC",
@@ -221,6 +250,10 @@ export async function buildDailyReport(dateStr: string): Promise<DailyReport> {
     lines.push("");
   }
   lines.push(`Total meeting-ready delivered today: ${grandActual}`);
+  if (failedSheets.length) {
+    lines.push("");
+    lines.push(`‼️ ${failedSheets.length} sheet(s) could not be read this run — totals may be INCOMPLETE: ${failedSheets.join(", ")}`);
+  }
   if (unmapped.length) {
     lines.push("");
     lines.push(`⚠️ ${unmapped.length} client sheet(s) have no tier in the Client Tracker (not counted): ${unmapped.map((u) => u.clientTag).join(", ")}`);
@@ -236,8 +269,9 @@ export async function buildDailyReport(dateStr: string): Promise<DailyReport> {
       </tr></table>
     </div>`).join("");
   const totalHtml = `<div style="margin-top:4px;padding-top:12px;border-top:1px solid #e5e7eb;font-size:15px;"><b>Total meeting-ready delivered today:</b> ${grandActual}</div>`;
+  const failedHtml = failedSheets.length ? calloutRed(`${failedSheets.length} sheet(s) could not be read this run — totals may be incomplete: ${failedSheets.join(", ")}`) : "";
   const unmappedHtml = unmapped.length ? callout(`${unmapped.length} client sheet(s) have no tier in the Client Tracker (not counted): ${unmapped.map((u) => u.clientTag).join(", ")}`) : "";
-  const html = htmlShell("Daily Meeting-Ready Lead Report", `${niceDate} (PT)${weekend ? " · weekend targets at 50%" : ""}`, cards + totalHtml + unmappedHtml);
+  const html = htmlShell("Daily Meeting-Ready Lead Report", `${niceDate} (PT)${weekend ? " · weekend targets at 50%" : ""}`, cards + totalHtml + failedHtml + unmappedHtml);
 
   return { subject: `Daily Lead Report — ${niceDate}`, text: lines.join("\n"), html, date: dateStr };
 }
@@ -246,7 +280,7 @@ export async function buildDailyReport(dateStr: string): Promise<DailyReport> {
 export interface WeeklyReport { subject: string; text: string; html: string; startDate: string; endDate: string; flaggedCount: number }
 
 export async function buildWeeklyReport(endDateStr: string): Promise<WeeklyReport> {
-  const { clients, unmapped } = await buildLeadUniverse();
+  const { clients, unmapped, failedSheets } = await buildLeadUniverse();
 
   // 7-day window ending on endDateStr (inclusive).
   const end = new Date(`${endDateStr}T12:00:00Z`);
@@ -309,6 +343,10 @@ export async function buildWeeklyReport(endDateStr: string): Promise<WeeklyRepor
       lines.push(`• ${r.clientTag} [${BUCKET_LABEL[r.bucket]}] — ${r.reasons.join("; ")}`);
     }
   }
+  if (failedSheets.length) {
+    lines.push("");
+    lines.push(`‼️ ${failedSheets.length} sheet(s) could not be read this run — totals may be INCOMPLETE: ${failedSheets.join(", ")}`);
+  }
   if (unmapped.length) {
     lines.push("");
     lines.push(`⚠️ ${unmapped.length} client sheet(s) unmapped to a tier (excluded — please add to Client Tracker): ${unmapped.map((u) => u.clientTag).join(", ")}`);
@@ -343,8 +381,9 @@ export async function buildWeeklyReport(endDateStr: string): Promise<WeeklyRepor
         </tr>`).join("")}
         </tbody></table>`;
   const flaggedHeader = `<div style="font-size:15px;font-weight:700;margin:18px 0 8px;">Flagged clients <span style="color:#dc2626;">(${flagged.length})</span><div style="font-weight:400;color:#9ca3af;font-size:12px;margin-top:2px;">≥25% behind weekly pace on meeting-ready or quality leads</div></div>`;
+  const failedHtml = failedSheets.length ? calloutRed(`${failedSheets.length} sheet(s) could not be read this run — totals may be incomplete: ${failedSheets.join(", ")}`) : "";
   const unmappedHtml = unmapped.length ? callout(`${unmapped.length} client sheet(s) unmapped to a tier (excluded — please add to Client Tracker): ${unmapped.map((u) => u.clientTag).join(", ")}`) : "";
-  const html = htmlShell("Weekly Lead Performance Report", `${range} (PT) · last 7 days`, summaryCards + flaggedHeader + flaggedHtml + unmappedHtml);
+  const html = htmlShell("Weekly Lead Performance Report", `${range} (PT) · last 7 days`, summaryCards + flaggedHeader + flaggedHtml + failedHtml + unmappedHtml);
 
   return { subject: `Weekly Lead Report — ${range}`, text: lines.join("\n"), html, startDate: startDateStr, endDate: endDateStr, flaggedCount: flagged.length };
 }
