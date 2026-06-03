@@ -17,6 +17,9 @@
 
     { "path": "/api/cron/daily-account-status-report",     "schedule": "55 7 * * *" },
 
-    { "path": "/api/cron/snapshot-deliverability",         "schedule": "0 15 * * *" }
+    { "path": "/api/cron/snapshot-deliverability",         "schedule": "0 15 * * *" },
+
+    { "path": "/api/cron/client-report-daily",             "schedule": "30 0 * * *" },
+    { "path": "/api/cron/client-report-weekly",            "schedule": "0 20 * * 5" }
   ]
 }
