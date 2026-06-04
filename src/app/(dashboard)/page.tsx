@@ -16,6 +16,8 @@ import { useAllLeads } from "@/lib/hooks/use-leads";
 import { useSheets } from "@/lib/hooks/use-sheets";
 import { useClientTracker } from "@/lib/hooks/use-client-tracker";
 import { useNotDeliveredTodayAggregate } from "@/lib/hooks/use-not-delivered-today";
+import { useAuth } from "@/lib/auth-context";
+import { useTriageStatus, nextStatus, type TriageStatus } from "@/lib/hooks/use-triage-status";
 import { PageHeader } from "@/components/shared/page-header";
 import { RefreshButton } from "@/components/shared/refresh-button";
 import { StatCard } from "@/components/dashboard/stat-card";
@@ -37,6 +39,24 @@ function formatDate(dateStr: string): string {
   return d.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
 }
 
+const TRIAGE_META: Record<TriageStatus, { label: string; dot: string; wrap: string }> = {
+  unreviewed: {
+    label: "Unreviewed",
+    dot: "bg-amber-500/50",
+    wrap: "bg-amber-100 dark:bg-amber-900/50 border-amber-300 dark:border-amber-700 text-amber-900 dark:text-amber-200",
+  },
+  in_progress: {
+    label: "In progress",
+    dot: "bg-yellow-400",
+    wrap: "bg-yellow-100 dark:bg-yellow-900/40 border-yellow-400 dark:border-yellow-600 text-yellow-900 dark:text-yellow-100",
+  },
+  resolved: {
+    label: "Resolved",
+    dot: "bg-emerald-500",
+    wrap: "bg-emerald-100 dark:bg-emerald-900/40 border-emerald-400 dark:border-emerald-600 text-emerald-900 dark:text-emerald-200",
+  },
+};
+
 export default function DashboardPage() {
   const [selectedClient, setSelectedClient] = useState<string>("");
   const { analytics, isLoading, mutate } = useAnalytics(
@@ -46,6 +66,15 @@ export default function DashboardPage() {
   const { sheets } = useSheets();
   const { clients: trackerClients } = useClientTracker();
   const { total: notDeliveredTotal, byClient: notDeliveredByClient } = useNotDeliveredTodayAggregate();
+  const { user } = useAuth();
+
+  // Shared triage status for the stale-clients panel (passes current panel tags
+  // so the API auto-resets clients that dropped off the panel).
+  const staleTags = useMemo(
+    () => (analytics?.clientsWithoutRecentMeetingReady || []).map((c) => c.client),
+    [analytics],
+  );
+  const { statuses: triageStatuses, setStatus: setTriageStatus } = useTriageStatus(staleTags);
 
   // Set of tracked client tags for fast lookup
   const trackedClientTags = useMemo(
@@ -232,28 +261,40 @@ export default function DashboardPage() {
                   Clients without meeting-ready leads for the past 4 days
                 </h2>
                 <p className="text-sm text-amber-700 dark:text-amber-400 mt-0.5">
-                  {analytics.clientsWithoutRecentMeetingReady.length} client{analytics.clientsWithoutRecentMeetingReady.length !== 1 ? "s" : ""} need attention — click to view their leads
+                  {analytics.clientsWithoutRecentMeetingReady.length} client{analytics.clientsWithoutRecentMeetingReady.length !== 1 ? "s" : ""} need attention — click the dot to set status, name to view leads
                 </p>
               </div>
               <div className="flex flex-wrap gap-2">
-                {analytics.clientsWithoutRecentMeetingReady.map(({ client, lastMeetingReadyDate }) => (
-                  <Link
-                    key={client}
-                    href={`/clients/${encodeURIComponent(client)}`}
-                    className="inline-flex items-center gap-2 rounded-lg bg-amber-100 dark:bg-amber-900/50 border border-amber-300 dark:border-amber-700 px-3 py-1.5 text-sm font-semibold text-amber-900 dark:text-amber-200 hover:bg-amber-200 dark:hover:bg-amber-800/60 transition-colors"
-                  >
-                    {client}
-                    {lastMeetingReadyDate ? (
-                      <span className="text-xs font-normal text-amber-600 dark:text-amber-400 bg-amber-200 dark:bg-amber-800/60 rounded px-1.5 py-0.5">
-                        last: {new Date(lastMeetingReadyDate).toLocaleDateString()}
+                {analytics.clientsWithoutRecentMeetingReady.map(({ client, lastMeetingReadyDate }) => {
+                  const status = (triageStatuses[client]?.status || "unreviewed") as TriageStatus;
+                  const meta = TRIAGE_META[status];
+                  const updatedBy = triageStatuses[client]?.updated_by;
+                  return (
+                    <div
+                      key={client}
+                      className={`inline-flex items-center gap-2 rounded-lg border px-2.5 py-1.5 text-sm font-semibold transition-colors ${meta.wrap}`}
+                    >
+                      <button
+                        type="button"
+                        onClick={() => setTriageStatus(client, nextStatus(status), user?.email || null)}
+                        title={`${meta.label}${updatedBy ? ` · by ${updatedBy}` : ""} — click to change`}
+                        className="flex items-center shrink-0 rounded-full hover:scale-110 transition-transform"
+                        aria-label={`Status: ${meta.label}. Click to change.`}
+                      >
+                        <span className={`h-3 w-3 rounded-full ring-2 ring-black/5 ${meta.dot}`} />
+                      </button>
+                      <Link
+                        href={`/clients/${encodeURIComponent(client)}`}
+                        className={`hover:underline ${status === "resolved" ? "line-through opacity-70" : ""}`}
+                      >
+                        {client}
+                      </Link>
+                      <span className="text-xs font-normal opacity-70 bg-black/5 dark:bg-white/10 rounded px-1.5 py-0.5">
+                        {lastMeetingReadyDate ? `last: ${new Date(lastMeetingReadyDate).toLocaleDateString()}` : "no data"}
                       </span>
-                    ) : (
-                      <span className="text-xs font-normal text-amber-600 dark:text-amber-400 bg-amber-200 dark:bg-amber-800/60 rounded px-1.5 py-0.5">
-                        no data
-                      </span>
-                    )}
-                  </Link>
-                ))}
+                    </div>
+                  );
+                })}
               </div>
             </div>
           </div>
