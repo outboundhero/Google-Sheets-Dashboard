@@ -42,8 +42,8 @@ function formatDate(dateStr: string): string {
 const TRIAGE_META: Record<TriageStatus, { label: string; dot: string; wrap: string }> = {
   unreviewed: {
     label: "Unreviewed",
-    // hollow/empty dot so it's clearly "not started" vs the solid yellow/green
-    dot: "bg-transparent border-2 border-amber-700/40 dark:border-amber-300/40",
+    // solid white dot with a gray ring — clearly "not started" (⬜) and visible on amber
+    dot: "bg-white border-2 border-gray-400 dark:border-gray-500",
     wrap: "bg-amber-100 dark:bg-amber-900/50 border-amber-300 dark:border-amber-700 text-amber-900 dark:text-amber-200",
   },
   in_progress: {
