@@ -42,17 +42,18 @@ function formatDate(dateStr: string): string {
 const TRIAGE_META: Record<TriageStatus, { label: string; dot: string; wrap: string }> = {
   unreviewed: {
     label: "Unreviewed",
-    dot: "bg-amber-500/50",
+    // hollow/empty dot so it's clearly "not started" vs the solid yellow/green
+    dot: "bg-transparent border-2 border-amber-700/40 dark:border-amber-300/40",
     wrap: "bg-amber-100 dark:bg-amber-900/50 border-amber-300 dark:border-amber-700 text-amber-900 dark:text-amber-200",
   },
   in_progress: {
     label: "In progress",
-    dot: "bg-yellow-400",
+    dot: "bg-yellow-400 border-2 border-yellow-500",
     wrap: "bg-yellow-100 dark:bg-yellow-900/40 border-yellow-400 dark:border-yellow-600 text-yellow-900 dark:text-yellow-100",
   },
   resolved: {
     label: "Resolved",
-    dot: "bg-emerald-500",
+    dot: "bg-emerald-500 border-2 border-emerald-600",
     wrap: "bg-emerald-100 dark:bg-emerald-900/40 border-emerald-400 dark:border-emerald-600 text-emerald-900 dark:text-emerald-200",
   },
 };
