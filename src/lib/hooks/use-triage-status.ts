@@ -8,6 +8,7 @@ export type TriageStatus = "unreviewed" | "in_progress" | "resolved";
 
 export interface TriageEntry {
   status: TriageStatus;
+  needs: string[];
   updated_by: string | null;
   updated_at: string;
 }
@@ -28,9 +29,16 @@ export function nextStatus(s: TriageStatus): TriageStatus {
  * Pass the CURRENT panel tags — the API uses them to auto-reset clients that
  * have dropped off the panel. Polls every 15s so both users stay in sync.
  */
-export function useTriageStatus(tags: string[]) {
+export function useTriageStatus(tags: string[], ready = true) {
   const sorted = [...tags].sort();
-  const key = `/api/triage-status?tags=${encodeURIComponent(sorted.join(","))}`;
+  // IMPORTANT: only send the `tags` param once the panel data has actually
+  // loaded. The API prunes (and, on an empty list, RESETS ALL) statuses based
+  // on this param — during the brief load on a refresh `tags` is [], which
+  // would wipe every status (the "resets on refresh" bug). Until ready, read
+  // without `tags` so the server just returns stored statuses without pruning.
+  const key = ready
+    ? `/api/triage-status?tags=${encodeURIComponent(sorted.join(","))}`
+    : `/api/triage-status`;
   const { data, mutate, isLoading } = useSWR<TriageResponse>(key, fetcher, {
     revalidateOnFocus: true,
     refreshInterval: 15000,
@@ -40,24 +48,40 @@ export function useTriageStatus(tags: string[]) {
 
   const statuses = data?.statuses || {};
 
-  async function setStatus(clientTag: string, status: TriageStatus, updatedBy: string | null) {
-    // Optimistic update, then POST, then revalidate.
+  // Shared optimistic-POST helper. `patch` is the field(s) being changed; the
+  // entry's other fields are preserved from the current cache.
+  async function update(
+    clientTag: string,
+    body: { status?: TriageStatus; needs?: string[] },
+    updatedBy: string | null,
+  ) {
+    const prev = statuses[clientTag] ?? { status: "unreviewed" as TriageStatus, needs: [], updated_by: null, updated_at: "" };
     await mutate(async () => {
       await fetch("/api/triage-status", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ clientTag, status, updatedBy }),
+        body: JSON.stringify({ clientTag, ...body, updatedBy }),
       });
       const res = await fetch(key);
       return res.json();
     }, {
       optimisticData: {
-        statuses: { ...statuses, [clientTag]: { status, updated_by: updatedBy, updated_at: new Date().toISOString() } },
+        statuses: {
+          ...statuses,
+          [clientTag]: { ...prev, ...body, updated_by: updatedBy, updated_at: new Date().toISOString() },
+        },
       },
       rollbackOnError: true,
       revalidate: false,
     });
   }
 
-  return { statuses, setStatus, isLoading };
+  function setStatus(clientTag: string, status: TriageStatus, updatedBy: string | null) {
+    return update(clientTag, { status }, updatedBy);
+  }
+  function setNeeds(clientTag: string, needs: string[], updatedBy: string | null) {
+    return update(clientTag, { needs }, updatedBy);
+  }
+
+  return { statuses, setStatus, setNeeds, isLoading };
 }

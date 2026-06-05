@@ -1,13 +1,16 @@
 import { NextResponse } from "next/server";
 import { getSupabaseAdmin } from "@/lib/supabase";
 import { postSlackMessage } from "@/lib/slack";
+import { TRIAGE_NEEDS } from "@/lib/constants";
 
 // Shared triage status for the "Clients without meeting-ready leads (4+ days)"
 // panel. Status is per client tag (shared across users), one of:
 //   unreviewed | in_progress | resolved
-// Table: client_triage_status (client_tag PK, status, updated_by, updated_at)
+// Plus `needs`: a multi-select of what the client needs (see TRIAGE_NEEDS).
+// Table: client_triage_status (client_tag PK, status, needs text[], updated_by, updated_at)
 
 const VALID = new Set(["unreviewed", "in_progress", "resolved"]);
+const VALID_NEEDS = new Set<string>(TRIAGE_NEEDS);
 
 // GET ?tags=A,B,C  → { statuses: { TAG: { status, updated_by, updated_at } } }
 // Also AUTO-RESETS: any stored tag NOT in the current panel set is deleted, so a
@@ -36,12 +39,12 @@ export async function GET(request: Request) {
 
     const { data, error } = await supabase
       .from("client_triage_status")
-      .select("client_tag, status, updated_by, updated_at");
+      .select("client_tag, status, needs, updated_by, updated_at");
     if (error) throw new Error(error.message);
 
-    const statuses: Record<string, { status: string; updated_by: string | null; updated_at: string }> = {};
+    const statuses: Record<string, { status: string; needs: string[]; updated_by: string | null; updated_at: string }> = {};
     for (const r of data || []) {
-      statuses[r.client_tag] = { status: r.status, updated_by: r.updated_by, updated_at: r.updated_at };
+      statuses[r.client_tag] = { status: r.status, needs: r.needs || [], updated_by: r.updated_by, updated_at: r.updated_at };
     }
     return NextResponse.json({ statuses });
   } catch (error) {
@@ -50,24 +53,40 @@ export async function GET(request: Request) {
   }
 }
 
-// POST { clientTag, status, updatedBy } → upsert; posts to Slack on "resolved".
+// POST { clientTag, status?, needs?, updatedBy } → upsert; posts to Slack on
+// "resolved". `status` and `needs` are each optional but at least one is
+// required — a status-only update leaves needs untouched and vice versa.
 export async function POST(request: Request) {
   try {
     const supabase = getSupabaseAdmin();
-    const { clientTag, status, updatedBy } = (await request.json()) as {
-      clientTag?: string; status?: string; updatedBy?: string;
+    const { clientTag, status, needs, updatedBy } = (await request.json()) as {
+      clientTag?: string; status?: string; needs?: string[]; updatedBy?: string;
     };
-    if (!clientTag || !status || !VALID.has(status)) {
-      return NextResponse.json({ error: "clientTag and a valid status are required" }, { status: 400 });
+    if (!clientTag) {
+      return NextResponse.json({ error: "clientTag is required" }, { status: 400 });
+    }
+    if (status !== undefined && !VALID.has(status)) {
+      return NextResponse.json({ error: "invalid status" }, { status: 400 });
+    }
+    if (needs !== undefined && (!Array.isArray(needs) || needs.some((n) => !VALID_NEEDS.has(n)))) {
+      return NextResponse.json({ error: "invalid needs" }, { status: 400 });
+    }
+    if (status === undefined && needs === undefined) {
+      return NextResponse.json({ error: "nothing to update — provide status and/or needs" }, { status: 400 });
     }
 
     const now = new Date().toISOString();
+    // Only include the columns being changed so a needs-only update doesn't
+    // clobber status (and vice versa); the upsert leaves untouched columns as-is.
+    const payload: Record<string, unknown> = {
+      client_tag: clientTag, updated_by: updatedBy || null, updated_at: now,
+    };
+    if (status !== undefined) payload.status = status;
+    if (needs !== undefined) payload.needs = [...new Set(needs)];
+
     const { error } = await supabase
       .from("client_triage_status")
-      .upsert(
-        { client_tag: clientTag, status, updated_by: updatedBy || null, updated_at: now },
-        { onConflict: "client_tag" },
-      );
+      .upsert(payload, { onConflict: "client_tag" });
     if (error) throw new Error(error.message);
 
     let slack: { ok: boolean; reason?: string } | undefined;

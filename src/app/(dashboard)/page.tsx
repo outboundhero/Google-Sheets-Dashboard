@@ -18,6 +18,7 @@ import { useClientTracker } from "@/lib/hooks/use-client-tracker";
 import { useNotDeliveredTodayAggregate } from "@/lib/hooks/use-not-delivered-today";
 import { useAuth } from "@/lib/auth-context";
 import { useTriageStatus, nextStatus, type TriageStatus } from "@/lib/hooks/use-triage-status";
+import { TriageNeeds } from "@/components/dashboard/triage-needs";
 import { PageHeader } from "@/components/shared/page-header";
 import { RefreshButton } from "@/components/shared/refresh-button";
 import { StatCard } from "@/components/dashboard/stat-card";
@@ -75,7 +76,9 @@ export default function DashboardPage() {
     () => (analytics?.clientsWithoutRecentMeetingReady || []).map((c) => c.client),
     [analytics],
   );
-  const { statuses: triageStatuses, setStatus: setTriageStatus } = useTriageStatus(staleTags);
+  // `!!analytics` gates the prune: until analytics has loaded, staleTags is []
+  // and we must NOT tell the API the panel is empty (it would reset all statuses).
+  const { statuses: triageStatuses, setStatus: setTriageStatus, setNeeds: setTriageNeeds } = useTriageStatus(staleTags, !!analytics);
 
   // Set of tracked client tags for fast lookup
   const trackedClientTags = useMemo(
@@ -270,6 +273,7 @@ export default function DashboardPage() {
                   const status = (triageStatuses[client]?.status || "unreviewed") as TriageStatus;
                   const meta = TRIAGE_META[status];
                   const updatedBy = triageStatuses[client]?.updated_by;
+                  const needs = triageStatuses[client]?.needs || [];
                   return (
                     <div
                       key={client}
@@ -293,6 +297,10 @@ export default function DashboardPage() {
                       <span className="text-xs font-normal opacity-70 bg-black/5 dark:bg-white/10 rounded px-1.5 py-0.5">
                         {lastMeetingReadyDate ? `last: ${new Date(lastMeetingReadyDate).toLocaleDateString()}` : "no data"}
                       </span>
+                      <TriageNeeds
+                        needs={needs}
+                        onChange={(next) => setTriageNeeds(client, next, user?.email || null)}
+                      />
                     </div>
                   );
                 })}
