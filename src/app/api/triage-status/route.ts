@@ -93,10 +93,15 @@ export async function POST(request: Request) {
       timeZone: "America/Los_Angeles", dateStyle: "medium", timeStyle: "short",
     });
     const by = updatedBy || "a teammate";
+    // Triage notifications (complete + needs edits) go to the "lead sync
+    // outbound" channel. Set SLACK_LEAD_SYNC_CHANNEL_ID to it; if unset we fall
+    // back to SLACK_TRIAGE_CHANNEL_ID (postSlackMessage's default).
+    const channel = process.env.SLACK_LEAD_SYNC_CHANNEL_ID;
     let slack: { ok: boolean; reason?: string } | undefined;
     if (status === "resolved") {
       slack = await postSlackMessage(
         `✅ *${clientTag}* has been diagnosed and resolved by ${by} — ${ts} PST`,
+        channel,
       );
     }
     // Mirror needs edits to Slack so the team sees what each client needs there too.
@@ -105,7 +110,7 @@ export async function POST(request: Request) {
       const msg = list.length
         ? `📋 *${clientTag}* needs updated → *${list.join(", ")}* (by ${by} — ${ts} PST)`
         : `📋 *${clientTag}* needs cleared (by ${by} — ${ts} PST)`;
-      slack = await postSlackMessage(msg);
+      slack = await postSlackMessage(msg, channel);
     }
     return NextResponse.json({ ok: true, slack });
   } catch (error) {
