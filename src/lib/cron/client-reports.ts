@@ -70,7 +70,15 @@ export async function getClientTierMap(): Promise<Map<string, TrackerEntry>> {
       }
     }
     for (const k of keys) {
-      if (!map.has(k)) map.set(k, entry); // explicit standalone rows win over a split part
+      // First registration wins (explicit standalone rows beat a split part) —
+      // EXCEPT a tracker can hold duplicate rows for one abbreviation where the
+      // first has a blank Plan (e.g. two "JPC&A" rows, one blank + one "Tier 1").
+      // A later row that actually has a tier must override the blank one,
+      // otherwise the client resolves to no bucket and silently goes unmapped.
+      const existing = map.get(k);
+      if (!existing || (existing.bucket === null && entry.bucket !== null)) {
+        map.set(k, entry);
+      }
     }
   }
   return map;
@@ -141,14 +149,21 @@ const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 // transient read failure would silently undercount and mis-flag a client.
 async function readSheetWithRetry(
   s: { id: string; sheetName?: string; clientTag: string },
-  retries = 2,
+  retries = 4,
 ): Promise<Lead[] | null> {
   for (let attempt = 0; attempt <= retries; attempt++) {
     try {
       return await getLeadsFromSheet(s.id, s.sheetName || "Leads", s.clientTag);
-    } catch {
+    } catch (err) {
       if (attempt === retries) return null;
-      await sleep(1200 * (attempt + 1));
+      const msg = err instanceof Error ? err.message : String(err);
+      const quota =
+        (err as { code?: number })?.code === 429 ||
+        /quota|rate.?limit|RESOURCE_EXHAUSTED|\b429\b/i.test(msg);
+      // Google's read quota is enforced per ROLLING MINUTE — a short backoff
+      // lands in the same throttled window and fails again (this was why ~25
+      // sheets dropped each run). Wait out the window on quota errors.
+      await sleep(quota ? 20_000 + attempt * 10_000 : 1_200 * (attempt + 1));
     }
   }
   return null;
@@ -163,7 +178,13 @@ async function buildLeadUniverse(): Promise<LeadUniverse> {
   const failedSheets: string[] = [];
   let inactive = 0;
 
-  const BATCH = 20;
+  // Google Sheets read quota is ~per-minute, so reading ~100 separate
+  // spreadsheets in fast 20-wide bursts (the old BATCH=20 + 400ms) saturated it
+  // and ~25 sheets 429'd every run. We have a 300s cron budget (maxDuration),
+  // so read in small bursts paced to a sustained rate well under quota.
+  const READS_PER_MIN = 50;
+  const BATCH = 5;
+  const BATCH_INTERVAL_MS = Math.ceil((BATCH / READS_PER_MIN) * 60_000); // ~6s per 5 reads
   for (let i = 0; i < config.sheets.length; i += BATCH) {
     const batch = config.sheets.slice(i, i + BATCH);
     const results = await Promise.all(batch.map((s) => readSheetWithRetry(s)));
@@ -183,7 +204,7 @@ async function buildLeadUniverse(): Promise<LeadUniverse> {
       }
       clients.push({ clientTag: s.clientTag, name: s.name, bucket: entry.bucket, leads });
     }
-    if (i + BATCH < config.sheets.length) await sleep(400); // pace to stay under read quota
+    if (i + BATCH < config.sheets.length) await sleep(BATCH_INTERVAL_MS);
   }
   return { clients, unmapped, inactive, failedSheets };
 }
