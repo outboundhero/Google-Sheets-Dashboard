@@ -57,7 +57,7 @@ export const LEAD_STATUSES = [
 // What a stale client (no recent meeting-ready leads) actually needs, shown as a
 // multi-select checklist on the dashboard triage panel. Add new categories here —
 // the API validates against this list and the UI renders it, so one edit is enough.
-export const TRIAGE_NEEDS = ["Email accounts", "Leads"] as const;
+export const TRIAGE_NEEDS = ["Email accounts", "Leads", "Email accounts and leads"] as const;
 export type TriageNeed = (typeof TRIAGE_NEEDS)[number];
 
 export const SHEET_TAB_NAME = "Leads";

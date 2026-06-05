@@ -89,14 +89,23 @@ export async function POST(request: Request) {
       .upsert(payload, { onConflict: "client_tag" });
     if (error) throw new Error(error.message);
 
+    const ts = new Date().toLocaleString("en-US", {
+      timeZone: "America/Los_Angeles", dateStyle: "medium", timeStyle: "short",
+    });
+    const by = updatedBy || "a teammate";
     let slack: { ok: boolean; reason?: string } | undefined;
     if (status === "resolved") {
-      const ts = new Date().toLocaleString("en-US", {
-        timeZone: "America/Los_Angeles", dateStyle: "medium", timeStyle: "short",
-      });
       slack = await postSlackMessage(
-        `✅ *${clientTag}* has been diagnosed and resolved by ${updatedBy || "a teammate"} — ${ts} PST`,
+        `✅ *${clientTag}* has been diagnosed and resolved by ${by} — ${ts} PST`,
       );
+    }
+    // Mirror needs edits to Slack so the team sees what each client needs there too.
+    if (needs !== undefined) {
+      const list = (payload.needs as string[]);
+      const msg = list.length
+        ? `📋 *${clientTag}* needs updated → *${list.join(", ")}* (by ${by} — ${ts} PST)`
+        : `📋 *${clientTag}* needs cleared (by ${by} — ${ts} PST)`;
+      slack = await postSlackMessage(msg);
     }
     return NextResponse.json({ ok: true, slack });
   } catch (error) {

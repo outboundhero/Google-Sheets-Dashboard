@@ -8,13 +8,16 @@ import {
   DropdownMenuContent,
   DropdownMenuLabel,
   DropdownMenuSeparator,
-  DropdownMenuCheckboxItem,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
+  DropdownMenuItem,
 } from "@/components/ui/dropdown-menu";
 
 /**
- * Multi-select "what does this client need" control for the stale-clients triage
- * panel. Renders the currently selected needs as inline chips plus a dropdown
- * checklist (driven by TRIAGE_NEEDS — add categories there, no change here).
+ * Single-select "what does this client need" control for the stale-clients
+ * triage panel: pick ONE of TRIAGE_NEEDS (e.g. Email accounts / Leads / Email
+ * accounts and leads). Stored as a 0-or-1 element array so the API + DB
+ * (`needs text[]`) are unchanged. Add categories in TRIAGE_NEEDS — nothing here.
  */
 export function TriageNeeds({
   needs,
@@ -25,26 +28,15 @@ export function TriageNeeds({
   onChange: (needs: string[]) => void;
   disabled?: boolean;
 }) {
-  const selected = new Set(needs);
-  const toggle = (need: string) => {
-    const next = new Set(selected);
-    if (next.has(need)) next.delete(need);
-    else next.add(need);
-    // Preserve TRIAGE_NEEDS order for a stable, readable chip list.
-    onChange(TRIAGE_NEEDS.filter((n) => next.has(n)));
-  };
+  const current = needs[0] ?? "";
 
   return (
     <div className="flex items-center gap-1.5">
-      {needs.length > 0 &&
-        TRIAGE_NEEDS.filter((n) => selected.has(n)).map((n) => (
-          <span
-            key={n}
-            className="rounded bg-black/10 dark:bg-white/15 px-1.5 py-0.5 text-[11px] font-medium"
-          >
-            {n}
-          </span>
-        ))}
+      {current && (
+        <span className="rounded bg-black/10 dark:bg-white/15 px-1.5 py-0.5 text-[11px] font-medium">
+          {current}
+        </span>
+      )}
       <DropdownMenu>
         <DropdownMenuTrigger asChild disabled={disabled}>
           <button
@@ -53,23 +45,30 @@ export function TriageNeeds({
             className="inline-flex items-center gap-1 rounded-md border border-current/20 bg-black/5 dark:bg-white/10 px-1.5 py-0.5 text-[11px] font-medium opacity-80 hover:opacity-100 transition-opacity"
           >
             <ListChecks className="h-3 w-3" />
-            {needs.length === 0 ? "Needs" : "Edit"}
+            {current ? "Edit" : "Needs"}
           </button>
         </DropdownMenuTrigger>
-        <DropdownMenuContent align="start" className="w-44">
+        <DropdownMenuContent align="start" className="w-56">
           <DropdownMenuLabel>Client needs</DropdownMenuLabel>
           <DropdownMenuSeparator />
-          {TRIAGE_NEEDS.map((need) => (
-            <DropdownMenuCheckboxItem
-              key={need}
-              checked={selected.has(need)}
-              // Keep the menu open so several needs can be toggled in one go.
-              onSelect={(e) => e.preventDefault()}
-              onCheckedChange={() => toggle(need)}
-            >
-              {need}
-            </DropdownMenuCheckboxItem>
-          ))}
+          <DropdownMenuRadioGroup
+            value={current}
+            onValueChange={(v) => {
+              if (v !== current) onChange([v]);
+            }}
+          >
+            {TRIAGE_NEEDS.map((need) => (
+              <DropdownMenuRadioItem key={need} value={need}>
+                {need}
+              </DropdownMenuRadioItem>
+            ))}
+          </DropdownMenuRadioGroup>
+          {current && (
+            <>
+              <DropdownMenuSeparator />
+              <DropdownMenuItem onClick={() => onChange([])}>Clear</DropdownMenuItem>
+            </>
+          )}
         </DropdownMenuContent>
       </DropdownMenu>
     </div>
