@@ -18,7 +18,6 @@ import { useClientTracker } from "@/lib/hooks/use-client-tracker";
 import { useNotDeliveredTodayAggregate } from "@/lib/hooks/use-not-delivered-today";
 import { useAuth } from "@/lib/auth-context";
 import { useTriageStatus, nextStatus, type TriageStatus } from "@/lib/hooks/use-triage-status";
-import { TriageNeeds } from "@/components/dashboard/triage-needs";
 import { ResolveTriageDialog } from "@/components/dashboard/resolve-triage-dialog";
 import { PageHeader } from "@/components/shared/page-header";
 import { RefreshButton } from "@/components/shared/refresh-button";
@@ -79,7 +78,7 @@ export default function DashboardPage() {
   );
   // `!!analytics` gates the prune: until analytics has loaded, staleTags is []
   // and we must NOT tell the API the panel is empty (it would reset all statuses).
-  const { statuses: triageStatuses, setStatus: setTriageStatus, setNeeds: setTriageNeeds } = useTriageStatus(staleTags, !!analytics);
+  const { statuses: triageStatuses, setStatus: setTriageStatus } = useTriageStatus(staleTags, !!analytics);
 
   // Resolving a client opens a dialog to capture the diagnosis (reason + fix)
   // before the status flips — those flow into the Slack notification. Other
@@ -311,10 +310,11 @@ export default function DashboardPage() {
                       <span className="text-xs font-normal opacity-70 bg-black/5 dark:bg-white/10 rounded px-1.5 py-0.5">
                         {lastMeetingReadyDate ? `last: ${new Date(lastMeetingReadyDate).toLocaleDateString()}` : "no data"}
                       </span>
-                      <TriageNeeds
-                        needs={needs}
-                        onChange={(next) => setTriageNeeds(client, next, user?.email || null)}
-                      />
+                      {needs[0] && (
+                        <span className="text-xs font-normal rounded bg-black/10 dark:bg-white/15 px-1.5 py-0.5">
+                          {needs[0]}
+                        </span>
+                      )}
                     </div>
                   );
                 })}
@@ -328,9 +328,9 @@ export default function DashboardPage() {
         clientTag={resolvingClient}
         open={resolvingClient !== null}
         onOpenChange={(o) => { if (!o) setResolvingClient(null); }}
-        onConfirm={({ reason, fixed }) => {
+        onConfirm={({ needs, reason, fixed }) => {
           if (resolvingClient) {
-            setTriageStatus(resolvingClient, "resolved", user?.email || null, { reason, fixed });
+            setTriageStatus(resolvingClient, "resolved", user?.email || null, { needs, reason, fixed });
           }
         }}
       />

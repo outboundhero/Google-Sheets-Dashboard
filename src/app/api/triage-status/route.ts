@@ -107,15 +107,17 @@ export async function POST(request: Request) {
     const channel = process.env.SLACK_LEAD_SYNC_CHANNEL_ID;
     let slack: { ok: boolean; reason?: string } | undefined;
     if (status === "resolved") {
-      // Include the diagnosis Spencer asked for: the reason it was flagged and
-      // what was fixed. Each line only shows when the operator provided it.
+      // One consolidated message: what the client needed, the reason it was
+      // flagged for low performance, and what was fixed. Each line only shows
+      // when the operator provided it.
+      const needList = (payload.needs as string[] | undefined) || [];
       const lines = [`✅ *${clientTag}* has been diagnosed and resolved by ${by} — ${ts} PST`];
+      if (needList.length) lines.push(`   • *Needs:* ${needList.join(", ")}`);
       if (cleanReason) lines.push(`   • *Reason:* ${cleanReason}`);
-      if (cleanFixed) lines.push(`   • *Fixed:* ${cleanFixed}`);
+      if (cleanFixed) lines.push(`   • *Fixed / detail:* ${cleanFixed}`);
       slack = await postSlackMessage(lines.join("\n"), channel);
-    }
-    // Mirror needs edits to Slack so the team sees what each client needs there too.
-    if (needs !== undefined) {
+    } else if (needs !== undefined) {
+      // Needs changed outside of a resolve (kept for the API's older callers).
       const list = (payload.needs as string[]);
       const msg = list.length
         ? `📋 *${clientTag}* needs updated → *${list.join(", ")}* (by ${by} — ${ts} PST)`

@@ -60,7 +60,7 @@ export function useTriageStatus(tags: string[], ready = true) {
     const prev = statuses[clientTag] ?? { status: "unreviewed" as TriageStatus, needs: [], resolve_reason: null, resolve_fixed: null, updated_by: null, updated_at: "" };
     // Optimistically mirror the diagnosis onto the entry (the POST stores it).
     const optimisticDiag = body.status === "resolved"
-      ? { resolve_reason: body.reason?.trim() || null, resolve_fixed: body.fixed?.trim() || null }
+      ? { needs: body.needs ?? prev.needs, resolve_reason: body.reason?.trim() || null, resolve_fixed: body.fixed?.trim() || null }
       : {};
     await mutate(async () => {
       await fetch("/api/triage-status", {
@@ -86,13 +86,10 @@ export function useTriageStatus(tags: string[], ready = true) {
     clientTag: string,
     status: TriageStatus,
     updatedBy: string | null,
-    diagnosis?: { reason?: string; fixed?: string },
+    diagnosis?: { needs?: string[]; reason?: string; fixed?: string },
   ) {
     return update(clientTag, { status, ...diagnosis }, updatedBy);
   }
-  function setNeeds(clientTag: string, needs: string[], updatedBy: string | null) {
-    return update(clientTag, { needs }, updatedBy);
-  }
 
-  return { statuses, setStatus, setNeeds, isLoading };
+  return { statuses, setStatus, isLoading };
 }
