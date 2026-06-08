@@ -11,7 +11,7 @@ export function CategoryBadge({ category }: { category: string }) {
   return (
     <Badge
       variant="outline"
-      className={cn("font-medium", categoryStyles[category] || "bg-muted text-muted-foreground")}
+      className={cn("font-medium", categoryStyles[category] || "bg-muted text-foreground border-border")}
     >
       {category}
     </Badge>
