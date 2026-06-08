@@ -11,7 +11,7 @@ const statusStyles: Record<string, string> = {
 
 export function StatusBadge({ status }: { status: string }) {
   if (!status) return null;
-  const style = statusStyles[status.trim().toLowerCase()] || "bg-muted text-muted-foreground";
+  const style = statusStyles[status.trim().toLowerCase()] || "bg-muted text-foreground border-border";
   return (
     <Badge variant="outline" className={cn("font-medium text-xs", style)}>
       {status}
