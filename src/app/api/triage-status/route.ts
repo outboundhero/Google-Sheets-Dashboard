@@ -39,12 +39,12 @@ export async function GET(request: Request) {
 
     const { data, error } = await supabase
       .from("client_triage_status")
-      .select("client_tag, status, needs, updated_by, updated_at");
+      .select("client_tag, status, needs, resolve_reason, resolve_fixed, updated_by, updated_at");
     if (error) throw new Error(error.message);
 
-    const statuses: Record<string, { status: string; needs: string[]; updated_by: string | null; updated_at: string }> = {};
+    const statuses: Record<string, { status: string; needs: string[]; resolve_reason: string | null; resolve_fixed: string | null; updated_by: string | null; updated_at: string }> = {};
     for (const r of data || []) {
-      statuses[r.client_tag] = { status: r.status, needs: r.needs || [], updated_by: r.updated_by, updated_at: r.updated_at };
+      statuses[r.client_tag] = { status: r.status, needs: r.needs || [], resolve_reason: r.resolve_reason ?? null, resolve_fixed: r.resolve_fixed ?? null, updated_by: r.updated_by, updated_at: r.updated_at };
     }
     return NextResponse.json({ statuses });
   } catch (error) {
@@ -59,8 +59,8 @@ export async function GET(request: Request) {
 export async function POST(request: Request) {
   try {
     const supabase = getSupabaseAdmin();
-    const { clientTag, status, needs, updatedBy } = (await request.json()) as {
-      clientTag?: string; status?: string; needs?: string[]; updatedBy?: string;
+    const { clientTag, status, needs, reason, fixed, updatedBy } = (await request.json()) as {
+      clientTag?: string; status?: string; needs?: string[]; reason?: string; fixed?: string; updatedBy?: string;
     };
     if (!clientTag) {
       return NextResponse.json({ error: "clientTag is required" }, { status: 400 });
@@ -83,6 +83,14 @@ export async function POST(request: Request) {
     };
     if (status !== undefined) payload.status = status;
     if (needs !== undefined) payload.needs = [...new Set(needs)];
+    // The diagnosis (reason for low performance + what was fixed) is captured
+    // when a client is marked resolved. Trim to null so blanks don't store "".
+    const cleanReason = typeof reason === "string" ? reason.trim() || null : undefined;
+    const cleanFixed = typeof fixed === "string" ? fixed.trim() || null : undefined;
+    if (status === "resolved") {
+      payload.resolve_reason = cleanReason ?? null;
+      payload.resolve_fixed = cleanFixed ?? null;
+    }
 
     const { error } = await supabase
       .from("client_triage_status")
@@ -99,10 +107,12 @@ export async function POST(request: Request) {
     const channel = process.env.SLACK_LEAD_SYNC_CHANNEL_ID;
     let slack: { ok: boolean; reason?: string } | undefined;
     if (status === "resolved") {
-      slack = await postSlackMessage(
-        `✅ *${clientTag}* has been diagnosed and resolved by ${by} — ${ts} PST`,
-        channel,
-      );
+      // Include the diagnosis Spencer asked for: the reason it was flagged and
+      // what was fixed. Each line only shows when the operator provided it.
+      const lines = [`✅ *${clientTag}* has been diagnosed and resolved by ${by} — ${ts} PST`];
+      if (cleanReason) lines.push(`   • *Reason:* ${cleanReason}`);
+      if (cleanFixed) lines.push(`   • *Fixed:* ${cleanFixed}`);
+      slack = await postSlackMessage(lines.join("\n"), channel);
     }
     // Mirror needs edits to Slack so the team sees what each client needs there too.
     if (needs !== undefined) {

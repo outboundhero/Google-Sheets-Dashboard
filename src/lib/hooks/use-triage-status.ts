@@ -9,6 +9,8 @@ export type TriageStatus = "unreviewed" | "in_progress" | "resolved";
 export interface TriageEntry {
   status: TriageStatus;
   needs: string[];
+  resolve_reason: string | null;
+  resolve_fixed: string | null;
   updated_by: string | null;
   updated_at: string;
 }
@@ -52,10 +54,14 @@ export function useTriageStatus(tags: string[], ready = true) {
   // entry's other fields are preserved from the current cache.
   async function update(
     clientTag: string,
-    body: { status?: TriageStatus; needs?: string[] },
+    body: { status?: TriageStatus; needs?: string[]; reason?: string; fixed?: string },
     updatedBy: string | null,
   ) {
-    const prev = statuses[clientTag] ?? { status: "unreviewed" as TriageStatus, needs: [], updated_by: null, updated_at: "" };
+    const prev = statuses[clientTag] ?? { status: "unreviewed" as TriageStatus, needs: [], resolve_reason: null, resolve_fixed: null, updated_by: null, updated_at: "" };
+    // Optimistically mirror the diagnosis onto the entry (the POST stores it).
+    const optimisticDiag = body.status === "resolved"
+      ? { resolve_reason: body.reason?.trim() || null, resolve_fixed: body.fixed?.trim() || null }
+      : {};
     await mutate(async () => {
       await fetch("/api/triage-status", {
         method: "POST",
@@ -68,7 +74,7 @@ export function useTriageStatus(tags: string[], ready = true) {
       optimisticData: {
         statuses: {
           ...statuses,
-          [clientTag]: { ...prev, ...body, updated_by: updatedBy, updated_at: new Date().toISOString() },
+          [clientTag]: { ...prev, ...body, ...optimisticDiag, updated_by: updatedBy, updated_at: new Date().toISOString() },
         },
       },
       rollbackOnError: true,
@@ -76,8 +82,13 @@ export function useTriageStatus(tags: string[], ready = true) {
     });
   }
 
-  function setStatus(clientTag: string, status: TriageStatus, updatedBy: string | null) {
-    return update(clientTag, { status }, updatedBy);
+  function setStatus(
+    clientTag: string,
+    status: TriageStatus,
+    updatedBy: string | null,
+    diagnosis?: { reason?: string; fixed?: string },
+  ) {
+    return update(clientTag, { status, ...diagnosis }, updatedBy);
   }
   function setNeeds(clientTag: string, needs: string[], updatedBy: string | null) {
     return update(clientTag, { needs }, updatedBy);

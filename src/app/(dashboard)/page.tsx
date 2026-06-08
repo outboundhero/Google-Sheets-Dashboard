@@ -19,6 +19,7 @@ import { useNotDeliveredTodayAggregate } from "@/lib/hooks/use-not-delivered-tod
 import { useAuth } from "@/lib/auth-context";
 import { useTriageStatus, nextStatus, type TriageStatus } from "@/lib/hooks/use-triage-status";
 import { TriageNeeds } from "@/components/dashboard/triage-needs";
+import { ResolveTriageDialog } from "@/components/dashboard/resolve-triage-dialog";
 import { PageHeader } from "@/components/shared/page-header";
 import { RefreshButton } from "@/components/shared/refresh-button";
 import { StatCard } from "@/components/dashboard/stat-card";
@@ -79,6 +80,19 @@ export default function DashboardPage() {
   // `!!analytics` gates the prune: until analytics has loaded, staleTags is []
   // and we must NOT tell the API the panel is empty (it would reset all statuses).
   const { statuses: triageStatuses, setStatus: setTriageStatus, setNeeds: setTriageNeeds } = useTriageStatus(staleTags, !!analytics);
+
+  // Resolving a client opens a dialog to capture the diagnosis (reason + fix)
+  // before the status flips — those flow into the Slack notification. Other
+  // transitions (→ in_progress, → unreviewed) apply immediately.
+  const [resolvingClient, setResolvingClient] = useState<string | null>(null);
+  function cycleTriage(client: string, current: TriageStatus) {
+    const next = nextStatus(current);
+    if (next === "resolved") {
+      setResolvingClient(client);
+      return;
+    }
+    setTriageStatus(client, next, user?.email || null);
+  }
 
   // Set of tracked client tags for fast lookup
   const trackedClientTags = useMemo(
@@ -281,7 +295,7 @@ export default function DashboardPage() {
                     >
                       <button
                         type="button"
-                        onClick={() => setTriageStatus(client, nextStatus(status), user?.email || null)}
+                        onClick={() => cycleTriage(client, status)}
                         title={`${meta.label}${updatedBy ? ` · by ${updatedBy}` : ""} — click to change`}
                         className="flex items-center shrink-0 rounded-full hover:scale-110 transition-transform"
                         aria-label={`Status: ${meta.label}. Click to change.`}
@@ -309,6 +323,17 @@ export default function DashboardPage() {
           </div>
         </div>
       )}
+
+      <ResolveTriageDialog
+        clientTag={resolvingClient}
+        open={resolvingClient !== null}
+        onOpenChange={(o) => { if (!o) setResolvingClient(null); }}
+        onConfirm={({ reason, fixed }) => {
+          if (resolvingClient) {
+            setTriageStatus(resolvingClient, "resolved", user?.email || null, { reason, fixed });
+          }
+        }}
+      />
 
       {/* Not Delivered Today */}
       {notDeliveredTotal > 0 && (
