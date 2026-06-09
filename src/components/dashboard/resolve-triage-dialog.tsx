@@ -13,13 +13,12 @@ import {
 import { Button } from "@/components/ui/button";
 
 /**
- * Shown when a stale client is moved to Complete/Resolved. Captures everything
- * the team wants in the Slack "diagnosed and resolved" notification:
+ * Shown when a stale client is moved to Complete/Resolved. Captures what goes
+ * into the Slack "diagnosed and resolved" notification:
  *   - what the client needs (one of TRIAGE_NEEDS)
- *   - the reason it was flagged for low performance (required)
- *   - what was fixed / any extra detail (optional)
- * This replaces the old standalone "Needs" button on the panel chip — needs is
- * now picked here as part of completing.
+ *   - any extra detail (optional, free text)
+ * Nothing is required — Complete is always clickable. Replaces the old
+ * standalone "Needs" button; needs is now picked here as part of completing.
  */
 export function ResolveTriageDialog({
   clientTag,
@@ -30,24 +29,20 @@ export function ResolveTriageDialog({
   clientTag: string | null;
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  onConfirm: (result: { needs: string[]; reason: string; fixed: string }) => void;
+  onConfirm: (result: { needs: string[]; detail: string }) => void;
 }) {
   const [need, setNeed] = useState("");
-  const [reason, setReason] = useState("");
-  const [fixed, setFixed] = useState("");
+  const [detail, setDetail] = useState("");
 
   function reset() {
     setNeed("");
-    setReason("");
-    setFixed("");
+    setDetail("");
   }
 
   function submit() {
-    if (!reason.trim()) return;
     onConfirm({
       needs: need ? [need] : [],
-      reason: reason.trim(),
-      fixed: fixed.trim(),
+      detail: detail.trim(),
     });
     reset();
     onOpenChange(false);
@@ -65,7 +60,7 @@ export function ResolveTriageDialog({
         <DialogHeader>
           <DialogTitle>Complete {clientTag}</DialogTitle>
           <DialogDescription>
-            This posts to Slack so the team knows what happened. The reason is required.
+            This posts to Slack so the team knows what happened.
           </DialogDescription>
         </DialogHeader>
         <div className="space-y-3">
@@ -91,25 +86,15 @@ export function ResolveTriageDialog({
             </div>
           </div>
           <div className="space-y-1">
-            <label className="text-sm font-medium">Reason for low performance</label>
-            <textarea
-              value={reason}
-              onChange={(e) => setReason(e.target.value)}
-              placeholder="e.g. Inboxes were disconnected"
-              rows={2}
-              className="w-full rounded-md border bg-transparent px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-ring resize-none"
-            />
-          </div>
-          <div className="space-y-1">
             <label className="text-sm font-medium">
-              What was fixed / more detail{" "}
+              More detail{" "}
               <span className="text-muted-foreground font-normal">(optional)</span>
             </label>
             <textarea
-              value={fixed}
-              onChange={(e) => setFixed(e.target.value)}
-              placeholder="e.g. Reconnected senders and loaded new leads"
-              rows={2}
+              value={detail}
+              onChange={(e) => setDetail(e.target.value)}
+              placeholder="e.g. Inboxes were disconnected — reconnected senders and loaded new leads"
+              rows={3}
               className="w-full rounded-md border bg-transparent px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-ring resize-none"
             />
           </div>
@@ -118,9 +103,7 @@ export function ResolveTriageDialog({
           <Button variant="outline" onClick={() => onOpenChange(false)}>
             Cancel
           </Button>
-          <Button onClick={submit} disabled={!reason.trim()}>
-            Complete
-          </Button>
+          <Button onClick={submit}>Complete</Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>

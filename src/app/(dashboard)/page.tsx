@@ -328,9 +328,9 @@ export default function DashboardPage() {
         clientTag={resolvingClient}
         open={resolvingClient !== null}
         onOpenChange={(o) => { if (!o) setResolvingClient(null); }}
-        onConfirm={({ needs, reason, fixed }) => {
+        onConfirm={({ needs, detail }) => {
           if (resolvingClient) {
-            setTriageStatus(resolvingClient, "resolved", user?.email || null, { needs, reason, fixed });
+            setTriageStatus(resolvingClient, "resolved", user?.email || null, { needs, fixed: detail });
           }
         }}
       />

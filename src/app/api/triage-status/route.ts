@@ -114,7 +114,7 @@ export async function POST(request: Request) {
       const lines = [`✅ *${clientTag}* has been diagnosed and resolved by ${by} — ${ts} PST`];
       if (needList.length) lines.push(`   • *Needs:* ${needList.join(", ")}`);
       if (cleanReason) lines.push(`   • *Reason:* ${cleanReason}`);
-      if (cleanFixed) lines.push(`   • *Fixed / detail:* ${cleanFixed}`);
+      if (cleanFixed) lines.push(`   • *Detail:* ${cleanFixed}`);
       slack = await postSlackMessage(lines.join("\n"), channel);
     } else if (needs !== undefined) {
       // Needs changed outside of a resolve (kept for the API's older callers).
