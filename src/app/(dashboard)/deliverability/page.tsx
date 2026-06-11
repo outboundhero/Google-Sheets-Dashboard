@@ -70,6 +70,8 @@ interface DomainRow {
   redirect_checked_at?: string | null;
   blacklisted?: boolean | null;
   blacklist_checked_at?: string | null;
+  spamhaus_dbl?: boolean | null;
+  spamhaus_checked_at?: string | null;
   // Trailing reply/bounce rates (%), null until enough snapshot history exists
   reply_10?: number | null;
   reply_15?: number | null;
@@ -136,12 +138,13 @@ function evalCondition(d: DomainRow, c: FilterCondition): boolean {
 // and the show/hide toggle). `field` doubles as the sort key + visibility key.
 // Domain is non-toggleable (always shown). ---
 type ColField =
-  | "domain" | "blacklisted" | "redirect_url" | "inbox_count" | "total_sent" | "total_replied"
+  | "domain" | "blacklisted" | "spamhaus_dbl" | "redirect_url" | "inbox_count" | "total_sent" | "total_replied"
   | "reply_rate" | "reply_trailing" | "total_bounced" | "bounce_rate"
   | "bounce_trailing" | "daily_limit" | "warmup_days";
 const TABLE_COLUMNS: { field: ColField; label: string; align: string; width: string; toggleable: boolean }[] = [
   { field: "domain", label: "Domain", align: "text-left", width: "1fr", toggleable: false },
-  { field: "blacklisted", label: "Blacklisted", align: "text-center", width: "90px", toggleable: true },
+  { field: "blacklisted", label: "SURBL", align: "text-center", width: "80px", toggleable: true },
+  { field: "spamhaus_dbl", label: "Spamhaus DBL", align: "text-center", width: "110px", toggleable: true },
   { field: "redirect_url", label: "Redirect URL", align: "text-left", width: "180px", toggleable: true },
   { field: "inbox_count", label: "Inboxes", align: "text-center", width: "90px", toggleable: true },
   { field: "total_sent", label: "Sent", align: "text-center", width: "70px", toggleable: true },
@@ -309,6 +312,8 @@ function DeliverabilityPageInner() {
   const [showHealthy, setShowHealthy] = useState(() => searchParams.get("healthy") === "true");
   const [showBlacklisted, setShowBlacklisted] = useState(() => searchParams.get("blacklisted") === "true");
   const [showNotBlacklisted, setShowNotBlacklisted] = useState(() => searchParams.get("blacklisted") === "false");
+  const [showSpamhausListed, setShowSpamhausListed] = useState(() => searchParams.get("spamhaus") === "true");
+  const [showSpamhausClean, setShowSpamhausClean] = useState(() => searchParams.get("spamhaus") === "false");
   const [showMultiClient, setShowMultiClient] = useState(() => searchParams.get("multiClient") === "true");
   const [flagSubFilter, setFlagSubFilter] = useState<"all" | "reply" | "bounce">("all");
   const [showReserve, setShowReserve] = useState(false);
@@ -324,7 +329,7 @@ function DeliverabilityPageInner() {
   // Column show/hide (persisted). Missing key = visible.
   const [columnVisibility, setColumnVisibility] = useState<Record<string, boolean>>({});
   const [showColumnMenu, setShowColumnMenu] = useState(false);
-  const [sortField, setSortField] = useState<"domain" | "blacklisted" | "redirect_url" | "inbox_count" | "total_sent" | "total_replied" | "reply_rate" | "reply_trailing" | "total_bounced" | "bounce_rate" | "bounce_trailing" | "daily_limit" | "warmup_days" | null>(null);
+  const [sortField, setSortField] = useState<"domain" | "blacklisted" | "spamhaus_dbl" | "redirect_url" | "inbox_count" | "total_sent" | "total_replied" | "reply_rate" | "reply_trailing" | "total_bounced" | "bounce_rate" | "bounce_trailing" | "daily_limit" | "warmup_days" | null>(null);
   const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
   const [attachDialogOpen, setAttachDialogOpen] = useState(false);
   const [conformTagsOpen, setConformTagsOpen] = useState(false);
@@ -385,6 +390,10 @@ function DeliverabilityPageInner() {
   // Check blacklist job state
   interface BlacklistCheckJob { status: "running" | "done" | "error"; checked: number; total: number; listed: number; inconclusive: number; error?: string }
   const [blacklistCheckJob, setBlacklistCheckJob] = useState<BlacklistCheckJob | null>(null);
+
+  // Check Spamhaus DBL job state
+  interface SpamhausCheckJob { status: "running" | "done" | "error"; checked: number; total: number; listed: number; inconclusive: number; error?: string }
+  const [spamhausCheckJob, setSpamhausCheckJob] = useState<SpamhausCheckJob | null>(null);
   const [limitInput, setLimitInput] = useState("");
   interface LimitJob { type: "daily" | "warmup"; limit: number; status: "running" | "done" | "error"; updated?: number; total?: number; error?: string }
   const [limitJob, setLimitJob] = useState<LimitJob | null>(null);
@@ -1068,6 +1077,54 @@ function DeliverabilityPageInner() {
     loadDomains();
   }, [loadDomains]);
 
+  // Bulk Spamhaus DBL check. Same DNS-batched shape as SURBL.
+  const startCheckSpamhaus = useCallback(async (domainList: string[]) => {
+    if (domainList.length === 0) return;
+    setSpamhausCheckJob({ status: "running", checked: 0, total: domainList.length, listed: 0, inconclusive: 0 });
+    setSelectedDomains(new Set());
+
+    const CHUNK = 500;
+    let checked = 0;
+    let listed = 0;
+    let inconclusive = 0;
+    let failedChunks = 0;
+    let firstError: string | undefined;
+    for (let i = 0; i < domainList.length; i += CHUNK) {
+      const slice = domainList.slice(i, i + CHUNK);
+      try {
+        const res = await fetch("/api/deliverability/check-spamhaus", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ domains: slice }),
+        });
+        if (!res.ok) {
+          const data = await res.json().catch(() => ({}));
+          throw new Error(data?.error || `HTTP ${res.status}`);
+        }
+        const data = await res.json();
+        checked += data.checked || 0;
+        listed += data.listed || 0;
+        inconclusive += data.inconclusive || 0;
+      } catch (e) {
+        failedChunks++;
+        checked += slice.length;
+        if (!firstError) firstError = e instanceof Error ? e.message : "Failed";
+      }
+      setSpamhausCheckJob({ status: "running", checked, total: domainList.length, listed, inconclusive });
+    }
+    setSpamhausCheckJob({
+      status: failedChunks > 0 ? "error" : "done",
+      checked,
+      total: domainList.length,
+      listed,
+      inconclusive,
+      error: failedChunks > 0
+        ? firstError || `${failedChunks} batch${failedChunks !== 1 ? "es" : ""} failed`
+        : undefined,
+    });
+    loadDomains();
+  }, [loadDomains]);
+
   // Bulk SURBL blacklist check. DNS is fast — push bigger chunks than redirects.
   const startCheckBlacklist = useCallback(async (domainList: string[]) => {
     if (domainList.length === 0) return;
@@ -1202,6 +1259,12 @@ function DeliverabilityPageInner() {
     if (showNotBlacklisted) {
       result = result.filter((d) => d.blacklisted === false);
     }
+    if (showSpamhausListed) {
+      result = result.filter((d) => d.spamhaus_dbl === true);
+    }
+    if (showSpamhausClean) {
+      result = result.filter((d) => d.spamhaus_dbl === false);
+    }
     if (showReserve) {
       result = result.filter(isDomainReserve);
     }
@@ -1256,6 +1319,10 @@ function DeliverabilityPageInner() {
             av = a.blacklisted == null ? -1 : a.blacklisted ? 1 : 0;
             bv = b.blacklisted == null ? -1 : b.blacklisted ? 1 : 0;
             break;
+          case "spamhaus_dbl":
+            av = a.spamhaus_dbl == null ? -1 : a.spamhaus_dbl ? 1 : 0;
+            bv = b.spamhaus_dbl == null ? -1 : b.spamhaus_dbl ? 1 : 0;
+            break;
           case "redirect_url":
             av = (a.redirect_url || "").toLowerCase();
             bv = (b.redirect_url || "").toLowerCase();
@@ -1285,12 +1352,14 @@ function DeliverabilityPageInner() {
       });
     }
     return result;
-  }, [domains, tagFilters, domainSearch, redirectSearch, typeFilter, showFlagged, flagSubFilter, showHealthy, showBlacklisted, showNotBlacklisted, showReserve, showAssigned, showMultiClient, warmupDaysFilter, warmupDaysFrom, warmupDaysTo, filterConditions, filterMatchMode, sortField, sortDir, isDomainFlagged, hasReplyIssue, hasBounceIssue, isDomainReserve, isDomainAssigned, isDomainMultiClient, now]);
+  }, [domains, tagFilters, domainSearch, redirectSearch, typeFilter, showFlagged, flagSubFilter, showHealthy, showBlacklisted, showNotBlacklisted, showSpamhausListed, showSpamhausClean, showReserve, showAssigned, showMultiClient, warmupDaysFilter, warmupDaysFrom, warmupDaysTo, filterConditions, filterMatchMode, sortField, sortDir, isDomainFlagged, hasReplyIssue, hasBounceIssue, isDomainReserve, isDomainAssigned, isDomainMultiClient, now]);
 
   const flaggedCount = useMemo(() => domains.filter(isDomainFlagged).length, [domains, isDomainFlagged]);
   const healthyCount = useMemo(() => domains.filter((d) => !isDomainFlagged(d)).length, [domains, isDomainFlagged]);
   const blacklistedCount = useMemo(() => domains.filter((d) => d.blacklisted === true).length, [domains]);
   const notBlacklistedCount = useMemo(() => domains.filter((d) => d.blacklisted === false).length, [domains]);
+  const spamhausListedCount = useMemo(() => domains.filter((d) => d.spamhaus_dbl === true).length, [domains]);
+  const spamhausCleanCount = useMemo(() => domains.filter((d) => d.spamhaus_dbl === false).length, [domains]);
 
   // --- Column show/hide persistence + derived visible columns / grid template ---
   useEffect(() => {
@@ -1692,6 +1761,36 @@ function DeliverabilityPageInner() {
         </div>
       )}
 
+      {/* Check Spamhaus Progress */}
+      {spamhausCheckJob && (
+        <div className="rounded-lg border bg-muted/30 px-4 py-3">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2 text-sm">
+              {spamhausCheckJob.status === "running" && <Loader2 className="h-3.5 w-3.5 animate-spin text-primary" />}
+              {spamhausCheckJob.status === "done" && <CheckCircle2 className="h-3.5 w-3.5 text-emerald-500" />}
+              {spamhausCheckJob.status === "error" && <AlertTriangle className="h-3.5 w-3.5 text-destructive" />}
+              <span className="font-medium">
+                {spamhausCheckJob.status === "running"
+                  ? `Checking Spamhaus DBL · ${spamhausCheckJob.checked} / ${spamhausCheckJob.total}`
+                  : spamhausCheckJob.status === "done"
+                    ? `Spamhaus: checked ${spamhausCheckJob.total} domain${spamhausCheckJob.total !== 1 ? "s" : ""}`
+                    : "Spamhaus check failed"}
+              </span>
+              <span className="text-xs text-destructive">{spamhausCheckJob.listed} listed</span>
+              {spamhausCheckJob.inconclusive > 0 && (
+                <span className="text-xs text-amber-500">· {spamhausCheckJob.inconclusive} inconclusive</span>
+              )}
+              {spamhausCheckJob.status === "error" && spamhausCheckJob.error && (
+                <span className="text-xs text-destructive">· {spamhausCheckJob.error}</span>
+              )}
+            </div>
+            {spamhausCheckJob.status !== "running" && (
+              <button onClick={() => setSpamhausCheckJob(null)} className="text-xs text-muted-foreground hover:text-foreground">Dismiss</button>
+            )}
+          </div>
+        </div>
+      )}
+
       {/* Check Blacklist Progress */}
       {blacklistCheckJob && (
         <div className="rounded-lg border bg-muted/30 px-4 py-3">
@@ -2059,7 +2158,7 @@ function DeliverabilityPageInner() {
               )}
             </button>
 
-            {/* Blacklisted filter (SURBL) */}
+            {/* SURBL Listed filter */}
             <button
               onClick={() => {
                 const next = !showBlacklisted;
@@ -2073,7 +2172,7 @@ function DeliverabilityPageInner() {
               }`}
             >
               <ShieldAlert className="h-3 w-3" />
-              Blacklisted
+              SURBL Listed
               {blacklistedCount > 0 && (
                 <span className={`text-[10px] font-medium rounded-full px-1.5 ${
                   showBlacklisted ? "bg-destructive-foreground/20" : "bg-destructive/15 text-destructive"
@@ -2083,7 +2182,7 @@ function DeliverabilityPageInner() {
               )}
             </button>
 
-            {/* Not blacklisted filter — confirmed clean on SURBL */}
+            {/* SURBL Clean filter — confirmed clean on SURBL */}
             <button
               onClick={() => {
                 const next = !showNotBlacklisted;
@@ -2097,12 +2196,60 @@ function DeliverabilityPageInner() {
               }`}
             >
               <CheckCircle2 className="h-3 w-3" />
-              Not Blacklisted
+              SURBL Clean
               {notBlacklistedCount > 0 && (
                 <span className={`text-[10px] font-medium rounded-full px-1.5 ${
                   showNotBlacklisted ? "bg-white/20" : "bg-emerald-500/15 text-emerald-600 dark:text-emerald-400"
                 }`}>
                   {notBlacklistedCount}
+                </span>
+              )}
+            </button>
+
+            {/* Spamhaus Listed filter */}
+            <button
+              onClick={() => {
+                const next = !showSpamhausListed;
+                setShowSpamhausListed(next);
+                if (next) setShowSpamhausClean(false);
+              }}
+              className={`text-xs px-3 py-1.5 rounded-full border transition-colors flex items-center gap-1.5 ${
+                showSpamhausListed
+                  ? "bg-destructive text-destructive-foreground border-destructive"
+                  : "border-border text-muted-foreground hover:border-foreground hover:text-foreground"
+              }`}
+            >
+              <ShieldAlert className="h-3 w-3" />
+              Spamhaus Listed
+              {spamhausListedCount > 0 && (
+                <span className={`text-[10px] font-medium rounded-full px-1.5 ${
+                  showSpamhausListed ? "bg-destructive-foreground/20" : "bg-destructive/15 text-destructive"
+                }`}>
+                  {spamhausListedCount}
+                </span>
+              )}
+            </button>
+
+            {/* Spamhaus Clean filter */}
+            <button
+              onClick={() => {
+                const next = !showSpamhausClean;
+                setShowSpamhausClean(next);
+                if (next) setShowSpamhausListed(false);
+              }}
+              className={`text-xs px-3 py-1.5 rounded-full border transition-colors flex items-center gap-1.5 ${
+                showSpamhausClean
+                  ? "bg-emerald-500 text-white border-emerald-500"
+                  : "border-border text-muted-foreground hover:border-foreground hover:text-foreground"
+              }`}
+            >
+              <CheckCircle2 className="h-3 w-3" />
+              Spamhaus Clean
+              {spamhausCleanCount > 0 && (
+                <span className={`text-[10px] font-medium rounded-full px-1.5 ${
+                  showSpamhausClean ? "bg-white/20" : "bg-emerald-500/15 text-emerald-600 dark:text-emerald-400"
+                }`}>
+                  {spamhausCleanCount}
                 </span>
               )}
             </button>
@@ -2371,7 +2518,17 @@ function DeliverabilityPageInner() {
                       title="Check selected domains against SURBL (multi.surbl.org)"
                     >
                       <ShieldAlert className="h-3 w-3" />
-                      Check Blacklist
+                      Check SURBL
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="h-7 text-xs gap-1.5"
+                      onClick={() => startCheckSpamhaus(Array.from(selectedDomains))}
+                      title="Check selected domains against Spamhaus DBL (dbl.spamhaus.org)"
+                    >
+                      <ShieldAlert className="h-3 w-3" />
+                      Check Spamhaus
                     </Button>
                     <Button
                       size="sm"
@@ -2587,6 +2744,33 @@ function DeliverabilityPageInner() {
                             </span>
                           </TooltipTrigger>
                           <TooltipContent side="top">Not listed · checked {d.blacklist_checked_at ? new Date(d.blacklist_checked_at).toLocaleString() : ""}</TooltipContent>
+                        </Tooltip>
+                      ) : (
+                        <span className="text-muted-foreground/40">—</span>
+                      )}
+                    </div>
+                    )}
+
+                    {/* Spamhaus DBL */}
+                    {isColVisible("spamhaus_dbl") && (
+                    <div className="text-center text-xs">
+                      {d.spamhaus_dbl === true ? (
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-destructive/15 text-destructive font-medium">
+                              true
+                            </span>
+                          </TooltipTrigger>
+                          <TooltipContent side="top">Listed on Spamhaus DBL · checked {d.spamhaus_checked_at ? new Date(d.spamhaus_checked_at).toLocaleString() : ""}</TooltipContent>
+                        </Tooltip>
+                      ) : d.spamhaus_dbl === false ? (
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-emerald-500/10 text-emerald-500 font-medium">
+                              false
+                            </span>
+                          </TooltipTrigger>
+                          <TooltipContent side="top">Not listed · checked {d.spamhaus_checked_at ? new Date(d.spamhaus_checked_at).toLocaleString() : ""}</TooltipContent>
                         </Tooltip>
                       ) : (
                         <span className="text-muted-foreground/40">—</span>
