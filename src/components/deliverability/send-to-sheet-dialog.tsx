@@ -100,7 +100,7 @@ export function SendToSheetDialog({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="sm:!max-w-md max-h-[80vh] flex flex-col">
         <DialogHeader>
-          <DialogTitle>Send to Domains Sheet</DialogTitle>
+          <DialogTitle>Whitelist Domains</DialogTitle>
         </DialogHeader>
 
         {loading ? (
@@ -114,8 +114,9 @@ export function SendToSheetDialog({
         ) : (
           <div className="space-y-3 flex-1 overflow-hidden flex flex-col">
             <p className="text-sm text-muted-foreground">
-              {selectedDomains.length} domain{selectedDomains.length !== 1 ? "s" : ""} will be added to the Domains tab.
-              Duplicates are automatically skipped.
+              {selectedDomains.length} domain{selectedDomains.length !== 1 ? "s" : ""} will be added to the Domains tab
+              and the client&apos;s contacts will be emailed now to whitelist them. Duplicates and
+              already-whitelisted domains are skipped.
             </p>
 
             <div className="flex items-center gap-2 rounded-lg border bg-background px-3 py-1.5">
@@ -162,7 +163,7 @@ export function SendToSheetDialog({
             <div className="flex justify-end gap-2 pt-1">
               <Button variant="ghost" size="sm" onClick={() => onOpenChange(false)}>Cancel</Button>
               <Button size="sm" disabled={!selectedTag} onClick={handleConfirm}>
-                Send to Sheet
+                Whitelist &amp; Send
               </Button>
             </div>
           </div>

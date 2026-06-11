@@ -362,7 +362,7 @@ function DeliverabilityPageInner() {
   const [showSendToSheet, setShowSendToSheet] = useState(false);
 
   // Standalone sheet append state
-  interface SheetAppendJob { status: "running" | "done" | "error"; label: string; added?: number; duplicates?: number; error?: string }
+  interface SheetAppendJob { status: "running" | "done" | "error"; label: string; added?: number; duplicates?: number; error?: string; whitelist?: string }
   const [sheetAppendJob, setSheetAppendJob] = useState<SheetAppendJob | null>(null);
 
   // Bulk limit update state
@@ -574,9 +574,21 @@ function DeliverabilityPageInner() {
         });
         const data = await res.json();
         if (!res.ok) throw new Error(data.error || "Failed");
+        // Also queue these domains for the daily 6:30am PST whitelist email.
+        // Best-effort — a queue failure shouldn't fail the sheet append.
+        let queuedLabel = "";
+        try {
+          const qRes = await fetch("/api/deliverability/whitelist/queue", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ domains: info.domains, clientTag: info.sheetAppend.clientTag }),
+          });
+          const qData = await qRes.json();
+          if (qRes.ok && qData.queued > 0) queuedLabel = ` · ${qData.queued} queued for whitelist email`;
+        } catch {/* ignore queue errors */}
         setTagCampaignJob((prev) => prev ? {
           ...prev, sheetStatus: "done",
-          sheetLabel: `Added to "${data.sheetName}" Domains tab`,
+          sheetLabel: `Added to "${data.sheetName}" Domains tab${queuedLabel}`,
           sheetAdded: data.added, sheetDuplicates: data.duplicates,
         } : prev);
       } catch (err) {
@@ -594,7 +606,7 @@ function DeliverabilityPageInner() {
   }, [loadDomains, loadTags]);
 
   const startBackgroundSheetAppend = useCallback(async (doms: string[], clientTag: string) => {
-    setSheetAppendJob({ status: "running", label: `Sending ${doms.length} domains to ${clientTag} sheet...` });
+    setSheetAppendJob({ status: "running", label: `Whitelisting ${doms.length} domains for ${clientTag}...` });
     setSelectedDomains(new Set());
     try {
       const res = await fetch("/api/deliverability/send-to-sheet", {
@@ -604,15 +616,35 @@ function DeliverabilityPageInner() {
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Failed");
+      // Immediate whitelist email (skips the daily queue) — this is the
+      // "Whitelist" button. Surface the result; an email failure doesn't undo
+      // the successful sheet append.
+      let whitelist = "";
+      try {
+        const wRes = await fetch("/api/deliverability/whitelist/send-now", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ domains: doms, clientTag }),
+        });
+        const wData = await wRes.json();
+        if (wData.sent) {
+          whitelist = `Emailed ${wData.recipients.to + wData.recipients.bcc} recipient(s)`;
+          if (wData.skipped > 0) whitelist += ` · ${wData.skipped} already whitelisted`;
+        } else {
+          whitelist = `Email not sent: ${wData.reason || "unknown"}`;
+        }
+      } catch (e) {
+        whitelist = `Email failed: ${e instanceof Error ? e.message : "error"}`;
+      }
       setSheetAppendJob({
         status: "done",
         label: `Added to "${data.sheetName}" Domains tab`,
-        added: data.added, duplicates: data.duplicates,
+        added: data.added, duplicates: data.duplicates, whitelist,
       });
     } catch (err) {
       setSheetAppendJob({
         status: "error",
-        label: "Sheet append failed",
+        label: "Whitelist failed",
         error: err instanceof Error ? err.message : "Failed",
       });
     }
@@ -1545,6 +1577,9 @@ function DeliverabilityPageInner() {
                   {(sheetAppendJob.duplicates ?? 0) > 0 && (
                     <span className="text-amber-500"> ({sheetAppendJob.duplicates} duplicates)</span>
                   )}
+                  {sheetAppendJob.whitelist && (
+                    <span className="text-muted-foreground"> · {sheetAppendJob.whitelist}</span>
+                  )}
                 </span>
               )}
               {sheetAppendJob.status === "error" && (
@@ -2236,7 +2271,7 @@ function DeliverabilityPageInner() {
                       onClick={() => setShowSendToSheet(true)}
                     >
                       <Send className="h-3 w-3" />
-                      Send to Sheet
+                      Whitelist
                     </Button>
                     <Button
                       size="sm"
