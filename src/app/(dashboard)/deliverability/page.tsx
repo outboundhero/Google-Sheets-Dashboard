@@ -2139,11 +2139,11 @@ function DeliverabilityPageInner() {
             <div className="space-y-1.5">
               {/* Bulk action bar (admin only) */}
               {isAdmin && selectedDomains.size > 0 && (
-                <div className="flex items-center gap-3 rounded-xl border bg-muted/50 px-4 py-2.5">
-                  <span className="text-xs font-medium">
+                <div className="flex items-start gap-3 rounded-xl border bg-muted/50 px-4 py-2.5">
+                  <span className="text-xs font-medium whitespace-nowrap shrink-0 mt-1.5">
                     {selectedDomains.size} domain{selectedDomains.size !== 1 ? "s" : ""} selected
                   </span>
-                  <div className="flex items-center gap-2 ml-auto">
+                  <div className="flex flex-wrap items-center justify-end gap-2 ml-auto">
                     <Button
                       size="sm"
                       variant="outline"
