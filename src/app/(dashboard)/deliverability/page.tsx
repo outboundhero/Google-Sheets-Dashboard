@@ -307,6 +307,8 @@ function DeliverabilityPageInner() {
   const [typeFilter, setTypeFilter] = useState<"all" | "outlook" | "google">("all");
   const [showFlagged, setShowFlagged] = useState(() => searchParams.get("flagged") === "true");
   const [showHealthy, setShowHealthy] = useState(() => searchParams.get("healthy") === "true");
+  const [showBlacklisted, setShowBlacklisted] = useState(() => searchParams.get("blacklisted") === "true");
+  const [showNotBlacklisted, setShowNotBlacklisted] = useState(() => searchParams.get("blacklisted") === "false");
   const [showMultiClient, setShowMultiClient] = useState(() => searchParams.get("multiClient") === "true");
   const [flagSubFilter, setFlagSubFilter] = useState<"all" | "reply" | "bounce">("all");
   const [showReserve, setShowReserve] = useState(false);
@@ -1194,6 +1196,12 @@ function DeliverabilityPageInner() {
     if (showHealthy) {
       result = result.filter((d) => !isDomainFlagged(d));
     }
+    if (showBlacklisted) {
+      result = result.filter((d) => d.blacklisted === true);
+    }
+    if (showNotBlacklisted) {
+      result = result.filter((d) => d.blacklisted === false);
+    }
     if (showReserve) {
       result = result.filter(isDomainReserve);
     }
@@ -1277,10 +1285,12 @@ function DeliverabilityPageInner() {
       });
     }
     return result;
-  }, [domains, tagFilters, domainSearch, redirectSearch, typeFilter, showFlagged, flagSubFilter, showHealthy, showReserve, showAssigned, showMultiClient, warmupDaysFilter, warmupDaysFrom, warmupDaysTo, filterConditions, filterMatchMode, sortField, sortDir, isDomainFlagged, hasReplyIssue, hasBounceIssue, isDomainReserve, isDomainAssigned, isDomainMultiClient, now]);
+  }, [domains, tagFilters, domainSearch, redirectSearch, typeFilter, showFlagged, flagSubFilter, showHealthy, showBlacklisted, showNotBlacklisted, showReserve, showAssigned, showMultiClient, warmupDaysFilter, warmupDaysFrom, warmupDaysTo, filterConditions, filterMatchMode, sortField, sortDir, isDomainFlagged, hasReplyIssue, hasBounceIssue, isDomainReserve, isDomainAssigned, isDomainMultiClient, now]);
 
   const flaggedCount = useMemo(() => domains.filter(isDomainFlagged).length, [domains, isDomainFlagged]);
   const healthyCount = useMemo(() => domains.filter((d) => !isDomainFlagged(d)).length, [domains, isDomainFlagged]);
+  const blacklistedCount = useMemo(() => domains.filter((d) => d.blacklisted === true).length, [domains]);
+  const notBlacklistedCount = useMemo(() => domains.filter((d) => d.blacklisted === false).length, [domains]);
 
   // --- Column show/hide persistence + derived visible columns / grid template ---
   useEffect(() => {
@@ -2045,6 +2055,54 @@ function DeliverabilityPageInner() {
                   showHealthy ? "bg-white/20" : "bg-emerald-500/15 text-emerald-600 dark:text-emerald-400"
                 }`}>
                   {healthyCount}
+                </span>
+              )}
+            </button>
+
+            {/* Blacklisted filter (SURBL) */}
+            <button
+              onClick={() => {
+                const next = !showBlacklisted;
+                setShowBlacklisted(next);
+                if (next) setShowNotBlacklisted(false);
+              }}
+              className={`text-xs px-3 py-1.5 rounded-full border transition-colors flex items-center gap-1.5 ${
+                showBlacklisted
+                  ? "bg-destructive text-destructive-foreground border-destructive"
+                  : "border-border text-muted-foreground hover:border-foreground hover:text-foreground"
+              }`}
+            >
+              <ShieldAlert className="h-3 w-3" />
+              Blacklisted
+              {blacklistedCount > 0 && (
+                <span className={`text-[10px] font-medium rounded-full px-1.5 ${
+                  showBlacklisted ? "bg-destructive-foreground/20" : "bg-destructive/15 text-destructive"
+                }`}>
+                  {blacklistedCount}
+                </span>
+              )}
+            </button>
+
+            {/* Not blacklisted filter — confirmed clean on SURBL */}
+            <button
+              onClick={() => {
+                const next = !showNotBlacklisted;
+                setShowNotBlacklisted(next);
+                if (next) setShowBlacklisted(false);
+              }}
+              className={`text-xs px-3 py-1.5 rounded-full border transition-colors flex items-center gap-1.5 ${
+                showNotBlacklisted
+                  ? "bg-emerald-500 text-white border-emerald-500"
+                  : "border-border text-muted-foreground hover:border-foreground hover:text-foreground"
+              }`}
+            >
+              <CheckCircle2 className="h-3 w-3" />
+              Not Blacklisted
+              {notBlacklistedCount > 0 && (
+                <span className={`text-[10px] font-medium rounded-full px-1.5 ${
+                  showNotBlacklisted ? "bg-white/20" : "bg-emerald-500/15 text-emerald-600 dark:text-emerald-400"
+                }`}>
+                  {notBlacklistedCount}
                 </span>
               )}
             </button>
