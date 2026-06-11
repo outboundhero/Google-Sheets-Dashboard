@@ -25,6 +25,7 @@ import {
   Tags,
   SlidersHorizontal,
   Plus,
+  ShieldAlert,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -67,6 +68,8 @@ interface DomainRow {
   warmup_limit_total?: number;
   redirect_url?: string | null;
   redirect_checked_at?: string | null;
+  blacklisted?: boolean | null;
+  blacklist_checked_at?: string | null;
   // Trailing reply/bounce rates (%), null until enough snapshot history exists
   reply_10?: number | null;
   reply_15?: number | null;
@@ -133,11 +136,12 @@ function evalCondition(d: DomainRow, c: FilterCondition): boolean {
 // and the show/hide toggle). `field` doubles as the sort key + visibility key.
 // Domain is non-toggleable (always shown). ---
 type ColField =
-  | "domain" | "redirect_url" | "inbox_count" | "total_sent" | "total_replied"
+  | "domain" | "blacklisted" | "redirect_url" | "inbox_count" | "total_sent" | "total_replied"
   | "reply_rate" | "reply_trailing" | "total_bounced" | "bounce_rate"
   | "bounce_trailing" | "daily_limit" | "warmup_days";
 const TABLE_COLUMNS: { field: ColField; label: string; align: string; width: string; toggleable: boolean }[] = [
   { field: "domain", label: "Domain", align: "text-left", width: "1fr", toggleable: false },
+  { field: "blacklisted", label: "Blacklisted", align: "text-center", width: "90px", toggleable: true },
   { field: "redirect_url", label: "Redirect URL", align: "text-left", width: "180px", toggleable: true },
   { field: "inbox_count", label: "Inboxes", align: "text-center", width: "90px", toggleable: true },
   { field: "total_sent", label: "Sent", align: "text-center", width: "70px", toggleable: true },
@@ -318,7 +322,7 @@ function DeliverabilityPageInner() {
   // Column show/hide (persisted). Missing key = visible.
   const [columnVisibility, setColumnVisibility] = useState<Record<string, boolean>>({});
   const [showColumnMenu, setShowColumnMenu] = useState(false);
-  const [sortField, setSortField] = useState<"domain" | "redirect_url" | "inbox_count" | "total_sent" | "total_replied" | "reply_rate" | "reply_trailing" | "total_bounced" | "bounce_rate" | "bounce_trailing" | "daily_limit" | "warmup_days" | null>(null);
+  const [sortField, setSortField] = useState<"domain" | "blacklisted" | "redirect_url" | "inbox_count" | "total_sent" | "total_replied" | "reply_rate" | "reply_trailing" | "total_bounced" | "bounce_rate" | "bounce_trailing" | "daily_limit" | "warmup_days" | null>(null);
   const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
   const [attachDialogOpen, setAttachDialogOpen] = useState(false);
   const [conformTagsOpen, setConformTagsOpen] = useState(false);
@@ -375,6 +379,10 @@ function DeliverabilityPageInner() {
   // Check redirects job state
   interface RedirectCheckJob { status: "running" | "done" | "error"; checked: number; total: number; redirects: number; error?: string }
   const [redirectCheckJob, setRedirectCheckJob] = useState<RedirectCheckJob | null>(null);
+
+  // Check blacklist job state
+  interface BlacklistCheckJob { status: "running" | "done" | "error"; checked: number; total: number; listed: number; inconclusive: number; error?: string }
+  const [blacklistCheckJob, setBlacklistCheckJob] = useState<BlacklistCheckJob | null>(null);
   const [limitInput, setLimitInput] = useState("");
   interface LimitJob { type: "daily" | "warmup"; limit: number; status: "running" | "done" | "error"; updated?: number; total?: number; error?: string }
   const [limitJob, setLimitJob] = useState<LimitJob | null>(null);
@@ -1058,6 +1066,50 @@ function DeliverabilityPageInner() {
     loadDomains();
   }, [loadDomains]);
 
+  // Bulk SURBL blacklist check. DNS is fast — push bigger chunks than redirects.
+  const startCheckBlacklist = useCallback(async (domainList: string[]) => {
+    if (domainList.length === 0) return;
+    setBlacklistCheckJob({ status: "running", checked: 0, total: domainList.length, listed: 0, inconclusive: 0 });
+    setSelectedDomains(new Set());
+
+    const CHUNK = 500;
+    let checked = 0;
+    let listed = 0;
+    let inconclusive = 0;
+    let failedChunks = 0;
+    for (let i = 0; i < domainList.length; i += CHUNK) {
+      const slice = domainList.slice(i, i + CHUNK);
+      try {
+        const res = await fetch("/api/deliverability/check-blacklist", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ domains: slice }),
+        });
+        if (!res.ok) {
+          const data = await res.json().catch(() => ({}));
+          throw new Error(data?.error || `HTTP ${res.status}`);
+        }
+        const data = await res.json();
+        checked += data.checked || 0;
+        listed += data.listed || 0;
+        inconclusive += data.inconclusive || 0;
+      } catch {
+        failedChunks++;
+        checked += slice.length;
+      }
+      setBlacklistCheckJob({ status: "running", checked, total: domainList.length, listed, inconclusive });
+    }
+    setBlacklistCheckJob({
+      status: failedChunks > 0 ? "error" : "done",
+      checked,
+      total: domainList.length,
+      listed,
+      inconclusive,
+      error: failedChunks > 0 ? `${failedChunks} batch${failedChunks !== 1 ? "es" : ""} failed — re-run to retry those` : undefined,
+    });
+    loadDomains();
+  }, [loadDomains]);
+
   // Drag-to-select: track by index range so fast scrolling doesn't skip rows
   const dragStartIdx = useRef(-1);
   const dragLastIdx = useRef(-1);
@@ -1191,6 +1243,11 @@ function DeliverabilityPageInner() {
         let av: number | string = 0, bv: number | string = 0;
         switch (sortField) {
           case "domain": av = a.domain; bv = b.domain; return dir * av.localeCompare(bv);
+          case "blacklisted":
+            // never-checked < clean < listed
+            av = a.blacklisted == null ? -1 : a.blacklisted ? 1 : 0;
+            bv = b.blacklisted == null ? -1 : b.blacklisted ? 1 : 0;
+            break;
           case "redirect_url":
             av = (a.redirect_url || "").toLowerCase();
             bv = (b.redirect_url || "").toLowerCase();
@@ -1620,6 +1677,36 @@ function DeliverabilityPageInner() {
             </div>
             {limitJob.status !== "running" && (
               <button onClick={() => setLimitJob(null)} className="text-xs text-muted-foreground hover:text-foreground">Dismiss</button>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Check Blacklist Progress */}
+      {blacklistCheckJob && (
+        <div className="rounded-lg border bg-muted/30 px-4 py-3">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2 text-sm">
+              {blacklistCheckJob.status === "running" && <Loader2 className="h-3.5 w-3.5 animate-spin text-primary" />}
+              {blacklistCheckJob.status === "done" && <CheckCircle2 className="h-3.5 w-3.5 text-emerald-500" />}
+              {blacklistCheckJob.status === "error" && <AlertTriangle className="h-3.5 w-3.5 text-destructive" />}
+              <span className="font-medium">
+                {blacklistCheckJob.status === "running"
+                  ? `Checking blacklist · ${blacklistCheckJob.checked} / ${blacklistCheckJob.total}`
+                  : blacklistCheckJob.status === "done"
+                    ? `Checked ${blacklistCheckJob.total} domain${blacklistCheckJob.total !== 1 ? "s" : ""}`
+                    : "Blacklist check failed"}
+              </span>
+              <span className="text-xs text-destructive">{blacklistCheckJob.listed} listed</span>
+              {blacklistCheckJob.inconclusive > 0 && (
+                <span className="text-xs text-amber-500">· {blacklistCheckJob.inconclusive} inconclusive</span>
+              )}
+              {blacklistCheckJob.status === "error" && blacklistCheckJob.error && (
+                <span className="text-xs text-destructive">· {blacklistCheckJob.error}</span>
+              )}
+            </div>
+            {blacklistCheckJob.status !== "running" && (
+              <button onClick={() => setBlacklistCheckJob(null)} className="text-xs text-muted-foreground hover:text-foreground">Dismiss</button>
             )}
           </div>
         </div>
@@ -2222,6 +2309,16 @@ function DeliverabilityPageInner() {
                       size="sm"
                       variant="outline"
                       className="h-7 text-xs gap-1.5"
+                      onClick={() => startCheckBlacklist(Array.from(selectedDomains))}
+                      title="Check selected domains against SURBL (multi.surbl.org)"
+                    >
+                      <ShieldAlert className="h-3 w-3" />
+                      Check Blacklist
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="h-7 text-xs gap-1.5"
                       onClick={() => setChangeRedirectOpen(true)}
                       title="Bulk-change the redirect URL via each domain's provider (MilkBox / Inboxing / ScaledMail)"
                     >
@@ -2411,6 +2508,33 @@ function DeliverabilityPageInner() {
                         ))}
                       </div>
                     </div>
+
+                    {/* Blacklisted (SURBL) */}
+                    {isColVisible("blacklisted") && (
+                    <div className="text-center text-xs">
+                      {d.blacklisted === true ? (
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-destructive/15 text-destructive font-medium">
+                              true
+                            </span>
+                          </TooltipTrigger>
+                          <TooltipContent side="top">Listed on SURBL · checked {d.blacklist_checked_at ? new Date(d.blacklist_checked_at).toLocaleString() : ""}</TooltipContent>
+                        </Tooltip>
+                      ) : d.blacklisted === false ? (
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-emerald-500/10 text-emerald-500 font-medium">
+                              false
+                            </span>
+                          </TooltipTrigger>
+                          <TooltipContent side="top">Not listed · checked {d.blacklist_checked_at ? new Date(d.blacklist_checked_at).toLocaleString() : ""}</TooltipContent>
+                        </Tooltip>
+                      ) : (
+                        <span className="text-muted-foreground/40">—</span>
+                      )}
+                    </div>
+                    )}
 
                     {/* Redirect URL */}
                     {isColVisible("redirect_url") && (
