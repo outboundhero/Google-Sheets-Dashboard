@@ -5,12 +5,13 @@ import { promises as dns } from "node:dns";
 // (anonymous query via public resolver, rate limit, etc.) — treat as
 // inconclusive so we never mis-mark a denied query as "clean".
 const ZONE = "dbl.spamhaus.org";
-const TOTAL_BUDGET_MS = 5000;
-// Quad9 was the only public resolver that consistently let the Spamhaus test
-// point through during local verification. Cloudflare 1.1.1.1 surfaces the
-// denial code honestly (also OK) but is slower; Google 8.8.8.8 silently
-// converts denials to NXDOMAIN, which would produce false-cleans — don't use.
-const RESOLVER_SERVERS = ["9.9.9.9", "149.112.112.112", "1.1.1.1", "1.0.0.1"];
+const PER_RESOLVE_TIMEOUT_MS = 3000;
+const RETRY_DELAY_MS = 500;
+const TRANSIENT_DNS_ERRORS = new Set(["ETIMEOUT", "ESERVFAIL", "EREFUSED", "ECONNRESET"]);
+// Cloudflare surfaces the denial code honestly (good — we want that signal),
+// Quad9 sometimes lets queries through. Google 8.8.8.8 silently converts
+// denials to NXDOMAIN, which would produce false-cleans — don't use.
+const RESOLVER_SERVERS = ["1.1.1.1", "1.0.0.1", "9.9.9.9", "149.112.112.112"];
 const TEST_POINT = "dbltest.com";
 
 const resolver = new dns.Resolver();
@@ -72,11 +73,23 @@ function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
   return Promise.race<T>([
     p,
     new Promise<T>((_, reject) => {
-      timer = setTimeout(() => reject(new Error("DNS timeout")), ms);
+      timer = setTimeout(() => {
+        const err = new Error("DNS timeout") as NodeJS.ErrnoException;
+        err.code = "ETIMEOUT";
+        reject(err);
+      }, ms);
     }),
   ]).finally(() => {
     if (timer) clearTimeout(timer);
   });
+}
+
+const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
+// One resolve attempt: returns the IP list, or throws an Error whose `.code`
+// is either a DNS error code (ENOTFOUND, ETIMEOUT, …) or "" for unknown.
+async function resolveOnce(host: string): Promise<string[]> {
+  return withTimeout(resolver.resolve4(host), PER_RESOLVE_TIMEOUT_MS);
 }
 
 /**
@@ -87,7 +100,7 @@ function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
  */
 export async function verifySpamhausAccess(): Promise<{ ok: boolean; reason: string | null }> {
   try {
-    const ips = await withTimeout(resolver.resolve4(`${TEST_POINT}.${ZONE}`), TOTAL_BUDGET_MS);
+    const ips = await withTimeout(resolver.resolve4(`${TEST_POINT}.${ZONE}`), PER_RESOLVE_TIMEOUT_MS);
     if (!ips || ips.length === 0) {
       return { ok: false, reason: "Spamhaus returned no answer for the test point" };
     }
@@ -119,37 +132,59 @@ export async function verifySpamhausAccess(): Promise<{ ok: boolean; reason: str
 export async function checkSpamhausDbl(rawDomain: string): Promise<SpamhausResult> {
   const domain = rawDomain.trim().toLowerCase();
   const host = `${domain}.${ZONE}`;
-  try {
-    const ips = await withTimeout(resolver.resolve4(host), TOTAL_BUDGET_MS);
-    if (!ips || ips.length === 0) {
+
+  // Single attempt — returns null for "couldn't get a verdict, maybe retry"
+  // or a final SpamhausResult.
+  const attempt = async (): Promise<SpamhausResult | { retry: true; reason: string }> => {
+    try {
+      const ips = await resolveOnce(host);
+      if (!ips || ips.length === 0) {
+        return { domain, blacklisted: false, category: null, error: null };
+      }
+      const decs = ips.map(decode);
+      // Refusal / rate-limit signal — never a real listing.
+      if (decs.some((d) => d.denied)) {
+        return {
+          domain,
+          blacklisted: null,
+          category: null,
+          error: `Spamhaus refused (${ips.join(",")})`,
+        };
+      }
+      const hits = decs.filter((d) => d.listed);
+      if (hits.length > 0) {
+        const cats = Array.from(new Set(hits.map((h) => h.category).filter(Boolean) as string[]));
+        return { domain, blacklisted: true, category: cats.join(","), error: null };
+      }
       return { domain, blacklisted: false, category: null, error: null };
-    }
-    // Combine results across multiple A records if present.
-    const decs = ips.map(decode);
-    if (decs.some((d) => d.denied)) {
+    } catch (e) {
+      const code = (e as NodeJS.ErrnoException)?.code || "";
+      // NXDOMAIN / ENODATA = the domain is NOT on the list. Confirmed clean.
+      if (code === "ENOTFOUND" || code === "ENODATA") {
+        return { domain, blacklisted: false, category: null, error: null };
+      }
+      // Transient: one retry. Anything else is a final "unverified".
+      if (TRANSIENT_DNS_ERRORS.has(code)) {
+        return { retry: true, reason: `transient ${code}` };
+      }
       return {
         domain,
         blacklisted: null,
         category: null,
-        error: `Spamhaus denied/inconclusive (${ips.join(",")})`,
+        error: `DNS error: ${e instanceof Error ? e.message : "unknown"}`.slice(0, 200),
       };
     }
-    const hits = decs.filter((d) => d.listed);
-    if (hits.length > 0) {
-      const cats = Array.from(new Set(hits.map((h) => h.category).filter(Boolean) as string[]));
-      return { domain, blacklisted: true, category: cats.join(","), error: null };
+  };
+
+  const first = await attempt();
+  if ("retry" in first) {
+    await sleep(RETRY_DELAY_MS);
+    const second = await attempt();
+    if ("retry" in second) {
+      // Two transient failures in a row — give up as unverified, don't write.
+      return { domain, blacklisted: null, category: null, error: `transient: ${second.reason}` };
     }
-    return { domain, blacklisted: false, category: null, error: null };
-  } catch (e) {
-    const code = (e as NodeJS.ErrnoException)?.code;
-    if (code === "ENOTFOUND" || code === "ENODATA") {
-      return { domain, blacklisted: false, category: null, error: null };
-    }
-    return {
-      domain,
-      blacklisted: null,
-      category: null,
-      error: `DNS error: ${e instanceof Error ? e.message : "unknown"}`.slice(0, 200),
-    };
+    return second;
   }
+  return first;
 }

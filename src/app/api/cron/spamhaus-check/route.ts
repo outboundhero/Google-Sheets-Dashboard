@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { getSupabaseAdmin } from "@/lib/supabase";
-import { checkSpamhausDbl, verifySpamhausAccess } from "@/lib/spamhaus-dbl-resolver";
+import { checkSpamhausDbl } from "@/lib/spamhaus-dbl-resolver";
 
 const CONCURRENT = 100;
 const TIME_BUDGET_MS = 50_000;
@@ -13,14 +13,6 @@ export async function GET() {
   const supabase = getSupabaseAdmin();
 
   try {
-    // Bail early (write nothing) if Spamhaus is blocking the resolver — we
-    // never want to write a batch of misleading "clean" rows.
-    const access = await verifySpamhausAccess();
-    if (!access.ok) {
-      console.warn("[cron/spamhaus-check] skipped — Spamhaus DBL not reachable:", access.reason);
-      return NextResponse.json({ skipped: true, reason: access.reason });
-    }
-
     const { data, error } = await supabase
       .from("deliverability_domains")
       .select("instance, domain")

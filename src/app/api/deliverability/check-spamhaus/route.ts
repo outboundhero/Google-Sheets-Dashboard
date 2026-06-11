@@ -2,7 +2,6 @@ import { NextResponse } from "next/server";
 import { getSupabaseAdmin } from "@/lib/supabase";
 import {
   checkSpamhausDbl,
-  verifySpamhausAccess,
   type SpamhausResult,
 } from "@/lib/spamhaus-dbl-resolver";
 
@@ -12,16 +11,6 @@ export const maxDuration = 60;
 
 export async function POST(request: Request) {
   try {
-    // Preflight: if Spamhaus is blocking us, fail loud now rather than writing
-    // a batch of misleading "clean" rows. The frontend surfaces the reason.
-    const access = await verifySpamhausAccess();
-    if (!access.ok) {
-      return NextResponse.json(
-        { error: access.reason || "Spamhaus DBL not reachable" },
-        { status: 503 },
-      );
-    }
-
     const body = await request.json().catch(() => ({}));
     const raw = Array.isArray(body?.domains) ? body.domains : [];
     const normalized: string[] = [];
