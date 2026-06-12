@@ -31,12 +31,13 @@ interface CampaignReport {
 
 async function findCampaigns() {
   const supabase = getSupabaseAdmin();
-  // ILIKE %nurture% — covers "Nurture", "nurture campaign", "JPCO: Nurture", etc.
+  // Only the current naming convention: "<TAG>: <…> [Nurture] (Cleaning Client)"
+  // Brackets aren't ILIKE wildcards in Postgres — match literally.
   const { data, error } = await supabase
     .from("campaigns")
     .select("id, name, client_tag, status")
     .eq("instance", INSTANCE)
-    .ilike("name", "%nurture%")
+    .ilike("name", "%[Nurture] (Cleaning Client)%")
     .order("name", { ascending: true });
   if (error) throw new Error(error.message);
   return data ?? [];
@@ -46,14 +47,17 @@ async function findInboxesForTag(tag: string): Promise<InboxRow[]> {
   const supabase = getSupabaseAdmin();
   const out: InboxRow[] = [];
   let offset = 0;
-  // Tags column is jsonb array of {id, name}. `contains` matches any element
-  // having { name: tag }. Paginate to clear the 1000-row default cap.
+  // Tags is a jsonb array of {id, name}. supabase-js's .contains() treats a JS
+  // array as a *PG array literal* — wrong for jsonb. Pre-stringify so the
+  // string code path emits `cs.[{"name":"X"}]`, which PostgREST routes to the
+  // jsonb @> operator. Match by name only (id varies per Bison instance).
+  const needle = JSON.stringify([{ name: tag }]);
   while (true) {
     const { data, error } = await supabase
       .from("deliverability_inboxes")
       .select("id, email")
       .eq("instance", INSTANCE)
-      .contains("tags", [{ name: tag }])
+      .filter("tags", "cs", needle)
       .range(offset, offset + 999);
     if (error) throw new Error(error.message);
     if (!data || data.length === 0) break;
