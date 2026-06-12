@@ -165,9 +165,12 @@ export async function GET(request: Request) {
     const resumeFrom = resumeFromRaw ? Number(resumeFromRaw) : 0;
 
     const allCampaigns = await findCampaigns();
-    const campaigns = Number.isFinite(resumeFrom) && resumeFrom > 0
-      ? allCampaigns.filter((c) => (c.id as number) >= resumeFrom)
-      : allCampaigns;
+    const totalCampaigns = allCampaigns.length;
+    const startIdx = Number.isFinite(resumeFrom) && resumeFrom > 0
+      ? allCampaigns.findIndex((c) => (c.id as number) >= resumeFrom)
+      : 0;
+    const alreadyDoneBeforeThisRun = startIdx < 0 ? totalCampaigns : startIdx;
+    const campaigns = startIdx < 0 ? [] : allCampaigns.slice(startIdx);
     const reports: CampaignReport[] = [];
     let nextResumeFrom: number | null = null;
 
@@ -238,11 +241,23 @@ export async function GET(request: Request) {
       failed: reports.reduce((s, r) => s + r.failed, 0),
     };
 
+    const completedSoFar = alreadyDoneBeforeThisRun + reports.length;
+    const remaining = Math.max(0, totalCampaigns - completedSoFar);
+    const progress = {
+      totalCampaigns,
+      completedSoFar,
+      remaining,
+      percentComplete:
+        totalCampaigns > 0 ? Math.round((completedSoFar / totalCampaigns) * 1000) / 10 : 100,
+      processedThisRun: reports.length,
+    };
+
     return NextResponse.json({
       instance: INSTANCE,
       dryRun,
       done: nextResumeFrom === null,
       nextResumeFrom,
+      progress,
       totalsThisRun: totals,
       durationMs: Date.now() - startedAt,
       campaigns: reports,
