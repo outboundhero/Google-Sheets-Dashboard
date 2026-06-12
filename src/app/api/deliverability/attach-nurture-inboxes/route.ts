@@ -204,7 +204,9 @@ export async function runAttachNurture(searchParams: URLSearchParams) {
   let nextResumeFrom: number | null = null;
 
   for (const c of todo) {
-    if (!dryRun && Date.now() - startedAt > TIME_BUDGET_MS) {
+    // Time budget applies to dry-run too — fetching senders-by-tag is the
+    // expensive part and dry-run still does that to surface totalSendersForTag.
+    if (Date.now() - startedAt > TIME_BUDGET_MS) {
       nextResumeFrom = c.id;
       break;
     }
