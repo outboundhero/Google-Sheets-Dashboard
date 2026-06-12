@@ -12,6 +12,9 @@ export const maxDuration = 60;
 
 const INSTANCE: BisonInstanceSlug = "outboundhero";
 const BATCH = 50;
+// Stop dispatching new campaigns once this much wall-clock has elapsed so we
+// have time to write the response. The user re-hits with ?resumeFrom=<id>.
+const TIME_BUDGET_MS = 50_000;
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 interface InboxRow { id: number; email: string }
@@ -33,12 +36,15 @@ async function findCampaigns() {
   const supabase = getSupabaseAdmin();
   // Only the current naming convention: "<TAG>: <…> [Nurture] (Cleaning Client)"
   // Brackets aren't ILIKE wildcards in Postgres — match literally.
+  // Skip archived — attaching senders to a retired campaign is pointless.
+  // Order by id so ?resumeFrom=<id> can pick up deterministically.
   const { data, error } = await supabase
     .from("campaigns")
     .select("id, name, client_tag, status")
     .eq("instance", INSTANCE)
     .ilike("name", "%[Nurture] (Cleaning Client)%")
-    .order("name", { ascending: true });
+    .neq("status", "archived")
+    .order("id", { ascending: true });
   if (error) throw new Error(error.message);
   return data ?? [];
 }
@@ -151,14 +157,27 @@ async function attachToCampaign(campaignId: number, inboxIds: number[]): Promise
 }
 
 export async function GET(request: Request) {
+  const startedAt = Date.now();
   try {
     const { searchParams } = new URL(request.url);
     const dryRun = searchParams.get("dryRun") !== "0";
+    const resumeFromRaw = searchParams.get("resumeFrom");
+    const resumeFrom = resumeFromRaw ? Number(resumeFromRaw) : 0;
 
-    const campaigns = await findCampaigns();
+    const allCampaigns = await findCampaigns();
+    const campaigns = Number.isFinite(resumeFrom) && resumeFrom > 0
+      ? allCampaigns.filter((c) => (c.id as number) >= resumeFrom)
+      : allCampaigns;
     const reports: CampaignReport[] = [];
+    let nextResumeFrom: number | null = null;
 
     for (const c of campaigns) {
+      // Out of time — tell the caller where to pick up. Dry runs skip this
+      // since they don't make Bison calls and can usually finish in one shot.
+      if (!dryRun && Date.now() - startedAt > TIME_BUDGET_MS) {
+        nextResumeFrom = c.id as number;
+        break;
+      }
       const tag = (c.client_tag as string | null)?.trim() || "";
       const base: CampaignReport = {
         id: c.id as number,
@@ -222,7 +241,10 @@ export async function GET(request: Request) {
     return NextResponse.json({
       instance: INSTANCE,
       dryRun,
-      totals,
+      done: nextResumeFrom === null,
+      nextResumeFrom,
+      totalsThisRun: totals,
+      durationMs: Date.now() - startedAt,
       campaigns: reports,
       generatedAt: new Date().toISOString(),
     });
