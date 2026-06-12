@@ -156,113 +156,116 @@ async function attachToCampaign(campaignId: number, inboxIds: number[]): Promise
   return { newly, already, failed, errorMsg };
 }
 
-export async function GET(request: Request) {
+export async function runAttachNurture(searchParams: URLSearchParams) {
   const startedAt = Date.now();
-  try {
-    const { searchParams } = new URL(request.url);
-    const dryRun = searchParams.get("dryRun") !== "0";
-    const resumeFromRaw = searchParams.get("resumeFrom");
-    const resumeFrom = resumeFromRaw ? Number(resumeFromRaw) : 0;
+  const dryRun = searchParams.get("dryRun") !== "0";
+  const resumeFromRaw = searchParams.get("resumeFrom");
+  const resumeFrom = resumeFromRaw ? Number(resumeFromRaw) : 0;
 
-    const allCampaigns = await findCampaigns();
-    const totalCampaigns = allCampaigns.length;
-    const startIdx = Number.isFinite(resumeFrom) && resumeFrom > 0
-      ? allCampaigns.findIndex((c) => (c.id as number) >= resumeFrom)
-      : 0;
-    const alreadyDoneBeforeThisRun = startIdx < 0 ? totalCampaigns : startIdx;
-    const campaigns = startIdx < 0 ? [] : allCampaigns.slice(startIdx);
-    const reports: CampaignReport[] = [];
-    let nextResumeFrom: number | null = null;
+  const allCampaigns = await findCampaigns();
+  const totalCampaigns = allCampaigns.length;
+  const startIdx = Number.isFinite(resumeFrom) && resumeFrom > 0
+    ? allCampaigns.findIndex((c) => (c.id as number) >= resumeFrom)
+    : 0;
+  const alreadyDoneBeforeThisRun = startIdx < 0 ? totalCampaigns : startIdx;
+  const campaigns = startIdx < 0 ? [] : allCampaigns.slice(startIdx);
+  const reports: CampaignReport[] = [];
+  let nextResumeFrom: number | null = null;
 
-    for (const c of campaigns) {
-      // Out of time — tell the caller where to pick up. Dry runs skip this
-      // since they don't make Bison calls and can usually finish in one shot.
-      if (!dryRun && Date.now() - startedAt > TIME_BUDGET_MS) {
-        nextResumeFrom = c.id as number;
-        break;
-      }
-      const tag = (c.client_tag as string | null)?.trim() || "";
-      const base: CampaignReport = {
-        id: c.id as number,
-        name: c.name as string,
-        status: (c.status as string | null) ?? null,
-        clientTag: tag,
-        inboxesMatched: 0,
-        newlyAttached: 0,
-        alreadyAttached: 0,
-        failed: 0,
-        error: null,
-        skipped: null,
-        dryRun,
-      };
+  for (const c of campaigns) {
+    if (!dryRun && Date.now() - startedAt > TIME_BUDGET_MS) {
+      nextResumeFrom = c.id as number;
+      break;
+    }
+    const tag = (c.client_tag as string | null)?.trim() || "";
+    const base: CampaignReport = {
+      id: c.id as number,
+      name: c.name as string,
+      status: (c.status as string | null) ?? null,
+      clientTag: tag,
+      inboxesMatched: 0,
+      newlyAttached: 0,
+      alreadyAttached: 0,
+      failed: 0,
+      error: null,
+      skipped: null,
+      dryRun,
+    };
 
-      if (!tag) {
-        base.skipped = "campaign name has no client tag prefix (no ':') — can't determine tag";
-        reports.push(base);
-        continue;
-      }
-
-      let inboxes: InboxRow[] = [];
-      try {
-        inboxes = await findInboxesForTag(tag);
-      } catch (e) {
-        base.error = `find inboxes failed: ${e instanceof Error ? e.message : "unknown"}`;
-        reports.push(base);
-        continue;
-      }
-
-      base.inboxesMatched = inboxes.length;
-      if (inboxes.length === 0) {
-        base.skipped = `no inboxes in outboundhero tagged "${tag}"`;
-        reports.push(base);
-        continue;
-      }
-
-      if (dryRun) {
-        reports.push(base);
-        continue;
-      }
-
-      const ids = inboxes.map((i) => i.id);
-      const outcome = await attachToCampaign(c.id as number, ids);
-      base.newlyAttached = outcome.newly;
-      base.alreadyAttached = outcome.already;
-      base.failed = outcome.failed;
-      base.error = outcome.errorMsg;
+    if (!tag) {
+      base.skipped = "campaign name has no client tag prefix (no ':') — can't determine tag";
       reports.push(base);
+      continue;
     }
 
-    const totals = {
-      campaigns: reports.length,
-      campaignsActionable: reports.filter((r) => !r.skipped).length,
-      inboxesMatched: reports.reduce((s, r) => s + r.inboxesMatched, 0),
-      newlyAttached: reports.reduce((s, r) => s + r.newlyAttached, 0),
-      alreadyAttached: reports.reduce((s, r) => s + r.alreadyAttached, 0),
-      failed: reports.reduce((s, r) => s + r.failed, 0),
-    };
+    let inboxes: InboxRow[] = [];
+    try {
+      inboxes = await findInboxesForTag(tag);
+    } catch (e) {
+      base.error = `find inboxes failed: ${e instanceof Error ? e.message : "unknown"}`;
+      reports.push(base);
+      continue;
+    }
 
-    const completedSoFar = alreadyDoneBeforeThisRun + reports.length;
-    const remaining = Math.max(0, totalCampaigns - completedSoFar);
-    const progress = {
-      totalCampaigns,
-      completedSoFar,
-      remaining,
-      percentComplete:
-        totalCampaigns > 0 ? Math.round((completedSoFar / totalCampaigns) * 1000) / 10 : 100,
-      processedThisRun: reports.length,
-    };
+    base.inboxesMatched = inboxes.length;
+    if (inboxes.length === 0) {
+      base.skipped = `no inboxes in outboundhero tagged "${tag}"`;
+      reports.push(base);
+      continue;
+    }
 
-    return NextResponse.json({
-      instance: INSTANCE,
-      dryRun,
-      done: nextResumeFrom === null,
-      nextResumeFrom,
-      progress,
-      totalsThisRun: totals,
-      durationMs: Date.now() - startedAt,
-      campaigns: reports,
-      generatedAt: new Date().toISOString(),
-    });
+    if (dryRun) {
+      reports.push(base);
+      continue;
+    }
+
+    const ids = inboxes.map((i) => i.id);
+    const outcome = await attachToCampaign(c.id as number, ids);
+    base.newlyAttached = outcome.newly;
+    base.alreadyAttached = outcome.already;
+    base.failed = outcome.failed;
+    base.error = outcome.errorMsg;
+    reports.push(base);
+  }
+
+  const totals = {
+    campaigns: reports.length,
+    campaignsActionable: reports.filter((r) => !r.skipped).length,
+    inboxesMatched: reports.reduce((s, r) => s + r.inboxesMatched, 0),
+    newlyAttached: reports.reduce((s, r) => s + r.newlyAttached, 0),
+    alreadyAttached: reports.reduce((s, r) => s + r.alreadyAttached, 0),
+    failed: reports.reduce((s, r) => s + r.failed, 0),
+  };
+
+  const completedSoFar = alreadyDoneBeforeThisRun + reports.length;
+  const remaining = Math.max(0, totalCampaigns - completedSoFar);
+  const progress = {
+    totalCampaigns,
+    completedSoFar,
+    remaining,
+    percentComplete:
+      totalCampaigns > 0 ? Math.round((completedSoFar / totalCampaigns) * 1000) / 10 : 100,
+    processedThisRun: reports.length,
+  };
+
+  return {
+    instance: INSTANCE,
+    dryRun,
+    done: nextResumeFrom === null,
+    nextResumeFrom,
+    progress,
+    totalsThisRun: totals,
+    durationMs: Date.now() - startedAt,
+    campaigns: reports,
+    generatedAt: new Date().toISOString(),
+  };
+}
+
+export async function GET(request: Request) {
+  try {
+    const { searchParams } = new URL(request.url);
+    const result = await runAttachNurture(searchParams);
+    return NextResponse.json(result);
   } catch (error) {
     const message = error instanceof Error ? error.message : "Failed";
     return NextResponse.json({ error: message }, { status: 500 });
