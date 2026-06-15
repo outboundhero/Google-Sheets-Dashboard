@@ -7,6 +7,9 @@
     { "path": "/api/cron/inbox-orders-poll",     "schedule": "0 */6 * * *" },
     { "path": "/api/cron/client-tag-allocations","schedule": "0 8 * * *" },
 
+    { "path": "/api/cron/churn-check",           "schedule": "0 14 * * *" },
+    { "path": "/api/cron/churn-auto-fire",       "schedule": "5 17 * * *" },
+
     { "path": "/api/cron/campaigns-outboundhero",     "schedule": "0 17 * * *" },
     { "path": "/api/cron/campaigns-cleaningoutbound", "schedule": "15 17 * * *" },
     { "path": "/api/cron/campaigns-facilityreach",    "schedule": "30 17 * * *" },

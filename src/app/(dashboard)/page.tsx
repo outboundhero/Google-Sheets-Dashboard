@@ -25,6 +25,7 @@ import { StatCard } from "@/components/dashboard/stat-card";
 import { LeadsByStatusChart } from "@/components/dashboard/leads-by-status-chart";
 import { LeadsOverTimeChart } from "@/components/dashboard/leads-over-time-chart";
 import { TopClientsTable } from "@/components/dashboard/top-clients-table";
+import { PendingOffboardingsCard } from "@/components/dashboard/pending-offboardings-card";
 import {
   Select,
   SelectContent,
@@ -68,7 +69,8 @@ export default function DashboardPage() {
   const { sheets } = useSheets();
   const { clients: trackerClients } = useClientTracker();
   const { total: notDeliveredTotal, byClient: notDeliveredByClient } = useNotDeliveredTodayAggregate();
-  const { user } = useAuth();
+  const { user, role } = useAuth();
+  const isAdmin = role === "admin";
 
   // Shared triage status for the stale-clients panel (passes current panel tags
   // so the API auto-resets clients that dropped off the panel).
@@ -204,6 +206,9 @@ export default function DashboardPage() {
         </Select>
         <RefreshButton onRefresh={handleRefresh} isRefreshing={isSyncing} syncProgress={syncProgress} />
       </PageHeader>
+
+      {/* Pending offboardings — admin only; self-hides when there are none. */}
+      {isAdmin && <PendingOffboardingsCard />}
 
       {/* Clients Going Off + Churned — side by side */}
       {(clientsGoingOff.length > 0 || churnedClients.length > 0) && (
