@@ -3,11 +3,13 @@ import { bisonFetch } from "@/lib/bison";
 import {
   ALL_INSTANCE_SLUGS,
   instancesInGroup,
+  isInstanceSlug,
   type BisonInstanceSlug,
 } from "@/lib/bison-instances";
 import { getGroupForClientTag } from "@/lib/client-tag-allocations";
 
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
+const DETAG_BATCH = 50;
 
 interface SupabaseCampaignRow {
   id: number;
@@ -36,6 +38,40 @@ export interface OffboardingPreview {
   affectedDomains: number;
 }
 
+// Step types — emitted by planClientOffboarding, consumed by executePlanStep.
+export type PlanStep =
+  | { id: string; kind: "pause-campaign"; instance: BisonInstanceSlug; label: string; campaignId: number; campaignName: string }
+  | { id: string; kind: "detag-inbox-batch"; instance: BisonInstanceSlug; label: string; tagId: number; tagName: string; inboxIds: number[]; domains: string[] }
+  | { id: string; kind: "reaggregate-domains"; instance: BisonInstanceSlug; label: string; domains: string[] };
+
+export interface OffboardingPlan {
+  clientTag: string;
+  instancesTargeted: BisonInstanceSlug[];
+  summary: {
+    campaigns: number;
+    inboxes: number;
+    domains: number;
+  };
+  perInstance: {
+    instance: BisonInstanceSlug;
+    campaigns: number;
+    inboxes: number;
+    tagId: number | null;       // null if the tag doesn't exist in this instance
+  }[];
+  steps: PlanStep[];
+}
+
+export interface StepResult {
+  ok: boolean;
+  error: string | null;
+  // Optional rolled-up counts so the frontend tally is accurate.
+  pausedCampaign?: { instance: BisonInstanceSlug; id: number; name: string };
+  detagged?: number;
+  detagFailures?: { instance: BisonInstanceSlug; inboxId: number; reason: string }[];
+}
+
+// Returned by executeClientOffboarding (cron path). Same shape the FE builds
+// by aggregating per-step results.
 export interface OffboardingResult {
   clientTag: string;
   instancesTargeted: BisonInstanceSlug[];
@@ -51,7 +87,6 @@ function normalize(tag: string): string {
   return tag.trim().toUpperCase();
 }
 
-// Group → instance list. Unallocated tags → all 4 (per the offboarding plan).
 async function resolveTargetInstances(clientTag: string): Promise<BisonInstanceSlug[]> {
   const group = await getGroupForClientTag(clientTag);
   if (group == null) return [...ALL_INSTANCE_SLUGS];
@@ -80,9 +115,6 @@ async function findInboxesWithTag(
   const supabase = getSupabaseAdmin();
   const out: SupabaseInboxRow[] = [];
   let offset = 0;
-  // supabase-js's .contains() emits a PG array literal for arrays-of-objects —
-  // wrong for jsonb. Pre-stringify so PostgREST routes to the jsonb `@>`
-  // operator. Same pattern used in attach-nurture-inboxes/route.ts.
   const needle = JSON.stringify([{ name: clientTag }]);
   while (true) {
     const { data, error } = await supabase
@@ -114,125 +146,7 @@ async function fetchTagIdByName(
   return null;
 }
 
-async function pauseCampaignsForInstance(
-  instance: BisonInstanceSlug,
-  campaigns: SupabaseCampaignRow[],
-  paused: { instance: BisonInstanceSlug; id: number; name: string }[],
-  failures: { instance: BisonInstanceSlug; id: number; name: string; error: string }[],
-) {
-  for (const c of campaigns) {
-    try {
-      const res = await bisonFetch(instance, `/campaigns/${c.id}/pause`, { method: "PATCH" });
-      if (res.ok) {
-        paused.push({ instance, id: c.id, name: c.name });
-      } else {
-        const text = await res.text().catch(() => "");
-        failures.push({ instance, id: c.id, name: c.name, error: `${res.status}: ${text.slice(0, 200)}` });
-      }
-    } catch (e) {
-      failures.push({
-        instance, id: c.id, name: c.name,
-        error: e instanceof Error ? e.message : "pause failed",
-      });
-    }
-    await delay(200);
-  }
-}
-
-async function detachTagFromInboxesForInstance(
-  instance: BisonInstanceSlug,
-  tagId: number,
-  tagName: string,
-  inboxes: SupabaseInboxRow[],
-): Promise<{ detagged: number; failures: { instance: BisonInstanceSlug; inboxId: number; reason: string }[]; domainsTouched: Set<string> }> {
-  const BATCH = 50;
-  const supabase = getSupabaseAdmin();
-  const failures: { instance: BisonInstanceSlug; inboxId: number; reason: string }[] = [];
-  const successIds = new Set<number>();
-  const domainsTouched = new Set<string>();
-
-  for (let i = 0; i < inboxes.length; i += BATCH) {
-    const batch = inboxes.slice(i, i + BATCH);
-    const batchIds = batch.map((b) => b.id);
-    try {
-      const res = await bisonFetch(instance, `/tags/remove-from-sender-emails`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ tag_ids: [tagId], sender_email_ids: batchIds }),
-      });
-      if (res.ok) {
-        for (const id of batchIds) successIds.add(id);
-      } else if (res.status === 422) {
-        // Fall back to single-id to isolate dead inboxes.
-        for (const id of batchIds) {
-          try {
-            const sr = await bisonFetch(instance, `/tags/remove-from-sender-emails`, {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ tag_ids: [tagId], sender_email_ids: [id] }),
-            });
-            if (sr.ok) successIds.add(id);
-            else {
-              const t = await sr.text().catch(() => "");
-              failures.push({ instance, inboxId: id, reason: `${sr.status}: ${t.slice(0, 200)}` });
-            }
-          } catch (e) {
-            failures.push({ instance, inboxId: id, reason: e instanceof Error ? e.message : "request failed" });
-          }
-        }
-      } else {
-        const t = await res.text().catch(() => "");
-        for (const id of batchIds) failures.push({ instance, inboxId: id, reason: `${res.status}: ${t.slice(0, 200)}` });
-      }
-    } catch (e) {
-      for (const id of batchIds) {
-        failures.push({ instance, inboxId: id, reason: e instanceof Error ? e.message : "request failed" });
-      }
-    }
-    if (i + BATCH < inboxes.length) await delay(200);
-  }
-
-  // Rewrite local Supabase tags column for inboxes Bison actually accepted.
-  const accepted = inboxes.filter((x) => successIds.has(x.id));
-  for (const inbox of accepted) {
-    domainsTouched.add(inbox.domain);
-    const current = Array.isArray(inbox.tags) ? inbox.tags : [];
-    const next = current.filter((t) => t.id !== tagId && t.name?.toLowerCase() !== tagName.toLowerCase());
-    await supabase
-      .from("deliverability_inboxes")
-      .update({ tags: next })
-      .eq("instance", instance)
-      .eq("id", inbox.id);
-  }
-
-  return { detagged: successIds.size, failures, domainsTouched };
-}
-
-// Re-derive the domain.tags rollup from its inboxes for every (instance, domain)
-// pair we touched. Mirrors the post-update step in bulk-tags/route.ts.
-async function reaggregateDomainTags(
-  instance: BisonInstanceSlug,
-  domains: Set<string>,
-) {
-  const supabase = getSupabaseAdmin();
-  for (const domain of domains) {
-    const { data } = await supabase
-      .from("deliverability_inboxes")
-      .select("tags")
-      .eq("instance", instance)
-      .eq("domain", domain);
-    const tagSet = new Set<string>();
-    for (const inbox of data || []) {
-      const tags = Array.isArray(inbox.tags) ? (inbox.tags as BisonTag[]) : [];
-      for (const t of tags) if (t.name) tagSet.add(t.name);
-    }
-    await supabase
-      .from("deliverability_domains")
-      .update({ tags: Array.from(tagSet).sort() })
-      .eq("instance", instance)
-      .eq("domain", domain);
-  }
-}
+// ===== preview (cheap counts) =====
 
 export async function previewClientOffboarding(rawTag: string): Promise<OffboardingPreview> {
   const clientTag = normalize(rawTag);
@@ -256,10 +170,247 @@ export async function previewClientOffboarding(rawTag: string): Promise<Offboard
   };
 }
 
-export async function executeClientOffboarding(rawTag: string): Promise<OffboardingResult> {
+// ===== plan (full ordered step list for FE-driven execution) =====
+
+export async function planClientOffboarding(rawTag: string): Promise<OffboardingPlan> {
   const clientTag = normalize(rawTag);
   const instances = await resolveTargetInstances(clientTag);
+  const steps: PlanStep[] = [];
+  const perInstance: OffboardingPlan["perInstance"] = [];
+  let stepCounter = 0;
+  const nextId = () => `s${++stepCounter}`;
+  let totalCampaigns = 0;
+  let totalInboxes = 0;
+  const allDomainPairs = new Set<string>();
 
+  for (const instance of instances) {
+    const camps = await findActiveCampaignsForTag(instance, clientTag);
+    const inboxes = await findInboxesWithTag(instance, clientTag);
+    // Tag id is needed for detag steps. Skip detag entirely if the tag doesn't
+    // exist in this instance (nothing to detach).
+    const tagId = inboxes.length > 0 ? await fetchTagIdByName(instance, clientTag) : null;
+
+    perInstance.push({
+      instance,
+      campaigns: camps.length,
+      inboxes: inboxes.length,
+      tagId,
+    });
+    totalCampaigns += camps.length;
+    totalInboxes += inboxes.length;
+
+    for (const c of camps) {
+      steps.push({
+        id: nextId(),
+        kind: "pause-campaign",
+        instance,
+        label: `Pause "${c.name}" (${instance})`,
+        campaignId: c.id,
+        campaignName: c.name,
+      });
+    }
+
+    if (inboxes.length > 0 && tagId != null) {
+      const domains = new Set<string>();
+      for (const ib of inboxes) {
+        domains.add(ib.domain);
+        allDomainPairs.add(`${instance}:${ib.domain}`);
+      }
+      const domainList = Array.from(domains).sort();
+
+      for (let i = 0; i < inboxes.length; i += DETAG_BATCH) {
+        const slice = inboxes.slice(i, i + DETAG_BATCH);
+        const batchNo = Math.floor(i / DETAG_BATCH) + 1;
+        const totalBatches = Math.ceil(inboxes.length / DETAG_BATCH);
+        steps.push({
+          id: nextId(),
+          kind: "detag-inbox-batch",
+          instance,
+          label: `Detag ${slice.length} inboxes (batch ${batchNo}/${totalBatches}, ${instance})`,
+          tagId,
+          tagName: clientTag,
+          inboxIds: slice.map((s) => s.id),
+          // domain list is per-batch (subset) so the FE can show per-batch context
+          domains: Array.from(new Set(slice.map((s) => s.domain))).sort(),
+        });
+      }
+
+      steps.push({
+        id: nextId(),
+        kind: "reaggregate-domains",
+        instance,
+        label: `Refresh domain rollups (${instance}, ${domainList.length} domains)`,
+        domains: domainList,
+      });
+    }
+  }
+
+  return {
+    clientTag,
+    instancesTargeted: instances,
+    summary: {
+      campaigns: totalCampaigns,
+      inboxes: totalInboxes,
+      domains: allDomainPairs.size,
+    },
+    perInstance,
+    steps,
+  };
+}
+
+// ===== single-step execution =====
+
+async function pauseCampaignStep(
+  instance: BisonInstanceSlug,
+  campaignId: number,
+  campaignName: string,
+): Promise<StepResult> {
+  try {
+    const res = await bisonFetch(instance, `/campaigns/${campaignId}/pause`, { method: "PATCH" });
+    if (res.ok) {
+      return { ok: true, error: null, pausedCampaign: { instance, id: campaignId, name: campaignName } };
+    }
+    const text = await res.text().catch(() => "");
+    return { ok: false, error: `Bison ${res.status}: ${text.slice(0, 200)}` };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : "pause failed" };
+  }
+}
+
+async function detagInboxBatchStep(
+  instance: BisonInstanceSlug,
+  tagId: number,
+  tagName: string,
+  inboxIds: number[],
+): Promise<StepResult> {
+  const supabase = getSupabaseAdmin();
+  const successIds = new Set<number>();
+  const failures: { instance: BisonInstanceSlug; inboxId: number; reason: string }[] = [];
+
+  try {
+    const res = await bisonFetch(instance, `/tags/remove-from-sender-emails`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ tag_ids: [tagId], sender_email_ids: inboxIds }),
+    });
+    if (res.ok) {
+      for (const id of inboxIds) successIds.add(id);
+    } else if (res.status === 422) {
+      // Single-id fallback to isolate dead inboxes.
+      for (const id of inboxIds) {
+        try {
+          const sr = await bisonFetch(instance, `/tags/remove-from-sender-emails`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ tag_ids: [tagId], sender_email_ids: [id] }),
+          });
+          if (sr.ok) successIds.add(id);
+          else {
+            const t = await sr.text().catch(() => "");
+            failures.push({ instance, inboxId: id, reason: `${sr.status}: ${t.slice(0, 200)}` });
+          }
+        } catch (e) {
+          failures.push({ instance, inboxId: id, reason: e instanceof Error ? e.message : "request failed" });
+        }
+      }
+    } else {
+      const t = await res.text().catch(() => "");
+      const msg = `Bison ${res.status}: ${t.slice(0, 200)}`;
+      for (const id of inboxIds) failures.push({ instance, inboxId: id, reason: msg });
+      return { ok: false, error: msg, detagged: 0, detagFailures: failures };
+    }
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : "request failed";
+    for (const id of inboxIds) failures.push({ instance, inboxId: id, reason: msg });
+    return { ok: false, error: msg, detagged: 0, detagFailures: failures };
+  }
+
+  if (successIds.size === 0) {
+    return { ok: false, error: failures[0]?.reason || "no inboxes detagged", detagged: 0, detagFailures: failures };
+  }
+
+  // Strip the tag from each accepted inbox's local Supabase row.
+  const { data: existing, error: selErr } = await supabase
+    .from("deliverability_inboxes")
+    .select("id, tags")
+    .eq("instance", instance)
+    .in("id", Array.from(successIds));
+  if (selErr) {
+    return { ok: false, error: `local select: ${selErr.message}`, detagged: 0, detagFailures: failures };
+  }
+  for (const row of existing || []) {
+    const current = Array.isArray(row.tags) ? (row.tags as BisonTag[]) : [];
+    const next = current.filter(
+      (t) => t.id !== tagId && t.name?.toLowerCase() !== tagName.toLowerCase(),
+    );
+    await supabase
+      .from("deliverability_inboxes")
+      .update({ tags: next })
+      .eq("instance", instance)
+      .eq("id", row.id);
+  }
+
+  return {
+    ok: failures.length === 0,
+    error: failures.length > 0 ? failures[0].reason : null,
+    detagged: successIds.size,
+    detagFailures: failures,
+  };
+}
+
+async function reaggregateDomainsStep(
+  instance: BisonInstanceSlug,
+  domains: string[],
+): Promise<StepResult> {
+  const supabase = getSupabaseAdmin();
+  try {
+    for (const domain of domains) {
+      const { data } = await supabase
+        .from("deliverability_inboxes")
+        .select("tags")
+        .eq("instance", instance)
+        .eq("domain", domain);
+      const tagSet = new Set<string>();
+      for (const inbox of data || []) {
+        const tags = Array.isArray(inbox.tags) ? (inbox.tags as BisonTag[]) : [];
+        for (const t of tags) if (t.name) tagSet.add(t.name);
+      }
+      await supabase
+        .from("deliverability_domains")
+        .update({ tags: Array.from(tagSet).sort() })
+        .eq("instance", instance)
+        .eq("domain", domain);
+    }
+    return { ok: true, error: null };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : "reaggregate failed" };
+  }
+}
+
+export async function executePlanStep(step: PlanStep): Promise<StepResult> {
+  if (!isInstanceSlug(step.instance)) {
+    return { ok: false, error: `unknown instance: ${step.instance}` };
+  }
+  switch (step.kind) {
+    case "pause-campaign":
+      return pauseCampaignStep(step.instance, step.campaignId, step.campaignName);
+    case "detag-inbox-batch":
+      return detagInboxBatchStep(step.instance, step.tagId, step.tagName, step.inboxIds);
+    case "reaggregate-domains":
+      return reaggregateDomainsStep(step.instance, step.domains);
+    default: {
+      const _exhaustive: never = step;
+      void _exhaustive;
+      return { ok: false, error: "unknown step kind" };
+    }
+  }
+}
+
+// ===== synchronous executor (cron path) — walks its own plan =====
+
+export async function executeClientOffboarding(rawTag: string): Promise<OffboardingResult> {
+  const clientTag = normalize(rawTag);
+  const plan = await planClientOffboarding(clientTag);
   const pausedCampaigns: OffboardingResult["pausedCampaigns"] = [];
   const pauseFailures: OffboardingResult["pauseFailures"] = [];
   const detagFailures: OffboardingResult["detagFailures"] = [];
@@ -267,37 +418,33 @@ export async function executeClientOffboarding(rawTag: string): Promise<Offboard
   let inboxesDetagged = 0;
   const affectedDomainPairs = new Set<string>();
 
-  for (const instance of instances) {
-    try {
-      const camps = await findActiveCampaignsForTag(instance, clientTag);
-      await pauseCampaignsForInstance(instance, camps, pausedCampaigns, pauseFailures);
-    } catch (e) {
-      errors.push(`[${instance}] pause-phase: ${e instanceof Error ? e.message : "failed"}`);
-    }
-
-    try {
-      const inboxes = await findInboxesWithTag(instance, clientTag);
-      if (inboxes.length === 0) continue;
-      const tagId = await fetchTagIdByName(instance, clientTag);
-      if (tagId == null) {
-        // Tag doesn't exist in this instance — nothing to detach.
-        continue;
+  for (const step of plan.steps) {
+    const result = await executePlanStep(step);
+    if (step.kind === "pause-campaign") {
+      if (result.ok && result.pausedCampaign) {
+        pausedCampaigns.push(result.pausedCampaign);
+      } else if (result.error) {
+        pauseFailures.push({
+          instance: step.instance,
+          id: step.campaignId,
+          name: step.campaignName,
+          error: result.error,
+        });
       }
-      const { detagged, failures, domainsTouched } = await detachTagFromInboxesForInstance(
-        instance, tagId, clientTag, inboxes,
-      );
-      inboxesDetagged += detagged;
-      detagFailures.push(...failures);
-      for (const d of domainsTouched) affectedDomainPairs.add(`${instance}:${d}`);
-      await reaggregateDomainTags(instance, domainsTouched);
-    } catch (e) {
-      errors.push(`[${instance}] detag-phase: ${e instanceof Error ? e.message : "failed"}`);
+    } else if (step.kind === "detag-inbox-batch") {
+      if (result.detagged) inboxesDetagged += result.detagged;
+      if (result.detagFailures) detagFailures.push(...result.detagFailures);
+      for (const d of step.domains) affectedDomainPairs.add(`${step.instance}:${d}`);
+      if (!result.ok && result.error) errors.push(`[${step.instance}] detag: ${result.error}`);
+    } else if (step.kind === "reaggregate-domains") {
+      if (!result.ok && result.error) errors.push(`[${step.instance}] reaggregate: ${result.error}`);
     }
+    await delay(150);
   }
 
   return {
     clientTag,
-    instancesTargeted: instances,
+    instancesTargeted: plan.instancesTargeted,
     pausedCampaigns,
     pauseFailures,
     inboxesDetagged,

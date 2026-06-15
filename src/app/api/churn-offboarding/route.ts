@@ -75,10 +75,13 @@ export async function POST(request: Request) {
     }
 
     const body = await request.json().catch(() => ({}));
-    const { clientAbbr, churnDate, decision } = body as {
+    const { clientAbbr, churnDate, decision, result: feResult } = body as {
       clientAbbr?: string;
       churnDate?: string;
       decision?: "confirm" | "skip";
+      // Optional: result built up by the FE walking the plan. When provided we
+      // trust it and skip server-side re-execution (saves another ~30s sync).
+      result?: unknown;
     };
     if (!clientAbbr || !churnDate || !decision) {
       return NextResponse.json(
@@ -126,24 +129,28 @@ export async function POST(request: Request) {
       return NextResponse.json({ status: "skipped" });
     }
 
-    // decision === "confirm" — execute the offboarding synchronously.
-    let result;
-    try {
-      result = await executeClientOffboarding(abbr);
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : "execution failed";
-      await supabase
-        .from("client_offboarding_actions")
-        .update({
-          status: "failed",
-          decided_by: decidedBy,
-          decided_at: decidedAt,
-          executed_at: new Date().toISOString(),
-          result: { errors: [msg] },
-        })
-        .eq("client_abbr", abbr)
-        .eq("churn_date", churnDate);
-      return NextResponse.json({ status: "failed", error: msg }, { status: 500 });
+    // decision === "confirm" — either trust the FE's result (preferred — the
+    // dashboard walks the plan step-by-step for live progress) or run the full
+    // executor synchronously as a fallback (legacy curl callers, no FE).
+    let result: unknown = feResult ?? null;
+    if (!result) {
+      try {
+        result = await executeClientOffboarding(abbr);
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : "execution failed";
+        await supabase
+          .from("client_offboarding_actions")
+          .update({
+            status: "failed",
+            decided_by: decidedBy,
+            decided_at: decidedAt,
+            executed_at: new Date().toISOString(),
+            result: { errors: [msg] },
+          })
+          .eq("client_abbr", abbr)
+          .eq("churn_date", churnDate);
+        return NextResponse.json({ status: "failed", error: msg }, { status: 500 });
+      }
     }
 
     const { error: updErr } = await supabase
