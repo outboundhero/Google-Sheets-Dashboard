@@ -133,6 +133,158 @@ const ChartTooltip = ({ active, payload }: { active?: boolean; payload?: Array<{
 
 const keyOf = (c: { instance: BisonInstanceSlug; id: number }) => `${c.instance}:${c.id}`;
 
+// ---------- Client Multi-Select Dropdown (search + drag-select) ----------
+// Mirrors the deliverability Tag filter: a searchable popover whose rows can be
+// drag-selected (mouse-down on a row, drag down, release) the same way the
+// campaign table itself supports drag selection.
+function ClientFilterDropdown({
+  allClients,
+  selected,
+  onChange,
+}: {
+  allClients: string[];
+  selected: string[];
+  onChange: (clients: string[]) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [search, setSearch] = useState("");
+  const ref = useRef<HTMLDivElement>(null);
+
+  // Drag-to-select state. We snapshot the selection at drag start and re-apply
+  // the whole start→current range on every enter, so a missed event can't leave
+  // a gap (selection lives in the parent, so functional updates aren't available).
+  const isDragging = useRef(false);
+  const dragSelectMode = useRef(true); // true = selecting, false = deselecting
+  const dragStartIdx = useRef(-1);
+  const dragLastIdx = useRef(-1);
+  const dragBase = useRef<Set<string>>(new Set());
+
+  useEffect(() => {
+    const handler = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, []);
+
+  useEffect(() => {
+    const onUp = () => { isDragging.current = false; dragStartIdx.current = -1; dragLastIdx.current = -1; };
+    window.addEventListener("mouseup", onUp);
+    return () => window.removeEventListener("mouseup", onUp);
+  }, []);
+
+  const filtered = useMemo(
+    () => allClients.filter((c) => c.toLowerCase().includes(search.toLowerCase())),
+    [allClients, search]
+  );
+
+  const applyRange = useCallback((a: number, b: number) => {
+    const from = Math.min(a, b);
+    const to = Math.max(a, b);
+    const next = new Set(dragBase.current);
+    for (let i = from; i <= to; i++) {
+      const c = filtered[i];
+      if (!c) continue;
+      if (dragSelectMode.current) next.add(c); else next.delete(c);
+    }
+    onChange(Array.from(next));
+  }, [filtered, onChange]);
+
+  const handleDragStart = (idx: number, client: string) => {
+    isDragging.current = true;
+    dragStartIdx.current = idx;
+    dragLastIdx.current = idx;
+    dragSelectMode.current = !selected.includes(client);
+    dragBase.current = new Set(selected);
+    applyRange(idx, idx);
+  };
+
+  const handleDragEnter = (idx: number) => {
+    if (!isDragging.current || idx === dragLastIdx.current) return;
+    dragLastIdx.current = idx;
+    applyRange(dragStartIdx.current, idx);
+  };
+
+  return (
+    <div className="relative" ref={ref}>
+      <button
+        onClick={() => setOpen((v) => !v)}
+        className={`flex items-center gap-1.5 text-xs px-2.5 py-1.5 rounded-lg border transition-colors ${
+          selected.length > 0
+            ? "border-primary bg-primary/10 text-primary"
+            : "border-border text-muted-foreground hover:border-foreground hover:text-foreground"
+        }`}
+      >
+        <span>{selected.length > 0 ? "Clients" : "All Clients"}</span>
+        {selected.length > 0 && (
+          <span className="bg-primary text-primary-foreground text-[10px] font-medium rounded-full w-4 h-4 flex items-center justify-center">
+            {selected.length}
+          </span>
+        )}
+        <ChevronDown className={`h-3.5 w-3.5 transition-transform ${open ? "rotate-180" : ""}`} />
+      </button>
+
+      {open && (
+        <div className="absolute top-full right-0 mt-1.5 z-50 w-56 rounded-xl border bg-popover shadow-lg overflow-hidden">
+          {/* Search */}
+          <div className="flex items-center gap-2 px-3 py-2 border-b">
+            <Search className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
+            <input
+              autoFocus
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder="Search clients…"
+              className="flex-1 text-sm bg-transparent outline-none placeholder:text-muted-foreground"
+            />
+            {search && (
+              <button onClick={() => setSearch("")}>
+                <X className="h-3 w-3 text-muted-foreground hover:text-foreground" />
+              </button>
+            )}
+          </div>
+
+          {/* Clear all */}
+          {selected.length > 0 && (
+            <button
+              onClick={() => onChange([])}
+              className="w-full text-left px-3 py-1.5 text-xs text-muted-foreground hover:bg-accent border-b"
+            >
+              Clear all ({selected.length} selected)
+            </button>
+          )}
+
+          {/* Client list (drag-selectable) */}
+          <div className="max-h-64 overflow-y-auto select-none">
+            {filtered.length === 0 ? (
+              <div className="px-3 py-4 text-sm text-muted-foreground text-center">No clients found</div>
+            ) : (
+              filtered.map((client, idx) => {
+                const isSelected = selected.includes(client);
+                return (
+                  <div
+                    key={client}
+                    onMouseDown={(e) => { e.preventDefault(); handleDragStart(idx, client); }}
+                    onMouseEnter={() => handleDragEnter(idx)}
+                    className="w-full flex items-center gap-2 px-3 py-2 text-sm hover:bg-accent text-left transition-colors cursor-pointer"
+                  >
+                    <div className={`h-4 w-4 rounded border flex items-center justify-center shrink-0 transition-colors ${
+                      isSelected ? "bg-primary border-primary" : "border-border"
+                    }`}>
+                      {isSelected && <Check className="h-2.5 w-2.5 text-primary-foreground" />}
+                    </div>
+                    <span className="truncate">{client}</span>
+                  </div>
+                );
+              })
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+// ------------------------------------------------------------------------
+
 export default function CampaignsPage() {
   const { instances, instancesQuery } = useInstance();
   const { role } = useAuth();
@@ -142,7 +294,7 @@ export default function CampaignsPage() {
   const [syncing, setSyncing] = useState(false);
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState("active");
-  const [clientFilter, setClientFilter] = useState("all");
+  const [clientFilters, setClientFilters] = useState<string[]>([]);
   const [selectedCampaign, setSelectedCampaign] = useState<Campaign | null>(null);
   const [lowLeadsOpen, setLowLeadsOpen] = useState(true);
   const [sortField, setSortField] = useState<"created_at" | "remaining_leads" | "emails_sent" | "replied">("created_at");
@@ -240,10 +392,16 @@ export default function CampaignsPage() {
   const filtered = useMemo(() => {
     let result = campaigns;
     if (statusFilter !== "all") result = result.filter((c) => normStatus(c.status) === statusFilter);
-    if (clientFilter !== "all") result = result.filter((c) => c.client_tag === clientFilter);
-    if (search) {
-      const q = search.toLowerCase();
-      result = result.filter((c) => c.name.toLowerCase().includes(q) || c.client_tag.toLowerCase().includes(q));
+    if (clientFilters.length > 0) result = result.filter((c) => clientFilters.includes(c.client_tag));
+    // Search supports a comma-separated list of client tag abbreviations (or any
+    // substring): a campaign matches if its name or tag contains ANY of the terms.
+    const terms = search.split(",").map((s) => s.trim().toLowerCase()).filter(Boolean);
+    if (terms.length > 0) {
+      result = result.filter((c) => {
+        const name = c.name.toLowerCase();
+        const tag = c.client_tag.toLowerCase();
+        return terms.some((q) => name.includes(q) || tag.includes(q));
+      });
     }
     return [...result].sort((a, b) => {
       if (sortField === "created_at") {
@@ -252,7 +410,7 @@ export default function CampaignsPage() {
       }
       return sortDir === "desc" ? b[sortField] - a[sortField] : a[sortField] - b[sortField];
     });
-  }, [campaigns, statusFilter, clientFilter, search, sortField, sortDir]);
+  }, [campaigns, statusFilter, clientFilters, search, sortField, sortDir]);
 
   // Clients with <1500 remaining leads (active only)
   const lowLeadsClients = useMemo(() => {
@@ -537,7 +695,7 @@ export default function CampaignsPage() {
           <input
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            placeholder="Search campaigns..."
+            placeholder="Search campaigns or JPPS, SC, ABM…"
             className="flex-1 text-sm bg-transparent outline-none placeholder:text-muted-foreground"
           />
           {search && <button onClick={() => setSearch("")}><X className="h-3 w-3 text-muted-foreground hover:text-foreground" /></button>}
@@ -562,14 +720,11 @@ export default function CampaignsPage() {
           );
         })}
 
-        <select
-          value={clientFilter}
-          onChange={(e) => setClientFilter(e.target.value)}
-          className="text-xs px-2.5 py-1.5 rounded-lg border bg-background"
-        >
-          <option value="all">All Clients</option>
-          {clientTags.map((t) => <option key={t} value={t}>{t}</option>)}
-        </select>
+        <ClientFilterDropdown
+          allClients={clientTags}
+          selected={clientFilters}
+          onChange={setClientFilters}
+        />
 
         {filtered.length !== campaigns.length && (
           <span className="text-xs text-muted-foreground">{filtered.length} result{filtered.length !== 1 ? "s" : ""}</span>
