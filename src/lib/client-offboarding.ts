@@ -64,6 +64,9 @@ export interface OffboardingPlan {
 export interface StepResult {
   ok: boolean;
   error: string | null;
+  // "skipped" means there was no real work to do (e.g. campaign already gone
+  // from Bison). Distinct from a failure so the UI can tally it separately.
+  skipped?: { reason: string };
   // Optional rolled-up counts so the frontend tally is accurate.
   pausedCampaign?: { instance: BisonInstanceSlug; id: number; name: string };
   detagged?: number;
@@ -76,6 +79,9 @@ export interface OffboardingResult {
   clientTag: string;
   instancesTargeted: BisonInstanceSlug[];
   pausedCampaigns: { instance: BisonInstanceSlug; id: number; name: string }[];
+  // Campaigns we couldn't pause because they don't exist in Bison anymore —
+  // stale Supabase rows that the cron hasn't pruned. Not a real failure.
+  pauseSkipped: { instance: BisonInstanceSlug; id: number; name: string; reason: string }[];
   pauseFailures: { instance: BisonInstanceSlug; id: number; name: string; error: string }[];
   inboxesDetagged: number;
   detagFailures: { instance: BisonInstanceSlug; inboxId: number; reason: string }[];
@@ -270,6 +276,11 @@ async function pauseCampaignStep(
     if (res.ok) {
       return { ok: true, error: null, pausedCampaign: { instance, id: campaignId, name: campaignName } };
     }
+    // Bison returns 404 when the campaign was deleted but our Supabase
+    // `campaigns` row hasn't been pruned. Not a failure — just nothing to do.
+    if (res.status === 404) {
+      return { ok: false, error: null, skipped: { reason: "no longer in Bison (stale row)" } };
+    }
     const text = await res.text().catch(() => "");
     return { ok: false, error: `Bison ${res.status}: ${text.slice(0, 200)}` };
   } catch (e) {
@@ -412,6 +423,7 @@ export async function executeClientOffboarding(rawTag: string): Promise<Offboard
   const clientTag = normalize(rawTag);
   const plan = await planClientOffboarding(clientTag);
   const pausedCampaigns: OffboardingResult["pausedCampaigns"] = [];
+  const pauseSkipped: OffboardingResult["pauseSkipped"] = [];
   const pauseFailures: OffboardingResult["pauseFailures"] = [];
   const detagFailures: OffboardingResult["detagFailures"] = [];
   const errors: string[] = [];
@@ -423,6 +435,13 @@ export async function executeClientOffboarding(rawTag: string): Promise<Offboard
     if (step.kind === "pause-campaign") {
       if (result.ok && result.pausedCampaign) {
         pausedCampaigns.push(result.pausedCampaign);
+      } else if (result.skipped) {
+        pauseSkipped.push({
+          instance: step.instance,
+          id: step.campaignId,
+          name: step.campaignName,
+          reason: result.skipped.reason,
+        });
       } else if (result.error) {
         pauseFailures.push({
           instance: step.instance,
@@ -446,6 +465,7 @@ export async function executeClientOffboarding(rawTag: string): Promise<Offboard
     clientTag,
     instancesTargeted: plan.instancesTargeted,
     pausedCampaigns,
+    pauseSkipped,
     pauseFailures,
     inboxesDetagged,
     detagFailures,

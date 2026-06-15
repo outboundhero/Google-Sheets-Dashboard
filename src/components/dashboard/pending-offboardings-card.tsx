@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { AlertTriangle, Loader2, CheckCircle2, XCircle, Circle, AlertCircle } from "lucide-react";
+import { AlertTriangle, Loader2, CheckCircle2, XCircle, Circle, AlertCircle, MinusCircle } from "lucide-react";
 import {
   Dialog,
   DialogContent,
@@ -50,12 +50,46 @@ interface Plan {
 interface StepResult {
   ok: boolean;
   error: string | null;
+  skipped?: { reason: string };
   pausedCampaign?: { instance: string; id: number; name: string };
   detagged?: number;
   detagFailures?: { instance: string; inboxId: number; reason: string }[];
 }
 
-type StepState = "queued" | "running" | "done" | "failed";
+type StepState = "queued" | "running" | "done" | "skipped" | "failed";
+
+// Walk one /execute-step request with up to 2 retries on transient errors
+// (network blip, Vercel cold-start returning HTML, JSON parse error). Each
+// retry waits a bit longer. The pause/detag operations are idempotent so a
+// retry that lands on a successful previous attempt still returns ok.
+async function callStep(step: PlanStep): Promise<StepResult> {
+  const attempts = 3;
+  let lastErr: string | null = null;
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    try {
+      const res = await fetch("/api/churn-offboarding/execute-step", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ step }),
+      });
+      const text = await res.text();
+      let json: StepResult | null = null;
+      try { json = JSON.parse(text) as StepResult; }
+      catch {
+        lastErr = `non-JSON response (HTTP ${res.status}) — likely a transient Vercel error`;
+        if (attempt < attempts - 1) { await new Promise((r) => setTimeout(r, 800 * (attempt + 1))); continue; }
+        return { ok: false, error: lastErr };
+      }
+      if (!res.ok && !json.error) json.error = `HTTP ${res.status}`;
+      return json;
+    } catch (e) {
+      lastErr = e instanceof Error ? e.message : "request failed";
+      if (attempt < attempts - 1) { await new Promise((r) => setTimeout(r, 800 * (attempt + 1))); continue; }
+      return { ok: false, error: lastErr };
+    }
+  }
+  return { ok: false, error: lastErr || "request failed" };
+}
 
 function formatDate(iso: string): string {
   const [y, m, d] = iso.split("-").map((s) => parseInt(s, 10));
@@ -68,6 +102,7 @@ function formatDate(iso: string): string {
 function StatusDot({ state }: { state: StepState }) {
   if (state === "running") return <Loader2 className="h-3.5 w-3.5 animate-spin text-amber-500 shrink-0" />;
   if (state === "done")    return <CheckCircle2 className="h-3.5 w-3.5 text-emerald-500 shrink-0" />;
+  if (state === "skipped") return <MinusCircle className="h-3.5 w-3.5 text-zinc-400 dark:text-zinc-500 shrink-0" />;
   if (state === "failed")  return <AlertCircle className="h-3.5 w-3.5 text-red-500 shrink-0" />;
   return <Circle className="h-3.5 w-3.5 text-zinc-300 dark:text-zinc-600 shrink-0" />;
 }
@@ -156,8 +191,8 @@ function OffboardDialog({ item, onClose }: { item: OffboardingItem; onClose: (re
   const [running, setRunning] = useState(false);
   const [finished, setFinished] = useState(false);
   const [stepStates, setStepStates] = useState<Record<string, StepState>>({});
-  const [stepErrors, setStepErrors] = useState<Record<string, string>>({});
-  const [tally, setTally] = useState({ paused: 0, detagged: 0, pauseFailed: 0, detagFailed: 0 });
+  const [stepNotes, setStepNotes] = useState<Record<string, { tone: "error" | "muted"; text: string }>>({});
+  const [tally, setTally] = useState({ paused: 0, pauseSkipped: 0, pauseFailed: 0, detagged: 0, detagFailed: 0 });
   const [recordError, setRecordError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -189,6 +224,7 @@ function OffboardDialog({ item, onClose }: { item: OffboardingItem; onClose: (re
     setRecordError(null);
 
     const pausedCampaigns: { instance: string; id: number; name: string }[] = [];
+    const pauseSkipped: { instance: string; id: number; name: string; reason: string }[] = [];
     const pauseFailures: { instance: string; id: number; name: string; error: string }[] = [];
     const detagFailures: { instance: string; inboxId: number; reason: string }[] = [];
     const errors: string[] = [];
@@ -197,51 +233,55 @@ function OffboardDialog({ item, onClose }: { item: OffboardingItem; onClose: (re
 
     for (const step of plan.steps) {
       setStepStates((prev) => ({ ...prev, [step.id]: "running" }));
-      let result: StepResult;
-      try {
-        const res = await fetch("/api/churn-offboarding/execute-step", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ step }),
-        });
-        result = await res.json();
-        if (!res.ok && !result?.error) result.error = `HTTP ${res.status}`;
-      } catch (e) {
-        result = { ok: false, error: e instanceof Error ? e.message : "request failed" };
-      }
-
-      const ok = result?.ok === true;
-      setStepStates((prev) => ({ ...prev, [step.id]: ok ? "done" : "failed" }));
-      if (!ok && result?.error) {
-        setStepErrors((prev) => ({ ...prev, [step.id]: result.error! }));
-      }
+      const result = await callStep(step);
 
       if (step.kind === "pause-campaign") {
-        if (ok && result.pausedCampaign) {
+        if (result.ok && result.pausedCampaign) {
           pausedCampaigns.push(result.pausedCampaign);
+          setStepStates((p) => ({ ...p, [step.id]: "done" }));
           setTally((t) => ({ ...t, paused: t.paused + 1 }));
+        } else if (result.skipped) {
+          pauseSkipped.push({
+            instance: step.instance,
+            id: step.campaignId,
+            name: step.campaignName,
+            reason: result.skipped.reason,
+          });
+          setStepStates((p) => ({ ...p, [step.id]: "skipped" }));
+          setStepNotes((p) => ({ ...p, [step.id]: { tone: "muted", text: result.skipped!.reason } }));
+          setTally((t) => ({ ...t, pauseSkipped: t.pauseSkipped + 1 }));
         } else {
           pauseFailures.push({
             instance: step.instance,
             id: step.campaignId,
             name: step.campaignName,
-            error: result?.error || "pause failed",
+            error: result.error || "pause failed",
           });
+          setStepStates((p) => ({ ...p, [step.id]: "failed" }));
+          if (result.error) setStepNotes((p) => ({ ...p, [step.id]: { tone: "error", text: result.error! } }));
           setTally((t) => ({ ...t, pauseFailed: t.pauseFailed + 1 }));
         }
       } else if (step.kind === "detag-inbox-batch") {
-        const n = result?.detagged || 0;
+        const n = result.detagged || 0;
         detaggedTotal += n;
         setTally((t) => ({
           ...t,
           detagged: t.detagged + n,
-          detagFailed: t.detagFailed + (result?.detagFailures?.length || 0),
+          detagFailed: t.detagFailed + (result.detagFailures?.length || 0),
         }));
-        if (result?.detagFailures) detagFailures.push(...result.detagFailures);
+        if (result.detagFailures) detagFailures.push(...result.detagFailures);
         for (const d of step.domains) affectedDomainPairs.add(`${step.instance}:${d}`);
-        if (!ok && result?.error) errors.push(`[${step.instance}] detag: ${result.error}`);
+        setStepStates((p) => ({ ...p, [step.id]: result.ok ? "done" : "failed" }));
+        if (!result.ok && result.error) {
+          errors.push(`[${step.instance}] detag: ${result.error}`);
+          setStepNotes((p) => ({ ...p, [step.id]: { tone: "error", text: result.error! } }));
+        }
       } else if (step.kind === "reaggregate-domains") {
-        if (!ok && result?.error) errors.push(`[${step.instance}] reaggregate: ${result.error}`);
+        setStepStates((p) => ({ ...p, [step.id]: result.ok ? "done" : "failed" }));
+        if (!result.ok && result.error) {
+          errors.push(`[${step.instance}] reaggregate: ${result.error}`);
+          setStepNotes((p) => ({ ...p, [step.id]: { tone: "error", text: result.error! } }));
+        }
       }
     }
 
@@ -258,6 +298,7 @@ function OffboardDialog({ item, onClose }: { item: OffboardingItem; onClose: (re
             clientTag: plan.clientTag,
             instancesTargeted: plan.instancesTargeted,
             pausedCampaigns,
+            pauseSkipped,
             pauseFailures,
             inboxesDetagged: detaggedTotal,
             detagFailures,
@@ -277,7 +318,15 @@ function OffboardDialog({ item, onClose }: { item: OffboardingItem; onClose: (re
   }
 
   const totalSteps = plan?.steps.length || 0;
-  const doneSteps = Object.values(stepStates).filter((s) => s === "done" || s === "failed").length;
+  const doneSteps = Object.values(stepStates).filter(
+    (s) => s === "done" || s === "skipped" || s === "failed",
+  ).length;
+  function tallyText(): string {
+    const parts = [`${tally.paused} paused`];
+    if (tally.pauseSkipped) parts.push(`${tally.pauseSkipped} already deleted in Bison`);
+    if (tally.pauseFailed) parts.push(`${tally.pauseFailed} failed`);
+    return parts.join(" · ");
+  }
 
   return (
     <Dialog open onOpenChange={(o) => { if (!o && !running) onClose(finished); }}>
@@ -304,9 +353,9 @@ function OffboardDialog({ item, onClose }: { item: OffboardingItem; onClose: (re
             <div className="rounded-lg border border-zinc-200 dark:border-zinc-800 p-3 text-sm space-y-1.5">
               <div className="flex justify-between">
                 <span className="text-zinc-500">Campaigns to pause</span>
-                <span className="font-medium">
+                <span className="font-medium text-right">
                   {running || finished
-                    ? `${tally.paused}/${plan.summary.campaigns}${tally.pauseFailed ? ` (${tally.pauseFailed} failed)` : ""}`
+                    ? tallyText()
                     : plan.summary.campaigns.toLocaleString("en-US")}
                 </span>
               </div>
@@ -336,21 +385,31 @@ function OffboardDialog({ item, onClose }: { item: OffboardingItem; onClose: (re
             {(running || finished) && (
               <div className="space-y-3">
                 {pauseSteps.length > 0 && (
-                  <Section title={`Pause campaigns (${pauseSteps.filter((s) => stepStates[s.id] === "done").length}/${pauseSteps.length})`}>
+                  <Section title={`Pause campaigns — ${tallyText()}`}>
                     <ul className="space-y-1 max-h-44 overflow-y-auto text-xs">
-                      {pauseSteps.map((s) => (
-                        <li key={s.id} className="flex items-center gap-2 px-1 py-0.5">
-                          <StatusDot state={stepStates[s.id] || "queued"} />
-                          <span className="truncate flex-1">
-                            <span className="text-zinc-500 mr-1">[{s.instance}]</span>{s.campaignName}
-                          </span>
-                          {stepErrors[s.id] && (
-                            <span className="text-[10px] text-red-500 truncate max-w-[120px]" title={stepErrors[s.id]}>
-                              {stepErrors[s.id]}
+                      {pauseSteps.map((s) => {
+                        const state = stepStates[s.id] || "queued";
+                        const note = stepNotes[s.id];
+                        return (
+                          <li
+                            key={s.id}
+                            className={`flex items-center gap-2 px-1 py-0.5 ${state === "skipped" ? "opacity-60" : ""}`}
+                          >
+                            <StatusDot state={state} />
+                            <span className="truncate flex-1">
+                              <span className="text-zinc-500 mr-1">[{s.instance}]</span>{s.campaignName}
                             </span>
-                          )}
-                        </li>
-                      ))}
+                            {note && (
+                              <span
+                                className={`text-[10px] truncate max-w-[180px] italic ${note.tone === "error" ? "text-red-500" : "text-zinc-500"}`}
+                                title={note.text}
+                              >
+                                {note.text}
+                              </span>
+                            )}
+                          </li>
+                        );
+                      })}
                     </ul>
                   </Section>
                 )}
