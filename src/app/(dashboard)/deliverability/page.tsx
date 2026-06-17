@@ -75,15 +75,17 @@ interface DomainRow {
   // Trailing reply/bounce rates (%), null until enough snapshot history exists
   reply_10?: number | null;
   reply_15?: number | null;
+  reply_30?: number | null;
   bounce_10?: number | null;
   bounce_15?: number | null;
+  bounce_30?: number | null;
 }
 
 // --- Numeric multi-condition filter (up to 5, combined with AND or OR) -------
 type FilterField =
   | "inbox_count" | "total_sent" | "total_replied" | "reply_rate"
   | "total_bounced" | "bounce_rate" | "daily_limit_total"
-  | "reply_10" | "reply_15" | "bounce_10" | "bounce_15";
+  | "reply_10" | "reply_15" | "reply_30" | "bounce_10" | "bounce_15" | "bounce_30";
 type FilterOp = ">=" | ">" | "=" | "<" | "<=";
 interface FilterCondition { id: number; field: FilterField; op: FilterOp; value: string; }
 
@@ -97,8 +99,10 @@ const FILTER_FIELDS: { value: FilterField; label: string }[] = [
   { value: "bounce_rate", label: "Bounce rate % (all)" },
   { value: "reply_10", label: "Reply rate % (10d)" },
   { value: "reply_15", label: "Reply rate % (15d)" },
+  { value: "reply_30", label: "Reply rate % (30d)" },
   { value: "bounce_10", label: "Bounce rate % (10d)" },
   { value: "bounce_15", label: "Bounce rate % (15d)" },
+  { value: "bounce_30", label: "Bounce rate % (30d)" },
 ];
 const FILTER_OPS: FilterOp[] = [">=", ">", "=", "<", "<="];
 
@@ -114,8 +118,10 @@ function filterFieldValue(d: DomainRow, field: FilterField): number | null {
     case "bounce_rate": return (d.total_sent || 0) > 0 ? (d.total_bounced || 0) / (d.total_sent || 1) * 100 : 0;
     case "reply_10": return d.reply_10 ?? null;
     case "reply_15": return d.reply_15 ?? null;
+    case "reply_30": return d.reply_30 ?? null;
     case "bounce_10": return d.bounce_10 ?? null;
     case "bounce_15": return d.bounce_15 ?? null;
+    case "bounce_30": return d.bounce_30 ?? null;
   }
 }
 
@@ -150,10 +156,10 @@ const TABLE_COLUMNS: { field: ColField; label: string; align: string; width: str
   { field: "total_sent", label: "Sent", align: "text-center", width: "70px", toggleable: true },
   { field: "total_replied", label: "Replied", align: "text-center", width: "70px", toggleable: true },
   { field: "reply_rate", label: "Reply Rate", align: "text-center", width: "80px", toggleable: true },
-  { field: "reply_trailing", label: "Reply 10/15d", align: "text-center", width: "96px", toggleable: true },
+  { field: "reply_trailing", label: "Reply 10/15/30d", align: "text-center", width: "128px", toggleable: true },
   { field: "total_bounced", label: "Bounced", align: "text-center", width: "70px", toggleable: true },
   { field: "bounce_rate", label: "Bounce Rate", align: "text-center", width: "80px", toggleable: true },
-  { field: "bounce_trailing", label: "Bounce 10/15d", align: "text-center", width: "96px", toggleable: true },
+  { field: "bounce_trailing", label: "Bounce 10/15/30d", align: "text-center", width: "128px", toggleable: true },
   { field: "daily_limit", label: "Daily", align: "text-center", width: "70px", toggleable: true },
   { field: "warmup_days", label: "Status", align: "text-center", width: "90px", toggleable: true },
 ];
@@ -480,12 +486,12 @@ function DeliverabilityPageInner() {
       if (seq !== domainsSeqRef.current) return;
 
       // Build a domain → trailing-rates map (keyed by domain; domains are unique per view).
-      const trailingByDomain = new Map<string, { reply_10: number | null; reply_15: number | null; bounce_10: number | null; bounce_15: number | null }>();
+      const trailingByDomain = new Map<string, { reply_10: number | null; reply_15: number | null; reply_30: number | null; bounce_10: number | null; bounce_15: number | null; bounce_30: number | null }>();
       if (trailingRes && trailingRes.ok) {
         try {
           const t = await trailingRes.json();
-          for (const r of (t?.rates || []) as { domain: string; reply_10: number | null; reply_15: number | null; bounce_10: number | null; bounce_15: number | null }[]) {
-            trailingByDomain.set(r.domain, { reply_10: r.reply_10, reply_15: r.reply_15, bounce_10: r.bounce_10, bounce_15: r.bounce_15 });
+          for (const r of (t?.rates || []) as { domain: string; reply_10: number | null; reply_15: number | null; reply_30: number | null; bounce_10: number | null; bounce_15: number | null; bounce_30: number | null }[]) {
+            trailingByDomain.set(r.domain, { reply_10: r.reply_10, reply_15: r.reply_15, reply_30: r.reply_30 ?? null, bounce_10: r.bounce_10, bounce_15: r.bounce_15, bounce_30: r.bounce_30 ?? null });
           }
           setTrailingDaysCollected(typeof t?.daysCollected === "number" ? t.daysCollected : 0);
         } catch { /* ignore trailing parse errors */ }
@@ -981,7 +987,7 @@ function DeliverabilityPageInner() {
     const selected = domains.filter((d) => selectedDomains.has(d.domain));
     let csv: string;
     if (withStats) {
-      const header = "Domain,Date Added,Inboxes,Sent,Replied,Bounced,Reply Rate 10d,Reply Rate 15d,Bounce Rate 10d,Bounce Rate 15d,Daily Limit,Tags";
+      const header = "Domain,Date Added,Inboxes,Sent,Replied,Bounced,Reply Rate 10d,Reply Rate 15d,Reply Rate 30d,Bounce Rate 10d,Bounce Rate 15d,Bounce Rate 30d,Daily Limit,Tags";
       const pct = (v: number | null | undefined) => (v != null ? `${v}%` : "");
       const rows = selected.map((d) => {
         let dateAdded = "";
@@ -991,7 +997,7 @@ function DeliverabilityPageInner() {
           const dd = String(dt.getDate()).padStart(2, "0");
           dateAdded = `${mm}-${dd}-${dt.getFullYear()}`;
         }
-        return `${d.domain},${dateAdded},${d.inbox_count},${d.total_sent || 0},${d.total_replied || 0},${d.total_bounced || 0},${pct(d.reply_10)},${pct(d.reply_15)},${pct(d.bounce_10)},${pct(d.bounce_15)},${d.daily_limit_total || 0},"${(d.tags || []).join(", ")}"`;
+        return `${d.domain},${dateAdded},${d.inbox_count},${d.total_sent || 0},${d.total_replied || 0},${d.total_bounced || 0},${pct(d.reply_10)},${pct(d.reply_15)},${pct(d.reply_30)},${pct(d.bounce_10)},${pct(d.bounce_15)},${pct(d.bounce_30)},${d.daily_limit_total || 0},"${(d.tags || []).join(", ")}"`;
       });
       csv = [header, ...rows].join("\n");
     } else {
@@ -2088,9 +2094,9 @@ function DeliverabilityPageInner() {
             </div>
 
             {/* Trailing-rate warm-up note */}
-            {trailingDaysCollected > 0 && trailingDaysCollected < 15 && (
+            {trailingDaysCollected > 0 && trailingDaysCollected < 30 && (
               <span className="text-[11px] text-muted-foreground self-center">
-                Trailing rates warming up — day {trailingDaysCollected}/15
+                Trailing rates warming up — day {trailingDaysCollected}/30
               </span>
             )}
 
@@ -2725,6 +2731,8 @@ function DeliverabilityPageInner() {
                   : "0.0";
                 const lowReply = (d.total_sent || 0) > 100 && (d.total_replied || 0) / (d.total_sent || 1) < 0.01;
                 const highBounce = (d.total_sent || 0) > 100 && (d.total_bounced || 0) / (d.total_sent || 1) > 0.03;
+                // Trailing rates only meaningful once the domain has sent enough — hide until >50 total sent.
+                const trailingReady = (d.total_sent || 0) > 50;
 
                 // Flagging rules
                 const isGoogleDomain = (d.google_count || 0) > 0 && (d.outlook_count || 0) === 0;
@@ -2911,16 +2919,22 @@ function DeliverabilityPageInner() {
                     </div>
                     )}
 
-                    {/* Trailing reply rate (10d / 15d) */}
+                    {/* Trailing reply rate (10d / 15d / 30d) — hidden until >50 sent */}
                     {isColVisible("reply_trailing") && (
                     <div className="text-center text-xs tabular-nums text-muted-foreground">
-                      <span className={d.reply_10 != null && d.reply_10 < 2 ? "text-destructive" : ""}>
-                        {d.reply_10 != null ? `${d.reply_10}%` : "—"}
-                      </span>
-                      <span className="text-muted-foreground/40"> / </span>
-                      <span className={d.reply_15 != null && d.reply_15 < 2 ? "text-destructive" : ""}>
-                        {d.reply_15 != null ? `${d.reply_15}%` : "—"}
-                      </span>
+                      {trailingReady ? (<>
+                        <span className={d.reply_10 != null && d.reply_10 < 2 ? "text-destructive" : ""}>
+                          {d.reply_10 != null ? `${d.reply_10}%` : "—"}
+                        </span>
+                        <span className="text-muted-foreground/40"> / </span>
+                        <span className={d.reply_15 != null && d.reply_15 < 2 ? "text-destructive" : ""}>
+                          {d.reply_15 != null ? `${d.reply_15}%` : "—"}
+                        </span>
+                        <span className="text-muted-foreground/40"> / </span>
+                        <span className={d.reply_30 != null && d.reply_30 < 2 ? "text-destructive" : ""}>
+                          {d.reply_30 != null ? `${d.reply_30}%` : "—"}
+                        </span>
+                      </>) : "—"}
                     </div>
                     )}
 
@@ -2938,16 +2952,22 @@ function DeliverabilityPageInner() {
                     </div>
                     )}
 
-                    {/* Trailing bounce rate (10d / 15d) */}
+                    {/* Trailing bounce rate (10d / 15d / 30d) — hidden until >50 sent */}
                     {isColVisible("bounce_trailing") && (
                     <div className="text-center text-xs tabular-nums text-muted-foreground">
-                      <span className={d.bounce_10 != null && d.bounce_10 > 5 ? "text-destructive" : ""}>
-                        {d.bounce_10 != null ? `${d.bounce_10}%` : "—"}
-                      </span>
-                      <span className="text-muted-foreground/40"> / </span>
-                      <span className={d.bounce_15 != null && d.bounce_15 > 5 ? "text-destructive" : ""}>
-                        {d.bounce_15 != null ? `${d.bounce_15}%` : "—"}
-                      </span>
+                      {trailingReady ? (<>
+                        <span className={d.bounce_10 != null && d.bounce_10 > 5 ? "text-destructive" : ""}>
+                          {d.bounce_10 != null ? `${d.bounce_10}%` : "—"}
+                        </span>
+                        <span className="text-muted-foreground/40"> / </span>
+                        <span className={d.bounce_15 != null && d.bounce_15 > 5 ? "text-destructive" : ""}>
+                          {d.bounce_15 != null ? `${d.bounce_15}%` : "—"}
+                        </span>
+                        <span className="text-muted-foreground/40"> / </span>
+                        <span className={d.bounce_30 != null && d.bounce_30 > 5 ? "text-destructive" : ""}>
+                          {d.bounce_30 != null ? `${d.bounce_30}%` : "—"}
+                        </span>
+                      </>) : "—"}
                     </div>
                     )}
 
