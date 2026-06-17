@@ -365,6 +365,12 @@ function DeliverabilityPageInner() {
     sheetError?: string;
   }
   const [tagCampaignJob, setTagCampaignJob] = useState<TagCampaignJob | null>(null);
+  // Retry orchestration for the tag/campaign/sheet card. lastTagInfoRef holds
+  // the args to re-run; the token cancels a pending auto-retry countdown when a
+  // new run starts (manual "Retry now" or Dismiss).
+  const lastTagInfoRef = useRef<TagApplyInfo | null>(null);
+  const tagRetryTokenRef = useRef(0);
+  const [tagRetry, setTagRetry] = useState<{ attempt: number; total: number; countdown: number } | null>(null);
   const [domainsCopied, setDomainsCopied] = useState(false);
   const [showSkippedList, setShowSkippedList] = useState(false);
   const [skippedCopied, setSkippedCopied] = useState(false);
@@ -528,7 +534,10 @@ function DeliverabilityPageInner() {
     } catch {/* ignore */}
   }, [instances]);
 
-  const startBackgroundTagCampaign = useCallback(async (info: TagApplyInfo) => {
+  // Re-runnable core of the tag + campaign + sheet operation. Returns true only
+  // if every step succeeded. Partial skips (e.g. disconnected inboxes reported
+  // as tagFailed) are NOT failures and don't trigger a retry.
+  const runTagCampaignOnce = useCallback(async (info: TagApplyInfo): Promise<boolean> => {
     const tagLabel = `${info.mode === "add" ? "Adding" : "Removing"} ${info.tagNames.join(", ")}`;
     const campaignJobs: AttachJob[] = info.campaigns.map((c) => ({ campaign: c.name, status: "pending" as const, newly: 0, existing: 0 }));
     setTagCampaignJob({
@@ -540,6 +549,10 @@ function DeliverabilityPageInner() {
     setDomainsCopied(false);
     setShowSkippedList(false);
 
+    let tagOk = true;
+    let campaignsOk = true;
+    let sheetOk = true;
+
     // Run tags + campaigns + sheet append in parallel
     const tagPromise = fetch("/api/deliverability/bulk-tags", {
       method: "POST",
@@ -550,6 +563,7 @@ function DeliverabilityPageInner() {
       if (!res.ok) throw new Error(data.error || "Failed");
       setTagCampaignJob((prev) => prev ? { ...prev, tagStatus: "done", tagAffected: data.inboxesAffected || 0, tagFailed: data.failed || 0, tagFailedInboxes: data.failedInboxes || [] } : prev);
     }).catch((err) => {
+      tagOk = false;
       setTagCampaignJob((prev) => prev ? { ...prev, tagStatus: "error", tagError: err instanceof Error ? err.message : "Failed" } : prev);
     });
 
@@ -574,6 +588,7 @@ function DeliverabilityPageInner() {
             campaignJobs: prev.campaignJobs.map((j, idx) => idx === i ? { ...j, status: "done", newly: data.newly_attached || 0, existing: data.already_attached || 0, failed: data.failed || 0 } : j),
           } : prev);
         } catch (err) {
+          campaignsOk = false;
           setTagCampaignJob((prev) => prev ? {
             ...prev,
             campaignJobs: prev.campaignJobs.map((j, idx) => idx === i ? { ...j, status: "error", error: err instanceof Error ? err.message : "Failed" } : j),
@@ -611,6 +626,7 @@ function DeliverabilityPageInner() {
           sheetAdded: data.added, sheetDuplicates: data.duplicates,
         } : prev);
       } catch (err) {
+        sheetOk = false;
         setTagCampaignJob((prev) => prev ? {
           ...prev, sheetStatus: "error",
           sheetLabel: "Sheet append failed",
@@ -622,7 +638,34 @@ function DeliverabilityPageInner() {
     await Promise.all([tagPromise, campaignPromise, sheetPromise]);
     loadDomains();
     loadTags();
+    return tagOk && campaignsOk && sheetOk;
   }, [loadDomains, loadTags]);
+
+  // After a failed run, auto-retry up to 3 times, 30s apart. The token guards
+  // against a superseding run (manual "Retry now" / Dismiss bumps it): a stale
+  // countdown or scheduling no-ops once the token changes.
+  const scheduleTagAutoRetry = useCallback(async (info: TagApplyInfo, attempt: number, token: number) => {
+    for (let s = 30; s > 0; s--) {
+      if (token !== tagRetryTokenRef.current) return;
+      setTagRetry({ attempt, total: 3, countdown: s });
+      await new Promise((r) => setTimeout(r, 1000));
+    }
+    if (token !== tagRetryTokenRef.current) return;
+    setTagRetry({ attempt, total: 3, countdown: 0 });
+    const ok = await runTagCampaignOnce(info);
+    if (token !== tagRetryTokenRef.current) return;
+    setTagRetry(null);
+    if (!ok && attempt < 3) scheduleTagAutoRetry(info, attempt + 1, token);
+  }, [runTagCampaignOnce]);
+
+  const startBackgroundTagCampaign = useCallback(async (info: TagApplyInfo) => {
+    const token = ++tagRetryTokenRef.current; // cancels any pending auto-retry
+    lastTagInfoRef.current = info;
+    setTagRetry(null);
+    const ok = await runTagCampaignOnce(info);
+    if (token !== tagRetryTokenRef.current) return;
+    if (!ok) scheduleTagAutoRetry(info, 1, token);
+  }, [runTagCampaignOnce, scheduleTagAutoRetry]);
 
   const startBackgroundSheetAppend = useCallback(async (doms: string[], clientTag: string) => {
     setSheetAppendJob({ status: "running", label: `Whitelisting ${doms.length} domains for ${clientTag}...` });
@@ -1588,27 +1631,49 @@ function DeliverabilityPageInner() {
       {tagCampaignJob && (() => {
         const sheetDone = !tagCampaignJob.sheetStatus || tagCampaignJob.sheetStatus === "done" || tagCampaignJob.sheetStatus === "error" || tagCampaignJob.sheetStatus === "skipped";
         const allDone = tagCampaignJob.tagStatus !== "running" && tagCampaignJob.campaignsDone && sheetDone;
+        const hasError = tagCampaignJob.tagStatus === "error"
+          || tagCampaignJob.campaignJobs.some((j) => j.status === "error")
+          || tagCampaignJob.sheetStatus === "error";
+        const retryNow = () => { if (lastTagInfoRef.current) startBackgroundTagCampaign(lastTagInfoRef.current); };
+        const dismiss = () => { tagRetryTokenRef.current++; setTagRetry(null); setTagCampaignJob(null); };
         return (
         <div className="rounded-lg border bg-muted/30 px-4 py-3">
           <div className="flex items-center justify-between mb-2">
             <div className="flex items-center gap-2 text-sm">
-              {!allDone && <Loader2 className="h-3.5 w-3.5 animate-spin text-primary" />}
-              {allDone && <CheckCircle2 className="h-3.5 w-3.5 text-emerald-500" />}
-              <span className="font-medium">{allDone ? "Complete" : "Processing..."}</span>
+              {tagRetry ? <Loader2 className="h-3.5 w-3.5 animate-spin text-amber-500" />
+                : !allDone ? <Loader2 className="h-3.5 w-3.5 animate-spin text-primary" />
+                : hasError ? <AlertTriangle className="h-3.5 w-3.5 text-destructive" />
+                : <CheckCircle2 className="h-3.5 w-3.5 text-emerald-500" />}
+              <span className="font-medium">
+                {tagRetry
+                  ? (tagRetry.countdown > 0
+                      ? `Retrying in ${tagRetry.countdown}s (attempt ${tagRetry.attempt} of ${tagRetry.total})`
+                      : `Retrying… (attempt ${tagRetry.attempt} of ${tagRetry.total})`)
+                  : !allDone ? "Processing..."
+                  : hasError ? "Completed with errors"
+                  : "Complete"}
+              </span>
             </div>
-            {allDone && (
+            {(allDone || tagRetry) && (
               <div className="flex items-center gap-3">
-                <button
-                  onClick={() => {
-                    navigator.clipboard.writeText(tagCampaignJob.domains.join("\n"));
-                    setDomainsCopied(true);
-                    setTimeout(() => setDomainsCopied(false), 2000);
-                  }}
-                  className="text-xs text-primary hover:underline"
-                >
-                  {domainsCopied ? "Copied!" : "Copy Domains"}
-                </button>
-                <button onClick={() => setTagCampaignJob(null)} className="text-xs text-muted-foreground hover:text-foreground">Dismiss</button>
+                {tagRetry ? (
+                  <button onClick={retryNow} className="text-xs text-primary hover:underline">Retry now</button>
+                ) : hasError ? (
+                  <button onClick={retryNow} className="text-xs font-medium text-primary hover:underline">Retry</button>
+                ) : null}
+                {allDone && !tagRetry && (
+                  <button
+                    onClick={() => {
+                      navigator.clipboard.writeText(tagCampaignJob.domains.join("\n"));
+                      setDomainsCopied(true);
+                      setTimeout(() => setDomainsCopied(false), 2000);
+                    }}
+                    className="text-xs text-primary hover:underline"
+                  >
+                    {domainsCopied ? "Copied!" : "Copy Domains"}
+                  </button>
+                )}
+                <button onClick={dismiss} className="text-xs text-muted-foreground hover:text-foreground">Dismiss</button>
               </div>
             )}
           </div>
