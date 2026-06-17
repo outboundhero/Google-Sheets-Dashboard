@@ -635,25 +635,28 @@ function DeliverabilityPageInner() {
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Failed");
-      // Immediate whitelist email (skips the daily queue) — this is the
-      // "Whitelist" button. Surface the result; an email failure doesn't undo
-      // the successful sheet append.
+      // Queue these domains for the daily 6:30am PST whitelist email — this is
+      // the "Whitelist" button. Deferred (not sent now) so a day's worth of
+      // domains go out in one batch. Surface the result; a queue failure
+      // doesn't undo the successful sheet append.
       let whitelist = "";
       try {
-        const wRes = await fetch("/api/deliverability/whitelist/send-now", {
+        const wRes = await fetch("/api/deliverability/whitelist/queue", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ domains: doms, clientTag }),
         });
         const wData = await wRes.json();
-        if (wData.sent) {
-          whitelist = `Emailed ${wData.recipients.to + wData.recipients.bcc} recipient(s)`;
-          if (wData.skipped > 0) whitelist += ` · ${wData.skipped} already whitelisted`;
+        if (wRes.ok) {
+          whitelist = wData.queued > 0
+            ? `${wData.queued} queued for 6:30 AM PST whitelist email`
+            : "Nothing new to email (already queued/sent)";
+          if (wData.queued > 0 && wData.skipped > 0) whitelist += ` · ${wData.skipped} already queued`;
         } else {
-          whitelist = `Email not sent: ${wData.reason || "unknown"}`;
+          whitelist = `Queue failed: ${wData.error || "unknown"}`;
         }
       } catch (e) {
-        whitelist = `Email failed: ${e instanceof Error ? e.message : "error"}`;
+        whitelist = `Queue failed: ${e instanceof Error ? e.message : "error"}`;
       }
       setSheetAppendJob({
         status: "done",
