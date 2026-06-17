@@ -30,43 +30,62 @@ async function getInboxIdsForDomains(instance: BisonInstanceSlug, domains: strin
   return ids;
 }
 
-/** Discover campaigns for a set of inbox IDs, returns campaign→inboxIds map */
+/**
+ * Discover campaigns for a set of inbox IDs in one instance.
+ *
+ * For each inbox we ask Bison "what campaigns is this in?" via
+ * /sender-emails/{id}/campaigns. There's no Bison bulk endpoint for this, so
+ * the per-inbox lookup is unavoidable. To keep wall-clock time reasonable on
+ * large selections (500-1000+ inboxes) we use a wide worker pool, no
+ * inter-batch sleep, and a 429-aware retry so a rate limit on one page doesn't
+ * silently drop that inbox's campaigns.
+ */
 async function discoverCampaigns(instance: BisonInstanceSlug, inboxIds: number[]) {
+  const CONC = 25;
   const campaignMap = new Map<number, { name: string; status: string; inboxIds: number[] }>();
-  for (let i = 0; i < inboxIds.length; i += 5) {
-    const batch = inboxIds.slice(i, i + 5);
-    const results = await Promise.allSettled(
-      batch.map(async (inboxId) => {
-        const campaigns: { id: number; name: string; status: string }[] = [];
-        let page = 1;
-        while (true) {
-          const res = await bisonFetch(
-            instance,
-            `/sender-emails/${inboxId}/campaigns?page=${page}&per_page=100`,
-          );
-          if (!res.ok) break;
-          const json = await res.json();
-          for (const c of json.data || []) {
-            campaigns.push({ id: c.id, name: c.name, status: c.status });
-          }
-          if (page >= (json.meta?.last_page || 1)) break;
-          page++;
-        }
-        return { inboxId, campaigns };
-      })
-    );
-    for (const r of results) {
-      if (r.status === "fulfilled") {
-        for (const c of r.value.campaigns) {
-          if (!campaignMap.has(c.id)) {
-            campaignMap.set(c.id, { name: c.name, status: c.status, inboxIds: [] });
-          }
-          campaignMap.get(c.id)!.inboxIds.push(r.value.inboxId);
-        }
+
+  async function fetchPage(inboxId: number, page: number): Promise<{ data?: { id: number; name: string; status: string }[]; meta?: { last_page?: number } } | null> {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const res = await bisonFetch(
+        instance,
+        `/sender-emails/${inboxId}/campaigns?page=${page}&per_page=100`,
+      );
+      if (res.status === 429) { await delay(800 * (attempt + 1)); continue; }
+      if (!res.ok) return null;
+      try { return await res.json(); } catch { return null; }
+    }
+    return null;
+  }
+
+  async function lookup(inboxId: number) {
+    const campaigns: { id: number; name: string; status: string }[] = [];
+    let page = 1;
+    while (true) {
+      const json = await fetchPage(inboxId, page);
+      if (!json) break;
+      for (const c of json.data || []) campaigns.push({ id: c.id, name: c.name, status: c.status });
+      if (page >= (json.meta?.last_page || 1)) break;
+      page++;
+    }
+    return { inboxId, campaigns };
+  }
+
+  // Simple worker pool over the inboxIds.
+  let next = 0;
+  const worker = async () => {
+    while (true) {
+      const i = next++;
+      if (i >= inboxIds.length) return;
+      const { inboxId, campaigns } = await lookup(inboxIds[i]);
+      for (const c of campaigns) {
+        let entry = campaignMap.get(c.id);
+        if (!entry) { entry = { name: c.name, status: c.status, inboxIds: [] }; campaignMap.set(c.id, entry); }
+        entry.inboxIds.push(inboxId);
       }
     }
-    if (i + 5 < inboxIds.length) await delay(200);
-  }
+  };
+  await Promise.all(Array.from({ length: Math.min(CONC, inboxIds.length) }, () => worker()));
+
   return campaignMap;
 }
 
@@ -152,24 +171,29 @@ export async function POST(request: Request) {
         // /campaigns/{id}/sender-emails truncates silently mid-pagination.
         inboxIds: number[];
       };
-      const all: Discovered[] = [];
-      let totalInboxes = 0;
-      for (const inst of instances) {
-        const inboxIds = await getInboxIdsForDomains(inst, domains);
-        if (inboxIds.length === 0) continue;
-        totalInboxes += inboxIds.length;
-        const campaignMap = await discoverCampaigns(inst, inboxIds);
-        for (const [id, info] of campaignMap) {
-          all.push({
-            id,
-            instance: inst,
-            name: info.name,
-            status: info.status,
-            inboxCount: info.inboxIds.length,
-            inboxIds: info.inboxIds,
-          });
-        }
-      }
+      // Parallelize across instances — most selections only have data in one
+      // or two instances, so we can fan out without worrying about API quota.
+      const perInstance = await Promise.all(
+        instances.map(async (inst) => {
+          const inboxIds = await getInboxIdsForDomains(inst, domains);
+          if (inboxIds.length === 0) return { inst, inboxCount: 0, campaigns: [] as Discovered[] };
+          const campaignMap = await discoverCampaigns(inst, inboxIds);
+          const camps: Discovered[] = [];
+          for (const [id, info] of campaignMap) {
+            camps.push({
+              id,
+              instance: inst,
+              name: info.name,
+              status: info.status,
+              inboxCount: info.inboxIds.length,
+              inboxIds: info.inboxIds,
+            });
+          }
+          return { inst, inboxCount: inboxIds.length, campaigns: camps };
+        }),
+      );
+      const all: Discovered[] = perInstance.flatMap((p) => p.campaigns);
+      const totalInboxes = perInstance.reduce((s, p) => s + p.inboxCount, 0);
       all.sort((a, b) => a.name.localeCompare(b.name));
       return NextResponse.json({ campaigns: all, inboxCount: totalInboxes });
     }
