@@ -70,17 +70,37 @@ async function discoverCampaigns(instance: BisonInstanceSlug, inboxIds: number[]
   return campaignMap;
 }
 
-/** Fetch all sender_email IDs currently attached to a campaign on a given Bison */
+/**
+ * Fetch all sender_email IDs currently attached to a campaign.
+ *
+ * Bison hard-caps per_page on this endpoint at 15, so large campaigns have
+ * many pages. The previous version silently broke the loop on any non-200
+ * (e.g. a transient 429) and returned a partial list → the caller's
+ * intersection then missed entries and reported "0 removed". This version
+ * retries each page up to 3x with backoff, and throws if a page fails after
+ * retries so the caller surfaces a real error rather than silently truncating.
+ */
 async function fetchCampaignSenderIds(instance: BisonInstanceSlug, campaignId: number): Promise<number[]> {
   const ids: number[] = [];
   let page = 1;
   while (true) {
-    const res = await bisonFetch(
-      instance,
-      `/campaigns/${campaignId}/sender-emails?page=${page}&per_page=100`,
-    );
-    if (!res.ok) break;
-    const json = await res.json();
+    let attempt = 0;
+    let json: { data?: { id: number }[]; meta?: { last_page?: number } } | null = null;
+    while (attempt < 3) {
+      const res = await bisonFetch(
+        instance,
+        `/campaigns/${campaignId}/sender-emails?page=${page}&per_page=100`,
+      );
+      if (res.status === 404) return ids;
+      if (res.ok) {
+        try { json = await res.json(); break; } catch { /* parse error → retry */ }
+      }
+      attempt++;
+      if (attempt < 3) await delay(800 * attempt);
+    }
+    if (!json) {
+      throw new Error(`failed to fetch campaign ${campaignId} senders page ${page} after retries`);
+    }
     for (const item of json.data || []) ids.push(item.id);
     const lastPage = json.meta?.last_page || 1;
     if (page >= lastPage) break;
@@ -110,7 +130,7 @@ export async function POST(request: Request) {
     const { domains, discover, campaigns: removeCampaigns } = body as {
       domains: string[];
       discover?: boolean;
-      campaigns?: { id: number; instance: string; name?: string; status?: string }[];
+      campaigns?: { id: number; instance: string; name?: string; status?: string; inboxIds?: number[] }[];
     };
 
     if (!domains?.length) {
@@ -125,6 +145,12 @@ export async function POST(request: Request) {
         name: string;
         status: string;
         inboxCount: number;
+        // Inbox IDs (from the user's selected domains) that Bison says are
+        // attached to this campaign. The FE passes these back in the remove
+        // call so the server can skip a slow re-fetch and just delete these
+        // exact IDs. Avoids the "0 removed" failure mode we saw when
+        // /campaigns/{id}/sender-emails truncates silently mid-pagination.
+        inboxIds: number[];
       };
       const all: Discovered[] = [];
       let totalInboxes = 0;
@@ -140,6 +166,7 @@ export async function POST(request: Request) {
             name: info.name,
             status: info.status,
             inboxCount: info.inboxIds.length,
+            inboxIds: info.inboxIds,
           });
         }
       }
@@ -183,9 +210,19 @@ export async function POST(request: Request) {
       }
 
       try {
-        // Fetch the campaign's current senders fresh, intersect with our domain inboxes.
-        const campaignSenders = await fetchCampaignSenderIds(inst, c.id);
-        const toRemove = campaignSenders.filter((id) => inboxIdSet!.has(id));
+        // Prefer the FE-supplied inboxIds from discovery — they're the exact
+        // set Bison confirmed are attached to this campaign at discovery time,
+        // so we can skip a slow re-fetch that's prone to silent truncation.
+        // Manually-added campaigns won't have inboxIds → fall back to fetching.
+        let toRemove: number[];
+        if (Array.isArray(c.inboxIds) && c.inboxIds.length > 0) {
+          // Still intersect with the domain-inbox set in case the user
+          // deselected domains between discovery and removal.
+          toRemove = c.inboxIds.filter((id) => inboxIdSet!.has(id));
+        } else {
+          const campaignSenders = await fetchCampaignSenderIds(inst, c.id);
+          toRemove = campaignSenders.filter((id) => inboxIdSet!.has(id));
+        }
 
         if (toRemove.length === 0) {
           details.push({ id: c.id, name: campaignName, removed: 0 });

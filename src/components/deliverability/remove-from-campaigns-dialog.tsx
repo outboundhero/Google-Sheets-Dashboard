@@ -23,6 +23,10 @@ interface CampaignInfo {
   name: string;
   status: string;
   inboxCount: number; // 0 for manually-added (unknown until removal)
+  // From discovery: the exact inbox IDs Bison says are attached to this
+  // campaign from the user's selected domains. Sent back on removal so the
+  // server skips a slow re-fetch that's prone to silent truncation.
+  inboxIds?: number[];
   source: "auto" | "manual";
 }
 
@@ -48,6 +52,35 @@ const STATUS_COLORS: Record<string, string> = {
   completed: "bg-blue-500/10 text-blue-400 border-blue-500/20",
   draft: "bg-zinc-500/10 text-zinc-400 border-zinc-500/20",
 };
+
+// Calls a route and parses JSON, retrying on transient errors. Catches the
+// "Unexpected token 'A', 'An error o'..." case where Vercel returns its HTML
+// error page on a cold start or function failure — surfaces a real message
+// instead of throwing a JSON.parse stack trace.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+async function fetchJsonWithRetry(url: string, init: RequestInit): Promise<any> {
+  const attempts = 3;
+  let lastErr = "request failed";
+  for (let i = 0; i < attempts; i++) {
+    try {
+      const res = await fetch(url, init);
+      const text = await res.text();
+      try {
+        const json = JSON.parse(text);
+        if (!res.ok && !json.error) json.error = `HTTP ${res.status}`;
+        return json;
+      } catch {
+        lastErr = res.status >= 500
+          ? `Server returned a non-JSON error (HTTP ${res.status}). This usually means a transient timeout — please try again.`
+          : `Unexpected non-JSON response (HTTP ${res.status})`;
+      }
+    } catch (e) {
+      lastErr = e instanceof Error ? e.message : "network error";
+    }
+    if (i < attempts - 1) await new Promise((r) => setTimeout(r, 1200 * (i + 1)));
+  }
+  throw new Error(lastErr);
+}
 
 export function RemoveFromCampaignsDialog({ open, onOpenChange, selectedDomains, onComplete }: Props) {
   const { instancesQuery } = useInstance();
@@ -76,12 +109,11 @@ export function RemoveFromCampaignsDialog({ open, onOpenChange, selectedDomains,
     setError("");
 
     setDiscovering(true);
-    fetch(`/api/deliverability/remove-from-campaigns?${instancesQuery}`, {
+    fetchJsonWithRetry(`/api/deliverability/remove-from-campaigns?${instancesQuery}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ domains: selectedDomains, discover: true }),
     })
-      .then((r) => r.json())
       .then((data) => {
         if (data.error) throw new Error(data.error);
         const camps: CampaignInfo[] = (data.campaigns || []).map(
@@ -172,18 +204,24 @@ export function RemoveFromCampaignsDialog({ open, onOpenChange, selectedDomains,
     setResult(null);
 
     try {
-      const res = await fetch(`/api/deliverability/remove-from-campaigns?${instancesQuery}`, {
+      const data = await fetchJsonWithRetry(`/api/deliverability/remove-from-campaigns?${instancesQuery}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           domains: selectedDomains,
           campaigns: selectedCampaigns.map((c) => ({
-            id: c.id, instance: c.instance, name: c.name, status: c.status,
+            id: c.id,
+            instance: c.instance,
+            name: c.name,
+            status: c.status,
+            // Auto-discovered campaigns carry the inboxIds from discovery so
+            // the server can skip a slow re-fetch. Manual ones don't have
+            // them — the server will fall back to fetching live.
+            inboxIds: c.inboxIds,
           })),
         }),
       });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+      if (data.error) throw new Error(data.error);
       setResult(data);
       setPhase("done");
       onComplete();
