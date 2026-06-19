@@ -35,6 +35,25 @@ interface CampaignMapResponse {
   totalCampaigns: number;
 }
 
+interface PlanItem {
+  burntDomain: string;
+  instance: string;
+  clientTag: string | null;
+  reasons: string[];
+  redirectUrl: string | null;
+  targetCampaigns: CampaignRef[];
+  replacementDomain: string | null;
+  capCurrent: number;
+  capMax: number;
+  blockers: string[];
+}
+interface PlanResponse {
+  generatedFor: string;
+  burntCount: number;
+  items: PlanItem[];
+  reserveReadyByInstance: Record<string, number>;
+}
+
 const WINDOWS: { value: LookbackWindow; label: string }[] = [
   { value: "all", label: "All-time" },
   { value: "10", label: "10-day" },
@@ -54,6 +73,8 @@ export default function ReplacementPage() {
   const [error, setError] = useState<string | null>(null);
   const [campaignMap, setCampaignMap] = useState<CampaignMapResponse | null>(null);
   const [loadingMap, setLoadingMap] = useState(false);
+  const [plan, setPlan] = useState<PlanResponse | null>(null);
+  const [loadingPlan, setLoadingPlan] = useState(false);
 
   useEffect(() => {
     if (!isAdmin) return;
@@ -104,6 +125,17 @@ export default function ReplacementPage() {
       else setError(data.error || "Campaign map failed");
     } catch { setError("Campaign map failed"); }
     setLoadingMap(false);
+  };
+
+  const loadPlan = async () => {
+    setLoadingPlan(true); setError(null);
+    try {
+      const res = await fetch("/api/replacement/plan", { cache: "no-store" });
+      const data = await res.json();
+      if (res.ok) setPlan(data);
+      else setError(data.error || "Plan failed");
+    } catch { setError("Plan failed"); }
+    setLoadingPlan(false);
   };
 
   if (!isAdmin) {
@@ -302,6 +334,68 @@ export default function ReplacementPage() {
                   </div>
                 ))}
               </div>
+            </>
+          )}
+        </CardContent>
+      </Card>
+
+      {/* Replacement plan — full proposed action per burnt domain (observe-only) */}
+      <Card>
+        <CardContent className="p-5 space-y-4">
+          <div className="flex items-center justify-between">
+            <div>
+              <div className="text-sm font-medium">Replacement plan — what would happen to each burnt domain</div>
+              <div className="text-[11px] text-muted-foreground">Observe-only — pull reserve → tag → set redirect → attach to campaigns → remove burnt. Nothing executes.</div>
+            </div>
+            <Button size="sm" variant="outline" onClick={loadPlan} disabled={loadingPlan} className="gap-2">
+              <RefreshCw className={`h-4 w-4 ${loadingPlan ? "animate-spin" : ""}`} />
+              {loadingPlan ? "Building…" : "Build plan"}
+            </Button>
+          </div>
+
+          {plan && (
+            <>
+              <div className="flex flex-wrap gap-4 text-sm">
+                <span className="text-muted-foreground">Burnt domains <b className="text-amber-500">{plan.burntCount.toLocaleString()}</b></span>
+                <span className="text-muted-foreground">Reserve ready:</span>
+                {Object.keys(plan.reserveReadyByInstance).length === 0
+                  ? <span className="text-destructive">none</span>
+                  : Object.entries(plan.reserveReadyByInstance).map(([inst, n]) => (
+                      <span key={inst} className="text-muted-foreground">{inst}: <b className={n > 0 ? "text-emerald-500" : "text-destructive"}>{n}</b></span>
+                    ))}
+              </div>
+
+              <div className="rounded-lg border divide-y max-h-[480px] overflow-y-auto">
+                <div className="grid grid-cols-[1fr_90px_70px_1fr_1fr_70px] gap-2 px-3 py-2 text-[11px] text-muted-foreground font-medium bg-muted/30 sticky top-0">
+                  <span>Burnt domain</span><span>Client</span><span>Inst</span><span>Pull reserve → redirect</span><span>Attach to campaigns</span><span className="text-center">Cap</span>
+                </div>
+                {plan.items.map((it) => (
+                  <div key={`${it.instance}:${it.burntDomain}`} className="grid grid-cols-[1fr_90px_70px_1fr_1fr_70px] gap-2 px-3 py-2 text-xs items-start">
+                    <span className="truncate" title={it.reasons.join(" · ")}>{it.burntDomain}</span>
+                    <span className="font-medium">{it.clientTag ?? <span className="text-destructive">?</span>}</span>
+                    <span className="text-muted-foreground">{it.instance.slice(0, 8)}</span>
+                    <span className="truncate">
+                      {it.replacementDomain
+                        ? <span className="text-emerald-500">{it.replacementDomain}</span>
+                        : <span className="text-destructive">no reserve</span>}
+                      {it.redirectUrl
+                        ? <span className="text-muted-foreground"> → {it.redirectUrl.replace(/^https?:\/\//, "")}</span>
+                        : <span className="text-destructive"> → no redirect</span>}
+                    </span>
+                    <span className="truncate text-muted-foreground" title={it.targetCampaigns.map((c) => c.name).join(" · ")}>
+                      {it.targetCampaigns.length > 0
+                        ? `${it.targetCampaigns.length} campaign${it.targetCampaigns.length === 1 ? "" : "s"}`
+                        : <span className="text-destructive">none</span>}
+                    </span>
+                    <span className={`text-center tabular-nums ${it.capCurrent >= it.capMax ? "text-destructive" : "text-muted-foreground"}`}>
+                      {it.capCurrent}/{it.capMax}
+                    </span>
+                  </div>
+                ))}
+              </div>
+              <p className="text-[11px] text-muted-foreground">
+                Rows in red are blocked (missing redirect, no eligible campaign, no ready reserve, or at cap) — those need attention before this client could be auto-replaced.
+              </p>
             </>
           )}
         </CardContent>
