@@ -260,7 +260,7 @@ export default function ReplacementPage() {
           <div className="flex items-center justify-between">
             <div>
               <div className="text-sm font-medium">Campaign match — where replacements would attach</div>
-              <div className="text-[11px] text-muted-foreground">Eligible = active · processing · launch processing · draft (not archived/completed/paused)</div>
+              <div className="text-[11px] text-muted-foreground">Eligible = active · draft · launching · launch processing (not failed/paused/completed/archived)</div>
             </div>
             <Button size="sm" variant="outline" onClick={loadCampaignMap} disabled={loadingMap} className="gap-2">
               <RefreshCw className={`h-4 w-4 ${loadingMap ? "animate-spin" : ""}`} />
@@ -279,7 +279,7 @@ export default function ReplacementPage() {
               </div>
               <div className="flex flex-wrap gap-2">
                 {Object.entries(campaignMap.statusDistribution).sort((a, b) => b[1] - a[1]).map(([s, n]) => (
-                  <Badge key={s} variant="outline" className={`text-[10px] ${["active","processing","launch processing","draft"].includes(s) ? "border-emerald-500/30 text-emerald-500" : "text-muted-foreground"}`}>
+                  <Badge key={s} variant="outline" className={`text-[10px] ${["active","draft","launching","launch processing"].includes(s) ? "border-emerald-500/30 text-emerald-500" : "text-muted-foreground"}`}>
                     {s}: {n}
                   </Badge>
                 ))}
