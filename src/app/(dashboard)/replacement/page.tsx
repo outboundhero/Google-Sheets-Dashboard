@@ -38,6 +38,7 @@ interface CampaignMapResponse {
 interface PlanItem {
   burntDomain: string;
   instance: string;
+  provider: "outlook" | "google" | "mixed" | "unknown";
   clientTag: string | null;
   reasons: string[];
   redirectUrl: string | null;
@@ -51,7 +52,7 @@ interface PlanResponse {
   generatedFor: string;
   burntCount: number;
   items: PlanItem[];
-  reserveReadyByInstance: Record<string, number>;
+  reserveReadyByInstance: Record<string, { outlook: number; google: number }>;
 }
 
 const WINDOWS: { value: LookbackWindow; label: string }[] = [
@@ -357,23 +358,25 @@ export default function ReplacementPage() {
             <>
               <div className="flex flex-wrap gap-4 text-sm">
                 <span className="text-muted-foreground">Burnt domains <b className="text-amber-500">{plan.burntCount.toLocaleString()}</b></span>
-                <span className="text-muted-foreground">Reserve ready:</span>
-                {Object.keys(plan.reserveReadyByInstance).length === 0
-                  ? <span className="text-destructive">none</span>
-                  : Object.entries(plan.reserveReadyByInstance).map(([inst, n]) => (
-                      <span key={inst} className="text-muted-foreground">{inst}: <b className={n > 0 ? "text-emerald-500" : "text-destructive"}>{n}</b></span>
-                    ))}
+                <span className="text-muted-foreground">Reserve ready (Outlook / Google):</span>
+                {Object.entries(plan.reserveReadyByInstance).map(([inst, c]) => (
+                  <span key={inst} className="text-muted-foreground">
+                    {inst}: <b className={c.outlook > 0 ? "text-emerald-500" : "text-destructive"}>{c.outlook}</b>
+                    {" / "}<b className={c.google > 0 ? "text-emerald-500" : "text-muted-foreground"}>{c.google}</b>
+                  </span>
+                ))}
               </div>
 
               <div className="rounded-lg border divide-y max-h-[480px] overflow-y-auto">
-                <div className="grid grid-cols-[1fr_90px_70px_1fr_1fr_70px] gap-2 px-3 py-2 text-[11px] text-muted-foreground font-medium bg-muted/30 sticky top-0">
-                  <span>Burnt domain</span><span>Client</span><span>Inst</span><span>Pull reserve → redirect</span><span>Attach to campaigns</span><span className="text-center">Cap</span>
+                <div className="grid grid-cols-[1fr_80px_70px_60px_1fr_1fr_60px] gap-2 px-3 py-2 text-[11px] text-muted-foreground font-medium bg-muted/30 sticky top-0">
+                  <span>Burnt domain</span><span>Client</span><span>Inst</span><span>Type</span><span>Pull reserve → redirect</span><span>Attach to campaigns</span><span className="text-center">Cap</span>
                 </div>
                 {plan.items.map((it) => (
-                  <div key={`${it.instance}:${it.burntDomain}`} className="grid grid-cols-[1fr_90px_70px_1fr_1fr_70px] gap-2 px-3 py-2 text-xs items-start">
+                  <div key={`${it.instance}:${it.burntDomain}`} className="grid grid-cols-[1fr_80px_70px_60px_1fr_1fr_60px] gap-2 px-3 py-2 text-xs items-start">
                     <span className="truncate" title={it.reasons.join(" · ")}>{it.burntDomain}</span>
                     <span className="font-medium">{it.clientTag ?? <span className="text-destructive">?</span>}</span>
                     <span className="text-muted-foreground">{it.instance.slice(0, 8)}</span>
+                    <span className={it.provider === "outlook" ? "text-blue-400" : it.provider === "google" ? "text-red-400" : "text-amber-500"}>{it.provider === "outlook" ? "OL" : it.provider === "google" ? "GG" : it.provider}</span>
                     <span className="truncate">
                       {it.replacementDomain
                         ? <span className="text-emerald-500">{it.replacementDomain}</span>

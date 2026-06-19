@@ -24,27 +24,43 @@ interface DomRow {
   spamhaus_dbl: boolean | null;
   domain_created_at: string | null;
   outlook_count: number | null;
+  google_count: number | null;
+}
+
+export type Provider = "outlook" | "google" | "mixed" | "unknown";
+
+/** A domain's mailbox provider, from its inbox counts. */
+function providerOf(d: { outlook_count: number | null; google_count: number | null }): Provider {
+  const o = d.outlook_count ?? 0, g = d.google_count ?? 0;
+  if (o > 0 && g > 0) return "mixed";
+  if (o > 0) return "outlook";
+  if (g > 0) return "google";
+  return "unknown";
 }
 interface RateRow { instance: BisonInstanceSlug; domain: string; reply_10: number|null; reply_15: number|null; reply_30: number|null; bounce_10: number|null; bounce_15: number|null; bounce_30: number|null; }
 
 export interface PlanItem {
   burntDomain: string;
   instance: BisonInstanceSlug;
+  provider: Provider;                  // burnt domain's mailbox provider
   clientTag: string | null;
   reasons: string[];
   redirectUrl: string | null;
   targetCampaigns: CampaignRef[];
-  replacementDomain: string | null;   // reserve domain that would be pulled
+  replacementDomain: string | null;   // reserve domain (SAME provider) that would be pulled
   capCurrent: number;                  // current assigned domains for (tag, instance)
   capMax: number;                      // 5 (b2c) | 20 (b2b)
   blockers: string[];                  // why this can't proceed (missing redirect, no campaign, no reserve, at cap)
 }
 
+// reserve ready counts per instance, split by provider
+export interface ReserveReady { outlook: number; google: number }
+
 export interface PlanResult {
   generatedFor: string;            // pst date
   burntCount: number;
   items: PlanItem[];
-  reserveReadyByInstance: Record<string, number>;
+  reserveReadyByInstance: Record<string, ReserveReady>;
 }
 
 function ageDays(created: string | null, nowMs: number): number {
@@ -64,7 +80,7 @@ export async function buildReplacementPlan(): Promise<PlanResult> {
   while (true) {
     const { data, error } = await supabase
       .from("deliverability_domains")
-      .select("instance,domain,tags,total_sent,total_replied,total_bounced,blacklisted,spamhaus_dbl,domain_created_at,outlook_count")
+      .select("instance,domain,tags,total_sent,total_replied,total_bounced,blacklisted,spamhaus_dbl,domain_created_at,outlook_count,google_count")
       .in("instance", ALL_INSTANCE_SLUGS)
       .range(off, off + 999);
     if (error) throw new Error(error.message);
@@ -123,20 +139,28 @@ export async function buildReplacementPlan(): Promise<PlanResult> {
       : (w === "10" ? r.bounce_10 : w === "15" ? r.bounce_15 : r.bounce_30);
   };
 
-  // 4) build reserve-ready pools per instance (consumable). Ready = no client
-  //    tag + Outlook + Complete (>=21d) + not SURBL + not Spamhaus.
-  const reservePool = new Map<BisonInstanceSlug, string[]>();
+  // 4) build reserve-ready pools per (instance, provider) — consumable. Ready =
+  //    no client tag + Complete (>=21d) + not SURBL + not Spamhaus + a pure
+  //    provider (outlook or google). Replacement is like-for-like by provider.
+  const reservePool = new Map<string, string[]>(); // key: `${instance}:${provider}`
   for (const d of domains) {
     if (clientTagOf(d.tags) !== null) continue;             // reserve = no client tag
-    if ((d.outlook_count ?? 0) <= 0) continue;              // Outlook only
+    const prov = providerOf(d);
+    if (prov !== "outlook" && prov !== "google") continue;  // pure provider only
     if (ageDays(d.domain_created_at, nowMs) < WARMUP_DAYS) continue; // Complete
     if (d.blacklisted === true) continue;                  // SURBL clean
     if (d.spamhaus_dbl === true) continue;                 // Spamhaus clean
-    if (!reservePool.has(d.instance)) reservePool.set(d.instance, []);
-    reservePool.get(d.instance)!.push(d.domain);
+    const key = `${d.instance}:${prov}`;
+    if (!reservePool.has(key)) reservePool.set(key, []);
+    reservePool.get(key)!.push(d.domain);
   }
-  const reserveReadyByInstance: Record<string, number> = {};
-  for (const [inst, list] of reservePool) reserveReadyByInstance[inst] = list.length;
+  const reserveReadyByInstance: Record<string, ReserveReady> = {};
+  for (const inst of ALL_INSTANCE_SLUGS) {
+    reserveReadyByInstance[inst] = {
+      outlook: reservePool.get(`${inst}:outlook`)?.length ?? 0,
+      google: reservePool.get(`${inst}:google`)?.length ?? 0,
+    };
+  }
 
   // current assigned-domain count per (tag, instance) — for the cap check
   const assignedCount = new Map<string, number>();
@@ -159,23 +183,26 @@ export async function buildReplacementPlan(): Promise<PlanResult> {
     if (!res.burnt) continue;
 
     const tag = clientTagOf(d.tags);
+    const provider = providerOf(d);
     const redirectUrl = tag ? redirectByTag.get(tag) ?? null : null;
     const targetCampaigns = tag ? campaignsByKey.get(`${tag}:${d.instance}`) ?? [] : [];
     const capMax = INSTANCE_CAP[getInstance(d.instance).tier];
     const capCurrent = tag ? assignedCount.get(`${tag}:${d.instance}`) ?? 0 : 0;
 
-    // pull a reserve domain from the same instance (consume it)
-    const pool = reservePool.get(d.instance);
+    // pull a like-for-like reserve domain (same instance + same provider), consumed
+    const pool = (provider === "outlook" || provider === "google")
+      ? reservePool.get(`${d.instance}:${provider}`) : undefined;
     const replacementDomain = pool && pool.length > 0 ? pool.shift()! : null;
 
     const blockers: string[] = [];
     if (!tag) blockers.push("no client tag on domain");
     if (tag && !redirectUrl) blockers.push("no redirect URL for tag");
     if (tag && targetCampaigns.length === 0) blockers.push("no eligible campaign in this instance");
-    if (!replacementDomain) blockers.push("no ready reserve domain in this instance");
+    if (provider === "mixed" || provider === "unknown") blockers.push(`${provider}-provider domain (manual)`);
+    else if (!replacementDomain) blockers.push(`no ready ${provider} reserve in this instance`);
 
     items.push({
-      burntDomain: d.domain, instance: d.instance, clientTag: tag, reasons: res.reasons,
+      burntDomain: d.domain, instance: d.instance, provider, clientTag: tag, reasons: res.reasons,
       redirectUrl, targetCampaigns, replacementDomain, capCurrent, capMax, blockers,
     });
   }
