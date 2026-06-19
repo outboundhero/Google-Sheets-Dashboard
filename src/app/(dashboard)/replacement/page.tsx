@@ -26,6 +26,15 @@ interface DetectResponse {
   candidates: Candidate[];
 }
 
+interface CampaignRef { id: number; name: string; status: string }
+interface CampaignMatch { clientTag: string; instance: string; eligible: CampaignRef[]; excluded: CampaignRef[] }
+interface CampaignMapResponse {
+  matches: CampaignMatch[];
+  blankTagCount: number;
+  statusDistribution: Record<string, number>;
+  totalCampaigns: number;
+}
+
 const WINDOWS: { value: LookbackWindow; label: string }[] = [
   { value: "all", label: "All-time" },
   { value: "10", label: "10-day" },
@@ -43,6 +52,8 @@ export default function ReplacementPage() {
   const [preview, setPreview] = useState<DetectResponse | null>(null);
   const [running, setRunning] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [campaignMap, setCampaignMap] = useState<CampaignMapResponse | null>(null);
+  const [loadingMap, setLoadingMap] = useState(false);
 
   useEffect(() => {
     if (!isAdmin) return;
@@ -82,6 +93,17 @@ export default function ReplacementPage() {
       else setError(data.error || "Preview failed");
     } catch { setError("Preview failed"); }
     setRunning(false);
+  };
+
+  const loadCampaignMap = async () => {
+    setLoadingMap(true); setError(null);
+    try {
+      const res = await fetch("/api/replacement/campaign-map", { cache: "no-store" });
+      const data = await res.json();
+      if (res.ok) setCampaignMap(data);
+      else setError(data.error || "Campaign map failed");
+    } catch { setError("Campaign map failed"); }
+    setLoadingMap(false);
   };
 
   if (!isAdmin) {
@@ -228,6 +250,59 @@ export default function ReplacementPage() {
           )}
           {preview && preview.candidates.length === 0 && (
             <p className="text-sm text-muted-foreground">No domains match the current guardrails.</p>
+          )}
+        </CardContent>
+      </Card>
+
+      {/* Campaign match — which campaigns a replacement would attach to */}
+      <Card>
+        <CardContent className="p-5 space-y-4">
+          <div className="flex items-center justify-between">
+            <div>
+              <div className="text-sm font-medium">Campaign match — where replacements would attach</div>
+              <div className="text-[11px] text-muted-foreground">Eligible = active · processing · launch processing · draft (not archived/completed/paused)</div>
+            </div>
+            <Button size="sm" variant="outline" onClick={loadCampaignMap} disabled={loadingMap} className="gap-2">
+              <RefreshCw className={`h-4 w-4 ${loadingMap ? "animate-spin" : ""}`} />
+              {loadingMap ? "Loading…" : "Load campaign map"}
+            </Button>
+          </div>
+
+          {campaignMap && (
+            <>
+              <div className="flex flex-wrap gap-4 text-sm">
+                <span className="text-muted-foreground">Campaigns <b className="text-foreground">{campaignMap.totalCampaigns.toLocaleString()}</b></span>
+                <span className="text-muted-foreground">Client·instance pairs <b className="text-foreground">{campaignMap.matches.length}</b></span>
+                {campaignMap.blankTagCount > 0 && (
+                  <span className="text-amber-500">No tag prefix: <b>{campaignMap.blankTagCount}</b> (naming issue)</span>
+                )}
+              </div>
+              <div className="flex flex-wrap gap-2">
+                {Object.entries(campaignMap.statusDistribution).sort((a, b) => b[1] - a[1]).map(([s, n]) => (
+                  <Badge key={s} variant="outline" className={`text-[10px] ${["active","processing","launch processing","draft"].includes(s) ? "border-emerald-500/30 text-emerald-500" : "text-muted-foreground"}`}>
+                    {s}: {n}
+                  </Badge>
+                ))}
+              </div>
+              <div className="rounded-lg border divide-y max-h-[420px] overflow-y-auto">
+                <div className="grid grid-cols-[90px_120px_1fr] gap-2 px-3 py-2 text-[11px] text-muted-foreground font-medium bg-muted/30 sticky top-0">
+                  <span>Client</span><span>Instance</span><span>Eligible campaigns (would attach)</span>
+                </div>
+                {campaignMap.matches.map((m) => (
+                  <div key={`${m.clientTag}:${m.instance}`} className="grid grid-cols-[90px_120px_1fr] gap-2 px-3 py-2 text-xs items-start">
+                    <span className="font-medium">{m.clientTag}</span>
+                    <span className="text-muted-foreground">{m.instance}</span>
+                    <span>
+                      {m.eligible.length === 0 ? (
+                        <span className="text-amber-500">none eligible{m.excluded.length > 0 ? ` (${m.excluded.length} excluded)` : ""}</span>
+                      ) : (
+                        <span className="text-muted-foreground">{m.eligible.map((c) => c.name).join(" · ")}</span>
+                      )}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </>
           )}
         </CardContent>
       </Card>
