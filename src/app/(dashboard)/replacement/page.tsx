@@ -48,12 +48,19 @@ interface PlanItem {
   capMax: number;
   blockers: string[];
 }
+interface ClientAuditRow {
+  clientTag: string; instance: string;
+  total: number; info: number; comco: number; other: number;
+  outlook: number; google: number; burnt: number; capMax: number;
+}
 interface PlanResponse {
   generatedFor: string;
+  infoMigration: boolean;
   burntCount: number;
   unassignedBurntCount: number;
   items: PlanItem[];
   reserveReadyByInstance: Record<string, { outlook: number; google: number }>;
+  clientAudit: ClientAuditRow[];
 }
 
 // short, unambiguous instance labels (outboundhero vs outboundclean both start "outbound")
@@ -82,6 +89,7 @@ export default function ReplacementPage() {
   const [loadingMap, setLoadingMap] = useState(false);
   const [plan, setPlan] = useState<PlanResponse | null>(null);
   const [loadingPlan, setLoadingPlan] = useState(false);
+  const [infoMode, setInfoMode] = useState(false);
 
   useEffect(() => {
     if (!isAdmin) return;
@@ -134,10 +142,10 @@ export default function ReplacementPage() {
     setLoadingMap(false);
   };
 
-  const loadPlan = async () => {
+  const loadPlan = async (info: boolean) => {
     setLoadingPlan(true); setError(null);
     try {
-      const res = await fetch("/api/replacement/plan", { cache: "no-store" });
+      const res = await fetch(`/api/replacement/plan?infoMigration=${info ? 1 : 0}`, { cache: "no-store" });
       const data = await res.json();
       if (res.ok) setPlan(data);
       else setError(data.error || "Plan failed");
@@ -354,16 +362,23 @@ export default function ReplacementPage() {
               <div className="text-sm font-medium">Replacement plan — what would happen to each burnt domain</div>
               <div className="text-[11px] text-muted-foreground">Observe-only — pull reserve → tag → set redirect → attach to campaigns → remove burnt. Nothing executes.</div>
             </div>
-            <Button size="sm" variant="outline" onClick={loadPlan} disabled={loadingPlan} className="gap-2">
-              <RefreshCw className={`h-4 w-4 ${loadingPlan ? "animate-spin" : ""}`} />
-              {loadingPlan ? "Building…" : "Build plan"}
-            </Button>
+            <div className="flex items-center gap-3">
+              <label className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                <input type="checkbox" checked={infoMode} onChange={(e) => setInfoMode(e.target.checked)} />
+                Migrate all .info
+              </label>
+              <Button size="sm" variant="outline" onClick={() => loadPlan(infoMode)} disabled={loadingPlan} className="gap-2">
+                <RefreshCw className={`h-4 w-4 ${loadingPlan ? "animate-spin" : ""}`} />
+                {loadingPlan ? "Building…" : "Build plan"}
+              </Button>
+            </div>
           </div>
 
           {plan && (
             <>
               <div className="flex flex-wrap gap-4 text-sm">
-                <span className="text-muted-foreground">Burnt (assigned) <b className="text-amber-500">{plan.burntCount.toLocaleString()}</b></span>
+                {plan.infoMigration && <Badge variant="outline" className="border-amber-500/30 text-amber-500">.info migration mode</Badge>}
+                <span className="text-muted-foreground">{plan.infoMigration ? "To replace" : "Burnt (assigned)"} <b className="text-amber-500">{plan.burntCount.toLocaleString()}</b></span>
                 {plan.unassignedBurntCount > 0 && (
                   <span className="text-muted-foreground">Burnt spare/no-tag <b className="text-muted-foreground">{plan.unassignedBurntCount.toLocaleString()}</b> <span className="text-[10px]">(clean up, not replaced)</span></span>
                 )}
@@ -412,6 +427,36 @@ export default function ReplacementPage() {
           )}
         </CardContent>
       </Card>
+
+      {/* Per-client domain-count audit (validates totals / caps) */}
+      {plan && plan.clientAudit.length > 0 && (
+        <Card>
+          <CardContent className="p-5 space-y-3">
+            <div className="text-sm font-medium">Per-client domain count — by TLD & provider</div>
+            <div className="text-[11px] text-muted-foreground">Sorted by total. `.info` = to migrate off · `.com/.co` = keep. Over-cap shows when good (non-.info) domains alone exceed the limit.</div>
+            <div className="rounded-lg border divide-y max-h-[420px] overflow-y-auto">
+              <div className="grid grid-cols-[90px_110px_60px_60px_70px_60px_70px_70px] gap-2 px-3 py-2 text-[11px] text-muted-foreground font-medium bg-muted/30 sticky top-0">
+                <span>Client</span><span>Instance</span><span className="text-center">Total</span><span className="text-center">.info</span><span className="text-center">.com/.co</span><span className="text-center">other</span><span className="text-center">OL / GG</span><span className="text-center">Cap</span>
+              </div>
+              {plan.clientAudit.map((a) => {
+                const good = a.comco + a.other; // non-.info
+                return (
+                  <div key={`${a.clientTag}:${a.instance}`} className="grid grid-cols-[90px_110px_60px_60px_70px_60px_70px_70px] gap-2 px-3 py-2 text-xs items-center">
+                    <span className="font-medium">{a.clientTag}</span>
+                    <span className="text-muted-foreground">{INSTANCE_SHORT[a.instance] ?? a.instance}</span>
+                    <span className="text-center tabular-nums">{a.total}</span>
+                    <span className="text-center tabular-nums text-amber-500">{a.info || ""}</span>
+                    <span className="text-center tabular-nums text-emerald-500">{a.comco || ""}</span>
+                    <span className="text-center tabular-nums text-muted-foreground">{a.other || ""}</span>
+                    <span className="text-center tabular-nums text-muted-foreground">{a.outlook} / {a.google}</span>
+                    <span className={`text-center tabular-nums ${good > a.capMax ? "text-destructive" : "text-muted-foreground"}`}>{good}/{a.capMax}</span>
+                  </div>
+                );
+              })}
+            </div>
+          </CardContent>
+        </Card>
+      )}
     </div>
   );
 }

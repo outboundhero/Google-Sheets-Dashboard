@@ -56,12 +56,28 @@ export interface PlanItem {
 // reserve ready counts per instance, split by provider
 export interface ReserveReady { outlook: number; google: number }
 
+// per (client_tag, instance) raw domain-count audit — to validate totals/caps
+export interface ClientAuditRow {
+  clientTag: string;
+  instance: string;
+  total: number;
+  info: number;     // .info domains
+  comco: number;    // .com / .co domains
+  other: number;    // any other TLD
+  outlook: number;
+  google: number;
+  burnt: number;    // currently flagged burnt
+  capMax: number;
+}
+
 export interface PlanResult {
   generatedFor: string;            // pst date
-  burntCount: number;              // burnt domains WITH a client tag (replaceable)
-  unassignedBurntCount: number;    // burnt spare/reserve domains (no tag) — clean up, not replace
+  infoMigration: boolean;          // was migration mode on for this build
+  burntCount: number;              // replaceable domains WITH a client tag
+  unassignedBurntCount: number;    // replaceable spare/reserve domains (no tag) — clean up, not replace
   items: PlanItem[];
   reserveReadyByInstance: Record<string, ReserveReady>;
+  clientAudit: ClientAuditRow[];
 }
 
 function ageDays(created: string | null, nowMs: number): number {
@@ -69,7 +85,8 @@ function ageDays(created: string | null, nowMs: number): number {
   return Math.floor((nowMs - new Date(created).getTime()) / 86_400_000);
 }
 
-export async function buildReplacementPlan(): Promise<PlanResult> {
+export async function buildReplacementPlan(opts: { infoMigration?: boolean } = {}): Promise<PlanResult> {
+  const infoMigration = opts.infoMigration ?? false;
   const supabase = getSupabaseAdmin();
   const cfg = await getSettings();
   const today = pstDateString(new Date());
@@ -140,9 +157,18 @@ export async function buildReplacementPlan(): Promise<PlanResult> {
       : (w === "10" ? r.bounce_10 : w === "15" ? r.bounce_15 : r.bounce_30);
   };
 
-  // 4) enrich every domain once: provider, client tag, burnt verdict.
+  // 4) enrich every domain once: provider, client tag, TLD, burnt verdict, and
+  //    whether it's "replaceable". In .info-migration mode EVERY .info counts as
+  //    replaceable (not just flagged ones) so a mass migration isn't blocked by
+  //    not-yet-flagged .info domains.
   const isInfo = (dom: string) => dom.toLowerCase().endsWith(".info");
-  interface Enriched { d: DomRow; provider: Provider; tag: string | null; burnt: boolean; reasons: string[] }
+  const tldCat = (dom: string): "info" | "comco" | "other" => {
+    const l = dom.toLowerCase();
+    if (l.endsWith(".info")) return "info";
+    if (l.endsWith(".com") || l.endsWith(".co")) return "comco";
+    return "other";
+  };
+  interface Enriched { d: DomRow; provider: Provider; tag: string | null; burnt: boolean; replaceable: boolean; reasons: string[] }
   const enriched: Enriched[] = domains.map((d) => {
     const signals: DomainSignals = {
       instance: d.instance, domain: d.domain, totalSent: d.total_sent ?? 0,
@@ -150,7 +176,9 @@ export async function buildReplacementPlan(): Promise<PlanResult> {
       surbl: d.blacklisted, spamhaus: d.spamhaus_dbl,
     };
     const r = evaluateDomain(signals, cfg);
-    return { d, provider: providerOf(d), tag: clientTagOf(d.tags), burnt: r.burnt, reasons: r.reasons };
+    const replaceable = r.burnt || (infoMigration && isInfo(d.domain));
+    const reasons = r.burnt ? r.reasons : (replaceable ? [".info domain (migration)"] : []);
+    return { d, provider: providerOf(d), tag: clientTagOf(d.tags), burnt: r.burnt, replaceable, reasons };
   });
 
   // 5) reserve-ready pools per (instance, provider) — consumable. Ready =
@@ -177,28 +205,47 @@ export async function buildReplacementPlan(): Promise<PlanResult> {
     };
   }
 
-  // 6) HEALTHY (non-burnt) assigned count per (tag, instance) = the post-removal
-  //    baseline for the cap. The burnt domains get removed before replacements
-  //    are added, so they must NOT count toward the cap.
-  const healthyAssigned = new Map<string, number>();
+  // 6) cap baseline = assigned domains that STAY (not replaceable). Normal mode:
+  //    non-burnt. Migration mode: also excludes .info, leaving only the good
+  //    .com/.co domains — so there's room to swap .info out for fresh ones.
+  const stayingAssigned = new Map<string, number>();
   for (const e of enriched) {
-    if (!e.tag || e.burnt) continue;
+    if (!e.tag || e.replaceable) continue;
     const k = `${e.tag}:${e.d.instance}`;
-    healthyAssigned.set(k, (healthyAssigned.get(k) || 0) + 1);
+    stayingAssigned.set(k, (stayingAssigned.get(k) || 0) + 1);
   }
 
-  // 7) plan items — only burnt domains WITH a client tag. Burnt domains with no
-  //    tag are spare/reserve that went bad: counted separately, never "replaced".
+  // 6b) per-(tag,instance) raw domain-count audit (validates totals/caps)
+  interface AuditAcc { total: number; info: number; comco: number; other: number; outlook: number; google: number; burnt: number }
+  const auditMap = new Map<string, AuditAcc>();
+  for (const e of enriched) {
+    if (!e.tag) continue;
+    const k = `${e.tag}:${e.d.instance}`;
+    let a = auditMap.get(k);
+    if (!a) { a = { total: 0, info: 0, comco: 0, other: 0, outlook: 0, google: 0, burnt: 0 }; auditMap.set(k, a); }
+    a.total++;
+    a[tldCat(e.d.domain)]++;
+    if (e.provider === "outlook") a.outlook++; else if (e.provider === "google") a.google++;
+    if (e.burnt) a.burnt++;
+  }
+  const clientAudit: ClientAuditRow[] = [...auditMap.entries()].map(([k, a]) => {
+    const sep = k.lastIndexOf(":");
+    const clientTag = k.slice(0, sep), instance = k.slice(sep + 1) as BisonInstanceSlug;
+    return { clientTag, instance, ...a, capMax: INSTANCE_CAP[getInstance(instance).tier] };
+  }).sort((x, y) => y.total - x.total);
+
+  // 7) plan items — replaceable domains WITH a client tag. Replaceable spare
+  //    (no tag) domains are counted separately, never "replaced".
   const items: PlanItem[] = [];
   let unassignedBurntCount = 0;
   for (const e of enriched) {
-    if (!e.burnt) continue;
+    if (!e.replaceable) continue;
     if (!e.tag) { unassignedBurntCount++; continue; }
     const d = e.d, tag = e.tag, provider = e.provider;
     const redirectUrl = redirectByTag.get(tag) ?? null;
     const targetCampaigns = campaignsByKey.get(`${tag}:${d.instance}`) ?? [];
     const capMax = INSTANCE_CAP[getInstance(d.instance).tier];
-    const capCurrent = healthyAssigned.get(`${tag}:${d.instance}`) ?? 0;
+    const capCurrent = stayingAssigned.get(`${tag}:${d.instance}`) ?? 0;
 
     // pull a like-for-like reserve domain (same instance + same provider), consumed
     const pool = (provider === "outlook" || provider === "google")
@@ -219,5 +266,5 @@ export async function buildReplacementPlan(): Promise<PlanResult> {
   }
 
   items.sort((a, b) => (a.clientTag || "~").localeCompare(b.clientTag || "~") || a.instance.localeCompare(b.instance));
-  return { generatedFor: today, burntCount: items.length, items, reserveReadyByInstance, unassignedBurntCount };
+  return { generatedFor: today, infoMigration, burntCount: items.length, items, reserveReadyByInstance, unassignedBurntCount, clientAudit };
 }
