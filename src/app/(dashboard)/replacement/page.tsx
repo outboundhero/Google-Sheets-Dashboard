@@ -51,9 +51,15 @@ interface PlanItem {
 interface PlanResponse {
   generatedFor: string;
   burntCount: number;
+  unassignedBurntCount: number;
   items: PlanItem[];
   reserveReadyByInstance: Record<string, { outlook: number; google: number }>;
 }
+
+// short, unambiguous instance labels (outboundhero vs outboundclean both start "outbound")
+const INSTANCE_SHORT: Record<string, string> = {
+  outboundhero: "OH·B2B", cleaningoutbound: "CO·B2C", facilityreach: "FR·B2B", outboundclean: "OC·B2C",
+};
 
 const WINDOWS: { value: LookbackWindow; label: string }[] = [
   { value: "all", label: "All-time" },
@@ -357,7 +363,10 @@ export default function ReplacementPage() {
           {plan && (
             <>
               <div className="flex flex-wrap gap-4 text-sm">
-                <span className="text-muted-foreground">Burnt domains <b className="text-amber-500">{plan.burntCount.toLocaleString()}</b></span>
+                <span className="text-muted-foreground">Burnt (assigned) <b className="text-amber-500">{plan.burntCount.toLocaleString()}</b></span>
+                {plan.unassignedBurntCount > 0 && (
+                  <span className="text-muted-foreground">Burnt spare/no-tag <b className="text-muted-foreground">{plan.unassignedBurntCount.toLocaleString()}</b> <span className="text-[10px]">(clean up, not replaced)</span></span>
+                )}
                 <span className="text-muted-foreground">Reserve ready (Outlook / Google):</span>
                 {Object.entries(plan.reserveReadyByInstance).map(([inst, c]) => (
                   <span key={inst} className="text-muted-foreground">
@@ -375,7 +384,7 @@ export default function ReplacementPage() {
                   <div key={`${it.instance}:${it.burntDomain}`} className="grid grid-cols-[1fr_80px_70px_60px_1fr_1fr_60px] gap-2 px-3 py-2 text-xs items-start">
                     <span className="truncate" title={it.reasons.join(" · ")}>{it.burntDomain}</span>
                     <span className="font-medium">{it.clientTag ?? <span className="text-destructive">?</span>}</span>
-                    <span className="text-muted-foreground">{it.instance.slice(0, 8)}</span>
+                    <span className="text-muted-foreground">{INSTANCE_SHORT[it.instance] ?? it.instance}</span>
                     <span className={it.provider === "outlook" ? "text-blue-400" : it.provider === "google" ? "text-red-400" : "text-amber-500"}>{it.provider === "outlook" ? "OL" : it.provider === "google" ? "GG" : it.provider}</span>
                     <span className="truncate">
                       {it.replacementDomain

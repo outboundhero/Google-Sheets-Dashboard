@@ -58,7 +58,8 @@ export interface ReserveReady { outlook: number; google: number }
 
 export interface PlanResult {
   generatedFor: string;            // pst date
-  burntCount: number;
+  burntCount: number;              // burnt domains WITH a client tag (replaceable)
+  unassignedBurntCount: number;    // burnt spare/reserve domains (no tag) — clean up, not replace
   items: PlanItem[];
   reserveReadyByInstance: Record<string, ReserveReady>;
 }
@@ -139,20 +140,34 @@ export async function buildReplacementPlan(): Promise<PlanResult> {
       : (w === "10" ? r.bounce_10 : w === "15" ? r.bounce_15 : r.bounce_30);
   };
 
-  // 4) build reserve-ready pools per (instance, provider) — consumable. Ready =
-  //    no client tag + Complete (>=21d) + not SURBL + not Spamhaus + a pure
-  //    provider (outlook or google). Replacement is like-for-like by provider.
+  // 4) enrich every domain once: provider, client tag, burnt verdict.
+  const isInfo = (dom: string) => dom.toLowerCase().endsWith(".info");
+  interface Enriched { d: DomRow; provider: Provider; tag: string | null; burnt: boolean; reasons: string[] }
+  const enriched: Enriched[] = domains.map((d) => {
+    const signals: DomainSignals = {
+      instance: d.instance, domain: d.domain, totalSent: d.total_sent ?? 0,
+      replyRate: rateOf(d, "reply"), bounceRate: rateOf(d, "bounce"),
+      surbl: d.blacklisted, spamhaus: d.spamhaus_dbl,
+    };
+    const r = evaluateDomain(signals, cfg);
+    return { d, provider: providerOf(d), tag: clientTagOf(d.tags), burnt: r.burnt, reasons: r.reasons };
+  });
+
+  // 5) reserve-ready pools per (instance, provider) — consumable. Ready =
+  //    unassigned (no client tag) + pure provider + Complete (>=21d) + SURBL &
+  //    Spamhaus clean + NOT itself burnt + NOT a .info (we are migrating OFF
+  //    .info, so never pull one as a replacement).
   const reservePool = new Map<string, string[]>(); // key: `${instance}:${provider}`
-  for (const d of domains) {
-    if (clientTagOf(d.tags) !== null) continue;             // reserve = no client tag
-    const prov = providerOf(d);
-    if (prov !== "outlook" && prov !== "google") continue;  // pure provider only
-    if (ageDays(d.domain_created_at, nowMs) < WARMUP_DAYS) continue; // Complete
-    if (d.blacklisted === true) continue;                  // SURBL clean
-    if (d.spamhaus_dbl === true) continue;                 // Spamhaus clean
-    const key = `${d.instance}:${prov}`;
+  for (const e of enriched) {
+    if (e.tag !== null) continue;
+    if (e.provider !== "outlook" && e.provider !== "google") continue;
+    if (isInfo(e.d.domain)) continue;
+    if (ageDays(e.d.domain_created_at, nowMs) < WARMUP_DAYS) continue;
+    if (e.d.blacklisted === true || e.d.spamhaus_dbl === true) continue;
+    if (e.burnt) continue;
+    const key = `${e.d.instance}:${e.provider}`;
     if (!reservePool.has(key)) reservePool.set(key, []);
-    reservePool.get(key)!.push(d.domain);
+    reservePool.get(key)!.push(e.d.domain);
   }
   const reserveReadyByInstance: Record<string, ReserveReady> = {};
   for (const inst of ALL_INSTANCE_SLUGS) {
@@ -162,32 +177,28 @@ export async function buildReplacementPlan(): Promise<PlanResult> {
     };
   }
 
-  // current assigned-domain count per (tag, instance) — for the cap check
-  const assignedCount = new Map<string, number>();
-  for (const d of domains) {
-    const tag = clientTagOf(d.tags);
-    if (!tag) continue;
-    const k = `${tag}:${d.instance}`;
-    assignedCount.set(k, (assignedCount.get(k) || 0) + 1);
+  // 6) HEALTHY (non-burnt) assigned count per (tag, instance) = the post-removal
+  //    baseline for the cap. The burnt domains get removed before replacements
+  //    are added, so they must NOT count toward the cap.
+  const healthyAssigned = new Map<string, number>();
+  for (const e of enriched) {
+    if (!e.tag || e.burnt) continue;
+    const k = `${e.tag}:${e.d.instance}`;
+    healthyAssigned.set(k, (healthyAssigned.get(k) || 0) + 1);
   }
 
-  // 5) burnt domains -> plan items
+  // 7) plan items — only burnt domains WITH a client tag. Burnt domains with no
+  //    tag are spare/reserve that went bad: counted separately, never "replaced".
   const items: PlanItem[] = [];
-  for (const d of domains) {
-    const signals: DomainSignals = {
-      instance: d.instance, domain: d.domain, totalSent: d.total_sent ?? 0,
-      replyRate: rateOf(d, "reply"), bounceRate: rateOf(d, "bounce"),
-      surbl: d.blacklisted, spamhaus: d.spamhaus_dbl,
-    };
-    const res = evaluateDomain(signals, cfg);
-    if (!res.burnt) continue;
-
-    const tag = clientTagOf(d.tags);
-    const provider = providerOf(d);
-    const redirectUrl = tag ? redirectByTag.get(tag) ?? null : null;
-    const targetCampaigns = tag ? campaignsByKey.get(`${tag}:${d.instance}`) ?? [] : [];
+  let unassignedBurntCount = 0;
+  for (const e of enriched) {
+    if (!e.burnt) continue;
+    if (!e.tag) { unassignedBurntCount++; continue; }
+    const d = e.d, tag = e.tag, provider = e.provider;
+    const redirectUrl = redirectByTag.get(tag) ?? null;
+    const targetCampaigns = campaignsByKey.get(`${tag}:${d.instance}`) ?? [];
     const capMax = INSTANCE_CAP[getInstance(d.instance).tier];
-    const capCurrent = tag ? assignedCount.get(`${tag}:${d.instance}`) ?? 0 : 0;
+    const capCurrent = healthyAssigned.get(`${tag}:${d.instance}`) ?? 0;
 
     // pull a like-for-like reserve domain (same instance + same provider), consumed
     const pool = (provider === "outlook" || provider === "google")
@@ -195,18 +206,18 @@ export async function buildReplacementPlan(): Promise<PlanResult> {
     const replacementDomain = pool && pool.length > 0 ? pool.shift()! : null;
 
     const blockers: string[] = [];
-    if (!tag) blockers.push("no client tag on domain");
-    if (tag && !redirectUrl) blockers.push("no redirect URL for tag");
-    if (tag && targetCampaigns.length === 0) blockers.push("no eligible campaign in this instance");
+    if (!redirectUrl) blockers.push("no redirect URL for tag");
+    if (targetCampaigns.length === 0) blockers.push("no eligible campaign in this instance");
     if (provider === "mixed" || provider === "unknown") blockers.push(`${provider}-provider domain (manual)`);
     else if (!replacementDomain) blockers.push(`no ready ${provider} reserve in this instance`);
+    if (capCurrent >= capMax) blockers.push("client already at cap (after removal)");
 
     items.push({
-      burntDomain: d.domain, instance: d.instance, provider, clientTag: tag, reasons: res.reasons,
+      burntDomain: d.domain, instance: d.instance, provider, clientTag: tag, reasons: e.reasons,
       redirectUrl, targetCampaigns, replacementDomain, capCurrent, capMax, blockers,
     });
   }
 
   items.sort((a, b) => (a.clientTag || "~").localeCompare(b.clientTag || "~") || a.instance.localeCompare(b.instance));
-  return { generatedFor: today, burntCount: items.length, items, reserveReadyByInstance };
+  return { generatedFor: today, burntCount: items.length, items, reserveReadyByInstance, unassignedBurntCount };
 }
