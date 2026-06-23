@@ -4,7 +4,15 @@ import { promises as dns } from "node:dns";
 // (the last byte names the category). 127.255.255.X = access denied
 // (anonymous query via public resolver, rate limit, etc.) — treat as
 // inconclusive so we never mis-mark a denied query as "clean".
-const ZONE = "dbl.spamhaus.org";
+//
+// The public zone `dbl.spamhaus.org` BLOCKS queries from public resolvers
+// (Cloudflare/Quad9/Google) → every lookup returns 127.255.255.254 ("denied")
+// → everything is inconclusive. The fix is a Spamhaus DQS key: with one set,
+// we query the keyed zone `<KEY>.dbl.dq.spamhaus.net`, which Spamhaus allows
+// via public resolvers and which returns the same 127.0.1.X listing codes.
+// Same response format → the decode() logic below is unchanged.
+const DQS_KEY = process.env.SPAMHAUS_DQS_KEY?.trim();
+const ZONE = DQS_KEY ? `${DQS_KEY}.dbl.dq.spamhaus.net` : "dbl.spamhaus.org";
 const PER_RESOLVE_TIMEOUT_MS = 3000;
 const RETRY_DELAY_MS = 500;
 const TRANSIENT_DNS_ERRORS = new Set(["ETIMEOUT", "ESERVFAIL", "EREFUSED", "ECONNRESET"]);
