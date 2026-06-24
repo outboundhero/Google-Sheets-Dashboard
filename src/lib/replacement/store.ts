@@ -74,6 +74,68 @@ export async function logEvents(events: NewEvent[]): Promise<void> {
   if (error) throw new Error(error.message);
 }
 
+// --- Domain lifecycle state -------------------------------------------------
+export interface LifecycleUpdate {
+  instance: BisonInstanceSlug;
+  domain: string;
+  state: "reserve" | "assigned" | "flagged" | "replacing" | "removed" | "retired";
+  clientTag?: string | null;
+  reason?: string | null;
+}
+
+export async function setLifecycle(updates: LifecycleUpdate[]): Promise<void> {
+  if (updates.length === 0) return;
+  const supabase = getSupabaseAdmin();
+  const now = new Date().toISOString();
+  const rows = updates.map((u) => ({
+    instance: u.instance,
+    domain: u.domain,
+    state: u.state,
+    assigned_client_tag: u.clientTag ?? null,
+    flagged_reason: u.reason ?? null,
+    updated_at: now,
+  }));
+  const { error } = await supabase
+    .from("domain_replacement_state")
+    .upsert(rows, { onConflict: "instance,domain" });
+  if (error) throw new Error(error.message);
+}
+
+// --- Cancellation scheduling (5-day vendor-delete grace) ---------------------
+export const CANCEL_GRACE_DAYS = 5;
+
+export interface CancellationEntry {
+  instance: BisonInstanceSlug;
+  domain: string;
+  clientTag?: string | null;
+  provider?: string | null;
+  reason?: string | null;
+}
+
+/** Schedule burnt domains for vendor cancellation `graceDays` from now. Does
+ *  NOT delete anything — just records intent; a later cron actions it. */
+export async function scheduleCancellations(
+  entries: CancellationEntry[],
+  graceDays = CANCEL_GRACE_DAYS,
+): Promise<void> {
+  if (entries.length === 0) return;
+  const supabase = getSupabaseAdmin();
+  const scheduledAt = new Date(Date.now() + graceDays * 86_400_000).toISOString();
+  const rows = entries.map((e) => ({
+    instance: e.instance,
+    domain: e.domain,
+    client_tag: e.clientTag ?? null,
+    provider: e.provider ?? null,
+    reason: e.reason ?? null,
+    scheduled_at: scheduledAt,
+    status: "pending",
+  }));
+  const { error } = await supabase
+    .from("replacement_cancellations")
+    .upsert(rows, { onConflict: "instance,domain", ignoreDuplicates: true });
+  if (error) throw new Error(error.message);
+}
+
 export async function getEvents(limit = 200): Promise<ReplacementEvent[]> {
   const supabase = getSupabaseAdmin();
   const { data, error } = await supabase
