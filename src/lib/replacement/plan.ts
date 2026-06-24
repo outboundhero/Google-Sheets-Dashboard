@@ -48,9 +48,10 @@ export interface PlanItem {
   redirectUrl: string | null;
   targetCampaigns: CampaignRef[];
   replacementDomain: string | null;   // reserve domain (SAME provider) that would be pulled
-  capCurrent: number;                  // current assigned domains for (tag, instance)
+  removeOnly: boolean;                 // true = burnt removed but NO replacement (client already at cap)
+  capCurrent: number;                  // healthy domains that STAY for (tag, instance) — post-removal
   capMax: number;                      // 5 (b2c) | 20 (b2b)
-  blockers: string[];                  // why this can't proceed (missing redirect, no campaign, no reserve, at cap)
+  blockers: string[];                  // why a replacement can't proceed (missing redirect, no campaign, no reserve)
 }
 
 // reserve ready counts per instance, split by provider
@@ -234,37 +235,56 @@ export async function buildReplacementPlan(opts: { infoMigration?: boolean } = {
     return { clientTag, instance, ...a, capMax: INSTANCE_CAP[getInstance(instance).tier] };
   }).sort((x, y) => y.total - x.total);
 
-  // 7) plan items — replaceable domains WITH a client tag. Replaceable spare
-  //    (no tag) domains are counted separately, never "replaced".
+  // 7) plan items — TOP-UP-TO-CAP model (Spencer 2026-06-24):
+  //   * Every burnt domain WITH a tag is REMOVED.
+  //   * Replacements added per (tag,instance) = max(0, cap - healthy remaining),
+  //     NOT one-per-burnt. So the first `need` burnt domains in a group get a
+  //     like-for-like reserve; any beyond that are remove-only (client already
+  //     at/over cap — we never remove excess healthy or over-fill).
+  //   * Burnt domains with no tag = spare/cleanup, counted separately.
+  const replaceableTagged = enriched.filter((e) => e.replaceable && e.tag);
+  const unassignedBurntCount = enriched.filter((e) => e.replaceable && !e.tag).length;
+  // process each (tag,instance) group contiguously & deterministically
+  replaceableTagged.sort((a, b) => a.tag!.localeCompare(b.tag!) || a.d.instance.localeCompare(b.d.instance));
+
+  const assignedInGroup = new Map<string, number>(); // tag:instance -> reserves assigned so far
   const items: PlanItem[] = [];
-  let unassignedBurntCount = 0;
-  for (const e of enriched) {
-    if (!e.replaceable) continue;
-    if (!e.tag) { unassignedBurntCount++; continue; }
-    const d = e.d, tag = e.tag, provider = e.provider;
-    const redirectUrl = redirectByTag.get(tag) ?? null;
-    const targetCampaigns = campaignsByKey.get(`${tag}:${d.instance}`) ?? [];
+  for (const e of replaceableTagged) {
+    const d = e.d, tag = e.tag!, provider = e.provider;
+    const groupKey = `${tag}:${d.instance}`;
     const capMax = INSTANCE_CAP[getInstance(d.instance).tier];
-    const capCurrent = stayingAssigned.get(`${tag}:${d.instance}`) ?? 0;
+    const healthy = stayingAssigned.get(groupKey) ?? 0;        // domains that STAY
+    const need = Math.max(0, capMax - healthy);                // top-up target, never beyond cap
+    const already = assignedInGroup.get(groupKey) ?? 0;
 
-    // pull a like-for-like reserve domain (same instance + same provider), consumed
-    const pool = (provider === "outlook" || provider === "google")
-      ? reservePool.get(`${d.instance}:${provider}`) : undefined;
-    const replacementDomain = pool && pool.length > 0 ? pool.shift()! : null;
+    const redirectUrl = redirectByTag.get(tag) ?? null;
+    const targetCampaigns = campaignsByKey.get(groupKey) ?? [];
 
+    let replacementDomain: string | null = null;
+    let removeOnly = false;
     const blockers: string[] = [];
-    if (!redirectUrl) blockers.push("no redirect URL for tag");
-    if (targetCampaigns.length === 0) blockers.push("no eligible campaign in this instance");
-    if (provider === "mixed" || provider === "unknown") blockers.push(`${provider}-provider domain (manual)`);
-    else if (!replacementDomain) blockers.push(`no ready ${provider} reserve in this instance`);
-    if (capCurrent >= capMax) blockers.push("client already at cap (after removal)");
+
+    if (already < need) {
+      // top-up slot: pull a like-for-like reserve (same instance + provider)
+      const pool = (provider === "outlook" || provider === "google")
+        ? reservePool.get(`${d.instance}:${provider}`) : undefined;
+      replacementDomain = pool && pool.length > 0 ? pool.shift()! : null;
+      if (replacementDomain) assignedInGroup.set(groupKey, already + 1);
+      // blockers only matter when we actually intend to add a replacement
+      if (!redirectUrl) blockers.push("no redirect URL for tag");
+      if (targetCampaigns.length === 0) blockers.push("no eligible campaign in this instance");
+      if (provider === "mixed" || provider === "unknown") blockers.push(`${provider}-provider domain (manual)`);
+      else if (!replacementDomain) blockers.push(`no ready ${provider} reserve in this instance`);
+    } else {
+      // client already at/over cap → remove the burnt domain, add NO replacement.
+      // (Never remove excess healthy; just don't over-fill.)
+      removeOnly = true;
+    }
 
     items.push({
       burntDomain: d.domain, instance: d.instance, provider, clientTag: tag, reasons: e.reasons,
-      redirectUrl, targetCampaigns, replacementDomain, capCurrent, capMax, blockers,
+      redirectUrl, targetCampaigns, replacementDomain, removeOnly, capCurrent: healthy, capMax, blockers,
     });
   }
-
-  items.sort((a, b) => (a.clientTag || "~").localeCompare(b.clientTag || "~") || a.instance.localeCompare(b.instance));
   return { generatedFor: today, infoMigration, burntCount: items.length, items, reserveReadyByInstance, unassignedBurntCount, clientAudit };
 }

@@ -44,6 +44,7 @@ interface PlanItem {
   redirectUrl: string | null;
   targetCampaigns: CampaignRef[];
   replacementDomain: string | null;
+  removeOnly: boolean;
   capCurrent: number;
   capMax: number;
   blockers: string[];
@@ -378,7 +379,9 @@ export default function ReplacementPage() {
             <>
               <div className="flex flex-wrap gap-4 text-sm">
                 {plan.infoMigration && <Badge variant="outline" className="border-amber-500/30 text-amber-500">.info migration mode</Badge>}
-                <span className="text-muted-foreground">{plan.infoMigration ? "To replace" : "Burnt (assigned)"} <b className="text-amber-500">{plan.burntCount.toLocaleString()}</b></span>
+                <span className="text-muted-foreground">{plan.infoMigration ? "To remove" : "Burnt (assigned)"} <b className="text-amber-500">{plan.burntCount.toLocaleString()}</b></span>
+                <span className="text-muted-foreground">Get replacement <b className="text-emerald-500">{plan.items.filter((i) => !i.removeOnly).length.toLocaleString()}</b></span>
+                <span className="text-muted-foreground">Remove-only (at cap) <b>{plan.items.filter((i) => i.removeOnly).length.toLocaleString()}</b></span>
                 {plan.unassignedBurntCount > 0 && (
                   <span className="text-muted-foreground">Burnt spare/no-tag <b className="text-muted-foreground">{plan.unassignedBurntCount.toLocaleString()}</b> <span className="text-[10px]">(clean up, not replaced)</span></span>
                 )}
@@ -402,26 +405,31 @@ export default function ReplacementPage() {
                     <span className="text-muted-foreground">{INSTANCE_SHORT[it.instance] ?? it.instance}</span>
                     <span className={it.provider === "outlook" ? "text-blue-400" : it.provider === "google" ? "text-red-400" : "text-amber-500"}>{it.provider === "outlook" ? "OL" : it.provider === "google" ? "GG" : it.provider}</span>
                     <span className="truncate">
-                      {it.replacementDomain
-                        ? <span className="text-emerald-500">{it.replacementDomain}</span>
-                        : <span className="text-destructive">no reserve</span>}
-                      {it.redirectUrl
-                        ? <span className="text-muted-foreground"> → {it.redirectUrl.replace(/^https?:\/\//, "")}</span>
-                        : <span className="text-destructive"> → no redirect</span>}
+                      {it.removeOnly ? (
+                        <span className="text-muted-foreground italic">remove only — at cap, no replacement</span>
+                      ) : (<>
+                        {it.replacementDomain
+                          ? <span className="text-emerald-500">{it.replacementDomain}</span>
+                          : <span className="text-destructive">no reserve</span>}
+                        {it.redirectUrl
+                          ? <span className="text-muted-foreground"> → {it.redirectUrl.replace(/^https?:\/\//, "")}</span>
+                          : <span className="text-destructive"> → no redirect</span>}
+                      </>)}
                     </span>
                     <span className="truncate text-muted-foreground" title={it.targetCampaigns.map((c) => c.name).join(" · ")}>
-                      {it.targetCampaigns.length > 0
-                        ? `${it.targetCampaigns.length} campaign${it.targetCampaigns.length === 1 ? "" : "s"}`
-                        : <span className="text-destructive">none</span>}
+                      {it.removeOnly ? "—"
+                        : it.targetCampaigns.length > 0
+                          ? `${it.targetCampaigns.length} campaign${it.targetCampaigns.length === 1 ? "" : "s"}`
+                          : <span className="text-destructive">none</span>}
                     </span>
-                    <span className={`text-center tabular-nums ${it.capCurrent >= it.capMax ? "text-destructive" : "text-muted-foreground"}`}>
+                    <span className="text-center tabular-nums text-muted-foreground">
                       {it.capCurrent}/{it.capMax}
                     </span>
                   </div>
                 ))}
               </div>
               <p className="text-[11px] text-muted-foreground">
-                Rows in red are blocked (missing redirect, no eligible campaign, no ready reserve, or at cap) — those need attention before this client could be auto-replaced.
+                <b>Top-up to cap:</b> every burnt domain is removed; replacements are added only up to the cap ({"{healthy}/{cap}"}). Rows marked <span className="italic">&ldquo;remove only — at cap&rdquo;</span> mean the client already has enough healthy domains, so the burnt one is removed but <b>no</b> replacement is added (and healthy domains are never removed). Red text = a replacement is blocked (missing redirect, no eligible campaign, or no ready reserve).
               </p>
             </>
           )}
