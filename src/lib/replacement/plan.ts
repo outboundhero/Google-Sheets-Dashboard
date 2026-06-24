@@ -45,6 +45,8 @@ export interface PlanItem {
   provider: Provider;                  // burnt domain's mailbox provider
   clientTag: string | null;
   reasons: string[];
+  surbl: boolean | null;               // SURBL listed (null = unchecked)
+  spamhaus: boolean | null;            // Spamhaus DBL listed (null = unchecked)
   redirectUrl: string | null;
   targetCampaigns: CampaignRef[];
   replacementDomain: string | null;   // reserve domain (SAME provider) that would be pulled
@@ -283,6 +285,7 @@ export async function buildReplacementPlan(opts: { infoMigration?: boolean } = {
 
     items.push({
       burntDomain: d.domain, instance: d.instance, provider, clientTag: tag, reasons: e.reasons,
+      surbl: d.blacklisted, spamhaus: d.spamhaus_dbl,
       redirectUrl, targetCampaigns, replacementDomain, removeOnly, capCurrent: healthy, capMax, blockers,
     });
   }

@@ -41,6 +41,8 @@ interface PlanItem {
   provider: "outlook" | "google" | "mixed" | "unknown";
   clientTag: string | null;
   reasons: string[];
+  surbl: boolean | null;
+  spamhaus: boolean | null;
   redirectUrl: string | null;
   targetCampaigns: CampaignRef[];
   replacementDomain: string | null;
@@ -382,6 +384,7 @@ export default function ReplacementPage() {
                 <span className="text-muted-foreground">{plan.infoMigration ? "To remove" : "Burnt (assigned)"} <b className="text-amber-500">{plan.burntCount.toLocaleString()}</b></span>
                 <span className="text-muted-foreground">Get replacement <b className="text-emerald-500">{plan.items.filter((i) => !i.removeOnly).length.toLocaleString()}</b></span>
                 <span className="text-muted-foreground">Remove-only (at cap) <b>{plan.items.filter((i) => i.removeOnly).length.toLocaleString()}</b></span>
+                <span className="text-muted-foreground">Of removed: <b className="text-red-400">{plan.items.filter((i) => i.surbl === true || i.spamhaus === true).length.toLocaleString()}</b> blacklisted · <b>{plan.items.filter((i) => !(i.surbl === true || i.spamhaus === true)).length.toLocaleString()}</b> clean (migrating)</span>
                 {plan.unassignedBurntCount > 0 && (
                   <span className="text-muted-foreground">Burnt spare/no-tag <b className="text-muted-foreground">{plan.unassignedBurntCount.toLocaleString()}</b> <span className="text-[10px]">(clean up, not replaced)</span></span>
                 )}
@@ -395,15 +398,21 @@ export default function ReplacementPage() {
               </div>
 
               <div className="rounded-lg border divide-y max-h-[480px] overflow-y-auto">
-                <div className="grid grid-cols-[1fr_80px_70px_60px_1fr_1fr_60px] gap-2 px-3 py-2 text-[11px] text-muted-foreground font-medium bg-muted/30 sticky top-0">
-                  <span>Burnt domain</span><span>Client</span><span>Inst</span><span>Type</span><span>Pull reserve → redirect</span><span>Attach to campaigns</span><span className="text-center">Cap</span>
+                <div className="grid grid-cols-[1fr_75px_60px_45px_70px_1fr_1fr_55px] gap-2 px-3 py-2 text-[11px] text-muted-foreground font-medium bg-muted/30 sticky top-0">
+                  <span>Burnt domain</span><span>Client</span><span>Inst</span><span>Type</span><span>Blacklist</span><span>Pull reserve → redirect</span><span>Attach to campaigns</span><span className="text-center">Cap</span>
                 </div>
-                {plan.items.map((it) => (
-                  <div key={`${it.instance}:${it.burntDomain}`} className="grid grid-cols-[1fr_80px_70px_60px_1fr_1fr_60px] gap-2 px-3 py-2 text-xs items-start">
+                {plan.items.map((it) => {
+                  const bl = it.surbl === true || it.spamhaus === true;
+                  const blDetail = [it.surbl === true ? "SURBL" : null, it.spamhaus === true ? "Spamhaus" : null].filter(Boolean).join(" + ");
+                  return (
+                  <div key={`${it.instance}:${it.burntDomain}`} className="grid grid-cols-[1fr_75px_60px_45px_70px_1fr_1fr_55px] gap-2 px-3 py-2 text-xs items-start">
                     <span className="truncate" title={it.reasons.join(" · ")}>{it.burntDomain}</span>
                     <span className="font-medium">{it.clientTag ?? <span className="text-destructive">?</span>}</span>
                     <span className="text-muted-foreground">{INSTANCE_SHORT[it.instance] ?? it.instance}</span>
                     <span className={it.provider === "outlook" ? "text-blue-400" : it.provider === "google" ? "text-red-400" : "text-amber-500"}>{it.provider === "outlook" ? "OL" : it.provider === "google" ? "GG" : it.provider}</span>
+                    <span className={bl ? "text-red-400" : "text-muted-foreground"} title={bl ? `Blacklisted: ${blDetail}` : "Not blacklisted (migrating off .info)"}>
+                      {bl ? `yes (${blDetail === "SURBL + Spamhaus" ? "both" : it.surbl ? "S" : "DBL"})` : "no"}
+                    </span>
                     <span className="truncate">
                       {it.removeOnly ? (
                         <span className="text-muted-foreground italic">remove only — at cap, no replacement</span>
@@ -426,7 +435,8 @@ export default function ReplacementPage() {
                       {it.capCurrent}/{it.capMax}
                     </span>
                   </div>
-                ))}
+                  );
+                })}
               </div>
               <p className="text-[11px] text-muted-foreground">
                 <b>Top-up to cap:</b> every burnt domain is removed; replacements are added only up to the cap ({"{healthy}/{cap}"}). Rows marked <span className="italic">&ldquo;remove only — at cap&rdquo;</span> mean the client already has enough healthy domains, so the burnt one is removed but <b>no</b> replacement is added (and healthy domains are never removed). Red text = a replacement is blocked (missing redirect, no eligible campaign, or no ready reserve).
