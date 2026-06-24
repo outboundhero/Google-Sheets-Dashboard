@@ -7,6 +7,7 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { useAuth } from "@/lib/auth-context";
+import { ExecuteDialog, type ExecuteInputs } from "@/components/replacement/execute-dialog";
 import type { ReplacementSettings, LookbackWindow } from "@/lib/replacement/types";
 
 interface Candidate {
@@ -93,6 +94,8 @@ export default function ReplacementPage() {
   const [plan, setPlan] = useState<PlanResponse | null>(null);
   const [loadingPlan, setLoadingPlan] = useState(false);
   const [infoMode, setInfoMode] = useState(false);
+  const [execClient, setExecClient] = useState("");      // "clientTag|instance"
+  const [execInputs, setExecInputs] = useState<ExecuteInputs | null>(null);
 
   useEffect(() => {
     if (!isAdmin) return;
@@ -397,6 +400,43 @@ export default function ReplacementPage() {
                 ))}
               </div>
 
+              {isAdmin && (() => {
+                const groups = new Map<string, { clientTag: string; instance: string; replace: number; remove: number }>();
+                for (const it of plan.items) {
+                  if (!it.clientTag) continue;
+                  const k = `${it.clientTag}|${it.instance}`;
+                  if (!groups.has(k)) groups.set(k, { clientTag: it.clientTag, instance: it.instance, replace: 0, remove: 0 });
+                  const g = groups.get(k)!;
+                  g.remove++;
+                  if (!it.removeOnly && it.blockers.length === 0 && it.replacementDomain) g.replace++;
+                }
+                const list = [...groups.entries()].sort((a, b) => a[1].clientTag.localeCompare(b[1].clientTag));
+                const startExec = () => {
+                  const [tag, instance] = execClient.split("|");
+                  const items = plan.items.filter((i) => i.clientTag === tag && i.instance === instance);
+                  const replItems = items.filter((i) => !i.removeOnly && i.blockers.length === 0 && i.replacementDomain);
+                  setExecInputs({
+                    clientTag: tag, instance,
+                    instancesQuery: `instances=${instance}`,
+                    redirectUrl: items.find((i) => i.redirectUrl)?.redirectUrl ?? null,
+                    targetCampaigns: (replItems[0]?.targetCampaigns ?? []).map((c) => ({ id: c.id, name: c.name })),
+                    replacementDomains: replItems.map((i) => i.replacementDomain!),
+                    removeDomains: items.map((i) => i.burntDomain),
+                  });
+                };
+                return (
+                  <div className="flex items-center gap-2 rounded-lg border border-amber-500/30 bg-amber-500/5 px-3 py-2 flex-wrap">
+                    <span className="text-xs font-medium">Execute for one client:</span>
+                    <select value={execClient} onChange={(e) => setExecClient(e.target.value)} className="text-xs px-2 py-1 rounded border bg-background">
+                      <option value="">Select client…</option>
+                      {list.map(([k, g]) => <option key={k} value={k}>{g.clientTag} ({INSTANCE_SHORT[g.instance] ?? g.instance}) — {g.replace} replace · {g.remove} remove</option>)}
+                    </select>
+                    <Button size="sm" disabled={!execClient} onClick={startExec} className="h-7 text-xs">Execute →</Button>
+                    <span className="text-[10px] text-muted-foreground ml-auto">Confirm-first · reversible · vendor-delete waits 5 days</span>
+                  </div>
+                );
+              })()}
+
               <div className="rounded-lg border divide-y max-h-[480px] overflow-y-auto">
                 <div className="grid grid-cols-[1fr_75px_60px_45px_70px_1fr_1fr_55px] gap-2 px-3 py-2 text-[11px] text-muted-foreground font-medium bg-muted/30 sticky top-0">
                   <span>Burnt domain</span><span>Client</span><span>Inst</span><span>Type</span><span>Blacklist</span><span>Pull reserve → redirect</span><span>Attach to campaigns</span><span className="text-center">Cap</span>
@@ -474,6 +514,15 @@ export default function ReplacementPage() {
             </div>
           </CardContent>
         </Card>
+      )}
+
+      {execInputs && (
+        <ExecuteDialog
+          open={!!execInputs}
+          onOpenChange={(o) => { if (!o) setExecInputs(null); }}
+          inputs={execInputs}
+          onDone={() => { setExecInputs(null); loadPlan(infoMode); }}
+        />
       )}
     </div>
   );
