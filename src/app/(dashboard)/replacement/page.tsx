@@ -566,19 +566,23 @@ export default function ReplacementPage() {
             ) : (<>
               <div className="text-sm text-muted-foreground"><b className="text-amber-500">{cancellations.length.toLocaleString()}</b> domain(s) pending cancellation</div>
               <div className="rounded-lg border divide-y max-h-[420px] overflow-y-auto">
-                <div className="grid grid-cols-[1fr_90px_90px_110px_1fr] gap-2 px-3 py-2 text-[11px] text-muted-foreground font-medium bg-muted/30 sticky top-0">
-                  <span>Domain</span><span>Client</span><span>Instance</span><span>Fires in</span><span>Reason</span>
+                <div className="grid grid-cols-[1fr_85px_85px_95px_100px_1fr] gap-2 px-3 py-2 text-[11px] text-muted-foreground font-medium bg-muted/30 sticky top-0">
+                  <span>Domain</span><span>Client</span><span>Instance</span><span>Vendor</span><span>Fires in</span><span>Reason</span>
                 </div>
                 {cancellations.map((c) => {
                   const ms = new Date(c.scheduledAt).getTime() - cancelsNow;
                   const days = Math.floor(ms / 86_400_000);
                   const hours = Math.floor((ms % 86_400_000) / 3_600_000);
                   const due = ms <= 0;
+                  const apiCancel = c.provider === "inboxing" || c.provider === "milkbox"; // auto-cancellable
                   return (
-                    <div key={`${c.instance}:${c.domain}`} className="grid grid-cols-[1fr_90px_90px_110px_1fr] gap-2 px-3 py-2 text-xs items-center">
+                    <div key={`${c.instance}:${c.domain}`} className="grid grid-cols-[1fr_85px_85px_95px_100px_1fr] gap-2 px-3 py-2 text-xs items-center">
                       <span className="truncate" title={c.domain}>{c.domain}</span>
                       <span className="font-medium">{c.clientTag ?? "—"}</span>
                       <span className="text-muted-foreground">{INSTANCE_SHORT[c.instance] ?? c.instance}</span>
+                      <span className={apiCancel ? "text-emerald-500" : c.provider === "unknown" ? "text-muted-foreground" : "text-amber-500"} title={apiCancel ? "auto-cancel via API" : "manual / cancel sheet"}>
+                        {c.provider ?? "unknown"}
+                      </span>
                       <span className={due ? "text-destructive font-medium" : "text-muted-foreground tabular-nums"}>
                         {due ? "due now" : days > 0 ? `${days}d ${hours}h` : `${hours}h`}
                       </span>

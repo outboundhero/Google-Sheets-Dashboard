@@ -168,7 +168,19 @@ export interface PendingCancellation {
   createdAt: string;
 }
 
-/** The cancellation queue — burnt domains awaiting the 5-day vendor-delete. */
+/** Detect the inbox VENDOR (who hosts/bills the mailboxes) from a domain's tags
+ *  — same convention the change-redirect route uses. */
+function detectVendor(tags: string[] | null): string {
+  const lower = (tags || []).map((t) => String(t).toLowerCase());
+  if (lower.some((t) => t.includes("milkbox"))) return "milkbox";
+  if (lower.some((t) => t.includes("inboxing"))) return "inboxing";
+  if (lower.some((t) => t.includes("scaledmail") || t.includes("scaled mail"))) return "scaledmail";
+  if (lower.some((t) => t.includes("cheap"))) return "cheap";
+  return "unknown";
+}
+
+/** The cancellation queue — burnt domains awaiting the 5-day vendor-delete.
+ *  Enriches each row with the inbox vendor (from the domain's current tags). */
 export async function getCancellations(statuses: string[] = ["pending"], limit = 1000): Promise<PendingCancellation[]> {
   const supabase = getSupabaseAdmin();
   const { data, error } = await supabase
@@ -178,10 +190,24 @@ export async function getCancellations(statuses: string[] = ["pending"], limit =
     .order("scheduled_at", { ascending: true })
     .limit(limit);
   if (error) throw new Error(error.message);
-  return (data || []).map((r) => ({
+  const rows = data || [];
+
+  // look up tags → vendor for these domains (so we show who hosts each)
+  const vendorByKey = new Map<string, string>();
+  const domains = [...new Set(rows.map((r) => r.domain))];
+  for (let i = 0; i < domains.length; i += 200) {
+    const batch = domains.slice(i, i + 200);
+    const { data: tagRows } = await supabase
+      .from("deliverability_domains")
+      .select("instance,domain,tags")
+      .in("domain", batch);
+    for (const t of tagRows || []) vendorByKey.set(`${t.instance}:${t.domain}`, detectVendor(t.tags));
+  }
+
+  return rows.map((r) => ({
     instance: r.instance, domain: r.domain, clientTag: r.client_tag,
-    provider: r.provider, reason: r.reason, scheduledAt: r.scheduled_at,
-    status: r.status, createdAt: r.created_at,
+    provider: r.provider || vendorByKey.get(`${r.instance}:${r.domain}`) || "unknown",
+    reason: r.reason, scheduledAt: r.scheduled_at, status: r.status, createdAt: r.created_at,
   }));
 }
 
