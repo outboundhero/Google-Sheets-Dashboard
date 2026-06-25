@@ -14,7 +14,11 @@ export interface ExecuteInputs {
   removeDomains: string[];         // all burnt domains to remove from campaigns
 }
 
-export type StepState = "queued" | "running" | "done" | "failed" | "skipped";
+// "degraded" = the call succeeded but some inboxes couldn't be attached (e.g.
+// disconnected accounts, or rate-limits that survived retries). NOT silently
+// "done" — it's flagged and surfaced on the main dashboard so the automation
+// never reports success on a partial attach.
+export type StepState = "queued" | "running" | "done" | "failed" | "skipped" | "degraded";
 export interface ExecStep { key: string; label: string; state: StepState; note?: string }
 
 const RETRY = 3;
@@ -85,11 +89,49 @@ export async function runExecution(inp: ExecuteInputs, emit: (steps: ExecStep[])
       record({ events: [{ instance, clientTag, eventType: rRes.ok ? "redirect_set" : "error", detail: rRes.ok ? redirectUrl : rRes.error }] });
     }
 
+    type AttachData = {
+      newly_attached?: number; failed?: number; rateLimited?: number;
+      failedInboxes?: { email: string; domain: string; reason: string; retryable?: boolean }[];
+    };
     for (const c of targetCampaigns) {
       setStep(`attach:${c.id}`, { state: "running" });
-      const aRes = await callJson(`/api/deliverability/attach-domains-to-campaign?instance=${instance}`, { campaign_id: c.id, domains: replacementDomains });
-      setStep(`attach:${c.id}`, { state: aRes.ok ? "done" : "failed", note: aRes.ok ? undefined : aRes.error });
-      record({ events: [{ instance, clientTag, eventType: aRes.ok ? "attached" : "error", detail: aRes.ok ? c.name : `${c.name}: ${aRes.error}` }] });
+      let aRes = await callJson(`/api/deliverability/attach-domains-to-campaign?instance=${instance}`, { campaign_id: c.id, domains: replacementDomains });
+      let d = (aRes.data || {}) as AttachData;
+
+      // Auto-retry once more for rate-limit / transient skips. The route already
+      // backs off internally; this re-attempts whatever's still unattached
+      // (already-attached are filtered server-side) — critical in unattended mode
+      // where nobody is watching to click "retry".
+      if (aRes.ok && (d.rateLimited ?? 0) > 0) {
+        await sleep(4000);
+        const retry = await callJson(`/api/deliverability/attach-domains-to-campaign?instance=${instance}`, { campaign_id: c.id, domains: replacementDomains });
+        if (retry.ok) { aRes = retry; d = (retry.data || {}) as AttachData; }
+      }
+
+      if (!aRes.ok) {
+        setStep(`attach:${c.id}`, { state: "failed", note: aRes.error });
+        record({ events: [{ instance, clientTag, eventType: "error", detail: `${c.name}: ${aRes.error}` }] });
+        continue;
+      }
+
+      const failed = d.failed ?? 0;
+      const newly = d.newly_attached ?? 0;
+      if (failed > 0) {
+        // Partial attach — flag it. Distinguish rate-limited (retryable) from
+        // disconnected (permanent) so the dashboard shows the right cause.
+        const retr = d.rateLimited ?? 0;
+        const disc = failed - retr;
+        const parts = [retr ? `${retr} rate-limited` : "", disc ? `${disc} disconnected` : ""].filter(Boolean).join(", ");
+        setStep(`attach:${c.id}`, { state: "degraded", note: `${newly} attached · ${failed} skipped (${parts})` });
+        record({ events: [{
+          instance, clientTag, eventType: "error",
+          detail: `Attach incomplete — "${c.name}": ${newly} attached, ${failed} skipped (${parts})`,
+          signals: { kind: "attach_incomplete", campaign: c.name, campaignId: c.id, newlyAttached: newly, failed, rateLimited: retr, sample: (d.failedInboxes || []).slice(0, 8) },
+        }] });
+      } else {
+        setStep(`attach:${c.id}`, { state: "done" });
+        record({ events: [{ instance, clientTag, eventType: "attached", detail: `${c.name}${newly ? ` (+${newly})` : ""}` }] });
+      }
     }
 
     setStep("sheet", { state: "running" });

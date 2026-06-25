@@ -592,9 +592,10 @@ export default function ReplacementPage() {
                           {s.state === "running" ? <Loader2 className="h-3 w-3 animate-spin text-amber-500 shrink-0" />
                             : s.state === "done" ? <CheckCircle2 className="h-3 w-3 text-emerald-500 shrink-0" />
                             : s.state === "failed" ? <AlertCircle className="h-3 w-3 text-red-500 shrink-0" />
+                            : s.state === "degraded" ? <AlertTriangle className="h-3 w-3 text-amber-500 shrink-0" />
                             : <Circle className="h-3 w-3 text-zinc-300 dark:text-zinc-600 shrink-0" />}
                           <span className="flex-1">{s.label}</span>
-                          {s.note && <span className={`text-[10px] truncate max-w-[180px] italic ${s.state === "failed" ? "text-red-500" : "text-muted-foreground"}`} title={s.note}>{s.note}</span>}
+                          {s.note && <span className={`text-[10px] truncate max-w-[180px] italic ${s.state === "failed" ? "text-red-500" : s.state === "degraded" ? "text-amber-500" : "text-muted-foreground"}`} title={s.note}>{s.note}</span>}
                         </li>
                       ))}
                     </ul>

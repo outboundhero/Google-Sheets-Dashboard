@@ -26,6 +26,7 @@ import { LeadsByStatusChart } from "@/components/dashboard/leads-by-status-chart
 import { LeadsOverTimeChart } from "@/components/dashboard/leads-over-time-chart";
 import { TopClientsTable } from "@/components/dashboard/top-clients-table";
 import { RedirectIssuesCard } from "@/components/dashboard/redirect-issues-card";
+import { AttachFailuresCard } from "@/components/dashboard/attach-failures-card";
 import { PendingOffboardingsCard } from "@/components/dashboard/pending-offboardings-card";
 import {
   Select,
@@ -332,6 +333,10 @@ export default function DashboardPage() {
           </div>
         </div>
       )}
+
+      {/* Replacement attach failures — admin only; self-hides when none.
+          Sits just below the "not receiving leads for 4 days" flag section. */}
+      {isAdmin && <AttachFailuresCard />}
 
       <ResolveTriageDialog
         clientTag={resolvingClient}
