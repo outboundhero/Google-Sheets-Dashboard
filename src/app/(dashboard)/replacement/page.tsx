@@ -1,13 +1,14 @@
 "use client";
 
-import { useState, useEffect } from "react";
-import { RefreshCw, Loader2, ShieldAlert, Eye, AlertTriangle } from "lucide-react";
+import { useState, useEffect, useRef } from "react";
+import { RefreshCw, Loader2, ShieldAlert, Eye, AlertTriangle, CheckCircle2, AlertCircle, Circle } from "lucide-react";
 import { PageHeader } from "@/components/shared/page-header";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { useAuth } from "@/lib/auth-context";
-import { ExecuteDialog, type ExecuteInputs } from "@/components/replacement/execute-dialog";
+import { ExecuteDialog } from "@/components/replacement/execute-dialog";
+import { runExecution, type ExecuteInputs, type ExecStep } from "@/lib/replacement/execute-runner";
 import type { ReplacementSettings, LookbackWindow } from "@/lib/replacement/types";
 
 interface Candidate {
@@ -111,6 +112,15 @@ export default function ReplacementPage() {
   const [loadingCancels, setLoadingCancels] = useState(false);
   const [cancelsNow, setCancelsNow] = useState(0); // snapshot of "now" when queue loaded (for countdown)
 
+  // Execution queue — run confirmed clients back-to-back, one at a time.
+  type ExecJob = { id: number; clientTag: string; instance: string; inputs: ExecuteInputs; status: "queued" | "running" | "done" | "failed"; steps: ExecStep[] };
+  const [jobs, setJobs] = useState<ExecJob[]>([]);
+  const jobsRef = useRef<ExecJob[]>([]);
+  const jobSeq = useRef(0);
+  const processingRef = useRef(false);
+  const setJobsBoth = (updater: (prev: ExecJob[]) => ExecJob[]) =>
+    setJobs((prev) => { const next = updater(prev); jobsRef.current = next; return next; });
+
   useEffect(() => {
     if (!isAdmin) return;
     let active = true;
@@ -180,6 +190,32 @@ export default function ReplacementPage() {
       if (res.ok) { setCancellations(data.cancellations || []); setCancelsNow(Date.now()); }
     } catch { /* ignore */ }
     setLoadingCancels(false);
+  };
+
+  // Process the queue sequentially. No-ops if already running; the loop picks up
+  // any newly-queued jobs added while a prior one was executing.
+  const processQueue = async () => {
+    if (processingRef.current) return;
+    processingRef.current = true;
+    try {
+      while (true) {
+        const next = jobsRef.current.find((j) => j.status === "queued");
+        if (!next) break;
+        setJobsBoth((prev) => prev.map((j) => (j.id === next.id ? { ...j, status: "running" } : j)));
+        const { ok } = await runExecution(next.inputs, (steps) =>
+          setJobsBoth((prev) => prev.map((j) => (j.id === next.id ? { ...j, steps } : j))),
+        );
+        setJobsBoth((prev) => prev.map((j) => (j.id === next.id ? { ...j, status: ok ? "done" : "failed" } : j)));
+        // refresh data after each client finishes so executed domains drop off
+        loadPlan(infoMode); loadActivity(); loadCancellations();
+      }
+    } finally { processingRef.current = false; }
+  };
+
+  const enqueueJob = (inputs: ExecuteInputs) => {
+    const id = ++jobSeq.current;
+    setJobsBoth((prev) => [...prev, { id, clientTag: inputs.clientTag, instance: inputs.instance, inputs, status: "queued", steps: [] }]);
+    processQueue();
   };
 
   const loadPlan = async (info: boolean) => {
@@ -520,6 +556,56 @@ export default function ReplacementPage() {
         </CardContent>
       </Card>
 
+      {/* Execution queue — confirmed clients running back-to-back */}
+      {jobs.length > 0 && (
+        <Card>
+          <CardContent className="p-5 space-y-3">
+            <div className="flex items-center justify-between">
+              <div className="text-sm font-medium">Execution queue</div>
+              <div className="flex items-center gap-3">
+                <span className="text-[11px] text-muted-foreground">
+                  {jobs.filter((j) => j.status === "done").length} done · {jobs.filter((j) => j.status === "running").length} running · {jobs.filter((j) => j.status === "queued").length} queued
+                  {jobs.some((j) => j.status === "failed") ? ` · ${jobs.filter((j) => j.status === "failed").length} failed` : ""}
+                </span>
+                {!jobs.some((j) => j.status === "running" || j.status === "queued") && (
+                  <Button size="sm" variant="ghost" className="h-7 text-xs" onClick={() => { setJobs([]); jobsRef.current = []; }}>Clear</Button>
+                )}
+              </div>
+            </div>
+            <div className="space-y-2">
+              {jobs.map((job) => (
+                <div key={job.id} className="rounded-lg border px-3 py-2">
+                  <div className="flex items-center gap-2 text-sm">
+                    {job.status === "running" ? <Loader2 className="h-3.5 w-3.5 animate-spin text-amber-500" />
+                      : job.status === "done" ? <CheckCircle2 className="h-3.5 w-3.5 text-emerald-500" />
+                      : job.status === "failed" ? <AlertCircle className="h-3.5 w-3.5 text-red-500" />
+                      : <Circle className="h-3.5 w-3.5 text-zinc-400" />}
+                    <span className="font-medium">{job.clientTag}</span>
+                    <span className="text-muted-foreground text-xs">({INSTANCE_SHORT[job.instance] ?? job.instance})</span>
+                    <span className="text-xs text-muted-foreground">{job.inputs.replacementDomains.length} add · {job.inputs.removeDomains.length} remove</span>
+                    <span className={`text-xs ml-auto capitalize ${job.status === "failed" ? "text-red-500" : job.status === "done" ? "text-emerald-500" : "text-muted-foreground"}`}>{job.status}</span>
+                  </div>
+                  {(job.status === "running" || job.status === "failed") && job.steps.length > 0 && (
+                    <ul className="mt-1.5 space-y-1 text-xs pl-5">
+                      {job.steps.map((s) => (
+                        <li key={s.key} className={`flex items-center gap-2 ${s.state === "skipped" ? "opacity-60" : ""}`}>
+                          {s.state === "running" ? <Loader2 className="h-3 w-3 animate-spin text-amber-500 shrink-0" />
+                            : s.state === "done" ? <CheckCircle2 className="h-3 w-3 text-emerald-500 shrink-0" />
+                            : s.state === "failed" ? <AlertCircle className="h-3 w-3 text-red-500 shrink-0" />
+                            : <Circle className="h-3 w-3 text-zinc-300 dark:text-zinc-600 shrink-0" />}
+                          <span className="flex-1">{s.label}</span>
+                          {s.note && <span className={`text-[10px] truncate max-w-[180px] italic ${s.state === "failed" ? "text-red-500" : "text-muted-foreground"}`} title={s.note}>{s.note}</span>}
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+              ))}
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
       {/* Per-client domain-count audit (validates totals / caps) */}
       {plan && plan.clientAudit.length > 0 && (
         <Card>
@@ -642,7 +728,7 @@ export default function ReplacementPage() {
           open={!!execInputs}
           onOpenChange={(o) => { if (!o) setExecInputs(null); }}
           inputs={execInputs}
-          onDone={() => { setExecInputs(null); loadPlan(infoMode); if (preview) runPreview(); loadActivity(); loadCancellations(); }}
+          onConfirm={(inp) => { enqueueJob(inp); setExecInputs(null); }}
         />
       )}
     </div>
