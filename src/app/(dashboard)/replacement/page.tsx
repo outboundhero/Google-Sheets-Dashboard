@@ -55,7 +55,7 @@ interface PlanItem {
 interface ClientAuditRow {
   clientTag: string; instance: string;
   total: number; info: number; comco: number; other: number;
-  outlook: number; google: number; burnt: number; capMax: number;
+  outlook: number; google: number; burnt: number; staying: number; capMax: number;
 }
 interface PlanResponse {
   generatedFor: string;
@@ -491,15 +491,13 @@ export default function ReplacementPage() {
         <Card>
           <CardContent className="p-5 space-y-3">
             <div className="text-sm font-medium">Per-client domain count — by TLD & provider</div>
-            <div className="text-[11px] text-muted-foreground">Sorted by total. `.info` = to migrate off · `.com/.co` = keep. Over-cap shows when good (non-.info) domains alone exceed the limit.</div>
+            <div className="text-[11px] text-muted-foreground">Sorted by total. `.info` = to migrate off · `.com/.co` = keep. <b>Cap = staying/limit</b> (staying = domains kept after the removals in this run — matches the plan). Red = over the limit (excess healthy left in place, 0 replacements added).</div>
             <div className="rounded-lg border divide-y max-h-[420px] overflow-y-auto">
-              <div className="grid grid-cols-[90px_110px_60px_60px_70px_60px_70px_70px] gap-2 px-3 py-2 text-[11px] text-muted-foreground font-medium bg-muted/30 sticky top-0">
+              <div className="grid grid-cols-[90px_110px_55px_55px_65px_55px_65px_75px] gap-2 px-3 py-2 text-[11px] text-muted-foreground font-medium bg-muted/30 sticky top-0">
                 <span>Client</span><span>Instance</span><span className="text-center">Total</span><span className="text-center">.info</span><span className="text-center">.com/.co</span><span className="text-center">other</span><span className="text-center">OL / GG</span><span className="text-center">Cap</span>
               </div>
-              {plan.clientAudit.map((a) => {
-                const good = a.comco + a.other; // non-.info
-                return (
-                  <div key={`${a.clientTag}:${a.instance}`} className="grid grid-cols-[90px_110px_60px_60px_70px_60px_70px_70px] gap-2 px-3 py-2 text-xs items-center">
+              {plan.clientAudit.map((a) => (
+                  <div key={`${a.clientTag}:${a.instance}`} className="grid grid-cols-[90px_110px_55px_55px_65px_55px_65px_75px] gap-2 px-3 py-2 text-xs items-center">
                     <span className="font-medium">{a.clientTag}</span>
                     <span className="text-muted-foreground">{INSTANCE_SHORT[a.instance] ?? a.instance}</span>
                     <span className="text-center tabular-nums">{a.total}</span>
@@ -507,10 +505,9 @@ export default function ReplacementPage() {
                     <span className="text-center tabular-nums text-emerald-500">{a.comco || ""}</span>
                     <span className="text-center tabular-nums text-muted-foreground">{a.other || ""}</span>
                     <span className="text-center tabular-nums text-muted-foreground">{a.outlook} / {a.google}</span>
-                    <span className={`text-center tabular-nums ${good > a.capMax ? "text-destructive" : "text-muted-foreground"}`}>{good}/{a.capMax}</span>
+                    <span className={`text-center tabular-nums ${a.staying > a.capMax ? "text-destructive" : "text-muted-foreground"}`} title="staying (kept) / cap limit">{a.staying}/{a.capMax}</span>
                   </div>
-                );
-              })}
+              ))}
             </div>
           </CardContent>
         </Card>

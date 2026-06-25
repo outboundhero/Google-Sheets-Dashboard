@@ -70,6 +70,7 @@ export interface ClientAuditRow {
   outlook: number;
   google: number;
   burnt: number;    // currently flagged burnt
+  staying: number;  // domains that STAY (not removed) — the true cap baseline
   capMax: number;
 }
 
@@ -234,7 +235,11 @@ export async function buildReplacementPlan(opts: { infoMigration?: boolean } = {
   const clientAudit: ClientAuditRow[] = [...auditMap.entries()].map(([k, a]) => {
     const sep = k.lastIndexOf(":");
     const clientTag = k.slice(0, sep), instance = k.slice(sep + 1) as BisonInstanceSlug;
-    return { clientTag, instance, ...a, capMax: INSTANCE_CAP[getInstance(instance).tier] };
+    return {
+      clientTag, instance, ...a,
+      staying: stayingAssigned.get(k) ?? 0,   // matches the plan's healthy count (mode-aware)
+      capMax: INSTANCE_CAP[getInstance(instance).tier],
+    };
   }).sort((x, y) => y.total - x.total);
 
   // 7) plan items — TOP-UP-TO-CAP model (Spencer 2026-06-24):
