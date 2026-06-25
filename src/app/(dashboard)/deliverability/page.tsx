@@ -348,10 +348,15 @@ function DeliverabilityPageInner() {
   const [showRemoveFromCampaigns, setShowRemoveFromCampaigns] = useState(false);
 
   // Background attach state
-  interface AttachJob { campaign: string; status: "pending" | "running" | "done" | "error"; newly: number; existing: number; failed?: number; error?: string }
+  interface SkippedInbox { email: string; domain: string; reason: string; retryable?: boolean }
+  interface AttachJob { campaign: string; status: "pending" | "running" | "done" | "error"; newly: number; existing: number; failed?: number; rateLimited?: number; failedInboxes?: SkippedInbox[]; error?: string }
   const [attachJobs, setAttachJobs] = useState<AttachJob[]>([]);
   const [attachRunning, setAttachRunning] = useState(false);
   const attachDomainsRef = useRef<string[]>([]);
+  // Hold the campaigns from the last attach run so "Retry skipped" can re-run
+  // just the ones that had retryable (rate-limit / transient) skips.
+  const attachCampaignsRef = useRef<{ id: number; name: string; instance: BisonInstanceSlug }[]>([]);
+  const [showSkippedAttach, setShowSkippedAttach] = useState<number | null>(null);
 
   // Background tag + campaign combo state
   interface TagCampaignJob {
@@ -415,44 +420,75 @@ function DeliverabilityPageInner() {
   const dragSelectMode = useRef<boolean>(true); // true = selecting, false = deselecting
 
 
+  // Run the attach for one campaign (with 3x whole-request retry on hard
+  // failure) and write the result — including per-inbox skip reasons — into the
+  // job at jobIndex. Shared by the initial run and "Retry skipped".
+  const runAttachForCampaign = useCallback(async (
+    campaign: { id: number; name: string; instance: BisonInstanceSlug },
+    jobIndex: number,
+  ) => {
+    setAttachJobs((prev) => prev.map((j, idx) => idx === jobIndex ? { ...j, status: "running" } : j));
+    let success = false;
+    let lastError = "";
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        const res = await fetch(`/api/deliverability/attach-domains-to-campaign?instance=${campaign.instance}`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ campaign_id: campaign.id, domains: attachDomainsRef.current }),
+        });
+        const data = await res.json();
+        if (res.ok) {
+          setAttachJobs((prev) => prev.map((j, idx) => idx === jobIndex ? {
+            ...j, status: "done",
+            newly: data.newly_attached || 0,
+            existing: data.already_attached || 0,
+            failed: data.failed || 0,
+            rateLimited: data.rateLimited || 0,
+            failedInboxes: data.failedInboxes || [],
+          } : j));
+          success = true;
+          break;
+        }
+        lastError = data.error || `HTTP ${res.status}`;
+      } catch (e) {
+        lastError = e instanceof Error ? e.message : "Network error";
+      }
+      if (attempt < 3) await new Promise((r) => setTimeout(r, 3000));
+    }
+    if (!success) {
+      setAttachJobs((prev) => prev.map((j, idx) => idx === jobIndex ? { ...j, status: "error", error: lastError } : j));
+    }
+  }, []);
+
   const startBackgroundAttach = useCallback(async (campaigns: { id: number; name: string; instance: BisonInstanceSlug }[], domains: string[]) => {
     attachDomainsRef.current = domains;
+    attachCampaignsRef.current = campaigns;
     const jobs: AttachJob[] = campaigns.map((c) => ({ campaign: c.name, status: "pending" as const, newly: 0, existing: 0 }));
     setAttachJobs(jobs);
     setAttachRunning(true);
     setSelectedDomains(new Set());
 
     for (let i = 0; i < campaigns.length; i++) {
-      const campaign = campaigns[i];
-      setAttachJobs((prev) => prev.map((j, idx) => idx === i ? { ...j, status: "running" } : j));
-
-      let success = false;
-      let lastError = "";
-      for (let attempt = 1; attempt <= 3; attempt++) {
-        try {
-          const res = await fetch(`/api/deliverability/attach-domains-to-campaign?instance=${campaign.instance}`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ campaign_id: campaign.id, domains: attachDomainsRef.current }),
-          });
-          const data = await res.json();
-          if (res.ok) {
-            setAttachJobs((prev) => prev.map((j, idx) => idx === i ? { ...j, status: "done", newly: data.newly_attached || 0, existing: data.already_attached || 0, failed: data.failed || 0 } : j));
-            success = true;
-            break;
-          }
-          lastError = data.error || `HTTP ${res.status}`;
-        } catch (e) {
-          lastError = e instanceof Error ? e.message : "Network error";
-        }
-        if (attempt < 3) await new Promise((r) => setTimeout(r, 3000));
-      }
-      if (!success) {
-        setAttachJobs((prev) => prev.map((j, idx) => idx === i ? { ...j, status: "error", error: lastError } : j));
-      }
+      await runAttachForCampaign(campaigns[i], i);
     }
     setAttachRunning(false);
-  }, []);
+  }, [runAttachForCampaign]);
+
+  // Re-run attach for just the campaigns that had retryable (rate-limit /
+  // transient) skips. Already-attached inboxes are filtered server-side, so this
+  // only re-attempts the ones that didn't make it. Plain fn so it always reads
+  // the latest job results (clicked only after a run completes).
+  const retrySkippedAttach = async () => {
+    const campaigns = attachCampaignsRef.current;
+    const jobs = attachJobs;
+    setShowSkippedAttach(null);
+    setAttachRunning(true);
+    for (let i = 0; i < campaigns.length; i++) {
+      if ((jobs[i]?.rateLimited ?? 0) > 0) await runAttachForCampaign(campaigns[i], i);
+    }
+    setAttachRunning(false);
+  };
 
   useEffect(() => {
     const saved = localStorage.getItem("deliverability_next_page");
@@ -1595,7 +1631,9 @@ function DeliverabilityPageInner() {
       )}
 
       {/* Background Attach Progress */}
-      {attachJobs.length > 0 && (
+      {attachJobs.length > 0 && (() => {
+        const totalRetryable = attachJobs.reduce((s, j) => s + (j.rateLimited ?? 0), 0);
+        return (
         <div className="rounded-lg border bg-muted/30 px-4 py-3">
           <div className="flex items-center justify-between mb-2">
             <div className="flex items-center gap-2 text-sm">
@@ -1607,31 +1645,66 @@ function DeliverabilityPageInner() {
                 {attachJobs.filter((j) => j.status === "done").length}/{attachJobs.length} campaigns
               </span>
             </div>
-            {!attachRunning && (
-              <button onClick={() => setAttachJobs([])} className="text-xs text-muted-foreground hover:text-foreground">
-                Dismiss
-              </button>
-            )}
+            <div className="flex items-center gap-3">
+              {!attachRunning && totalRetryable > 0 && (
+                <button
+                  onClick={retrySkippedAttach}
+                  className="flex items-center gap-1 text-xs text-primary hover:underline"
+                >
+                  <RefreshCw className="h-3 w-3" /> Retry {totalRetryable} skipped (rate-limited)
+                </button>
+              )}
+              {!attachRunning && (
+                <button onClick={() => setAttachJobs([])} className="text-xs text-muted-foreground hover:text-foreground">
+                  Dismiss
+                </button>
+              )}
+            </div>
           </div>
-          <div className="space-y-1 max-h-40 overflow-y-auto">
+          <div className="space-y-1 max-h-60 overflow-y-auto">
             {attachJobs.map((job, i) => (
-              <div key={i} className="flex items-center gap-2 text-xs">
-                {job.status === "running" && <Loader2 className="h-3 w-3 animate-spin text-primary shrink-0" />}
-                {job.status === "done" && <CheckCircle2 className="h-3 w-3 text-emerald-500 shrink-0" />}
-                {job.status === "error" && <AlertTriangle className="h-3 w-3 text-destructive shrink-0" />}
-                {job.status === "pending" && <div className="h-3 w-3 rounded-full border border-muted-foreground/30 shrink-0" />}
-                <span className="truncate text-muted-foreground">{job.campaign}</span>
-                {job.status === "done" && (
-                  <span className="shrink-0 ml-auto text-emerald-500">+{job.newly} · {job.existing} existing{(job.failed ?? 0) > 0 && <span className="text-amber-500"> ({job.failed} skipped)</span>}</span>
-                )}
-                {job.status === "error" && (
-                  <span className="shrink-0 ml-auto text-destructive">{job.error}</span>
+              <div key={i}>
+                <div className="flex items-center gap-2 text-xs">
+                  {job.status === "running" && <Loader2 className="h-3 w-3 animate-spin text-primary shrink-0" />}
+                  {job.status === "done" && (job.failed ?? 0) === 0 && <CheckCircle2 className="h-3 w-3 text-emerald-500 shrink-0" />}
+                  {job.status === "done" && (job.failed ?? 0) > 0 && <AlertTriangle className="h-3 w-3 text-amber-500 shrink-0" />}
+                  {job.status === "error" && <AlertTriangle className="h-3 w-3 text-destructive shrink-0" />}
+                  {job.status === "pending" && <div className="h-3 w-3 rounded-full border border-muted-foreground/30 shrink-0" />}
+                  <span className="truncate text-muted-foreground">{job.campaign}</span>
+                  {job.status === "done" && (
+                    <span className="shrink-0 ml-auto text-emerald-500">
+                      +{job.newly} · {job.existing} existing
+                      {(job.failed ?? 0) > 0 && (
+                        <button
+                          onClick={() => setShowSkippedAttach((v) => (v === i ? null : i))}
+                          className="text-amber-500 hover:underline"
+                        >
+                          {" "}({job.failed} skipped{(job.rateLimited ?? 0) > 0 ? `, ${job.rateLimited} retryable` : ""} — {showSkippedAttach === i ? "hide" : "why?"})
+                        </button>
+                      )}
+                    </span>
+                  )}
+                  {job.status === "error" && (
+                    <span className="shrink-0 ml-auto text-destructive">{job.error}</span>
+                  )}
+                </div>
+                {/* Per-campaign skip reasons — explains WHY each inbox was skipped */}
+                {showSkippedAttach === i && (job.failedInboxes?.length ?? 0) > 0 && (
+                  <div className="mt-1 mb-2 ml-5 rounded-lg border border-amber-500/30 bg-amber-500/5 max-h-48 overflow-y-auto divide-y divide-amber-500/10">
+                    {job.failedInboxes!.map((f, k) => (
+                      <div key={`${f.email}-${k}`} className="px-3 py-1.5 flex items-center justify-between gap-2">
+                        <span className="text-[11px] font-mono text-foreground/80 truncate">{f.email}</span>
+                        <span className={`text-[10px] shrink-0 ${f.retryable ? "text-primary" : "text-amber-500"}`}>{f.reason}</span>
+                      </div>
+                    ))}
+                  </div>
                 )}
               </div>
             ))}
           </div>
         </div>
-      )}
+        );
+      })()}
 
       {/* Background Tag + Campaign + Sheet Progress */}
       {tagCampaignJob && (() => {
