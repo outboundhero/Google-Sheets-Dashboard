@@ -3,10 +3,10 @@ import { getSupabaseAdmin } from "@/lib/supabase";
 import { checkSpamhausDbl } from "@/lib/spamhaus-dbl-resolver";
 
 const CONCURRENT = 100;
-const TIME_BUDGET_MS = 50_000;
-const BATCH_PULL_LIMIT = 2000;
+const TIME_BUDGET_MS = 280_000; // full daily 6am sweep
+const BATCH_PULL_LIMIT = 5000;
 
-export const maxDuration = 60;
+export const maxDuration = 300;
 
 export async function GET() {
   const t0 = Date.now();
