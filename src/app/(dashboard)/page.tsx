@@ -25,6 +25,7 @@ import { StatCard } from "@/components/dashboard/stat-card";
 import { LeadsByStatusChart } from "@/components/dashboard/leads-by-status-chart";
 import { LeadsOverTimeChart } from "@/components/dashboard/leads-over-time-chart";
 import { TopClientsTable } from "@/components/dashboard/top-clients-table";
+import { RedirectIssuesCard } from "@/components/dashboard/redirect-issues-card";
 import { PendingOffboardingsCard } from "@/components/dashboard/pending-offboardings-card";
 import {
   Select,
@@ -209,6 +210,9 @@ export default function DashboardPage() {
 
       {/* Pending offboardings — admin only; self-hides when there are none. */}
       {isAdmin && <PendingOffboardingsCard />}
+
+      {/* Redirect issues — admin only; flags domains not matching the Client Tracker. */}
+      {isAdmin && <RedirectIssuesCard />}
 
       {/* Clients Going Off + Churned — side by side */}
       {(clientsGoingOff.length > 0 || churnedClients.length > 0) && (
