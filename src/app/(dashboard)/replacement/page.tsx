@@ -71,6 +71,10 @@ interface ActivityEvent {
   id: number; instance: string | null; domain: string | null; clientTag: string | null;
   eventType: string; detail: string | null; createdAt: string;
 }
+interface PendingCancellation {
+  instance: string; domain: string; clientTag: string | null; provider: string | null;
+  reason: string | null; scheduledAt: string; status: string; createdAt: string;
+}
 
 // short, unambiguous instance labels (outboundhero vs outboundclean both start "outbound")
 const INSTANCE_SHORT: Record<string, string> = {
@@ -103,6 +107,9 @@ export default function ReplacementPage() {
   const [execInputs, setExecInputs] = useState<ExecuteInputs | null>(null);
   const [activity, setActivity] = useState<ActivityEvent[] | null>(null);
   const [loadingActivity, setLoadingActivity] = useState(false);
+  const [cancellations, setCancellations] = useState<PendingCancellation[] | null>(null);
+  const [loadingCancels, setLoadingCancels] = useState(false);
+  const [cancelsNow, setCancelsNow] = useState(0); // snapshot of "now" when queue loaded (for countdown)
 
   useEffect(() => {
     if (!isAdmin) return;
@@ -163,6 +170,16 @@ export default function ReplacementPage() {
       if (res.ok) setActivity(data.events || []);
     } catch { /* ignore */ }
     setLoadingActivity(false);
+  };
+
+  const loadCancellations = async () => {
+    setLoadingCancels(true);
+    try {
+      const res = await fetch("/api/replacement/cancellations?status=pending", { cache: "no-store" });
+      const data = await res.json();
+      if (res.ok) { setCancellations(data.cancellations || []); setCancelsNow(Date.now()); }
+    } catch { /* ignore */ }
+    setLoadingCancels(false);
   };
 
   const loadPlan = async (info: boolean) => {
@@ -530,6 +547,51 @@ export default function ReplacementPage() {
         </Card>
       )}
 
+      {/* Pending cancellations — the 5-day vendor-delete queue */}
+      <Card>
+        <CardContent className="p-5 space-y-3">
+          <div className="flex items-center justify-between">
+            <div>
+              <div className="text-sm font-medium">Pending cancellations — 5-day vendor-delete queue</div>
+              <div className="text-[11px] text-muted-foreground">Burnt domains removed from campaigns, awaiting provider cancellation. <b>Nothing fires yet</b> (the delete cron isn&apos;t built) — these are scheduled records only.</div>
+            </div>
+            <Button size="sm" variant="outline" onClick={loadCancellations} disabled={loadingCancels} className="gap-2">
+              <RefreshCw className={`h-4 w-4 ${loadingCancels ? "animate-spin" : ""}`} />
+              {loadingCancels ? "Loading…" : "Load queue"}
+            </Button>
+          </div>
+          {cancellations && (
+            cancellations.length === 0 ? (
+              <p className="text-sm text-muted-foreground">No domains in the cancellation queue.</p>
+            ) : (<>
+              <div className="text-sm text-muted-foreground"><b className="text-amber-500">{cancellations.length.toLocaleString()}</b> domain(s) pending cancellation</div>
+              <div className="rounded-lg border divide-y max-h-[420px] overflow-y-auto">
+                <div className="grid grid-cols-[1fr_90px_90px_110px_1fr] gap-2 px-3 py-2 text-[11px] text-muted-foreground font-medium bg-muted/30 sticky top-0">
+                  <span>Domain</span><span>Client</span><span>Instance</span><span>Fires in</span><span>Reason</span>
+                </div>
+                {cancellations.map((c) => {
+                  const ms = new Date(c.scheduledAt).getTime() - cancelsNow;
+                  const days = Math.floor(ms / 86_400_000);
+                  const hours = Math.floor((ms % 86_400_000) / 3_600_000);
+                  const due = ms <= 0;
+                  return (
+                    <div key={`${c.instance}:${c.domain}`} className="grid grid-cols-[1fr_90px_90px_110px_1fr] gap-2 px-3 py-2 text-xs items-center">
+                      <span className="truncate" title={c.domain}>{c.domain}</span>
+                      <span className="font-medium">{c.clientTag ?? "—"}</span>
+                      <span className="text-muted-foreground">{INSTANCE_SHORT[c.instance] ?? c.instance}</span>
+                      <span className={due ? "text-destructive font-medium" : "text-muted-foreground tabular-nums"}>
+                        {due ? "due now" : days > 0 ? `${days}d ${hours}h` : `${hours}h`}
+                      </span>
+                      <span className="truncate text-muted-foreground" title={c.reason ?? ""}>{c.reason ?? ""}</span>
+                    </div>
+                  );
+                })}
+              </div>
+            </>)
+          )}
+        </CardContent>
+      </Card>
+
       {/* Activity log — what the execution actually did */}
       <Card>
         <CardContent className="p-5 space-y-3">
@@ -576,7 +638,7 @@ export default function ReplacementPage() {
           open={!!execInputs}
           onOpenChange={(o) => { if (!o) setExecInputs(null); }}
           inputs={execInputs}
-          onDone={() => { setExecInputs(null); loadPlan(infoMode); if (preview) runPreview(); loadActivity(); }}
+          onDone={() => { setExecInputs(null); loadPlan(infoMode); if (preview) runPreview(); loadActivity(); loadCancellations(); }}
         />
       )}
     </div>

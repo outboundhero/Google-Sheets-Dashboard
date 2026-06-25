@@ -157,6 +157,34 @@ export async function getHandledDomains(): Promise<Set<string>> {
   return set;
 }
 
+export interface PendingCancellation {
+  instance: string;
+  domain: string;
+  clientTag: string | null;
+  provider: string | null;
+  reason: string | null;
+  scheduledAt: string;
+  status: string;
+  createdAt: string;
+}
+
+/** The cancellation queue — burnt domains awaiting the 5-day vendor-delete. */
+export async function getCancellations(statuses: string[] = ["pending"], limit = 1000): Promise<PendingCancellation[]> {
+  const supabase = getSupabaseAdmin();
+  const { data, error } = await supabase
+    .from("replacement_cancellations")
+    .select("*")
+    .in("status", statuses)
+    .order("scheduled_at", { ascending: true })
+    .limit(limit);
+  if (error) throw new Error(error.message);
+  return (data || []).map((r) => ({
+    instance: r.instance, domain: r.domain, clientTag: r.client_tag,
+    provider: r.provider, reason: r.reason, scheduledAt: r.scheduled_at,
+    status: r.status, createdAt: r.created_at,
+  }));
+}
+
 export async function getEvents(limit = 200): Promise<ReplacementEvent[]> {
   const supabase = getSupabaseAdmin();
   const { data, error } = await supabase
