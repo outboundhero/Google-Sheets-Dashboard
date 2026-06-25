@@ -650,7 +650,22 @@ export default function ReplacementPage() {
             cancellations.length === 0 ? (
               <p className="text-sm text-muted-foreground">No domains in the cancellation queue.</p>
             ) : (<>
-              <div className="text-sm text-muted-foreground"><b className="text-amber-500">{cancellations.length.toLocaleString()}</b> domain(s) pending cancellation</div>
+              {(() => {
+                const mix: Record<string, number> = {};
+                for (const c of cancellations) { const p = c.provider || "unknown"; mix[p] = (mix[p] || 0) + 1; }
+                const auto = (mix.inboxing || 0) + (mix.milkbox || 0);
+                const sheet = cancellations.length - auto;
+                return (
+                  <div className="flex flex-wrap items-center gap-3 text-sm">
+                    <span className="text-muted-foreground"><b className="text-amber-500">{cancellations.length.toLocaleString()}</b> pending</span>
+                    <span className="text-muted-foreground">·</span>
+                    <span className="text-emerald-500"><b>{auto}</b> auto-cancel (API)</span>
+                    <span className="text-amber-500"><b>{sheet}</b> → sheet</span>
+                    <span className="text-muted-foreground">·</span>
+                    <span className="text-[11px] text-muted-foreground">vendor mix: {Object.entries(mix).sort((a, b) => b[1] - a[1]).map(([p, n]) => `${p} ${n}`).join(" · ")}</span>
+                  </div>
+                );
+              })()}
               <div className="rounded-lg border divide-y max-h-[420px] overflow-y-auto">
                 <div className="grid grid-cols-[1fr_85px_85px_95px_100px_1fr] gap-2 px-3 py-2 text-[11px] text-muted-foreground font-medium bg-muted/30 sticky top-0">
                   <span>Domain</span><span>Client</span><span>Instance</span><span>Vendor</span><span>Fires in</span><span>Reason</span>
