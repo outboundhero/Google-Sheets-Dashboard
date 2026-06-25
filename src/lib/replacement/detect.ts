@@ -5,6 +5,7 @@
 import { getSupabaseAdmin } from "@/lib/supabase";
 import { ALL_INSTANCE_SLUGS, type BisonInstanceSlug } from "@/lib/bison-instances";
 import { pstDateString } from "@/lib/date-utils";
+import { getHandledDomains } from "./store";
 import type { ReplacementSettings } from "./types";
 
 export interface DomainSignals {
@@ -85,6 +86,9 @@ export async function runDetection(cfg: ReplacementSettings): Promise<{ scanned:
   const supabase = getSupabaseAdmin();
   const instances = ALL_INSTANCE_SLUGS;
 
+  // domains already removed/in-flight — skip so they drop off the moment they're executed
+  const handled = await getHandledDomains();
+
   // pull domains (paginated)
   const domains: DomainRow[] = [];
   let offset = 0;
@@ -96,7 +100,7 @@ export async function runDetection(cfg: ReplacementSettings): Promise<{ scanned:
       .range(offset, offset + 999);
     if (error) throw new Error(error.message);
     if (!data || data.length === 0) break;
-    domains.push(...(data as DomainRow[]));
+    for (const d of data as DomainRow[]) if (!handled.has(`${d.instance}:${d.domain}`)) domains.push(d);
     if (data.length < 1000) break;
     offset += 1000;
   }

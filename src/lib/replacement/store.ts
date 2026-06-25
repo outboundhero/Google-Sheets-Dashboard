@@ -136,6 +136,27 @@ export async function scheduleCancellations(
   if (error) throw new Error(error.message);
 }
 
+/** Domains already acted on (removed/in-flight) — so detection & the plan stop
+ *  showing them the moment execution finishes. Keyed `${instance}:${domain}`. */
+export async function getHandledDomains(): Promise<Set<string>> {
+  const supabase = getSupabaseAdmin();
+  const set = new Set<string>();
+  let offset = 0;
+  while (true) {
+    const { data, error } = await supabase
+      .from("domain_replacement_state")
+      .select("instance,domain")
+      .in("state", ["removed", "replacing", "retired"])
+      .range(offset, offset + 999);
+    if (error) throw new Error(error.message);
+    if (!data || data.length === 0) break;
+    for (const r of data) set.add(`${r.instance}:${r.domain}`);
+    if (data.length < 1000) break;
+    offset += 1000;
+  }
+  return set;
+}
+
 export async function getEvents(limit = 200): Promise<ReplacementEvent[]> {
   const supabase = getSupabaseAdmin();
   const { data, error } = await supabase

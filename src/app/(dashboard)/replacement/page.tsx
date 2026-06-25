@@ -67,6 +67,11 @@ interface PlanResponse {
   clientAudit: ClientAuditRow[];
 }
 
+interface ActivityEvent {
+  id: number; instance: string | null; domain: string | null; clientTag: string | null;
+  eventType: string; detail: string | null; createdAt: string;
+}
+
 // short, unambiguous instance labels (outboundhero vs outboundclean both start "outbound")
 const INSTANCE_SHORT: Record<string, string> = {
   outboundhero: "OH·B2B", cleaningoutbound: "CO·B2C", facilityreach: "FR·B2B", outboundclean: "OC·B2C",
@@ -96,6 +101,8 @@ export default function ReplacementPage() {
   const [infoMode, setInfoMode] = useState(false);
   const [execClient, setExecClient] = useState("");      // "clientTag|instance"
   const [execInputs, setExecInputs] = useState<ExecuteInputs | null>(null);
+  const [activity, setActivity] = useState<ActivityEvent[] | null>(null);
+  const [loadingActivity, setLoadingActivity] = useState(false);
 
   useEffect(() => {
     if (!isAdmin) return;
@@ -146,6 +153,16 @@ export default function ReplacementPage() {
       else setError(data.error || "Campaign map failed");
     } catch { setError("Campaign map failed"); }
     setLoadingMap(false);
+  };
+
+  const loadActivity = async () => {
+    setLoadingActivity(true);
+    try {
+      const res = await fetch("/api/replacement/events?limit=300", { cache: "no-store" });
+      const data = await res.json();
+      if (res.ok) setActivity(data.events || []);
+    } catch { /* ignore */ }
+    setLoadingActivity(false);
   };
 
   const loadPlan = async (info: boolean) => {
@@ -513,12 +530,53 @@ export default function ReplacementPage() {
         </Card>
       )}
 
+      {/* Activity log — what the execution actually did */}
+      <Card>
+        <CardContent className="p-5 space-y-3">
+          <div className="flex items-center justify-between">
+            <div>
+              <div className="text-sm font-medium">Activity log — what was executed</div>
+              <div className="text-[11px] text-muted-foreground">Every real action (tag · redirect · attach · removed · cancellation scheduled), newest first.</div>
+            </div>
+            <Button size="sm" variant="outline" onClick={loadActivity} disabled={loadingActivity} className="gap-2">
+              <RefreshCw className={`h-4 w-4 ${loadingActivity ? "animate-spin" : ""}`} />
+              {loadingActivity ? "Loading…" : "Load activity"}
+            </Button>
+          </div>
+          {activity && (
+            activity.length === 0 ? (
+              <p className="text-sm text-muted-foreground">No actions executed yet.</p>
+            ) : (
+              <div className="rounded-lg border divide-y max-h-[420px] overflow-y-auto">
+                <div className="grid grid-cols-[140px_90px_1fr_110px_1fr] gap-2 px-3 py-2 text-[11px] text-muted-foreground font-medium bg-muted/30 sticky top-0">
+                  <span>When</span><span>Client</span><span>Domain</span><span>Action</span><span>Detail</span>
+                </div>
+                {activity.map((e) => {
+                  const ec = e.eventType === "removed" ? "text-amber-500"
+                    : e.eventType === "error" ? "text-destructive"
+                    : ["tagged", "redirect_set", "attached"].includes(e.eventType) ? "text-emerald-500" : "text-muted-foreground";
+                  return (
+                    <div key={e.id} className="grid grid-cols-[140px_90px_1fr_110px_1fr] gap-2 px-3 py-2 text-xs items-start">
+                      <span className="text-muted-foreground tabular-nums">{new Date(e.createdAt).toLocaleString("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}</span>
+                      <span className="font-medium">{e.clientTag ?? "—"}</span>
+                      <span className="truncate" title={e.domain ?? ""}>{e.domain ?? "—"}</span>
+                      <span className={ec}>{e.eventType}</span>
+                      <span className="truncate text-muted-foreground" title={e.detail ?? ""}>{e.detail ?? ""}</span>
+                    </div>
+                  );
+                })}
+              </div>
+            )
+          )}
+        </CardContent>
+      </Card>
+
       {execInputs && (
         <ExecuteDialog
           open={!!execInputs}
           onOpenChange={(o) => { if (!o) setExecInputs(null); }}
           inputs={execInputs}
-          onDone={() => { setExecInputs(null); loadPlan(infoMode); }}
+          onDone={() => { setExecInputs(null); loadPlan(infoMode); if (preview) runPreview(); loadActivity(); }}
         />
       )}
     </div>

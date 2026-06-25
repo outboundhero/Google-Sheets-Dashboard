@@ -6,7 +6,7 @@
 import { getSupabaseAdmin } from "@/lib/supabase";
 import { ALL_INSTANCE_SLUGS, getInstance, type BisonInstanceSlug } from "@/lib/bison-instances";
 import { pstDateString } from "@/lib/date-utils";
-import { getSettings } from "./store";
+import { getSettings, getHandledDomains } from "./store";
 import { evaluateDomain, type DomainSignals } from "./detect";
 import { deriveCampaignMap, type CampaignRef } from "./campaigns";
 import { INSTANCE_CAP } from "./types";
@@ -96,6 +96,10 @@ export async function buildReplacementPlan(opts: { infoMigration?: boolean } = {
   const today = pstDateString(new Date());
   const nowMs = new Date(today).getTime();
 
+  // domains already removed/in-flight from a prior execution — exclude so they
+  // disappear from the plan the moment they're executed.
+  const handled = await getHandledDomains();
+
   // 1) all domains (with tags + fields)
   const domains: DomRow[] = [];
   let off = 0;
@@ -107,7 +111,7 @@ export async function buildReplacementPlan(opts: { infoMigration?: boolean } = {
       .range(off, off + 999);
     if (error) throw new Error(error.message);
     if (!data || data.length === 0) break;
-    domains.push(...(data as DomRow[]));
+    for (const d of data as DomRow[]) if (!handled.has(`${d.instance}:${d.domain}`)) domains.push(d);
     if (data.length < 1000) break;
     off += 1000;
   }
