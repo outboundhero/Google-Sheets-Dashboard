@@ -231,13 +231,15 @@ export function RemoveFromCampaignsDialog({ open, onOpenChange, selectedDomains,
     }
   };
 
+  // Closing is always allowed — the removal request keeps running server-side
+  // and this component stays mounted in the page, so it finishes and refreshes
+  // in the background (matching the "you can close this dialog" hint).
   const handleClose = () => {
-    if (phase === "running") return;
     onOpenChange(false);
   };
 
   return (
-    <Dialog open={open} onOpenChange={(v) => { if (!v && phase !== "running") handleClose(); }}>
+    <Dialog open={open} onOpenChange={(v) => { if (!v) handleClose(); }}>
       <DialogContent className="sm:!max-w-xl max-h-[80vh] flex flex-col">
         <DialogHeader>
           <DialogTitle>Remove from Campaigns</DialogTitle>
