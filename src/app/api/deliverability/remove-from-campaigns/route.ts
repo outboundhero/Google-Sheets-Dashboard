@@ -32,6 +32,29 @@ async function getInboxIdsForDomains(instance: BisonInstanceSlug, domains: strin
 
 interface DiscoveredCampaign { id: number; instance: BisonInstanceSlug; name: string; status: string; inboxCount: number; inboxIds: number[] }
 
+/** Union of all tag names on the given domains (across instances). The domain's
+ *  client tag (e.g. "BHS") is among these, so we filter campaigns to those whose
+ *  client tag matches — keeping removal scoped to the domain's own client. */
+async function getDomainTags(domains: string[]): Promise<Set<string>> {
+  const supabase = getSupabaseAdmin();
+  const names = new Set<string>();
+  for (let i = 0; i < domains.length; i += 100) {
+    const { data } = await supabase
+      .from("deliverability_domains")
+      .select("tags")
+      .in("domain", domains.slice(i, i + 100));
+    for (const r of data || []) {
+      let tags: unknown = r.tags;
+      if (typeof tags === "string") { try { tags = JSON.parse(tags); } catch { tags = []; } }
+      for (const t of (tags as unknown[]) || []) {
+        const n = t && typeof t === "object" ? (t as { name?: string }).name : t;
+        if (n) names.add(String(n).trim());
+      }
+    }
+  }
+  return names;
+}
+
 /**
  * ACCURATE discovery: for each inbox, ask Bison which campaigns it's actually
  * in (/sender-emails/{id}/campaigns) and collect the campaign → exact inboxIds
@@ -162,7 +185,15 @@ export async function POST(request: Request) {
     // every instance (so a wrong group/tier in the switcher doesn't hide them).
     // The FE calls this one domain at a time (chunked) so each request stays
     // small and never hits the 300s timeout.
+    //
+    // SCOPED TO THE DOMAIN'S OWN CLIENT TAG: a domain's inboxes can end up
+    // attached to OTHER clients' campaigns (cross-client). Removing it from
+    // those is almost never intended, so we only surface campaigns whose client
+    // tag (name prefix before ":") matches one of the domain's tags. Pass
+    // allClients=true to bypass and show every campaign it's in.
     if (discover) {
+      const showAllClients = (body as { allClients?: boolean }).allClients === true;
+      const domainTags = showAllClients ? null : await getDomainTags(domains);
       const perInstance = await Promise.all(
         ALL_INSTANCE_SLUGS.map(async (inst) => {
           const inboxIds = await getInboxIdsForDomains(inst, domains);
@@ -174,7 +205,10 @@ export async function POST(request: Request) {
           }));
         }),
       );
-      const all = perInstance.flat();
+      let all = perInstance.flat();
+      if (domainTags) {
+        all = all.filter((c) => domainTags.has(c.name.split(":")[0].trim()));
+      }
       all.sort((a, b) => a.name.localeCompare(b.name));
       return NextResponse.json({ campaigns: all });
     }
