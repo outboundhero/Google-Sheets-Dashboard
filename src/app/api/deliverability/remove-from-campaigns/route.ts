@@ -158,13 +158,14 @@ async function discoverCampaigns(instance: BisonInstanceSlug, inboxIds: number[]
  * retries each page up to 3x with backoff, and throws if a page fails after
  * retries so the caller surfaces a real error rather than silently truncating.
  */
+const SENDER_PAGE_RETRIES = 6;
 async function fetchCampaignSenderIds(instance: BisonInstanceSlug, campaignId: number): Promise<number[]> {
   const ids: number[] = [];
   let page = 1;
   while (true) {
     let attempt = 0;
     let json: { data?: { id: number }[]; meta?: { last_page?: number } } | null = null;
-    while (attempt < 3) {
+    while (attempt < SENDER_PAGE_RETRIES) {
       const res = await bisonFetch(
         instance,
         `/campaigns/${campaignId}/sender-emails?page=${page}&per_page=100`,
@@ -172,9 +173,15 @@ async function fetchCampaignSenderIds(instance: BisonInstanceSlug, campaignId: n
       if (res.status === 404) return ids;
       if (res.ok) {
         try { json = await res.json(); break; } catch { /* parse error → retry */ }
+        attempt++;
+        if (attempt < SENDER_PAGE_RETRIES) await delay(600 * 2 ** attempt);
+        continue;
       }
+      // Transient (rate-limit / 5xx): honor Retry-After, else exponential backoff.
+      const ra = parseInt(res.headers.get("retry-after") || "", 10);
+      const wait = Number.isFinite(ra) && ra > 0 ? ra * 1000 : Math.min(10000, 600 * 2 ** attempt);
       attempt++;
-      if (attempt < 3) await delay(800 * attempt);
+      if (attempt < SENDER_PAGE_RETRIES) await delay(wait + Math.floor(Math.random() * 300));
     }
     if (!json) {
       throw new Error(`failed to fetch campaign ${campaignId} senders page ${page} after retries`);
@@ -278,34 +285,32 @@ export async function POST(request: Request) {
         continue;
       }
       const inst = c.instance;
-
-      // Load (and cache) the domain inbox IDs for this instance
-      let inboxIdSet = inboxIdsByInstance.get(inst);
-      if (!inboxIdSet) {
-        const ids = await getInboxIdsForDomains(inst, domains);
-        inboxIdSet = new Set(ids);
-        inboxIdsByInstance.set(inst, inboxIdSet);
-        totalInboxes += ids.length;
-      }
-
       const campaignName = c.name || `Campaign ${c.id}`;
-
-      if (inboxIdSet.size === 0) {
-        details.push({ id: c.id, name: campaignName, removed: 0, error: "No matching inboxes found for selected domains on this instance" });
-        continue;
-      }
+      const discoveryIds = Array.isArray(c.inboxIds) ? Array.from(new Set(c.inboxIds)) : [];
 
       try {
-        // Prefer the FE-supplied inboxIds from discovery — they're the exact
-        // set Bison confirmed are attached to this campaign at discovery time,
-        // so we can skip a slow re-fetch that's prone to silent truncation.
-        // Manually-added campaigns won't have inboxIds → fall back to fetching.
         let toRemove: number[];
-        if (Array.isArray(c.inboxIds) && c.inboxIds.length > 0) {
-          // Still intersect with the domain-inbox set in case the user
-          // deselected domains between discovery and removal.
-          toRemove = c.inboxIds.filter((id) => inboxIdSet!.has(id));
+        if (discoveryIds.length > 0) {
+          // Trust the inbox IDs confirmed at discovery (domain ∩ campaign).
+          // Do NOT re-derive from `domains` here: the domain selection in the
+          // UI can be cleared between discovery and remove (e.g. onComplete
+          // resets it), which used to make this silently remove nothing.
+          toRemove = discoveryIds;
+          totalInboxes += discoveryIds.length;
         } else {
+          // Manually-added campaign (no discovery IDs) → resolve via the
+          // selected domains, fetching the campaign's senders live.
+          let inboxIdSet = inboxIdsByInstance.get(inst);
+          if (!inboxIdSet) {
+            const ids = await getInboxIdsForDomains(inst, domains);
+            inboxIdSet = new Set(ids);
+            inboxIdsByInstance.set(inst, inboxIdSet);
+            totalInboxes += ids.length;
+          }
+          if (inboxIdSet.size === 0) {
+            details.push({ id: c.id, name: campaignName, removed: 0, error: "No matching inboxes found for selected domains on this instance" });
+            continue;
+          }
           const campaignSenders = await fetchCampaignSenderIds(inst, c.id);
           toRemove = campaignSenders.filter((id) => inboxIdSet!.has(id));
         }

@@ -342,6 +342,9 @@ function DeliverabilityPageInner() {
   const [changeRedirectOpen, setChangeRedirectOpen] = useState(false);
   const [clientTags, setClientTags] = useState<Set<string>>(new Set());
   const [selectedDomains, setSelectedDomains] = useState<Set<string>>(new Set());
+  // Stable array of the selected domains — passed to dialogs so their effects
+  // don't re-run (and re-discover) on every render from a fresh Array.from(...).
+  const selectedDomainsList = useMemo(() => Array.from(selectedDomains), [selectedDomains]);
   const [bulkTagMode, setBulkTagMode] = useState<"add" | "remove" | null>(null);
   const [showBulkDelete, setShowBulkDelete] = useState(false);
   const [showAttachCampaigns, setShowAttachCampaigns] = useState(false);
@@ -3395,7 +3398,7 @@ function DeliverabilityPageInner() {
       <RemoveFromCampaignsDialog
         open={showRemoveFromCampaigns}
         onOpenChange={setShowRemoveFromCampaigns}
-        selectedDomains={Array.from(selectedDomains)}
+        selectedDomains={selectedDomainsList}
         onComplete={() => setSelectedDomains(new Set())}
       />
 
