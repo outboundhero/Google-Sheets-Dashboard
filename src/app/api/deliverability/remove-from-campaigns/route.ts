@@ -32,54 +32,58 @@ async function getInboxIdsForDomains(instance: BisonInstanceSlug, domains: strin
 
 interface DiscoveredCampaign { id: number; instance: BisonInstanceSlug; name: string; status: string; inboxCount: number; inboxIds: number[] }
 
-/** Collect the tag names applied to a set of domains (from the synced inbox/domain data). */
-async function getDomainTagNames(instance: BisonInstanceSlug, domains: string[]): Promise<Set<string>> {
-  const supabase = getSupabaseAdmin();
-  const names = new Set<string>();
-  for (let i = 0; i < domains.length; i += 100) {
-    const { data } = await supabase
-      .from("deliverability_domains")
-      .select("tags")
-      .eq("instance", instance)
-      .in("domain", domains.slice(i, i + 100));
-    for (const r of data || []) {
-      let tags: unknown = r.tags;
-      if (typeof tags === "string") { try { tags = JSON.parse(tags); } catch { tags = []; } }
-      for (const t of (tags as unknown[]) || []) {
-        const n = t && typeof t === "object" ? (t as { name?: string }).name : t;
-        if (n) names.add(String(n).trim());
+/**
+ * ACCURATE discovery: for each inbox, ask Bison which campaigns it's actually
+ * in (/sender-emails/{id}/campaigns) and collect the campaign → exact inboxIds
+ * map. This only surfaces campaigns the domains are genuinely attached to (so
+ * the user never picks one they aren't in and gets "0 removed"). It's cheap PER
+ * call (an inbox is in only a few campaigns), and the FE keeps each request
+ * small by chunking discovery one domain at a time — so it never times out.
+ */
+async function discoverCampaigns(instance: BisonInstanceSlug, inboxIds: number[]) {
+  const CONC = 10;
+  const campaignMap = new Map<number, { name: string; status: string; inboxIds: number[] }>();
+
+  async function fetchPage(inboxId: number, page: number): Promise<{ data?: { id: number; name: string; status: string }[]; meta?: { last_page?: number } } | null> {
+    for (let a = 0; a < 5; a++) {
+      const res = await bisonFetch(instance, `/sender-emails/${inboxId}/campaigns?page=${page}&per_page=100`);
+      if (res.status === 404) return { data: [] };
+      if (res.ok) { try { return await res.json(); } catch { return null; } }
+      // transient (429/5xx) → honor Retry-After, else exp backoff
+      const ra = parseInt(res.headers.get("retry-after") || "", 10);
+      await delay((Number.isFinite(ra) && ra > 0 ? ra * 1000 : Math.min(8000, 500 * 2 ** a)) + Math.floor(Math.random() * 200));
+    }
+    return null;
+  }
+
+  async function lookup(inboxId: number) {
+    const campaigns: { id: number; name: string; status: string }[] = [];
+    let page = 1;
+    while (true) {
+      const json = await fetchPage(inboxId, page);
+      if (!json) break;
+      for (const c of json.data || []) campaigns.push({ id: c.id, name: c.name, status: c.status });
+      if (page >= (json.meta?.last_page || 1)) break;
+      page++;
+    }
+    return campaigns;
+  }
+
+  let next = 0;
+  const worker = async () => {
+    while (true) {
+      const i = next++;
+      if (i >= inboxIds.length) return;
+      const campaigns = await lookup(inboxIds[i]);
+      for (const c of campaigns) {
+        let entry = campaignMap.get(c.id);
+        if (!entry) { entry = { name: c.name, status: c.status, inboxIds: [] }; campaignMap.set(c.id, entry); }
+        entry.inboxIds.push(inboxIds[i]);
       }
     }
-  }
-  return names;
-}
-
-/**
- * INSTANT discovery: the client's campaigns are already synced in the
- * `campaigns` table (client_tag = name prefix). We just read the tag(s) on the
- * selected domains and return the matching campaigns straight from Supabase —
- * NO Bison calls. We deliberately do NOT fetch each campaign's senders here:
- * for big shared campaigns that's tens of thousands of rate-limited reads and
- * was blowing the 300s function limit. Membership + exact inbox IDs are
- * resolved per-campaign at removal time instead (chunked, one request each), so
- * discovery can never time out. Returns null if the domains carry no tag on
- * this instance (caller then has nothing to show → user can search manually).
- */
-async function discoverViaCampaignsTable(instance: BisonInstanceSlug, domains: string[]): Promise<DiscoveredCampaign[] | null> {
-  const supabase = getSupabaseAdmin();
-  const tagNames = await getDomainTagNames(instance, domains);
-  if (tagNames.size === 0) return null;
-
-  const { data: camps } = await supabase
-    .from("campaigns")
-    .select("id, name, status, client_tag")
-    .eq("instance", instance)
-    .in("client_tag", Array.from(tagNames));
-  if (!camps || camps.length === 0) return null;
-
-  // inboxCount unknown until removal; inboxIds intentionally empty so removal
-  // resolves them live for that single campaign.
-  return camps.map((c) => ({ id: c.id, instance, name: c.name, status: c.status, inboxCount: 0, inboxIds: [] }));
+  };
+  await Promise.all(Array.from({ length: Math.min(CONC, inboxIds.length) }, () => worker()));
+  return campaignMap;
 }
 
 /**
@@ -154,16 +158,23 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "domains required" }, { status: 400 });
     }
 
-    // Discover phase: list the client's candidate campaigns INSTANTLY from the
-    // synced campaigns table (by the domains' tag), across EVERY instance so a
-    // wrong group/tier in the switcher doesn't hide them. No Bison calls here —
-    // membership + exact inbox IDs are resolved per-campaign at removal time
-    // (chunked), so this can never hit the 300s timeout.
+    // Discover phase: find the campaigns the domains are ACTUALLY in, across
+    // every instance (so a wrong group/tier in the switcher doesn't hide them).
+    // The FE calls this one domain at a time (chunked) so each request stays
+    // small and never hits the 300s timeout.
     if (discover) {
       const perInstance = await Promise.all(
-        ALL_INSTANCE_SLUGS.map((inst) => discoverViaCampaignsTable(inst, domains)),
+        ALL_INSTANCE_SLUGS.map(async (inst) => {
+          const inboxIds = await getInboxIdsForDomains(inst, domains);
+          if (inboxIds.length === 0) return [] as DiscoveredCampaign[];
+          const campaignMap = await discoverCampaigns(inst, inboxIds);
+          return Array.from(campaignMap).map(([id, info]) => ({
+            id, instance: inst, name: info.name, status: info.status,
+            inboxCount: info.inboxIds.length, inboxIds: info.inboxIds,
+          }));
+        }),
       );
-      const all = perInstance.flatMap((camps) => camps || []);
+      const all = perInstance.flat();
       all.sort((a, b) => a.name.localeCompare(b.name));
       return NextResponse.json({ campaigns: all });
     }

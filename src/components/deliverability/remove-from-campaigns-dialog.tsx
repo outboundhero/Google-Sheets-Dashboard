@@ -93,6 +93,7 @@ export function RemoveFromCampaignsDialog({ open, onOpenChange, selectedDomains,
   const [result, setResult] = useState<Result | null>(null);
   const [error, setError] = useState("");
   const [discovering, setDiscovering] = useState(false);
+  const [discoverProgress, setDiscoverProgress] = useState<{ total: number; done: number } | null>(null);
   const [allLoading, setAllLoading] = useState(false);
   // Live progress for the chunked (one-request-per-campaign) removal.
   interface RemoveDetail { id: number; name: string; removed: number; error?: string }
@@ -111,27 +112,45 @@ export function RemoveFromCampaignsDialog({ open, onOpenChange, selectedDomains,
     setResult(null);
     setError("");
     setRemoveProgress(null);
+    setDiscoverProgress(null);
 
+    // Chunked discovery: scan ONE domain at a time so each request stays small
+    // (an inbox is only in a few campaigns) and the scan can never time out.
+    // Merge campaigns across domains, unioning the inbox IDs per campaign. Only
+    // campaigns the domains are ACTUALLY in are returned, so the user can't pick
+    // one they aren't attached to and get a confusing "0 removed".
+    let cancelled = false;
     setDiscovering(true);
-    fetchJsonWithRetry(`/api/deliverability/remove-from-campaigns?${instancesQuery}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ domains: selectedDomains, discover: true }),
-    })
-      .then((data) => {
-        if (data.error) throw new Error(data.error);
-        const camps: CampaignInfo[] = (data.campaigns || []).map(
-          (c: Omit<CampaignInfo, "source">) => ({ ...c, source: "auto" as const })
-        );
-        setAutoCampaigns(camps);
-        setSelectedCampaignIds((prev) => {
-          const next = new Set(prev);
-          for (const c of camps) next.add(c.id);
-          return next;
-        });
-      })
-      .catch((err) => { setError(err instanceof Error ? err.message : "Failed to discover campaigns"); })
-      .finally(() => setDiscovering(false));
+    (async () => {
+      const merged = new Map<number, CampaignInfo>();
+      for (let di = 0; di < selectedDomains.length; di++) {
+        if (cancelled) return;
+        try {
+          const data = await fetchJsonWithRetry(`/api/deliverability/remove-from-campaigns?${instancesQuery}`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ domains: [selectedDomains[di]], discover: true }),
+          });
+          if (!data.error) {
+            for (const c of (data.campaigns || []) as Omit<CampaignInfo, "source">[]) {
+              const ex = merged.get(c.id);
+              if (ex) {
+                ex.inboxIds = Array.from(new Set([...(ex.inboxIds || []), ...(c.inboxIds || [])]));
+                ex.inboxCount = ex.inboxIds.length;
+              } else {
+                merged.set(c.id, { ...c, inboxCount: c.inboxIds?.length || 0, source: "auto" });
+              }
+            }
+          }
+        } catch { /* skip this domain, keep going */ }
+        if (cancelled) return;
+        const arr = Array.from(merged.values());
+        setAutoCampaigns(arr);
+        setSelectedCampaignIds((prev) => { const n = new Set(prev); for (const c of arr) n.add(c.id); return n; });
+        setDiscoverProgress({ total: selectedDomains.length, done: di + 1 });
+      }
+      if (!cancelled) setDiscovering(false);
+    })();
 
     setAllLoading(true);
     fetch(`/api/campaigns?all=1&${instancesQuery}`)
@@ -144,6 +163,8 @@ export function RemoveFromCampaignsDialog({ open, onOpenChange, selectedDomains,
       })
       .catch(() => { /* manual search just won't have anything to show */ })
       .finally(() => setAllLoading(false));
+
+    return () => { cancelled = true; };
   }, [open, selectedDomains, instancesQuery]);
 
   const allListed = useMemo<CampaignInfo[]>(
@@ -263,10 +284,10 @@ export function RemoveFromCampaignsDialog({ open, onOpenChange, selectedDomains,
           <div className="flex flex-col gap-3 mt-2 flex-1 overflow-hidden">
             <p className="text-sm text-muted-foreground">
               {discovering
-                ? "Detecting campaigns for these domains…"
+                ? `Scanning for campaigns these domains are in… ${discoverProgress ? `(${discoverProgress.done}/${discoverProgress.total} domains)` : ""}`
                 : autoCampaigns.length > 0
-                  ? `Auto-detected ${autoCampaigns.length} campaign${autoCampaigns.length !== 1 ? "s" : ""}. Search to add more manually.`
-                  : "No campaigns auto-detected for these domains. Use search to add manually."}
+                  ? `Found ${autoCampaigns.length} campaign${autoCampaigns.length !== 1 ? "s" : ""} these domains are in. Search to add more manually.`
+                  : "No campaigns found for these domains. Use search to add manually."}
             </p>
 
             {/* Search — filters list above AND surfaces addable matches below. Always live. */}
@@ -298,7 +319,9 @@ export function RemoveFromCampaignsDialog({ open, onOpenChange, selectedDomains,
               {discovering && allListed.length === 0 ? (
                 <div className="flex flex-col items-center justify-center py-6 gap-2">
                   <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
-                  <span className="text-xs text-muted-foreground">Finding campaigns for these domains…</span>
+                  <span className="text-xs text-muted-foreground">
+                    Scanning{discoverProgress ? ` ${discoverProgress.done}/${discoverProgress.total} domains` : ""}…
+                  </span>
                 </div>
               ) : filtered.length === 0 && allListed.length === 0 && !search ? (
                 <div className="px-3 py-6 text-center text-xs text-muted-foreground">
