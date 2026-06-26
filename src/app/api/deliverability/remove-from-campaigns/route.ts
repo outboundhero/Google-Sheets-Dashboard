@@ -30,18 +30,77 @@ async function getInboxIdsForDomains(instance: BisonInstanceSlug, domains: strin
   return ids;
 }
 
+interface DiscoveredCampaign { id: number; instance: BisonInstanceSlug; name: string; status: string; inboxCount: number; inboxIds: number[] }
+
+/** Collect the tag names applied to a set of domains (from the synced inbox/domain data). */
+async function getDomainTagNames(instance: BisonInstanceSlug, domains: string[]): Promise<Set<string>> {
+  const supabase = getSupabaseAdmin();
+  const names = new Set<string>();
+  for (let i = 0; i < domains.length; i += 100) {
+    const { data } = await supabase
+      .from("deliverability_domains")
+      .select("tags")
+      .eq("instance", instance)
+      .in("domain", domains.slice(i, i + 100));
+    for (const r of data || []) {
+      let tags: unknown = r.tags;
+      if (typeof tags === "string") { try { tags = JSON.parse(tags); } catch { tags = []; } }
+      for (const t of (tags as unknown[]) || []) {
+        const n = t && typeof t === "object" ? (t as { name?: string }).name : t;
+        if (n) names.add(String(n).trim());
+      }
+    }
+  }
+  return names;
+}
+
 /**
- * Discover campaigns for a set of inbox IDs in one instance.
+ * FAST discovery: the client's campaigns are already synced in the `campaigns`
+ * table (with client_tag = name prefix). So instead of asking Bison "what
+ * campaigns is this inbox in?" for hundreds of inboxes (which rate-limits and
+ * hangs), we:
+ *   1. read the tag(s) on the selected domains,
+ *   2. pull only the campaigns whose client_tag matches (from Supabase — instant),
+ *   3. fetch senders for just those few campaigns and intersect with the domain
+ *      inboxes → exact campaigns + inbox IDs to remove.
+ * Returns null if it can't resolve via tags (no tags / no matching campaigns) so
+ * the caller falls back to the exhaustive per-inbox scan.
+ */
+async function discoverViaCampaignsTable(instance: BisonInstanceSlug, domains: string[], inboxSet: Set<number>): Promise<DiscoveredCampaign[] | null> {
+  const supabase = getSupabaseAdmin();
+  const tagNames = await getDomainTagNames(instance, domains);
+  if (tagNames.size === 0) return null;
+
+  const { data: camps } = await supabase
+    .from("campaigns")
+    .select("id, name, status, client_tag")
+    .eq("instance", instance)
+    .in("client_tag", Array.from(tagNames));
+  if (!camps || camps.length === 0) return null;
+
+  const out: DiscoveredCampaign[] = [];
+  for (const c of camps) {
+    let senders: number[];
+    try { senders = await fetchCampaignSenderIds(instance, c.id); }
+    catch { continue; } // skip a campaign that won't load rather than hang the whole thing
+    const matched = senders.filter((id) => inboxSet.has(id));
+    if (matched.length > 0) {
+      out.push({ id: c.id, instance, name: c.name, status: c.status, inboxCount: matched.length, inboxIds: matched });
+    }
+  }
+  return out;
+}
+
+/**
+ * FALLBACK discovery for a set of inbox IDs in one instance.
  *
  * For each inbox we ask Bison "what campaigns is this in?" via
  * /sender-emails/{id}/campaigns. There's no Bison bulk endpoint for this, so
- * the per-inbox lookup is unavoidable. To keep wall-clock time reasonable on
- * large selections (500-1000+ inboxes) we use a wide worker pool, no
- * inter-batch sleep, and a 429-aware retry so a rate limit on one page doesn't
- * silently drop that inbox's campaigns.
+ * the per-inbox lookup is unavoidable. Only used when the campaigns-table path
+ * can't resolve (untagged domains / renamed campaigns).
  */
 async function discoverCampaigns(instance: BisonInstanceSlug, inboxIds: number[]) {
-  const CONC = 25;
+  const CONC = 8;
   const campaignMap = new Map<number, { name: string; status: string; inboxIds: number[] }>();
 
   async function fetchPage(inboxId: number, page: number): Promise<{ data?: { id: number; name: string; status: string }[]; meta?: { last_page?: number } } | null> {
@@ -177,17 +236,18 @@ export async function POST(request: Request) {
         instances.map(async (inst) => {
           const inboxIds = await getInboxIdsForDomains(inst, domains);
           if (inboxIds.length === 0) return { inst, inboxCount: 0, campaigns: [] as Discovered[] };
-          const campaignMap = await discoverCampaigns(inst, inboxIds);
-          const camps: Discovered[] = [];
-          for (const [id, info] of campaignMap) {
-            camps.push({
-              id,
-              instance: inst,
-              name: info.name,
-              status: info.status,
-              inboxCount: info.inboxIds.length,
-              inboxIds: info.inboxIds,
-            });
+          const inboxSet = new Set(inboxIds);
+
+          // Fast path: resolve via the synced campaigns table (by tag). Falls
+          // back to the exhaustive per-inbox Bison scan only if that can't
+          // resolve (untagged domains / renamed campaigns).
+          let camps = (await discoverViaCampaignsTable(inst, domains, inboxSet)) as Discovered[] | null;
+          if (camps === null) {
+            const campaignMap = await discoverCampaigns(inst, inboxIds);
+            camps = [];
+            for (const [id, info] of campaignMap) {
+              camps.push({ id, instance: inst, name: info.name, status: info.status, inboxCount: info.inboxIds.length, inboxIds: info.inboxIds });
+            }
           }
           return { inst, inboxCount: inboxIds.length, campaigns: camps };
         }),
