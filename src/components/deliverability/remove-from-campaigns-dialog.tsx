@@ -94,6 +94,9 @@ export function RemoveFromCampaignsDialog({ open, onOpenChange, selectedDomains,
   const [error, setError] = useState("");
   const [discovering, setDiscovering] = useState(false);
   const [allLoading, setAllLoading] = useState(false);
+  // Live progress for the chunked (one-request-per-campaign) removal.
+  interface RemoveDetail { id: number; name: string; removed: number; error?: string }
+  const [removeProgress, setRemoveProgress] = useState<{ total: number; done: number; current: string | null; details: RemoveDetail[] } | null>(null);
 
   // On open: kick off auto-discovery + full campaign list in background — the user
   // can interact with the search bar immediately while these load.
@@ -107,6 +110,7 @@ export function RemoveFromCampaignsDialog({ open, onOpenChange, selectedDomains,
     setSearch("");
     setResult(null);
     setError("");
+    setRemoveProgress(null);
 
     setDiscovering(true);
     fetchJsonWithRetry(`/api/deliverability/remove-from-campaigns?${instancesQuery}`, {
@@ -168,11 +172,6 @@ export function RemoveFromCampaignsDialog({ open, onOpenChange, selectedDomains,
     [allListed, selectedCampaignIds]
   );
 
-  const totalInboxesToRemove = useMemo(
-    () => selectedCampaigns.reduce((s, c) => s + c.inboxCount, 0),
-    [selectedCampaigns]
-  );
-
   const toggleCampaign = (id: number) => {
     setSelectedCampaignIds((prev) => {
       const next = new Set(prev);
@@ -198,37 +197,48 @@ export function RemoveFromCampaignsDialog({ open, onOpenChange, selectedDomains,
     setSelectedCampaignIds((prev) => new Set([...prev, c.id]));
   };
 
+  // Chunked removal: one request PER CAMPAIGN so no single request can hit the
+  // 300s function limit (a whole-selection removal of big clients used to 504).
+  // Each request resolves that one campaign's senders live, intersects with the
+  // domains, and removes. Progress is shown live and the completed campaigns are
+  // already done server-side, so an interruption is safe to re-run (idempotent).
   const handleRemove = async () => {
+    const campaigns = selectedCampaigns;       // snapshot at click time
+    const domainsSnapshot = [...selectedDomains];
     setPhase("running");
     setError("");
     setResult(null);
+    setRemoveProgress({ total: campaigns.length, done: 0, current: campaigns[0]?.name ?? null, details: [] });
 
-    try {
-      const data = await fetchJsonWithRetry(`/api/deliverability/remove-from-campaigns?${instancesQuery}`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          domains: selectedDomains,
-          campaigns: selectedCampaigns.map((c) => ({
-            id: c.id,
-            instance: c.instance,
-            name: c.name,
-            status: c.status,
-            // Auto-discovered campaigns carry the inboxIds from discovery so
-            // the server can skip a slow re-fetch. Manual ones don't have
-            // them — the server will fall back to fetching live.
-            inboxIds: c.inboxIds,
-          })),
-        }),
-      });
-      if (data.error) throw new Error(data.error);
-      setResult(data);
-      setPhase("done");
-      onComplete();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed");
-      setPhase("done");
+    const details: RemoveDetail[] = [];
+    for (let i = 0; i < campaigns.length; i++) {
+      const c = campaigns[i];
+      setRemoveProgress((p) => (p ? { ...p, current: c.name, done: i } : p));
+      try {
+        const data = await fetchJsonWithRetry(`/api/deliverability/remove-from-campaigns?${instancesQuery}`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            domains: domainsSnapshot,
+            campaigns: [{ id: c.id, instance: c.instance, name: c.name, status: c.status, inboxIds: c.inboxIds }],
+          }),
+        });
+        const det: RemoveDetail = (data.details && data.details[0]) || { id: c.id, name: c.name, removed: data.removed ?? 0, error: data.error };
+        details.push({ id: c.id, name: c.name, removed: det.removed ?? 0, error: det.error });
+      } catch (err) {
+        details.push({ id: c.id, name: c.name, removed: 0, error: err instanceof Error ? err.message : "Failed" });
+      }
+      setRemoveProgress((p) => (p ? { ...p, done: i + 1, details: [...details] } : p));
     }
+
+    setResult({
+      inboxes: 0,
+      campaigns: details.length,
+      removed: details.reduce((s, d) => s + d.removed, 0),
+      details,
+    });
+    setPhase("done");
+    onComplete();
   };
 
   // Closing is always allowed — the removal request keeps running server-side
@@ -323,9 +333,6 @@ export function RemoveFromCampaignsDialog({ open, onOpenChange, selectedDomains,
                       <Badge variant="outline" className={`text-[9px] px-1.5 py-0 shrink-0 ${STATUS_COLORS[c.status.toLowerCase()] || ""}`}>
                         {c.status}
                       </Badge>
-                      {c.source === "auto" && (
-                        <span className="text-[10px] text-muted-foreground shrink-0 tabular-nums">{c.inboxCount} inboxes</span>
-                      )}
                     </button>
                   );
                 })
@@ -377,9 +384,9 @@ export function RemoveFromCampaignsDialog({ open, onOpenChange, selectedDomains,
               <div className="text-sm">
                 <p className="font-medium text-amber-200">Confirm removal</p>
                 <p className="text-amber-400/80 mt-1 text-xs">
-                  This will remove inboxes from {selectedCampaigns.length} campaign{selectedCampaigns.length !== 1 ? "s" : ""}{totalInboxesToRemove > 0 ? ` (~${totalInboxesToRemove} inboxes detected)` : ""}.
-                  Manually-added campaigns will only have inboxes removed if your selected domains are actually attached.
-                  Active campaigns will be paused during removal, then resumed automatically.
+                  This will remove the selected domains&apos; inboxes from {selectedCampaigns.length} campaign{selectedCampaigns.length !== 1 ? "s" : ""}, one campaign at a time.
+                  Each campaign is checked live — inboxes are only removed where your domains are actually attached (campaigns they aren&apos;t in show 0).
+                  Active campaigns are paused during removal, then resumed automatically.
                 </p>
               </div>
             </div>
@@ -393,9 +400,6 @@ export function RemoveFromCampaignsDialog({ open, onOpenChange, selectedDomains,
                       <Badge variant="outline" className="text-[9px] px-1.5 py-0 border-blue-500/30 text-blue-400">manual</Badge>
                     )}
                     <Badge variant="outline" className={`text-[9px] px-1.5 py-0 ${STATUS_COLORS[c.status.toLowerCase()] || ""}`}>{c.status}</Badge>
-                    {c.source === "auto" && (
-                      <span className="text-[10px] text-muted-foreground tabular-nums">{c.inboxCount}</span>
-                    )}
                   </div>
                 </div>
               ))}
@@ -410,13 +414,41 @@ export function RemoveFromCampaignsDialog({ open, onOpenChange, selectedDomains,
           </div>
         )}
 
-        {/* Running */}
+        {/* Running — chunked, one campaign at a time, with live progress */}
         {phase === "running" && (
-          <div className="flex flex-col items-center justify-center py-10 gap-3">
-            <Loader2 className="h-8 w-8 animate-spin text-primary" />
-            <p className="text-sm text-muted-foreground">Removing inboxes from campaigns...</p>
-            <p className="text-xs text-muted-foreground">Pausing active campaigns, removing inboxes, then resuming.</p>
-            <p className="text-xs text-muted-foreground/60">You can close this dialog — it will continue in the background.</p>
+          <div className="flex flex-col gap-3 py-4 mt-2">
+            <div className="flex items-center gap-3">
+              <Loader2 className="h-5 w-5 animate-spin text-primary shrink-0" />
+              <div className="flex-1 min-w-0">
+                <p className="text-sm">
+                  Removing — {removeProgress?.done ?? 0}/{removeProgress?.total ?? 0} campaigns
+                </p>
+                <p className="text-xs text-muted-foreground truncate">
+                  {removeProgress?.current ? `Processing: ${removeProgress.current}` : "Pausing active campaigns, removing, then resuming."}
+                </p>
+              </div>
+            </div>
+            <div className="h-1.5 rounded-full bg-muted overflow-hidden">
+              <div
+                className="h-full bg-primary transition-all"
+                style={{ width: `${removeProgress && removeProgress.total ? (removeProgress.done / removeProgress.total) * 100 : 0}%` }}
+              />
+            </div>
+            {removeProgress && removeProgress.details.length > 0 && (
+              <div className="max-h-40 overflow-y-auto rounded-lg border divide-y">
+                {removeProgress.details.map((d) => (
+                  <div key={d.id} className="flex items-center justify-between px-3 py-1.5">
+                    <span className="text-xs truncate flex-1">{d.name}</span>
+                    {d.error
+                      ? <span className="text-[10px] text-destructive ml-2 shrink-0">{d.error}</span>
+                      : <span className="text-[10px] text-muted-foreground ml-2 shrink-0">{d.removed} removed</span>}
+                  </div>
+                ))}
+              </div>
+            )}
+            <p className="text-xs text-muted-foreground/60">
+              Each campaign is processed in its own request, so this won&apos;t time out. You can close this — it keeps running in the background, and it&apos;s safe to re-run if interrupted.
+            </p>
           </div>
         )}
 
