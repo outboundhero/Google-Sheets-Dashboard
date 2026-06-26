@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { getSupabaseAdmin } from "@/lib/supabase";
-import { bisonFetch, resolveInstances } from "@/lib/bison";
-import { isInstanceSlug, type BisonInstanceSlug } from "@/lib/bison-instances";
+import { bisonFetch } from "@/lib/bison";
+import { isInstanceSlug, ALL_INSTANCE_SLUGS, type BisonInstanceSlug } from "@/lib/bison-instances";
 
 export const maxDuration = 300;
 
@@ -202,8 +202,6 @@ async function fetchCampaignSenderIds(instance: BisonInstanceSlug, campaignId: n
  */
 export async function POST(request: Request) {
   try {
-    const { searchParams } = new URL(request.url);
-    const instances = resolveInstances(searchParams);
     const body = await request.json();
     const { domains, discover, campaigns: removeCampaigns } = body as {
       domains: string[];
@@ -215,8 +213,12 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "domains required" }, { status: 400 });
     }
 
-    // Discover phase: scan each instance for inboxes + campaigns, merge results.
+    // Discover phase: scan EVERY instance for inboxes + campaigns (not just the
+    // UI's current scope) so domains are found wherever they actually live —
+    // a wrong group/tier in the instance switcher used to make this come back
+    // empty. Per-instance lookups short-circuit cheaply when a domain isn't there.
     if (discover) {
+      const discoverInstances = ALL_INSTANCE_SLUGS;
       type Discovered = {
         id: number;
         instance: BisonInstanceSlug;
@@ -233,7 +235,7 @@ export async function POST(request: Request) {
       // Parallelize across instances — most selections only have data in one
       // or two instances, so we can fan out without worrying about API quota.
       const perInstance = await Promise.all(
-        instances.map(async (inst) => {
+        discoverInstances.map(async (inst) => {
           const inboxIds = await getInboxIdsForDomains(inst, domains);
           if (inboxIds.length === 0) return { inst, inboxCount: 0, campaigns: [] as Discovered[] };
           const inboxSet = new Set(inboxIds);
