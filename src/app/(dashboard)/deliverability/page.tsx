@@ -816,6 +816,9 @@ function DeliverabilityPageInner() {
               const ms = Math.round(performance.now() - t0);
               const pagesInChunk = Math.min(CHUNK, end - page + 1);
               incInstance(instance, result.synced || 0, pagesInChunk);
+              // Pages that failed even after the route's own retries → skip prune
+              // (those inboxes weren't refreshed; don't risk deleting them).
+              if (result.failedPages?.length) anyChunkFailed = true;
               console.log(`[${instance}:STREAM ${streamId}] Pages ${page}-${page + pagesInChunk - 1}: ${result.synced} inboxes, ${result.domains} domains in ${ms}ms`);
               success = true;
               break;
@@ -847,6 +850,7 @@ function DeliverabilityPageInner() {
         }
         const firstResult = await firstRes.json();
         const lastPage = firstResult.lastPage || 1;
+        if (firstResult.failedPages?.length) anyChunkFailed = true;
         console.log(`[SYNC:${instance}] First chunk done: ${firstResult.synced} inboxes, lastPage=${lastPage}`);
         patchInstance(instance, {
           synced: firstResult.synced || 0,

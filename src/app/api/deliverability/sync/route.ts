@@ -3,9 +3,14 @@ import { getSupabaseAdmin } from "@/lib/supabase";
 import { bisonFetch, resolveInstance } from "@/lib/bison";
 import { isInstanceSlug, type BisonInstanceSlug } from "@/lib/bison-instances";
 
+// Give a chunk room to finish (with backoff/retries) before the platform kills
+// it — a slow instance + a couple of rate-limit waits used to 504.
+export const maxDuration = 60;
+
 const PER_PAGE = 15;
-const CONCURRENT = 3;
+const CONCURRENT = 2;         // gentler: 4 streams × 2 = ~8 concurrent, fewer 429s than ×3
 const BATCH_DELAY_MS = 800;
+const PAGE_RETRIES = 4;       // transient (429/5xx/network) retries per page
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -34,15 +39,36 @@ interface SenderEmail {
   updated_at: string;
 }
 
-async function fetchPage(instance: BisonInstanceSlug, page: number): Promise<{ data: SenderEmail[]; lastPage: number }> {
-  const res = await bisonFetch(instance, `/sender-emails?page=${page}&per_page=${PER_PAGE}`);
-  if (!res.ok) throw new Error(`API error ${res.status} on page ${page}`);
-  const json = await res.json();
-  const payload = Array.isArray(json) ? json[0] : json;
-  return {
-    data: payload.data || [],
-    lastPage: payload.meta?.last_page || 1,
-  };
+// Fetch one page, retrying transient failures (rate-limit / 5xx / network) with
+// exponential backoff + jitter. This is the core fix for "B2B #2 errors every
+// time": the big instances get rate-limited mid-crawl, and without backoff a
+// single 429 used to throw and fail the whole chunk → whole instance red.
+async function fetchPage(instance: BisonInstanceSlug, page: number, attempt = 0): Promise<{ data: SenderEmail[]; lastPage: number }> {
+  let status = 0;
+  try {
+    const res = await bisonFetch(instance, `/sender-emails?page=${page}&per_page=${PER_PAGE}`);
+    if (res.ok) {
+      const json = await res.json();
+      const payload = Array.isArray(json) ? json[0] : json;
+      return { data: payload.data || [], lastPage: payload.meta?.last_page || 1 };
+    }
+    status = res.status;
+    // Honor Retry-After on a 429 when present.
+    if ((status === 429 || status >= 500) && attempt < PAGE_RETRIES) {
+      const ra = parseInt(res.headers.get("retry-after") || "", 10);
+      const wait = Number.isFinite(ra) && ra > 0 ? ra * 1000 : Math.min(8000, 500 * 2 ** attempt);
+      await sleep(wait + Math.floor(Math.random() * 300));
+      return fetchPage(instance, page, attempt + 1);
+    }
+  } catch (e) {
+    // Network/abort → also transient.
+    if (attempt < PAGE_RETRIES) {
+      await sleep(Math.min(8000, 500 * 2 ** attempt) + Math.floor(Math.random() * 300));
+      return fetchPage(instance, page, attempt + 1);
+    }
+    throw e;
+  }
+  throw new Error(`API error ${status} on page ${page}`);
 }
 
 export async function POST(request: Request) {
@@ -63,21 +89,23 @@ export async function POST(request: Request) {
     const remainingPages: number[] = [];
     for (let p = startPage + 1; p <= endPage; p++) remainingPages.push(p);
 
+    // fetchPage already retries 429/5xx with backoff, so we no longer "stop
+    // early" on a rate-limit (that silently skipped the rest of the chunk's
+    // pages → those inboxes went stale and could be pruned). If a page still
+    // fails after all retries, we record it so the chunk reports incomplete
+    // rather than pretending it synced everything.
+    const failedPages: number[] = [];
     for (let i = 0; i < remainingPages.length; i += CONCURRENT) {
       const batch = remainingPages.slice(i, i + CONCURRENT);
       const results = await Promise.allSettled(batch.map((p) => fetchPage(instance, p)));
-      let sawRateLimit = false;
-      for (const r of results) {
+      results.forEach((r, idx) => {
         if (r.status === "fulfilled") {
           allInboxes = allInboxes.concat(r.value.data);
-        } else if (String(r.reason).includes("429")) {
-          sawRateLimit = true;
+        } else {
+          failedPages.push(batch[idx]);
+          console.warn(`[SYNC:${instance}] Page ${batch[idx]} failed after retries: ${String(r.reason).slice(0, 120)}`);
         }
-      }
-      if (sawRateLimit) {
-        console.warn(`[SYNC:${instance}] Bison rate-limited, stopping early at batch ${i / CONCURRENT}`);
-        break;
-      }
+      });
       if (i + CONCURRENT < remainingPages.length) {
         await sleep(BATCH_DELAY_MS);
       }
@@ -160,7 +188,7 @@ export async function POST(request: Request) {
     const complete = nextPage > lastPage;
     const totalMs = Date.now() - t0;
 
-    console.log(`[SYNC:${instance}] Pages ${startPage}-${endPage}: ${allInboxes.length} inboxes | fetch=${fetchMs}ms db=${dbMs}ms total=${totalMs}ms`);
+    console.log(`[SYNC:${instance}] Pages ${startPage}-${endPage}: ${allInboxes.length} inboxes${failedPages.length ? ` | ${failedPages.length} pages failed` : ""} | fetch=${fetchMs}ms db=${dbMs}ms total=${totalMs}ms`);
 
     return NextResponse.json({
       instance,
@@ -170,6 +198,7 @@ export async function POST(request: Request) {
       lastPage,
       complete,
       domains: domainSet.size,
+      failedPages,              // pages that couldn't be fetched even after retries (usually [])
     });
   } catch (error) {
     console.error(`[SYNC] ERROR after ${Date.now() - t0}ms:`, error);
