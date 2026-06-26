@@ -9,10 +9,12 @@ import { RefreshCw, AlertTriangle, ExternalLink, Check, X, Loader2 } from "lucid
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 
-interface Issue { instance: string; domain: string; clientTag: string; current: string | null; expected: string | null; kind: "wrong" | "missing" | "multitag" }
+interface Issue { instance: string; displayInstance: string; mismatch: boolean; domain: string; clientTag: string; current: string | null; expected: string | null; kind: "wrong" | "missing" | "multitag" }
 interface AuditData { wrong: Issue[]; missing: Issue[]; multiTag: Issue[]; okCount: number; scanned: number }
 
-const short: Record<string, string> = { outboundhero: "OH·B2B", cleaningoutbound: "CO·B2C", facilityreach: "FR·B2B", outboundclean: "OC·B2C" };
+// Instance labels: tier+group AND the instance short-name. B2B#1 = outboundhero,
+// B2C#1 = cleaningoutbound, B2B#2 = facilityreach, B2C#2 = outboundclean.
+const short: Record<string, string> = { outboundhero: "B2B1·OH", cleaningoutbound: "B2C1·CO", facilityreach: "B2B2·FR", outboundclean: "B2C2·OC" };
 const withProto = (u: string) => (/^https?:\/\//i.test(u) ? u : `https://${u}`);
 
 export function RedirectIssuesCard() {
@@ -79,9 +81,11 @@ export function RedirectIssuesCard() {
   const Row = ({ i }: { i: Issue }) => {
     const k = key(i); const isBusy = busy.has(k); const note = notes[k];
     return (
-      <div className="grid grid-cols-[1fr_70px_1.4fr_120px] gap-2 px-3 py-2 text-xs items-center">
+      <div className="grid grid-cols-[1fr_84px_1.4fr_120px] gap-2 px-3 py-1 text-xs items-center">
         <span className="truncate" title={i.domain}>{i.domain}<span className="text-muted-foreground ml-1">({i.clientTag})</span></span>
-        <span className="text-muted-foreground">{short[i.instance] ?? i.instance}</span>
+        <span className={i.mismatch ? "text-amber-500" : "text-muted-foreground"} title={i.mismatch ? `Allocated to ${short[i.displayInstance] ?? i.displayInstance} (per allocation sheet) but the domain physically sits on ${short[i.instance] ?? i.instance}` : undefined}>
+          {short[i.displayInstance] ?? i.displayInstance}{i.mismatch ? " ⚠" : ""}
+        </span>
         <span className="truncate text-muted-foreground">
           {i.kind === "multitag" ? <span className="text-amber-500">multiple client tags — fix manually</span> : (<>
             <span className="text-red-400">{i.current ? i.current.replace(/^https?:\/\//, "") : "(none)"}</span>
@@ -104,7 +108,7 @@ export function RedirectIssuesCard() {
 
   const Section = ({ title, list, fixable }: { title: string; list: Issue[]; fixable?: boolean }) => list.length === 0 ? null : (
     <div>
-      <div className="flex items-center justify-between px-3 py-1.5 bg-muted/40 text-[11px] font-medium sticky top-0">
+      <div className="flex items-center justify-between px-3 py-1.5 bg-background border-b text-[11px] font-medium sticky top-0 z-10">
         <span>{title} <span className="text-muted-foreground">({list.length})</span></span>
         {fixable && <button onClick={() => fixAll(list)} className="text-emerald-500 hover:underline">Fix all {list.length}</button>}
       </div>
@@ -120,7 +124,7 @@ export function RedirectIssuesCard() {
             <ExternalLink className="h-4 w-4 text-amber-500" />
             <div>
               <div className="text-sm font-medium">Redirect issues — domains not matching the Client Tracker</div>
-              <div className="text-[11px] text-muted-foreground">Compared to the Client Tracker &ldquo;Website&rdquo; column. <b>Fix</b> pushes the correct redirect · <b>Ignore</b> leaves it as-is.</div>
+              <div className="text-[11px] text-muted-foreground">Compared to the Client Tracker &ldquo;Website&rdquo; column. <b>Fix</b> pushes the correct redirect · <b>Ignore</b> leaves it as-is · <b>Re-check</b> re-reads the sheet live.</div>
             </div>
           </div>
           <Button size="sm" variant="outline" onClick={load} disabled={loading} className="gap-2">
@@ -140,7 +144,7 @@ export function RedirectIssuesCard() {
               <span className="text-muted-foreground">Multi-tag <b className="text-amber-500">{data.multiTag.length}</b></span>
               <span className="text-muted-foreground">Correct <b className="text-emerald-500">{data.okCount}</b></span>
             </div>
-            <div className="rounded-lg border divide-y max-h-[480px] overflow-y-auto">
+            <div className="rounded-lg border divide-y max-h-[300px] overflow-y-auto">
               <Section title="Wrong — points to a different/incorrect URL" list={data.wrong} fixable />
               <Section title="Missing — no redirect set" list={data.missing} fixable />
               <Section title="Multiple client tags — needs manual fix" list={data.multiTag} />

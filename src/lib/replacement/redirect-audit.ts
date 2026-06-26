@@ -5,10 +5,26 @@
 // separate approved action.
 import { getSheetsClient } from "@/lib/google-sheets";
 import { getSupabaseAdmin } from "@/lib/supabase";
-import { ALL_INSTANCE_SLUGS } from "@/lib/bison-instances";
+import { ALL_INSTANCE_SLUGS, BISON_INSTANCES, type BisonInstanceSlug, type BisonGroup } from "@/lib/bison-instances";
+import { getAllocations } from "@/lib/client-tag-allocations";
 
 const CLIENT_TRACKER_ID = "1MGqSgGNoeN6WgjZnT7_Ij_nZftyyj7Z9DT77rVYLKuQ";
 const CLIENT_TRACKER_TAB = "Client Tracker";
+
+// Which instance to DISPLAY for a domain. The Client Tag Allocation sheet is the
+// source of truth for the GROUP (1 = OH+CO, 2 = FR+OC). The tier (b2b/b2c) comes
+// from where the domain physically sits (a b2b domain is on a b2b instance). So a
+// DM4PM domain physically on FacilityReach (group 2) but allocated to group 1
+// shows as B2B1·OH — the client's real home — not B2B2·FR. The physical instance
+// is still kept internally for the Fix/decision logic. `mismatch` = the domain
+// physically sits in a different group than the client is allocated to.
+function resolveDisplay(physicalSlug: string, allocGroup: BisonGroup | null): { display: string; mismatch: boolean } {
+  const phys = BISON_INSTANCES[physicalSlug as BisonInstanceSlug];
+  if (!phys) return { display: physicalSlug, mismatch: false };
+  const group = allocGroup ?? phys.group;
+  const slug = ALL_INSTANCE_SLUGS.find((s) => BISON_INSTANCES[s].group === group && BISON_INSTANCES[s].tier === phys.tier);
+  return { display: slug ?? physicalSlug, mismatch: allocGroup != null && allocGroup !== phys.group };
+}
 
 const norm = (u?: string | null) =>
   !u ? "" : String(u).trim().toLowerCase().replace(/^https?:\/\//, "").replace(/^www\./, "").replace(/\/+$/, "");
@@ -17,7 +33,9 @@ const looselyMatches = (a: string, b: string) =>
 
 export type RedirectIssueKind = "wrong" | "missing" | "multitag";
 export interface RedirectIssue {
-  instance: string;
+  instance: string;        // physical instance (where the domain lives — used for Fix/decisions)
+  displayInstance: string; // instance to SHOW (group from allocation sheet + domain's tier)
+  mismatch: boolean;       // domain physically sits in a different group than the client is allocated to
   domain: string;
   clientTag: string;       // for multitag, the joined tags
   current: string | null;  // current redirect
@@ -57,6 +75,8 @@ export interface RedirectAuditResult {
 export async function auditRedirects(): Promise<RedirectAuditResult> {
   const supabase = getSupabaseAdmin();
   const { websites, allTags } = await readClientTracker();
+  // Allocation sheet = source of truth for the client tag's group.
+  const { map: allocMap } = await getAllocations();
 
   // already-decided (fixed/ignored) domains — exclude so they don't re-appear
   const decided = new Set<string>();
@@ -99,19 +119,22 @@ export async function auditRedirects(): Promise<RedirectAuditResult> {
     scanned++;
 
     if (ctags.length > 1) {
-      multiTag.push({ instance: dm.instance, domain: dm.domain, clientTag: ctags.join(", "), current: dm.redirect_url, expected: null, kind: "multitag" });
+      // Multiple client tags → can't pick one allocation; show physical instance.
+      const { display } = resolveDisplay(dm.instance, null);
+      multiTag.push({ instance: dm.instance, displayInstance: display, mismatch: false, domain: dm.domain, clientTag: ctags.join(", "), current: dm.redirect_url, expected: null, kind: "multitag" });
       continue;
     }
     const tag = ctags[0];
+    const { display, mismatch } = resolveDisplay(dm.instance, allocMap[tag] ?? null);
     const expected = websites.get(tag);
     if (!expected) continue;                   // no website on file — can't judge/fix
     const current = dm.redirect_url;
     if (!current) {
-      missing.push({ instance: dm.instance, domain: dm.domain, clientTag: tag, current: null, expected, kind: "missing" });
+      missing.push({ instance: dm.instance, displayInstance: display, mismatch, domain: dm.domain, clientTag: tag, current: null, expected, kind: "missing" });
       continue;
     }
     if (looselyMatches(norm(current), norm(expected))) { okCount++; continue; }
-    wrong.push({ instance: dm.instance, domain: dm.domain, clientTag: tag, current, expected, kind: "wrong" });
+    wrong.push({ instance: dm.instance, displayInstance: display, mismatch, domain: dm.domain, clientTag: tag, current, expected, kind: "wrong" });
   }
 
   const sortFn = (a: RedirectIssue, b: RedirectIssue) => a.clientTag.localeCompare(b.clientTag) || a.domain.localeCompare(b.domain);
