@@ -26,6 +26,7 @@ import { LeadsByStatusChart } from "@/components/dashboard/leads-by-status-chart
 import { LeadsOverTimeChart } from "@/components/dashboard/leads-over-time-chart";
 import { TopClientsTable } from "@/components/dashboard/top-clients-table";
 import { RedirectIssuesCard } from "@/components/dashboard/redirect-issues-card";
+import { CrossTagAuditCard } from "@/components/dashboard/cross-tag-audit-card";
 import { AttachFailuresCard } from "@/components/dashboard/attach-failures-card";
 import { PendingOffboardingsCard } from "@/components/dashboard/pending-offboardings-card";
 import {
@@ -214,6 +215,9 @@ export default function DashboardPage() {
 
       {/* Redirect issues — admin only; flags domains not matching the Client Tracker. */}
       {isAdmin && <RedirectIssuesCard />}
+
+      {/* Cross-tag audit — admin only; domains in wrong-client campaigns. */}
+      {isAdmin && <CrossTagAuditCard />}
 
       {/* Clients Going Off + Churned — side by side */}
       {(clientsGoingOff.length > 0 || churnedClients.length > 0) && (
