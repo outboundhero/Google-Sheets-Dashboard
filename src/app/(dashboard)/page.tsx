@@ -27,6 +27,7 @@ import { LeadsOverTimeChart } from "@/components/dashboard/leads-over-time-chart
 import { TopClientsTable } from "@/components/dashboard/top-clients-table";
 import { RedirectIssuesCard } from "@/components/dashboard/redirect-issues-card";
 import { CrossTagAuditCard } from "@/components/dashboard/cross-tag-audit-card";
+import { DuplicateDomainsCard } from "@/components/dashboard/duplicate-domains-card";
 import { AttachFailuresCard } from "@/components/dashboard/attach-failures-card";
 import { PendingOffboardingsCard } from "@/components/dashboard/pending-offboardings-card";
 import {
@@ -218,6 +219,9 @@ export default function DashboardPage() {
 
       {/* Cross-tag audit — admin only; domains in wrong-client campaigns. */}
       {isAdmin && <CrossTagAuditCard />}
+
+      {/* Duplicate domains across instances — admin only. */}
+      {isAdmin && <DuplicateDomainsCard />}
 
       {/* Clients Going Off + Churned — side by side */}
       {(clientsGoingOff.length > 0 || churnedClients.length > 0) && (
