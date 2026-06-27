@@ -26,6 +26,7 @@ import { LeadsByStatusChart } from "@/components/dashboard/leads-by-status-chart
 import { LeadsOverTimeChart } from "@/components/dashboard/leads-over-time-chart";
 import { TopClientsTable } from "@/components/dashboard/top-clients-table";
 import { RedirectIssuesCard } from "@/components/dashboard/redirect-issues-card";
+import { TagAlignmentCard } from "@/components/dashboard/tag-alignment-card";
 import { CrossTagAuditCard } from "@/components/dashboard/cross-tag-audit-card";
 import { DuplicateDomainsCard } from "@/components/dashboard/duplicate-domains-card";
 import { AttachFailuresCard } from "@/components/dashboard/attach-failures-card";
@@ -213,6 +214,9 @@ export default function DashboardPage() {
 
       {/* Pending offboardings — admin only; self-hides when there are none. */}
       {isAdmin && <PendingOffboardingsCard />}
+
+      {/* Client Tracker tag alignment — admin only; small companion to the redirect audit. */}
+      {isAdmin && <TagAlignmentCard />}
 
       {/* Redirect issues — admin only; flags domains not matching the Client Tracker. */}
       {isAdmin && <RedirectIssuesCard />}
