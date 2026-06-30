@@ -326,7 +326,12 @@ export default function CampaignsPage() {
     const seq = ++campaignsSeqRef.current;
     setCampaigns([]);
     try {
-      const res = await fetch(`/api/campaigns?${instancesQuery}`, { cache: "no-store" });
+      // `?all=1` bypasses the route's default "active clients only" server-side
+      // filter so we can render every campaign in this instance group. The new
+      // "Active clients / Churned clients" pills (below) do the client-status
+      // filtering on the page instead — which is the only way the user can
+      // actually drill into churned-client campaigns at all.
+      const res = await fetch(`/api/campaigns?all=1&${instancesQuery}`, { cache: "no-store" });
       const data = await res.json();
       if (seq !== campaignsSeqRef.current) return;
       if (data.campaigns && Array.isArray(data.campaigns)) {
