@@ -186,6 +186,7 @@ export default function ClientDetailPage({
   }, [clientLeads, billingStartDate]);
 
   const leadsOverTime = analytics?.leadsOverTime || [];
+  const qualityLeadsOverTime = analytics?.qualityLeadsOverTime || [];
 
   // Compute 24h meeting-ready and missing status metrics
   const meetingReadyMetrics = useMemo(() => {
@@ -370,7 +371,7 @@ export default function ClientDetailPage({
           </Card>
 
           {/* Leads Over Time — full width */}
-          <LeadsOverTimeChart data={leadsOverTime} billingStartDate={billingStartDate} />
+          <LeadsOverTimeChart data={leadsOverTime} qualityData={qualityLeadsOverTime} billingStartDate={billingStartDate} />
         </>
       )}
 

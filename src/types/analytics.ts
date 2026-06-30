@@ -16,6 +16,7 @@ export interface DashboardAnalytics {
   leadsByStatus: { status: string; count: number }[];
   leadsByCategory: { category: string; count: number }[];
   leadsOverTime: { date: string; count: number }[];
+  qualityLeadsOverTime: { date: string; count: number }[];
   topClients: {
     client: string;
     qualityLeads: number;

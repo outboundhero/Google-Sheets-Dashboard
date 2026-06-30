@@ -234,6 +234,11 @@ export function computeAnalytics(
     .sort((a, b) => b.count - a.count);
 
   const leadsOverTime = computeTimeSeries(filtered, goLiveDate, isDeliverable);
+  // Parallel series scoped to leads whose canonical status is "Quality Lead" —
+  // lets the client detail page contrast Meeting-Ready vs Quality on the
+  // same axis. Uses the same billing-month bucketing so both lines align.
+  const isQualityLead = (l: Lead) => l.status.trim().toLowerCase() === "quality lead";
+  const qualityLeadsOverTime = computeTimeSeries(filtered, goLiveDate, isQualityLead);
 
   const topClients = leadsByClient
     .map(({ client, count }) => {
@@ -334,6 +339,7 @@ export function computeAnalytics(
     leadsByStatus,
     leadsByCategory,
     leadsOverTime,
+    qualityLeadsOverTime,
     topClients,
   };
 }
