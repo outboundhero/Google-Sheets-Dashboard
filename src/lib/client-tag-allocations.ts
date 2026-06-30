@@ -39,7 +39,7 @@ function normalizeTag(raw: unknown): string {
   return String(raw ?? "").trim().toUpperCase();
 }
 
-/** Reads the allocation sheet live and parses columns A + C into a map. */
+/** Reads the allocation sheet live and parses columns A + B into a map. */
 export async function fetchAllocationsFromSheet(): Promise<ClientTagAllocations> {
   const sheets = await getSheetsClient();
 
@@ -50,9 +50,15 @@ export async function fetchAllocationsFromSheet(): Promise<ClientTagAllocations>
   });
   const tab = meta.data.sheets?.[0]?.properties?.title || "Sheet1";
 
+  // Column A = Group 1 client tags, Column B = Group 2 client tags. The sheet
+  // used to have B as a "DONE" checkbox column (so we read A + C), but it has
+  // since been collapsed: B is now Group 2, and C no longer exists at all.
+  // Reading C2:C against the current 2-column sheet returned "exceeds grid
+  // limits" → every Group 2 tag was being treated as unallocated, leaking
+  // them into BOTH groups in the UI (per the fallback rule).
   const res = await sheets.spreadsheets.values.batchGet({
     spreadsheetId: ALLOCATION_SHEET_ID,
-    ranges: [`${tab}!A2:A`, `${tab}!C2:C`],
+    ranges: [`${tab}!A2:A`, `${tab}!B2:B`],
   });
 
   const group1Col = res.data.valueRanges?.[0]?.values || [];
