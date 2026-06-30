@@ -22,6 +22,7 @@ import {
 } from "@/components/campaigns/bulk-status-dialog";
 import { useInstance } from "@/lib/instance-context";
 import { useAuth } from "@/lib/auth-context";
+import { useClientTracker } from "@/lib/hooks/use-client-tracker";
 import type { BisonInstanceSlug } from "@/lib/bison-instances";
 
 interface Campaign {
@@ -295,6 +296,10 @@ export default function CampaignsPage() {
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState("active");
   const [clientFilters, setClientFilters] = useState<string[]>([]);
+  // Client lifecycle filter: campaigns whose client tag is currently active vs
+  // churned (per the Client Tracker sheet). "all" = no filter (default).
+  const [clientStatusFilter, setClientStatusFilter] = useState<"all" | "active" | "churned">("all");
+  const { clients: trackerClients } = useClientTracker();
   const [selectedCampaign, setSelectedCampaign] = useState<Campaign | null>(null);
   const [lowLeadsOpen, setLowLeadsOpen] = useState(true);
   const [sortField, setSortField] = useState<"created_at" | "remaining_leads" | "emails_sent" | "replied">("created_at");
@@ -389,10 +394,43 @@ export default function CampaignsPage() {
     return counts;
   }, [campaigns]);
 
+  // Churned client tags: status === "Churned" AND churn_date already reached
+  // (PST). Future churn dates → tag stays in the "active" bucket per spec.
+  // Stored UPPERCASE to match the way client_tag is normalised everywhere else.
+  const churnedTags = useMemo(() => {
+    const now = new Date();
+    const set = new Set<string>();
+    for (const c of trackerClients) {
+      if (!c.churnDate) continue;
+      if ((c.status || "").trim().toLowerCase() !== "churned") continue;
+      const d = new Date(c.churnDate);
+      if (isNaN(d.getTime()) || d > now) continue;
+      const tag = (c.clientAbbr || "").trim().toUpperCase();
+      if (tag) set.add(tag);
+    }
+    return set;
+  }, [trackerClients]);
+
+  const isChurnedCampaign = useCallback(
+    (c: Campaign) => !!c.client_tag && churnedTags.has(c.client_tag.trim().toUpperCase()),
+    [churnedTags],
+  );
+
+  // Pill counts come from ALL campaigns (not the current filter view) — same
+  // convention the existing status chips use, so the totals stay stable as
+  // other filters change.
+  const clientStatusCounts = useMemo(() => {
+    let churned = 0;
+    for (const c of campaigns) if (isChurnedCampaign(c)) churned++;
+    return { all: campaigns.length, active: campaigns.length - churned, churned };
+  }, [campaigns, isChurnedCampaign]);
+
   const filtered = useMemo(() => {
     let result = campaigns;
     if (statusFilter !== "all") result = result.filter((c) => normStatus(c.status) === statusFilter);
     if (clientFilters.length > 0) result = result.filter((c) => clientFilters.includes(c.client_tag));
+    if (clientStatusFilter === "active") result = result.filter((c) => !isChurnedCampaign(c));
+    else if (clientStatusFilter === "churned") result = result.filter((c) => isChurnedCampaign(c));
     // Search supports a comma-separated list of client tag abbreviations (or any
     // substring): a campaign matches if its name or tag contains ANY of the terms.
     const terms = search.split(",").map((s) => s.trim().toLowerCase()).filter(Boolean);
@@ -410,7 +448,7 @@ export default function CampaignsPage() {
       }
       return sortDir === "desc" ? b[sortField] - a[sortField] : a[sortField] - b[sortField];
     });
-  }, [campaigns, statusFilter, clientFilters, search, sortField, sortDir]);
+  }, [campaigns, statusFilter, clientFilters, clientStatusFilter, isChurnedCampaign, search, sortField, sortDir]);
 
   // Clients with <1500 remaining leads (active only)
   const lowLeadsClients = useMemo(() => {
@@ -719,6 +757,36 @@ export default function CampaignsPage() {
             </button>
           );
         })}
+
+        {/* Client lifecycle (sourced from Client Tracker sheet: status === "Churned"
+            AND churn date already reached → churned; otherwise active). */}
+        <div className="flex items-center gap-1 pl-2 ml-1 border-l">
+          {([
+            { key: "all",     label: "All clients",     count: clientStatusCounts.all },
+            { key: "active",  label: "Active clients",  count: clientStatusCounts.active },
+            { key: "churned", label: "Churned clients", count: clientStatusCounts.churned },
+          ] as const).map((p) => (
+            <button
+              key={p.key}
+              onClick={() => setClientStatusFilter(p.key)}
+              className={`text-xs px-2.5 py-1.5 rounded-full border transition-colors ${
+                clientStatusFilter === p.key
+                  ? p.key === "churned"
+                    ? "bg-zinc-500 text-zinc-50 border-zinc-500"
+                    : "bg-primary text-primary-foreground border-primary"
+                  : "border-border text-muted-foreground hover:border-foreground hover:text-foreground"
+              }`}
+              title={p.key === "churned"
+                ? "Campaigns whose client tag is marked Churned in the Client Tracker (with the churn date already reached)"
+                : p.key === "active"
+                  ? "Campaigns whose client tag is NOT churned yet"
+                  : "Show all client tags"}
+            >
+              {p.label}
+              <span className="ml-1 opacity-60">{p.count}</span>
+            </button>
+          ))}
+        </div>
 
         <ClientFilterDropdown
           allClients={clientTags}
