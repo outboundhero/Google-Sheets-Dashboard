@@ -18,6 +18,15 @@ const FROM_EMAIL = process.env.WHITELIST_FROM_EMAIL || "spencer@outboundhero.co"
 const INTERNAL_CC = (process.env.WHITELIST_INTERNAL_CC || "nick@outboundhero.co,madison@outboundhero.co")
   .split(",").map((s) => s.trim()).filter(Boolean);
 
+// Per-client extra primary recipients — added to the outgoing "To" list ALONGSIDE
+// whoever ReplyRouter returns. For SFS, George is a fixed CC on every whitelist
+// email (he goes with Rocco in the To field, not the internal CC). Keys are
+// UPPERCASE client tags.
+const EXTRA_TO_BY_CLIENT: Record<string, string[]> = {
+  SFS: ["george@urackit.com"],
+};
+
+
 const REPLY_ROUTER_BASE_URL =
   process.env.REPLY_ROUTER_BASE_URL || "https://replies-custom-code-project.vercel.app";
 const REPLY_ROUTER_SECRET = process.env.REPLY_ROUTER_SECRET || "outboundhero2024";
@@ -112,7 +121,14 @@ export async function sendWhitelistEmail(args: {
     console.warn("[whitelist] N8N_WHITELIST_WEBHOOK_URL not set — skipping send");
     return { sent: false, reason: "N8N_WHITELIST_WEBHOOK_URL not configured" };
   }
-  if (args.to.length === 0 && args.bcc.length === 0) {
+  // Fold any per-client "always include in To" addresses in alongside the
+  // ReplyRouter contacts. For SFS, this puts George next to Rocco. De-dup so
+  // a repeat address never lands twice. Every other client is unchanged
+  // because the lookup returns [] for anything not in EXTRA_TO_BY_CLIENT.
+  const extraTo = EXTRA_TO_BY_CLIENT[args.clientTag.trim().toUpperCase()] || [];
+  const to = Array.from(new Set([...args.to, ...extraTo]));
+
+  if (to.length === 0 && args.bcc.length === 0) {
     return { sent: false, reason: "no recipients" };
   }
   const { subject, text, html } = buildWhitelistEmail(args.domains);
@@ -123,7 +139,7 @@ export async function sendWhitelistEmail(args: {
       body: JSON.stringify({
         clientTag: args.clientTag,
         from: FROM_EMAIL,
-        to: args.to,
+        to,
         cc: INTERNAL_CC,
         bcc: args.bcc,
         subject,
