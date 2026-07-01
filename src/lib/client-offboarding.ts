@@ -99,6 +99,21 @@ async function resolveTargetInstances(clientTag: string): Promise<BisonInstanceS
   return instancesInGroup(group).map((i) => i.slug);
 }
 
+// Bison campaign statuses that are ACTIVELY sending or about to send — the
+// ones offboarding needs to pause. Draft/Paused/Completed/Archived are all
+// no-ops for the outbound pipeline and were previously being counted as
+// "active" here because the old blocklist was:
+//   .not("status", "in", '("archived","paused")')
+// That query was also case-sensitive at the Postgres layer, so any status
+// stored TitleCase (Bison returns TitleCase from some endpoints, lowercase
+// from others) slipped through the filter. YBS with 2 Draft campaigns and 0
+// Active ones showed "2 active campaigns to pause" for exactly this reason.
+//
+// Fix: fetch by (instance, client_tag) then filter case-insensitively in JS
+// against an explicit allowlist of live statuses. Matches how Bison labels
+// campaigns as "Active" in the UI.
+const ACTIVE_CAMPAIGN_STATUSES = new Set(["active", "launching", "queued"]);
+
 async function findActiveCampaignsForTag(
   instance: BisonInstanceSlug,
   clientTag: string,
@@ -108,10 +123,10 @@ async function findActiveCampaignsForTag(
     .from("campaigns")
     .select("id, instance, name, status")
     .eq("instance", instance)
-    .eq("client_tag", clientTag)
-    .not("status", "in", '("archived","paused")');
+    .eq("client_tag", clientTag);
   if (error) throw new Error(`campaigns query (${instance}): ${error.message}`);
-  return (data as SupabaseCampaignRow[]) ?? [];
+  const rows = (data as SupabaseCampaignRow[]) ?? [];
+  return rows.filter((c) => ACTIVE_CAMPAIGN_STATUSES.has((c.status || "").trim().toLowerCase()));
 }
 
 async function findInboxesWithTag(

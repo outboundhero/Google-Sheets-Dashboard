@@ -100,7 +100,22 @@ export async function POST(request: Request) {
     const abbr = clientAbbr.trim().toUpperCase();
     const supabase = getSupabaseAdmin();
 
-    // Reject if the row already has a decision recorded — no overwrites.
+    // Look up the existing row so we know whether to insert or update, and
+    // whether to allow the decision at all.
+    //
+    // Historic behavior: rejected any status !== "pending" — but the
+    // offboarding workflow is *inherently retryable* (Bison/Supabase steps
+    // are idempotent) and blocking retries at this record-decision step
+    // meant a partial failure on the actual Bison work permanently locked
+    // the row into a broken state. The Churned Clients "Offboard" button
+    // would 409 with "already confirmed — cannot change" even though the
+    // work never actually completed.
+    //
+    // New rule: only block if the row was explicitly `skipped` — the user
+    // chose to skip that offboarding and we respect that hard-lock. For
+    // pending / confirmed / auto_fired / failed, treat this POST as either
+    // an initial decision or a retry and let it through. All the step-level
+    // work is idempotent so re-running is safe.
     const { data: existing, error: lookupErr } = await supabase
       .from("client_offboarding_actions")
       .select("status")
@@ -127,12 +142,15 @@ export async function POST(request: Request) {
           group_hint: groupHint ?? null,
         });
       if (insErr) return NextResponse.json({ error: insErr.message }, { status: 500 });
-    } else if (existing.status !== "pending") {
+    } else if (existing.status === "skipped") {
       return NextResponse.json(
-        { error: `already ${existing.status} — cannot change` },
+        { error: "already skipped — undo skip first if you want to offboard" },
         { status: 409 },
       );
     }
+    // else: pending / confirmed / auto_fired / failed → allow the decision
+    // through (fresh confirm or retry). The row's decided_at / executed_at /
+    // result get overwritten with the latest attempt below.
 
     const decidedAt = new Date().toISOString();
     const decidedBy = user.email || user.id;
