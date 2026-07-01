@@ -1,52 +1,18 @@
 import { NextResponse } from "next/server";
-import { getSupabaseAdmin } from "@/lib/supabase";
 import { bisonFetch, resolveInstance, resolveInstances } from "@/lib/bison";
 import type { BisonInstanceSlug } from "@/lib/bison-instances";
+import {
+  bisonGetWithRetry,
+  fetchSenderEmailIdsByTag,
+  fetchCampaignSenderEmails,
+  warmupFilterIds,
+} from "@/lib/attach-campaigns";
 
 const DELAY_MS = 150;
-
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 interface Tag { id: number; name: string }
 interface Campaign { id: number; name: string; status: string }
-
-// Bison sometimes throws 429/502/503/504 under load. The previous code did
-// `if (!res.ok) break;` which SILENTLY truncated the pagination — that's
-// what caused the "No matches" for most campaigns when this dialog fires at
-// 419 campaigns × per_page=15 = ~14000 hits. This retries the same page a
-// few times before giving up, and throws (rather than swallowing) so the
-// caller surfaces a real error instead of pretending the tag is empty.
-async function bisonGetWithRetry(
-  instance: BisonInstanceSlug,
-  path: string,
-  attempts = 4,
-): Promise<Response> {
-  let lastErr = "";
-  for (let i = 0; i < attempts; i++) {
-    try {
-      const res = await bisonFetch(instance, path);
-      if (res.ok) return res;
-      if (res.status === 429 || res.status === 502 || res.status === 503 || res.status === 504) {
-        lastErr = `HTTP ${res.status}`;
-        // Exponential-ish backoff with jitter so parallel workers don't retry in lockstep.
-        await delay(500 * (i + 1) + Math.floor(Math.random() * 400));
-        continue;
-      }
-      // Non-retryable HTTP (400, 404, 500) — bubble up so the caller can decide.
-      const body = await res.text().catch(() => "");
-      throw new Error(`Bison ${res.status} on ${path}: ${body.slice(0, 200)}`);
-    } catch (e) {
-      // Network error → retry a few times then bubble up.
-      lastErr = e instanceof Error ? e.message : "request failed";
-      if (i < attempts - 1) {
-        await delay(500 * (i + 1) + Math.floor(Math.random() * 400));
-        continue;
-      }
-      throw e;
-    }
-  }
-  throw new Error(`Bison ${path} failed after ${attempts} attempts: ${lastErr}`);
-}
 
 // 1. Fetch all tags from the given instance → build name→id map
 async function fetchTags(instance: BisonInstanceSlug): Promise<Map<string, number>> {
@@ -60,71 +26,26 @@ async function fetchTags(instance: BisonInstanceSlug): Promise<Map<string, numbe
   return map;
 }
 
-// 2. Fetch all campaigns (paginated)
+// 2. Fetch all campaigns via cursor pagination (per_page is fixed at 15 on
+//    every Bison endpoint, so cursor is strictly faster than offset here).
 async function fetchAllCampaigns(instance: BisonInstanceSlug): Promise<Campaign[]> {
   const all: Campaign[] = [];
-  let page = 1;
-  // eslint-disable-next-line no-constant-condition
+  let cursor: string | null = null;
+  let guard = 0;
   while (true) {
-    const res = await bisonFetch(instance, `/campaigns?page=${page}&per_page=100`);
-    if (!res.ok) throw new Error(`Failed to fetch campaigns: ${res.status}`);
+    if (guard++ > 5000) throw new Error(`campaigns cursor runaway (${instance})`);
+    const path = cursor
+      ? `/campaigns?pagination_type=cursor&cursor=${encodeURIComponent(cursor)}`
+      : `/campaigns?pagination_type=cursor`;
+    const res = await bisonGetWithRetry(instance, path);
     const json = await res.json();
-    const data: Campaign[] = json.data || [];
+    const data: Campaign[] = json?.data || [];
     all.push(...data);
-    const lastPage = json.meta?.last_page || 1;
-    if (page >= lastPage) break;
-    page++;
-    await delay(DELAY_MS);
+    const nextCursor = json?.meta?.next_cursor ?? null;
+    if (!nextCursor || data.length === 0) break;
+    cursor = nextCursor;
   }
   return all;
-}
-
-// 3. Fetch ALL sender email IDs filtered by tag_id (paginated). Retries on
-// transient errors so partial data never masquerades as "No matches".
-async function fetchSenderEmailIdsByTag(instance: BisonInstanceSlug, tagId: number): Promise<number[]> {
-  const allIds: number[] = [];
-  let page = 1;
-  // eslint-disable-next-line no-constant-condition
-  while (true) {
-    const res = await bisonGetWithRetry(
-      instance,
-      `/sender-emails?tag_ids[]=${tagId}&page=${page}&per_page=100`,
-    );
-    const json = await res.json();
-    const payload = Array.isArray(json) ? json[0] : json;
-    const data = payload.data || [];
-    if (data.length === 0) break;
-    allIds.push(...data.map((e: { id: number }) => e.id));
-    const lastPage = payload.meta?.last_page || 1;
-    if (page >= lastPage) break;
-    page++;
-    // No sleep between pages — retry helper handles rate limits.
-  }
-  return allIds;
-}
-
-// 4. Fetch ALL already-attached sender emails for a campaign (paginated).
-// Bison hard-caps per_page at 15 for this endpoint even when you ask for more,
-// so this can be many pages on big campaigns. Retries on transient errors so
-// partial data doesn't inflate `newly_attached`.
-async function fetchCampaignSenderEmails(instance: BisonInstanceSlug, campaignId: number): Promise<number[]> {
-  const allIds: number[] = [];
-  let page = 1;
-  // eslint-disable-next-line no-constant-condition
-  while (true) {
-    const res = await bisonGetWithRetry(
-      instance,
-      `/campaigns/${campaignId}/sender-emails?page=${page}&per_page=100`,
-    );
-    const json = await res.json();
-    const data = json.data || [];
-    if (data.length === 0) break;
-    allIds.push(...data.map((e: { id: number }) => e.id));
-    const lastPage = json.meta?.last_page || 1;
-    if (page >= lastPage) break;
-    page++;
-  }
-  return allIds;
 }
 
 // GET: preview — list campaigns with matching tags across the requested
@@ -133,16 +54,12 @@ async function fetchCampaignSenderEmails(instance: BisonInstanceSlug, campaignId
 export async function GET(request: Request) {
   try {
     const { searchParams } = new URL(request.url);
-    // Multi-instance path: ?instances=<csv> takes precedence. Fall back to the
-    // single ?instance= param for back-compat with any older clients.
     const instances = searchParams.get("instances")
       ? resolveInstances(searchParams)
       : [resolveInstance(searchParams.get("instance"))];
 
     const statusOrder: Record<string, number> = { Active: 0, Launching: 1, Queued: 2, Draft: 3, Paused: 4, Completed: 5 };
 
-    // Per-instance fetch + merge. Each row carries its instance slug so the
-    // frontend can drive per-row POSTs at the right Bison.
     const results = await Promise.all(
       instances.map(async (instance) => {
         try {
@@ -189,56 +106,95 @@ export async function GET(request: Request) {
 }
 
 
-// POST: execute attachment for a single campaign
+// POST: execute attachment for a single campaign.
+//
+// Two modes:
+//
+//  A) SLOW / STANDALONE (backwards-compatible, no pre_matched_ids in body):
+//     - Fetch tag → sender IDs from Bison
+//     - Warmup-filter against Supabase (≥21d domains only)
+//     - Fetch already-attached sender IDs from Bison
+//     - Attach the diff
+//     - Report exact newly_attached / already_attached counts.
+//
+//  B) FAST BATCHED (pre_matched_ids supplied by /prepare):
+//     - Skip the tag fetch AND the already-attached fetch entirely.
+//     - Bison's /attach-sender-emails is idempotent — attaching a duplicate
+//       silently no-ops, so the "already attached" check is only useful for
+//       counts, not correctness.
+//     - Attach the whole pre-matched batch and report total_matched only.
+//     Mode B is what the FE dialog uses for large batches — cuts the per-
+//     campaign wall-clock from ~15-30s to ~1-3s at 419 campaigns.
 export async function POST(request: Request) {
   try {
     const { searchParams } = new URL(request.url);
     const instance = resolveInstance(searchParams.get("instance"));
-    const { campaign_id, campaign_name, client_tag, tag_id } = await request.json();
+    const body = await request.json();
+    const { campaign_id, campaign_name, client_tag, tag_id } = body;
+    const preMatchedIds: number[] | undefined = Array.isArray(body?.pre_matched_ids)
+      ? body.pre_matched_ids.filter((x: unknown): x is number => typeof x === "number")
+      : undefined;
+
     if (!campaign_id || !tag_id) {
       return NextResponse.json({ error: "campaign_id and tag_id required" }, { status: 400 });
     }
 
-    // 1. Get all sender email IDs with this tag from Bison
+    // ---------- Mode B: fast path, pre-matched IDs supplied ----------
+    if (preMatchedIds !== undefined) {
+      if (preMatchedIds.length === 0) {
+        return NextResponse.json({
+          campaign_id,
+          instance,
+          campaign_name: campaign_name || "",
+          total_matched: 0,
+          already_attached: 0,
+          newly_attached: 0,
+        });
+      }
+      let totalAttached = 0;
+      for (let i = 0; i < preMatchedIds.length; i += 100) {
+        const batch = preMatchedIds.slice(i, i + 100);
+        const attachRes = await bisonFetch(instance, `/campaigns/${campaign_id}/attach-sender-emails`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ sender_email_ids: batch }),
+        });
+        if (attachRes.ok) {
+          totalAttached += batch.length;
+        } else if (attachRes.status === 422) {
+          const errText = await attachRes.text().catch(() => "");
+          console.error(`422 attaching to campaign ${campaign_id} (${instance}): ${errText}`);
+        } else if (attachRes.status === 404) {
+          // Campaign gone in Bison — bail with a real error the FE can show.
+          return NextResponse.json({ error: `Campaign ${campaign_id} not found in Bison (stale)` }, { status: 404 });
+        } else {
+          const errText = await attachRes.text().catch(() => "");
+          return NextResponse.json({
+            error: `Bison ${attachRes.status} on attach: ${errText.slice(0, 200)}`,
+          }, { status: 502 });
+        }
+        if (i + 100 < preMatchedIds.length) await delay(DELAY_MS);
+      }
+      // We don't know already_attached vs newly_attached in fast mode. Report
+      // total_matched = attached-so-far and newly_attached = total. Bison's
+      // idempotent dedup on the server side keeps things consistent.
+      return NextResponse.json({
+        campaign_id,
+        instance,
+        campaign_name: campaign_name || "",
+        total_matched: preMatchedIds.length,
+        already_attached: 0,
+        newly_attached: totalAttached,
+      });
+    }
+
+    // ---------- Mode A: standalone path (legacy / single-campaign use) ----------
+
+    // 1. Get all sender email IDs with this tag from Bison (cursor pagination + retry)
     const allMatchedIds = await fetchSenderEmailIdsByTag(instance, tag_id);
 
-    // Filter to only warmed-up inboxes (domain 21+ days old, this instance)
-    const supabase = getSupabaseAdmin();
-    const warmupCutoff = new Date(Date.now() - 21 * 24 * 60 * 60 * 1000).toISOString();
-
-    // Get all warmed-up domains (created 21+ days ago, this instance)
-    const warmedUpDomains = new Set<string>();
-    let offset = 0;
-    while (true) {
-      const { data } = await supabase
-        .from("deliverability_domains")
-        .select("domain")
-        .eq("instance", instance)
-        .lte("domain_created_at", warmupCutoff)
-        .range(offset, offset + 999);
-      if (!data || data.length === 0) break;
-      for (const d of data) warmedUpDomains.add(d.domain);
-      if (data.length < 1000) break;
-      offset += 1000;
-    }
-
-    // Get inbox IDs that belong to warmed-up domains (this instance)
-    const warmedUpIds = new Set<number>();
-    for (let i = 0; i < allMatchedIds.length; i += 500) {
-      const batch = allMatchedIds.slice(i, i + 500);
-      const { data } = await supabase
-        .from("deliverability_inboxes")
-        .select("id, domain")
-        .eq("instance", instance)
-        .in("id", batch);
-      if (data) {
-        for (const inbox of data) {
-          if (warmedUpDomains.has(inbox.domain)) warmedUpIds.add(inbox.id);
-        }
-      }
-    }
-
-    const matchedIds = allMatchedIds.filter((id) => warmedUpIds.has(id));
+    // 2. Filter to only warmed-up inboxes (domain ≥21d, this instance)
+    const matchedIds = await warmupFilterIds(instance, allMatchedIds);
     console.log(`[ATTACH:${instance}] Tag ${client_tag}: ${allMatchedIds.length} total → ${matchedIds.length} warmed-up`);
 
     if (matchedIds.length === 0) {
@@ -252,10 +208,10 @@ export async function POST(request: Request) {
       });
     }
 
-    // 2. Get ALL already-attached sender emails (paginated)
+    // 3. Get ALL already-attached sender emails (cursor pagination + retry)
     const alreadyAttachedIds = await fetchCampaignSenderEmails(instance, campaign_id);
 
-    // 3. Compute new IDs to attach
+    // 4. Compute new IDs to attach
     const alreadySet = new Set(alreadyAttachedIds);
     const newIds = matchedIds.filter((id) => !alreadySet.has(id));
 
@@ -270,7 +226,7 @@ export async function POST(request: Request) {
       });
     }
 
-    // 4. Attach new inboxes (batch in groups of 100)
+    // 5. Attach new inboxes (batch in groups of 100)
     let totalAttached = 0;
     for (let i = 0; i < newIds.length; i += 100) {
       const batch = newIds.slice(i, i + 100);
@@ -283,7 +239,6 @@ export async function POST(request: Request) {
       if (attachRes.ok) {
         totalAttached += batch.length;
       } else if (attachRes.status === 422) {
-        // Some IDs invalid — skip this batch (already filtered by tag from live API)
         const errText = await attachRes.text().catch(() => "");
         console.error(`422 attaching to campaign ${campaign_id} (${instance}): ${errText}`);
       }

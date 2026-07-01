@@ -107,7 +107,9 @@ export function AttachCampaignsDialog({ open, onOpenChange, instancesQuery }: Pr
   const [allCampaigns, setAllCampaigns] = useState<AllCampaign[]>([]);
   const [selected, setSelected] = useState<Set<string>>(new Set()); // key = `${instance}:${id}`
   const [results, setResults] = useState<AttachResult[]>([]);
-  const [currentIndex, setCurrentIndex] = useState(0);
+  // Sub-status for the "attaching" phase. Shown while /prepare batches the
+  // tag → sender-id lookups before the per-campaign attach calls fan out.
+  const [prepareStatus, setPrepareStatus] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
@@ -124,7 +126,7 @@ export function AttachCampaignsDialog({ open, onOpenChange, instancesQuery }: Pr
       setAllCampaigns([]);
       setSelected(new Set());
       setResults([]);
-      setCurrentIndex(0);
+      setPrepareStatus(null);
       setError(null);
       setSearch("");
       setStatusFilter("all");
@@ -305,25 +307,91 @@ export function AttachCampaignsDialog({ open, onOpenChange, instancesQuery }: Pr
   );
 
   // ─── Attach all selected ──────────────────────────────────────────────────
+  // Two-phase flow, tuned for large batches (100s of campaigns):
+  //
+  //   Phase 1 — Prepare:
+  //     Group selection by instance, dedup unique tag_ids per instance, then
+  //     POST /attach-campaigns/prepare once per instance in parallel. The
+  //     server walks each tag → sender-email IDs (cursor-paginated + retry)
+  //     and warmup-filters against Supabase, returning a { tag_id: ids[] }
+  //     map. This replaces the previous behavior where the per-campaign
+  //     endpoint redid this walk for every campaign — many campaigns share
+  //     the same client tag, so dedup alone saves most of the work.
+  //
+  //   Phase 2 — Attach in parallel:
+  //     Worker pool of 6 concurrent per-campaign POSTs, each carrying
+  //     `pre_matched_ids` from the map. The server side skips both the tag
+  //     fetch AND the already-attached fetch and just calls Bison's
+  //     idempotent /attach-sender-emails endpoint.
+  //
+  // For any campaign that didn't get a prepare result (e.g. prepare errored
+  // for one instance), we fall back to the slow standalone POST for that
+  // campaign — no `pre_matched_ids` in the body → server walks Bison as before.
   const handleAttach = async () => {
     if (selectedList.length === 0) return;
     setPhase("attaching");
     setResults([]);
-    setCurrentIndex(0);
+    setPrepareStatus("Preparing sender lists…");
 
-    for (let i = 0; i < selectedList.length; i++) {
-      setCurrentIndex(i);
-      const c = selectedList[i];
+    // ── Phase 1: prepare per instance ────────────────────────────────────
+    const uniqueTagsByInstance = new Map<BisonInstanceSlug, Set<number>>();
+    for (const c of selectedList) {
+      if (typeof c.tag_id !== "number") continue;
+      let set = uniqueTagsByInstance.get(c.instance);
+      if (!set) {
+        set = new Set<number>();
+        uniqueTagsByInstance.set(c.instance, set);
+      }
+      set.add(c.tag_id);
+    }
+
+    // Key: `${instance}:${tag_id}` → warmup-filtered sender-email IDs
+    const matchedByTag = new Map<string, number[]>();
+    await Promise.all(
+      [...uniqueTagsByInstance.entries()].map(async ([instance, tagIdSet]) => {
+        try {
+          const res = await fetch(
+            `/api/deliverability/attach-campaigns/prepare?instance=${instance}`,
+            {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ tag_ids: [...tagIdSet] }),
+            },
+          );
+          if (!res.ok) return; // per-campaign fallback will handle it
+          const data = (await res.json()) as { tags?: Record<string, number[]> };
+          if (!data.tags) return;
+          for (const [tagIdStr, ids] of Object.entries(data.tags)) {
+            matchedByTag.set(`${instance}:${tagIdStr}`, Array.isArray(ids) ? ids : []);
+          }
+        } catch {
+          // Swallow — the per-campaign worker will fall back to the slow path
+          // for any campaign whose (instance, tag) isn't in matchedByTag.
+        }
+      }),
+    );
+    setPrepareStatus(null);
+
+    // ── Phase 2: parallel per-campaign attach ────────────────────────────
+    const CONCURRENCY = 6;
+    let cursor = 0;
+
+    const runOne = async (c: CampaignPreview) => {
       try {
+        const key = typeof c.tag_id === "number" ? `${c.instance}:${c.tag_id}` : null;
+        const preMatched = key ? matchedByTag.get(key) : undefined;
+        const body: Record<string, unknown> = {
+          campaign_id: c.campaign_id,
+          campaign_name: c.campaign_name,
+          client_tag: c.client_tag,
+          tag_id: c.tag_id,
+        };
+        if (preMatched !== undefined) body.pre_matched_ids = preMatched;
+
         const res = await fetch(`/api/deliverability/attach-campaigns?instance=${c.instance}`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            campaign_id: c.campaign_id,
-            campaign_name: c.campaign_name,
-            client_tag: c.client_tag,
-            tag_id: c.tag_id,
-          }),
+          body: JSON.stringify(body),
         });
         const result = await res.json();
         if (!res.ok) {
@@ -346,7 +414,20 @@ export function AttachCampaignsDialog({ open, onOpenChange, instancesQuery }: Pr
           error: e instanceof Error ? e.message : "Network error",
         }]);
       }
-    }
+    };
+
+    const worker = async () => {
+      while (true) {
+        const i = cursor++;
+        if (i >= selectedList.length) return;
+        await runOne(selectedList[i]);
+      }
+    };
+
+    await Promise.all(
+      Array.from({ length: Math.min(CONCURRENCY, selectedList.length) }, () => worker()),
+    );
+
     setPhase("done");
   };
 
@@ -535,10 +616,19 @@ export function AttachCampaignsDialog({ open, onOpenChange, instancesQuery }: Pr
           <div className="flex flex-col gap-3 flex-1 overflow-hidden">
             <div className="space-y-2">
               <div className="flex items-center justify-between text-sm">
-                <span className="text-muted-foreground">
-                  {phase === "attaching"
-                    ? `Processing ${currentIndex + 1} of ${selectedList.length}…`
-                    : "Complete"}
+                <span className="text-muted-foreground flex items-center gap-2">
+                  {phase === "attaching" ? (
+                    prepareStatus ? (
+                      <>
+                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                        {prepareStatus}
+                      </>
+                    ) : (
+                      <>Attaching in parallel…</>
+                    )
+                  ) : (
+                    "Complete"
+                  )}
                 </span>
                 <span className="font-medium">{results.length}/{selectedList.length}</span>
               </div>
@@ -601,11 +691,14 @@ export function AttachCampaignsDialog({ open, onOpenChange, instancesQuery }: Pr
                   )}
                 </div>
               ))}
-              {phase === "attaching" && currentIndex < selectedList.length && (
+              {phase === "attaching" && results.length < selectedList.length && (
                 <div className="flex items-center gap-3 px-3 py-2 text-sm bg-primary/5">
                   <Loader2 className="h-4 w-4 animate-spin text-primary shrink-0" />
-                  <span className="truncate flex-1">{selectedList[currentIndex]?.campaign_name}</span>
-                  <span className="text-xs text-muted-foreground">Processing…</span>
+                  <span className="truncate flex-1">
+                    {prepareStatus
+                      ? prepareStatus
+                      : `${selectedList.length - results.length} in flight…`}
+                  </span>
                 </div>
               )}
             </div>
