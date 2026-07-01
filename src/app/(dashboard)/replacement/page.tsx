@@ -600,8 +600,10 @@ export default function ReplacementPage() {
               </div>
 
               {/* Reserve inventory — the actual domain names, per instance.
-                  Collapsed by default because the list can be hundreds of rows. */}
-              <ReserveInventorySection reserveList={plan.reserveList} />
+                  Collapsed by default because the list can be hundreds of rows.
+                  Falls back to an empty list if the backend response predates
+                  the reserveList field (old cached response). */}
+              <ReserveInventorySection reserveList={plan.reserveList ?? []} />
 
               {isAdmin && (() => {
                 const groups = new Map<string, { clientTag: string; instance: string; replace: number; remove: number }>();
