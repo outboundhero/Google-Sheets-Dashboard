@@ -32,6 +32,8 @@ import { CrossTagAuditCard } from "@/components/dashboard/cross-tag-audit-card";
 import { DuplicateDomainsCard } from "@/components/dashboard/duplicate-domains-card";
 import { AttachFailuresCard } from "@/components/dashboard/attach-failures-card";
 import { PendingOffboardingsCard } from "@/components/dashboard/pending-offboardings-card";
+import { OffboardingProgressCard, type OffboardingPlan } from "@/components/dashboard/offboarding-progress-card";
+import { ChurnedOffboardDialog } from "@/components/dashboard/churned-offboard-dialog";
 import {
   Select,
   SelectContent,
@@ -75,6 +77,17 @@ export default function DashboardPage() {
   const { sheets } = useSheets();
   const { clients: trackerClients, refresh: refreshTracker } = useClientTracker();
   const [trackerRefreshing, setTrackerRefreshing] = useState(false);
+
+  // Churned Clients → Offboard flow. The confirmation dialog opens first
+  // (setChurnedOffboardTarget), fetches the plan, and hands it up here on
+  // confirm — the actual step walker runs inside OffboardingProgressCard at
+  // the top of the dashboard.
+  const [churnedOffboardTarget, setChurnedOffboardTarget] = useState<
+    { clientAbbr: string; companyName: string; churnDate: string } | null
+  >(null);
+  const [activeChurnedOffboarding, setActiveChurnedOffboarding] = useState<
+    { plan: OffboardingPlan; clientAbbr: string; companyName: string; churnDate: string } | null
+  >(null);
   const { total: notDeliveredTotal, byClient: notDeliveredByClient } = useNotDeliveredTodayAggregate();
   const { user, role } = useAuth();
   const isAdmin = role === "admin";
@@ -217,17 +230,18 @@ export default function DashboardPage() {
       {/* Pending offboardings — admin only; self-hides when there are none. */}
       {isAdmin && <PendingOffboardingsCard />}
 
-      {/* Client Tracker tag alignment — admin only; small companion to the redirect audit. */}
-      {isAdmin && <TagAlignmentCard />}
-
-      {/* Redirect issues — admin only; flags domains not matching the Client Tracker. */}
-      {isAdmin && <RedirectIssuesCard />}
-
-      {/* Cross-tag audit — admin only; domains in wrong-client campaigns. */}
-      {isAdmin && <CrossTagAuditCard />}
-
-      {/* Duplicate domains across instances — admin only. */}
-      {isAdmin && <DuplicateDomainsCard />}
+      {/* Live offboarding progress (top of dashboard) — fires when an admin
+          clicks Offboard on a churned client row and confirms. */}
+      {isAdmin && activeChurnedOffboarding && (
+        <OffboardingProgressCard
+          plan={activeChurnedOffboarding.plan}
+          clientAbbr={activeChurnedOffboarding.clientAbbr}
+          churnDate={activeChurnedOffboarding.churnDate}
+          companyName={activeChurnedOffboarding.companyName}
+          allowInsert
+          onDismiss={() => setActiveChurnedOffboarding(null)}
+        />
+      )}
 
       {/* Clients Going Off + Churned — side by side */}
       {(clientsGoingOff.length > 0 || churnedClients.length > 0) && (
@@ -288,12 +302,25 @@ export default function DashboardPage() {
                 {churnedClients.map((c) => (
                   <div
                     key={c.clientAbbr}
-                    className="flex items-center justify-between rounded-lg px-3 py-1.5 text-sm hover:bg-zinc-100 dark:hover:bg-zinc-800/50 transition-colors"
+                    className="flex items-center justify-between gap-2 rounded-lg px-3 py-1.5 text-sm hover:bg-zinc-100 dark:hover:bg-zinc-800/50 transition-colors"
                   >
-                    <span className="text-zinc-700 dark:text-zinc-300 truncate">
+                    <span className="text-zinc-700 dark:text-zinc-300 truncate min-w-0 flex-1">
                       {c.companyName} <span className="text-zinc-400 dark:text-zinc-600">({c.clientAbbr})</span>
                     </span>
-                    <span className="text-[10px] text-zinc-500 dark:text-zinc-500 shrink-0 ml-2">
+                    {isAdmin && (
+                      <button
+                        onClick={() => setChurnedOffboardTarget({
+                          clientAbbr: c.clientAbbr,
+                          companyName: c.companyName,
+                          churnDate: c.churnDate!,
+                        })}
+                        className="text-[10px] font-medium rounded-md bg-amber-500/15 hover:bg-amber-500/25 text-amber-700 dark:text-amber-300 border border-amber-500/30 px-2 py-0.5 shrink-0 transition-colors"
+                        title={`Pause campaigns + detach ${c.clientAbbr} tag from inboxes`}
+                      >
+                        Offboard
+                      </button>
+                    )}
+                    <span className="text-[10px] text-zinc-500 dark:text-zinc-500 shrink-0">
                       {formatDate(c.churnDate!)}
                     </span>
                   </div>
@@ -361,9 +388,20 @@ export default function DashboardPage() {
         </div>
       )}
 
-      {/* Replacement attach failures — admin only; self-hides when none.
-          Sits just below the "not receiving leads for 4 days" flag section. */}
+      {/* Replacement attach failures — admin only; self-hides when none. */}
       {isAdmin && <AttachFailuresCard />}
+
+      {/* Client Tracker tag alignment — admin only; small companion to the redirect audit. */}
+      {isAdmin && <TagAlignmentCard />}
+
+      {/* Redirect issues — admin only; flags domains not matching the Client Tracker. */}
+      {isAdmin && <RedirectIssuesCard />}
+
+      {/* Cross-tag audit — admin only; domains in wrong-client campaigns. */}
+      {isAdmin && <CrossTagAuditCard />}
+
+      {/* Duplicate domains across instances — admin only. */}
+      {isAdmin && <DuplicateDomainsCard />}
 
       <ResolveTriageDialog
         clientTag={resolvingClient}
@@ -375,6 +413,25 @@ export default function DashboardPage() {
           }
         }}
       />
+
+      {churnedOffboardTarget && (
+        <ChurnedOffboardDialog
+          open={!!churnedOffboardTarget}
+          onOpenChange={(o) => { if (!o) setChurnedOffboardTarget(null); }}
+          clientAbbr={churnedOffboardTarget.clientAbbr}
+          companyName={churnedOffboardTarget.companyName}
+          churnDate={churnedOffboardTarget.churnDate}
+          onStart={(plan) => {
+            setActiveChurnedOffboarding({
+              plan,
+              clientAbbr: churnedOffboardTarget.clientAbbr,
+              companyName: churnedOffboardTarget.companyName,
+              churnDate: churnedOffboardTarget.churnDate,
+            });
+            setChurnedOffboardTarget(null);
+          }}
+        />
+      )}
 
       {/* Not Delivered Today */}
       {notDeliveredTotal > 0 && (

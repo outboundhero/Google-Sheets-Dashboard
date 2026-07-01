@@ -75,13 +75,17 @@ export async function POST(request: Request) {
     }
 
     const body = await request.json().catch(() => ({}));
-    const { clientAbbr, churnDate, decision, result: feResult } = body as {
+    const { clientAbbr, churnDate, decision, result: feResult, allowInsert, groupHint } = body as {
       clientAbbr?: string;
       churnDate?: string;
       decision?: "confirm" | "skip";
       // Optional: result built up by the FE walking the plan. When provided we
       // trust it and skip server-side re-execution (saves another ~30s sync).
       result?: unknown;
+      // Ad-hoc offboardings from the Churned clients card don't have a
+      // pending row yet — allow the route to insert one on the fly.
+      allowInsert?: boolean;
+      groupHint?: 1 | 2 | null;
     };
     if (!clientAbbr || !churnDate || !decision) {
       return NextResponse.json(
@@ -107,9 +111,23 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: lookupErr.message }, { status: 500 });
     }
     if (!existing) {
-      return NextResponse.json({ error: "no pending offboarding for this client/date" }, { status: 404 });
-    }
-    if (existing.status !== "pending") {
+      // Ad-hoc path: no pending row exists yet (e.g. the user hit "Offboard"
+      // straight from the Churned Clients card before the daily churn-check
+      // cron enqueued it). Insert a new pending row so the standard flow can
+      // continue and the confirm() branch below has something to update.
+      if (!allowInsert) {
+        return NextResponse.json({ error: "no pending offboarding for this client/date" }, { status: 404 });
+      }
+      const { error: insErr } = await supabase
+        .from("client_offboarding_actions")
+        .insert({
+          client_abbr: abbr,
+          churn_date: churnDate,
+          status: "pending",
+          group_hint: groupHint ?? null,
+        });
+      if (insErr) return NextResponse.json({ error: insErr.message }, { status: 500 });
+    } else if (existing.status !== "pending") {
       return NextResponse.json(
         { error: `already ${existing.status} — cannot change` },
         { status: 409 },
