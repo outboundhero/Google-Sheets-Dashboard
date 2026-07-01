@@ -342,7 +342,14 @@ export async function getAllClientTags(): Promise<string[]> {
 
   const sheets = await getSheetsClient();
 
-  const [trackerRes, sheet6Res] = await Promise.all([
+  // Fetch each source independently — if one tab is renamed or deleted (e.g.
+  // Sheet6 no longer exists on the current Client Tracker spreadsheet), we
+  // still return the other source's tags. Previously a single Promise.all
+  // let a missing tab throw the whole function → /api/client-tags returned
+  // an error → the Deliverability page's `.catch(()=>{})` silently kept
+  // clientTags as an empty Set → the "Reserve" pill counted zero domains
+  // because its first check is `if (clientTags.size === 0) return false`.
+  const [trackerRes, sheet6Res] = await Promise.allSettled([
     sheets.spreadsheets.values.get({
       spreadsheetId: CLIENT_TRACKER_SHEET_ID,
       range: `'${CLIENT_TRACKER_TAB}'!A1:T`,
@@ -367,23 +374,33 @@ export async function getAllClientTags(): Promise<string[]> {
   };
 
   // Extract from Client Tracker tab (Client Abbreviation column)
-  const trackerRows = trackerRes.data.values || [];
-  if (trackerRows.length >= 2) {
-    const headers = trackerRows[0].map((h: string) => String(h).toLowerCase().trim());
-    const abbrIdx = headers.findIndex((h: string) => h.includes("client abbr"));
-    if (abbrIdx >= 0) {
-      for (const row of trackerRows.slice(1)) {
-        const val = (row[abbrIdx] || "").trim();
-        if (val) addCell(val);
+  if (trackerRes.status === "fulfilled") {
+    const trackerRows = trackerRes.value.data.values || [];
+    if (trackerRows.length >= 2) {
+      const headers = trackerRows[0].map((h: string) => String(h).toLowerCase().trim());
+      const abbrIdx = headers.findIndex((h: string) => h.includes("client abbr"));
+      if (abbrIdx >= 0) {
+        for (const row of trackerRows.slice(1)) {
+          const val = (row[abbrIdx] || "").trim();
+          if (val) addCell(val);
+        }
       }
     }
+  } else {
+    console.warn("[getAllClientTags] Client Tracker tab read failed:", trackerRes.reason);
   }
 
-  // Extract from Sheet6 (Client Tag column A)
-  const sheet6Rows = sheet6Res.data.values || [];
-  for (const row of sheet6Rows.slice(1)) {
-    const val = (row[0] || "").trim();
-    if (val) addCell(val);
+  // Extract from Sheet6 (Client Tag column A) — optional. Sheet6 has been
+  // removed from the Client Tracker spreadsheet; this branch just no-ops
+  // now, but is left in so re-adding a Sheet6 later still populates tags.
+  if (sheet6Res.status === "fulfilled") {
+    const sheet6Rows = sheet6Res.value.data.values || [];
+    for (const row of sheet6Rows.slice(1)) {
+      const val = (row[0] || "").trim();
+      if (val) addCell(val);
+    }
+  } else {
+    // Not warning here — Sheet6 is expected to be missing right now.
   }
 
   const result = Array.from(tags).sort();

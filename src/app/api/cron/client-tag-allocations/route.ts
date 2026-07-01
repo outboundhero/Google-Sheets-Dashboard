@@ -11,12 +11,14 @@ export async function GET() {
   try {
     const data = await syncAllocations();
     cache.invalidate("client-tracker-data");
+    cache.invalidate("all-client-tags");
     return NextResponse.json({
       ok: true,
       group1Count: data.group1Count,
       group2Count: data.group2Count,
       syncedAt: data.syncedAt,
       clientTrackerCacheInvalidated: true,
+      allClientTagsCacheInvalidated: true,
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Sync failed";
