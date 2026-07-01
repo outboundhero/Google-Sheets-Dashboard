@@ -9,6 +9,7 @@ import {
   Clock,
   AlertTriangle,
   XCircle,
+  RefreshCw,
 } from "lucide-react";
 import Link from "next/link";
 import { useAnalytics } from "@/lib/hooks/use-analytics";
@@ -72,7 +73,8 @@ export default function DashboardPage() {
   );
   const { isSyncing, syncProgress, refresh } = useAllLeads();
   const { sheets } = useSheets();
-  const { clients: trackerClients } = useClientTracker();
+  const { clients: trackerClients, refresh: refreshTracker } = useClientTracker();
+  const [trackerRefreshing, setTrackerRefreshing] = useState(false);
   const { total: notDeliveredTotal, byClient: notDeliveredByClient } = useNotDeliveredTodayAggregate();
   const { user, role } = useAuth();
   const isAdmin = role === "admin";
@@ -264,10 +266,23 @@ export default function DashboardPage() {
             <div className="rounded-xl border border-zinc-200 dark:border-zinc-700/50 bg-zinc-50 dark:bg-zinc-900/30 p-4">
               <div className="flex items-center gap-2 mb-3">
                 <XCircle className="h-4.5 w-4.5 text-zinc-500 dark:text-zinc-400 shrink-0" />
-                <div>
+                <div className="min-w-0">
                   <h3 className="text-sm font-semibold text-zinc-700 dark:text-zinc-200">Churned clients</h3>
                   <p className="text-[11px] text-zinc-500 dark:text-zinc-500">{churnedClients.length} total</p>
                 </div>
+                <button
+                  onClick={async () => {
+                    if (trackerRefreshing) return;
+                    setTrackerRefreshing(true);
+                    try { await refreshTracker(); } finally { setTrackerRefreshing(false); }
+                  }}
+                  disabled={trackerRefreshing}
+                  className="ml-auto flex items-center gap-1 rounded-md border border-zinc-200 dark:border-zinc-700 px-2 py-1 text-[10px] text-zinc-600 dark:text-zinc-400 hover:bg-zinc-100 dark:hover:bg-zinc-800/50 disabled:opacity-50 transition-colors"
+                  title="Re-read the Client Tracker sheet"
+                >
+                  <RefreshCw className={`h-3 w-3 ${trackerRefreshing ? "animate-spin" : ""}`} />
+                  {trackerRefreshing ? "Refreshing…" : "Refresh"}
+                </button>
               </div>
               <div className="max-h-52 overflow-y-auto space-y-1 pr-1">
                 {churnedClients.map((c) => (
