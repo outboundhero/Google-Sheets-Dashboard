@@ -10,6 +10,44 @@ const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 interface Tag { id: number; name: string }
 interface Campaign { id: number; name: string; status: string }
 
+// Bison sometimes throws 429/502/503/504 under load. The previous code did
+// `if (!res.ok) break;` which SILENTLY truncated the pagination — that's
+// what caused the "No matches" for most campaigns when this dialog fires at
+// 419 campaigns × per_page=15 = ~14000 hits. This retries the same page a
+// few times before giving up, and throws (rather than swallowing) so the
+// caller surfaces a real error instead of pretending the tag is empty.
+async function bisonGetWithRetry(
+  instance: BisonInstanceSlug,
+  path: string,
+  attempts = 4,
+): Promise<Response> {
+  let lastErr = "";
+  for (let i = 0; i < attempts; i++) {
+    try {
+      const res = await bisonFetch(instance, path);
+      if (res.ok) return res;
+      if (res.status === 429 || res.status === 502 || res.status === 503 || res.status === 504) {
+        lastErr = `HTTP ${res.status}`;
+        // Exponential-ish backoff with jitter so parallel workers don't retry in lockstep.
+        await delay(500 * (i + 1) + Math.floor(Math.random() * 400));
+        continue;
+      }
+      // Non-retryable HTTP (400, 404, 500) — bubble up so the caller can decide.
+      const body = await res.text().catch(() => "");
+      throw new Error(`Bison ${res.status} on ${path}: ${body.slice(0, 200)}`);
+    } catch (e) {
+      // Network error → retry a few times then bubble up.
+      lastErr = e instanceof Error ? e.message : "request failed";
+      if (i < attempts - 1) {
+        await delay(500 * (i + 1) + Math.floor(Math.random() * 400));
+        continue;
+      }
+      throw e;
+    }
+  }
+  throw new Error(`Bison ${path} failed after ${attempts} attempts: ${lastErr}`);
+}
+
 // 1. Fetch all tags from the given instance → build name→id map
 async function fetchTags(instance: BisonInstanceSlug): Promise<Map<string, number>> {
   const res = await bisonFetch(instance, `/tags`);
@@ -41,14 +79,17 @@ async function fetchAllCampaigns(instance: BisonInstanceSlug): Promise<Campaign[
   return all;
 }
 
-// 3. Fetch ALL sender email IDs filtered by tag_id (paginated)
+// 3. Fetch ALL sender email IDs filtered by tag_id (paginated). Retries on
+// transient errors so partial data never masquerades as "No matches".
 async function fetchSenderEmailIdsByTag(instance: BisonInstanceSlug, tagId: number): Promise<number[]> {
   const allIds: number[] = [];
   let page = 1;
   // eslint-disable-next-line no-constant-condition
   while (true) {
-    const res = await bisonFetch(instance, `/sender-emails?tag_ids[]=${tagId}&page=${page}&per_page=15`);
-    if (!res.ok) break;
+    const res = await bisonGetWithRetry(
+      instance,
+      `/sender-emails?tag_ids[]=${tagId}&page=${page}&per_page=100`,
+    );
     const json = await res.json();
     const payload = Array.isArray(json) ? json[0] : json;
     const data = payload.data || [];
@@ -57,22 +98,24 @@ async function fetchSenderEmailIdsByTag(instance: BisonInstanceSlug, tagId: numb
     const lastPage = payload.meta?.last_page || 1;
     if (page >= lastPage) break;
     page++;
-    await delay(100);
+    // No sleep between pages — retry helper handles rate limits.
   }
   return allIds;
 }
 
-// 4. Fetch ALL already-attached sender emails for a campaign (paginated)
+// 4. Fetch ALL already-attached sender emails for a campaign (paginated).
+// Bison hard-caps per_page at 15 for this endpoint even when you ask for more,
+// so this can be many pages on big campaigns. Retries on transient errors so
+// partial data doesn't inflate `newly_attached`.
 async function fetchCampaignSenderEmails(instance: BisonInstanceSlug, campaignId: number): Promise<number[]> {
   const allIds: number[] = [];
   let page = 1;
   // eslint-disable-next-line no-constant-condition
   while (true) {
-    const res = await bisonFetch(
+    const res = await bisonGetWithRetry(
       instance,
       `/campaigns/${campaignId}/sender-emails?page=${page}&per_page=100`,
     );
-    if (!res.ok) break;
     const json = await res.json();
     const data = json.data || [];
     if (data.length === 0) break;
@@ -80,7 +123,6 @@ async function fetchCampaignSenderEmails(instance: BisonInstanceSlug, campaignId
     const lastPage = json.meta?.last_page || 1;
     if (page >= lastPage) break;
     page++;
-    await delay(100);
   }
   return allIds;
 }
