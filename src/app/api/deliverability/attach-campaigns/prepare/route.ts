@@ -7,6 +7,11 @@ import {
   mapConcurrent,
 } from "@/lib/attach-campaigns";
 
+// Even chunked FE-side (~15 tags per call), a single tag with a lot of
+// senders across many pages can push a chunk past the 60s default. Cap at
+// the 300s Vercel Pro ceiling so a slow tag can't kill the whole request.
+export const maxDuration = 300;
+
 // POST /api/deliverability/attach-campaigns/prepare?instance=<slug>
 // Body: { tag_ids: number[] }
 // Returns: { tags: { [tag_id_string]: number[] } }

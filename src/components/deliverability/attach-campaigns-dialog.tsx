@@ -333,7 +333,16 @@ export function AttachCampaignsDialog({ open, onOpenChange, instancesQuery }: Pr
     setResults([]);
     setPrepareStatus("Preparing sender lists…");
 
-    // ── Phase 1: prepare per instance ────────────────────────────────────
+    // ── Phase 1: prepare (chunked per instance) ──────────────────────────
+    // One /prepare call per instance sounds cleanest but a single client tag
+    // with hundreds of senders can push a big call past Vercel's 300s ceiling
+    // — and even under it, a 3-minute silent wait looks stuck. So we chunk
+    // tag_ids into small batches (PREPARE_CHUNK) and run several chunks in
+    // parallel (PREPARE_CONCURRENCY), streaming progress into prepareStatus
+    // so the UI can prove it's alive.
+    const PREPARE_CHUNK = 15;
+    const PREPARE_CONCURRENCY = 3;
+
     const uniqueTagsByInstance = new Map<BisonInstanceSlug, Set<number>>();
     for (const c of selectedList) {
       if (typeof c.tag_id !== "number") continue;
@@ -345,30 +354,56 @@ export function AttachCampaignsDialog({ open, onOpenChange, instancesQuery }: Pr
       set.add(c.tag_id);
     }
 
-    // Key: `${instance}:${tag_id}` → warmup-filtered sender-email IDs
+    // Build a flat work-list of {instance, tag_ids_chunk} across all instances.
+    const chunks: { instance: BisonInstanceSlug; tagIds: number[] }[] = [];
+    for (const [instance, tagIdSet] of uniqueTagsByInstance) {
+      const arr = [...tagIdSet];
+      for (let i = 0; i < arr.length; i += PREPARE_CHUNK) {
+        chunks.push({ instance, tagIds: arr.slice(i, i + PREPARE_CHUNK) });
+      }
+    }
+    const totalTags = [...uniqueTagsByInstance.values()].reduce((s, set) => s + set.size, 0);
+
+    // Key: `${instance}:${tag_id}` → warmup-filtered sender-email IDs.
+    // Chunks that error out (network / Vercel timeout) simply leave their
+    // tags absent from the map — the per-campaign attach worker falls back
+    // to the slow standalone POST for those.
     const matchedByTag = new Map<string, number[]>();
-    await Promise.all(
-      [...uniqueTagsByInstance.entries()].map(async ([instance, tagIdSet]) => {
+    let tagsDone = 0;
+    setPrepareStatus(`Preparing sender lists… 0/${totalTags} tags`);
+
+    let chunkCursor = 0;
+    const prepareWorker = async () => {
+      while (true) {
+        const i = chunkCursor++;
+        if (i >= chunks.length) return;
+        const { instance, tagIds } = chunks[i];
         try {
           const res = await fetch(
             `/api/deliverability/attach-campaigns/prepare?instance=${instance}`,
             {
               method: "POST",
               headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ tag_ids: [...tagIdSet] }),
+              body: JSON.stringify({ tag_ids: tagIds }),
             },
           );
-          if (!res.ok) return; // per-campaign fallback will handle it
-          const data = (await res.json()) as { tags?: Record<string, number[]> };
-          if (!data.tags) return;
-          for (const [tagIdStr, ids] of Object.entries(data.tags)) {
-            matchedByTag.set(`${instance}:${tagIdStr}`, Array.isArray(ids) ? ids : []);
+          if (res.ok) {
+            const data = (await res.json()) as { tags?: Record<string, number[]> };
+            if (data.tags) {
+              for (const [tagIdStr, ids] of Object.entries(data.tags)) {
+                matchedByTag.set(`${instance}:${tagIdStr}`, Array.isArray(ids) ? ids : []);
+              }
+            }
           }
         } catch {
-          // Swallow — the per-campaign worker will fall back to the slow path
-          // for any campaign whose (instance, tag) isn't in matchedByTag.
+          // Swallow — per-campaign attach falls back to legacy path for these tags.
         }
-      }),
+        tagsDone += tagIds.length;
+        setPrepareStatus(`Preparing sender lists… ${tagsDone}/${totalTags} tags`);
+      }
+    };
+    await Promise.all(
+      Array.from({ length: Math.min(PREPARE_CONCURRENCY, chunks.length) }, () => prepareWorker()),
     );
     setPrepareStatus(null);
 
