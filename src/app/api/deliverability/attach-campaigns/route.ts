@@ -8,6 +8,12 @@ import {
   warmupFilterIds,
 } from "@/lib/attach-campaigns";
 
+// Mode A (standalone slow path) walks the same tag → senders pagination the
+// /prepare route does, plus the campaign's already-attached list — either can
+// take a while when Bison is throttling under batch load. Match /prepare so
+// the fallback path never gets guillotined.
+export const maxDuration = 300;
+
 const DELAY_MS = 150;
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 

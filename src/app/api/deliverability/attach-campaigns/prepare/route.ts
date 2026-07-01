@@ -62,11 +62,21 @@ export async function POST(request: Request) {
       }
     });
 
+    // IMPORTANT: only include tags that actually succeeded. A failed tag with
+    // `ids: []` would be indistinguishable on the FE from "legit no matches",
+    // and would trigger the per-campaign fast path with empty pre_matched_ids
+    // → the server short-circuits with "No matches" and never falls back to
+    // the slow standalone fetch. Leaving failed tags absent from `tags` makes
+    // the FE see them as undefined → it fires the per-campaign POST without
+    // pre_matched_ids → server runs Mode A (its own retry-backed Bison walk).
     const tags: Record<string, number[]> = {};
     const failed: { tag_id: number; error?: string }[] = [];
     for (const r of results) {
-      tags[String(r.tagId)] = r.ids;
-      if (!r.ok) failed.push({ tag_id: r.tagId, error: r.error });
+      if (r.ok) {
+        tags[String(r.tagId)] = r.ids;
+      } else {
+        failed.push({ tag_id: r.tagId, error: r.error });
+      }
     }
 
     return NextResponse.json({ instance, tags, ...(failed.length ? { failed } : {}) });
