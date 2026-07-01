@@ -81,6 +81,20 @@ export interface ClientAuditRow {
   capMax: number;
 }
 
+// One row of reserve inventory — an untagged domain that has finished warmup
+// (≥ 21 days). `pullable` tells the UI whether replacement can actually use
+// this one as a like-for-like replacement (pure Outlook or Google, non-.info,
+// non-blacklisted, not itself burnt) or whether it's inventory-only for now.
+export interface ReserveDomain {
+  instance: BisonInstanceSlug;
+  domain: string;
+  provider: Provider;
+  isInfo: boolean;
+  blacklisted: boolean;
+  ageDays: number;
+  pullable: boolean;
+}
+
 export interface PlanResult {
   generatedFor: string;            // pst date
   infoMigration: boolean;          // was migration mode on for this build
@@ -88,6 +102,7 @@ export interface PlanResult {
   unassignedBurntCount: number;    // replaceable spare/reserve domains (no tag) — clean up, not replace
   items: PlanItem[];
   reserveReadyByInstance: Record<string, ReserveReady>;
+  reserveList: ReserveDomain[];    // every untagged + ≥21d domain (sorted by instance, domain)
   clientAudit: ClientAuditRow[];
 }
 
@@ -219,11 +234,26 @@ export async function buildReplacementPlan(opts: { infoMigration?: boolean } = {
   // mixed provider, blacklisted).
   const totalReserveByInstance: Record<string, number> = {};
   for (const inst of ALL_INSTANCE_SLUGS) totalReserveByInstance[inst] = 0;
+  const reserveList: ReserveDomain[] = [];
+  const pullableKeys = new Set<string>();
+  for (const [key, list] of reservePool) for (const d of list) pullableKeys.add(`${key.split(":")[0]}:${d}`);
+
   for (const e of enriched) {
     if (e.tag !== null) continue;                                    // must be untagged
-    if (ageDays(e.d.domain_created_at, nowMs) < WARMUP_DAYS) continue; // must be ≥ 21d
+    const age = ageDays(e.d.domain_created_at, nowMs);
+    if (age < WARMUP_DAYS) continue;                                 // must be ≥ 21d
     totalReserveByInstance[e.d.instance] = (totalReserveByInstance[e.d.instance] || 0) + 1;
+    reserveList.push({
+      instance: e.d.instance,
+      domain: e.d.domain,
+      provider: e.provider,
+      isInfo: isInfo(e.d.domain),
+      blacklisted: e.d.blacklisted === true || e.d.spamhaus_dbl === true,
+      ageDays: age,
+      pullable: pullableKeys.has(`${e.d.instance}:${e.d.domain}`),
+    });
   }
+  reserveList.sort((a, b) => a.instance.localeCompare(b.instance) || a.domain.localeCompare(b.domain));
 
   const reserveReadyByInstance: Record<string, ReserveReady> = {};
   for (const inst of ALL_INSTANCE_SLUGS) {
@@ -319,5 +349,5 @@ export async function buildReplacementPlan(opts: { infoMigration?: boolean } = {
       redirectUrl, targetCampaigns, replacementDomain, removeOnly, capCurrent: healthy, capMax, blockers,
     });
   }
-  return { generatedFor: today, infoMigration, burntCount: items.length, items, reserveReadyByInstance, unassignedBurntCount, clientAudit };
+  return { generatedFor: today, infoMigration, burntCount: items.length, items, reserveReadyByInstance, reserveList, unassignedBurntCount, clientAudit };
 }

@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect, useRef } from "react";
-import { RefreshCw, Loader2, ShieldAlert, Eye, AlertTriangle, CheckCircle2, AlertCircle, Circle } from "lucide-react";
+import { RefreshCw, Loader2, ShieldAlert, Eye, AlertTriangle, CheckCircle2, AlertCircle, Circle, ChevronDown, ChevronRight } from "lucide-react";
 import { PageHeader } from "@/components/shared/page-header";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -65,6 +65,15 @@ interface PlanResponse {
   unassignedBurntCount: number;
   items: PlanItem[];
   reserveReadyByInstance: Record<string, { outlook: number; google: number; total: number }>;
+  reserveList: {
+    instance: string;
+    domain: string;
+    provider: "outlook" | "google" | "mixed" | "unknown";
+    isInfo: boolean;
+    blacklisted: boolean;
+    ageDays: number;
+    pullable: boolean;
+  }[];
   clientAudit: ClientAuditRow[];
 }
 
@@ -88,6 +97,123 @@ const WINDOWS: { value: LookbackWindow; label: string }[] = [
   { value: "15", label: "15-day" },
   { value: "30", label: "30-day" },
 ];
+
+// Reserve inventory — a per-instance, collapsible list of every untagged
+// domain that has finished warmup (≥ 21 days). Each row shows the provider
+// (Outlook / Google / mixed / unknown), the TLD, age, and whether it's
+// currently pullable as a replacement (green dot) or inventory-only (gray).
+interface ReserveDomainRow {
+  instance: string;
+  domain: string;
+  provider: "outlook" | "google" | "mixed" | "unknown";
+  isInfo: boolean;
+  blacklisted: boolean;
+  ageDays: number;
+  pullable: boolean;
+}
+
+function ReserveInventorySection({ reserveList }: { reserveList: ReserveDomainRow[] }) {
+  const [open, setOpen] = useState(false);
+  const [filter, setFilter] = useState<"all" | "pullable" | "inventory">("all");
+  const [search, setSearch] = useState("");
+
+  const byInstance = new Map<string, ReserveDomainRow[]>();
+  for (const r of reserveList) {
+    const shouldInclude =
+      (filter === "all" || (filter === "pullable" && r.pullable) || (filter === "inventory" && !r.pullable)) &&
+      (search === "" || r.domain.toLowerCase().includes(search.toLowerCase()));
+    if (!shouldInclude) continue;
+    if (!byInstance.has(r.instance)) byInstance.set(r.instance, []);
+    byInstance.get(r.instance)!.push(r);
+  }
+
+  const totalShown = [...byInstance.values()].reduce((s, l) => s + l.length, 0);
+
+  return (
+    <div className="rounded-lg border">
+      <button
+        onClick={() => setOpen((v) => !v)}
+        className="w-full flex items-center gap-2 px-3 py-2 text-left text-xs font-medium hover:bg-muted/40"
+      >
+        {open ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
+        Reserve inventory
+        <span className="text-muted-foreground font-normal">
+          — {reserveList.length.toLocaleString("en-US")} untagged domain{reserveList.length === 1 ? "" : "s"} ≥ 21d
+          {" ("}
+          <b className="text-emerald-500">{reserveList.filter((r) => r.pullable).length.toLocaleString("en-US")}</b> pullable
+          {", "}
+          <b>{reserveList.filter((r) => !r.pullable).length.toLocaleString("en-US")}</b> inventory-only
+          {")"}
+        </span>
+      </button>
+
+      {open && (
+        <div className="border-t p-3 space-y-3">
+          <div className="flex items-center gap-2 flex-wrap">
+            <input
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder="Search domain…"
+              className="text-xs px-2.5 py-1.5 rounded border bg-background flex-1 min-w-[200px] max-w-xs"
+            />
+            {(["all", "pullable", "inventory"] as const).map((k) => (
+              <button
+                key={k}
+                onClick={() => setFilter(k)}
+                className={`text-xs px-2.5 py-1.5 rounded-full border capitalize transition-colors ${
+                  filter === k
+                    ? "bg-primary text-primary-foreground border-primary"
+                    : "border-border text-muted-foreground hover:border-foreground hover:text-foreground"
+                }`}
+              >
+                {k}
+              </button>
+            ))}
+            <span className="text-[11px] text-muted-foreground ml-auto">{totalShown.toLocaleString("en-US")} shown</span>
+          </div>
+
+          {[...byInstance.entries()].sort((a, b) => a[0].localeCompare(b[0])).map(([inst, rows]) => (
+            <div key={inst}>
+              <div className="text-xs font-medium mb-1.5 flex items-center gap-2">
+                <span>{inst}</span>
+                <span className="text-muted-foreground font-normal">
+                  {rows.length.toLocaleString("en-US")} domain{rows.length === 1 ? "" : "s"}
+                </span>
+              </div>
+              <div className="rounded-lg border divide-y max-h-[300px] overflow-y-auto">
+                {rows.map((r) => (
+                  <div key={r.domain} className="grid grid-cols-[10px_1fr_80px_60px_60px_80px] gap-2 items-center px-3 py-1.5 text-xs">
+                    <span
+                      className={`h-2 w-2 rounded-full ${r.pullable ? "bg-emerald-500" : "bg-muted-foreground/40"}`}
+                      title={r.pullable ? "Pullable as a replacement" : "Inventory-only (not pullable)"}
+                    />
+                    <span className="truncate">{r.domain}</span>
+                    <span className={`text-[10px] tabular-nums ${
+                      r.provider === "outlook" ? "text-blue-400" :
+                      r.provider === "google" ? "text-emerald-500" :
+                      r.provider === "mixed" ? "text-amber-500" : "text-muted-foreground"
+                    }`}>{r.provider}</span>
+                    <span className={`text-[10px] ${r.isInfo ? "text-amber-500" : "text-muted-foreground"}`}>
+                      {r.isInfo ? ".info" : "com/co"}
+                    </span>
+                    <span className={`text-[10px] ${r.blacklisted ? "text-red-500" : "text-muted-foreground"}`}>
+                      {r.blacklisted ? "blocked" : "clean"}
+                    </span>
+                    <span className="text-[10px] text-muted-foreground text-right tabular-nums">{r.ageDays}d</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ))}
+
+          {totalShown === 0 && (
+            <div className="text-xs text-muted-foreground text-center py-4">No domains match.</div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
 
 export default function ReplacementPage() {
   const { role } = useAuth();
@@ -472,6 +598,10 @@ export default function ReplacementPage() {
                   </span>
                 ))}
               </div>
+
+              {/* Reserve inventory — the actual domain names, per instance.
+                  Collapsed by default because the list can be hundreds of rows. */}
+              <ReserveInventorySection reserveList={plan.reserveList} />
 
               {isAdmin && (() => {
                 const groups = new Map<string, { clientTag: string; instance: string; replace: number; remove: number }>();
