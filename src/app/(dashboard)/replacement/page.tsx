@@ -64,7 +64,7 @@ interface PlanResponse {
   burntCount: number;
   unassignedBurntCount: number;
   items: PlanItem[];
-  reserveReadyByInstance: Record<string, { outlook: number; google: number }>;
+  reserveReadyByInstance: Record<string, { outlook: number; google: number; total: number }>;
   clientAudit: ClientAuditRow[];
 }
 
@@ -461,11 +461,14 @@ export default function ReplacementPage() {
                 {plan.unassignedBurntCount > 0 && (
                   <span className="text-muted-foreground">Burnt spare/no-tag <b className="text-muted-foreground">{plan.unassignedBurntCount.toLocaleString()}</b> <span className="text-[10px]">(clean up, not replaced)</span></span>
                 )}
-                <span className="text-muted-foreground">Reserve ready (Outlook / Google):</span>
+                <span className="text-muted-foreground" title="Outlook / Google = ready to pull as a replacement (pure provider, non-.info, ≥21d, clean). Total = every untagged domain ≥21d, regardless of TLD or provider.">
+                  Reserve (pull: Outlook / Google · total ≥21d):
+                </span>
                 {Object.entries(plan.reserveReadyByInstance).map(([inst, c]) => (
                   <span key={inst} className="text-muted-foreground">
                     {inst}: <b className={c.outlook > 0 ? "text-emerald-500" : "text-destructive"}>{c.outlook}</b>
                     {" / "}<b className={c.google > 0 ? "text-emerald-500" : "text-muted-foreground"}>{c.google}</b>
+                    <span className="text-[10px] ml-1">· <b className="text-foreground">{c.total}</b> total</span>
                   </span>
                 ))}
               </div>

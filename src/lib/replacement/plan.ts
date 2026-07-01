@@ -56,8 +56,15 @@ export interface PlanItem {
   blockers: string[];                  // why a replacement can't proceed (missing redirect, no campaign, no reserve)
 }
 
-// reserve ready counts per instance, split by provider
-export interface ReserveReady { outlook: number; google: number }
+// Reserve counts per instance. `outlook`/`google` are the pool that's actually
+// pull-able as a replacement — pure provider, non-.info, non-blacklisted, and
+// ≥ 21 days old — matching the strict filters replacement pulls need.
+// `total` is Spencer's broader definition: every untagged domain that's ≥ 21
+// days old, regardless of TLD or provider. Reported for visibility so a
+// domain that's technically warmed but excluded from a pull (mixed provider,
+// .info, blacklisted) still shows up as reserve inventory. Nothing on the
+// pull path reads `total`.
+export interface ReserveReady { outlook: number; google: number; total: number }
 
 // per (client_tag, instance) raw domain-count audit — to validate totals/caps
 export interface ClientAuditRow {
@@ -205,11 +212,25 @@ export async function buildReplacementPlan(opts: { infoMigration?: boolean } = {
     if (!reservePool.has(key)) reservePool.set(key, []);
     reservePool.get(key)!.push(e.d.domain);
   }
+  // Broader "total reserve" per instance — untagged + ≥ 21 days old, nothing
+  // else. Doesn't affect what replacement pulls; only shown alongside the
+  // per-provider counts so it's obvious how many warmed-up untagged domains
+  // exist in total, even the ones filtered out of the pull pool (.info,
+  // mixed provider, blacklisted).
+  const totalReserveByInstance: Record<string, number> = {};
+  for (const inst of ALL_INSTANCE_SLUGS) totalReserveByInstance[inst] = 0;
+  for (const e of enriched) {
+    if (e.tag !== null) continue;                                    // must be untagged
+    if (ageDays(e.d.domain_created_at, nowMs) < WARMUP_DAYS) continue; // must be ≥ 21d
+    totalReserveByInstance[e.d.instance] = (totalReserveByInstance[e.d.instance] || 0) + 1;
+  }
+
   const reserveReadyByInstance: Record<string, ReserveReady> = {};
   for (const inst of ALL_INSTANCE_SLUGS) {
     reserveReadyByInstance[inst] = {
       outlook: reservePool.get(`${inst}:outlook`)?.length ?? 0,
       google: reservePool.get(`${inst}:google`)?.length ?? 0,
+      total: totalReserveByInstance[inst] ?? 0,
     };
   }
 
