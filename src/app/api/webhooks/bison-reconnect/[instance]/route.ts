@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { getSupabaseAdmin } from "@/lib/supabase";
 import { bisonFetch } from "@/lib/bison";
 import { isInstanceSlug } from "@/lib/bison-instances";
+import { enqueueReconnect } from "@/lib/reconnect-worker";
 
 export const maxDuration = 30;
 
@@ -203,6 +204,14 @@ export async function POST(
       instance, senderId, senderEmail,
       tagsRestored: resolvedIds.length, tagsTotal: storedTags.length, status: "ok",
     });
+
+    // Enqueue the post-reconnect work (conform tags against the domain's
+    // wanted set + attach the sender to matching campaigns). We do this
+    // AFTER the tag restore has succeeded — no point queuing work if the
+    // primary restore failed. The worker drains this queue every 5 min
+    // (see /api/cron/reconnect-worker).
+    await enqueueReconnect({ instance, senderId, senderEmail });
+
     return NextResponse.json({
       ok: true,
       instance,
@@ -210,6 +219,7 @@ export async function POST(
       senderEmail,
       restored: resolvedIds.length,
       total: storedTags.length,
+      queued_for_conform_and_attach: true,
     });
   } catch (err) {
     const message = err instanceof Error ? err.message : "Webhook failed";
