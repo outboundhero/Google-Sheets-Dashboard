@@ -769,8 +769,12 @@ function DeliverabilityPageInner() {
   const handleSync = async (slugs: BisonInstanceSlug[] = [...ALL_INSTANCE_SLUGS]) => {
     if (syncing) return;
     setSyncing(true);
-    const CHUNK = 20;
-    const STREAMS = 4;
+    // Cursor pagination is sequential — one chain per instance. PAGES_PER_CHUNK
+    // controls how many cursor pages the server walks per request before
+    // returning a nextCursor for the FE to feed back in. We used to run 4
+    // parallel offset streams per instance, but offset is hard-capped at 1000
+    // pages × 15 = 15k senders and silently truncated big instances.
+    const PAGES_PER_CHUNK = 40;
     localStorage.removeItem("deliverability_next_page");
     setSavedPage(null);
 
@@ -791,86 +795,66 @@ function DeliverabilityPageInner() {
       setSyncProgresses((prev) => prev?.map((p) => p.slug === slug ? { ...p, synced: p.synced + syncedDelta, page: p.page + pagesDelta } : p) ?? null);
     };
 
-    // Crawl one Bison instance end-to-end (parallel page streams + per-instance prune).
+    // Crawl one Bison instance end-to-end via cursor pagination + per-instance prune.
     const syncOneInstance = async (instance: BisonInstanceSlug): Promise<boolean> => {
       patchInstance(instance, { status: "running" });
       const syncStartedAt = new Date().toISOString();
       let anyChunkFailed = false;
+      let cursor: string | null = null;
 
-      const runStream = async (streamId: number, start: number, end: number) => {
-        let page = start;
-        console.log(`[${instance}:STREAM ${streamId}] Starting pages ${start}-${end}`);
-        while (page <= end) {
+      try {
+        console.log(`[SYNC:${instance}] Starting cursor walk, chunk=${PAGES_PER_CHUNK}`);
+        while (true) {
           let success = false;
+          let complete = false;
+          let nextCursor: string | null = null;
           for (let attempt = 1; attempt <= 3; attempt++) {
             const t0 = performance.now();
             try {
-              const res = await fetch(`/api/deliverability/sync?instance=${instance}`, {
+              const res: Response = await fetch(`/api/deliverability/sync?instance=${instance}`, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ startPage: page, pagesPerChunk: CHUNK }),
+                body: JSON.stringify({ cursor, pagesPerChunk: PAGES_PER_CHUNK }),
               });
               if (!res.ok) {
-                console.warn(`[${instance}:STREAM ${streamId}] Page ${page} attempt ${attempt}: ${res.status}`);
+                console.warn(`[SYNC:${instance}] chunk attempt ${attempt}: ${res.status}`);
                 if (attempt < 3) await new Promise((r) => setTimeout(r, 2000 * attempt));
                 continue;
               }
-              const result = await res.json();
+              const result: {
+                synced?: number;
+                pagesWalked?: number;
+                failedCursors?: string[];
+                nextCursor?: string | null;
+                complete?: boolean;
+              } = await res.json();
               const ms = Math.round(performance.now() - t0);
-              const pagesInChunk = Math.min(CHUNK, end - page + 1);
-              incInstance(instance, result.synced || 0, pagesInChunk);
-              // Pages that failed even after the route's own retries → skip prune
-              // (those inboxes weren't refreshed; don't risk deleting them).
-              if (result.failedPages?.length) anyChunkFailed = true;
-              console.log(`[${instance}:STREAM ${streamId}] Pages ${page}-${page + pagesInChunk - 1}: ${result.synced} inboxes, ${result.domains} domains in ${ms}ms`);
+              incInstance(instance, result.synced || 0, result.pagesWalked || 0);
+              if (result.failedCursors?.length) anyChunkFailed = true;
+              nextCursor = typeof result.nextCursor === "string" ? result.nextCursor : null;
+              complete = !!result.complete;
+              console.log(`[SYNC:${instance}] chunk: ${result.synced} inboxes, ${result.pagesWalked} pages in ${ms}ms — ${complete ? "COMPLETE" : "resume"}`);
               success = true;
               break;
             } catch (e) {
-              console.warn(`[${instance}:STREAM ${streamId}] Page ${page} attempt ${attempt} error:`, e);
+              console.warn(`[SYNC:${instance}] chunk attempt ${attempt} error:`, e);
               if (attempt < 3) await new Promise((r) => setTimeout(r, 2000 * attempt));
             }
           }
           if (!success) {
             anyChunkFailed = true;
-            console.error(`[${instance}:STREAM ${streamId}] FAILED at page ${page} after 3 attempts, skipping chunk`);
+            console.error(`[SYNC:${instance}] FAILED chunk after 3 attempts, stopping walk`);
+            break;
           }
-          page += CHUNK;
-        }
-        console.log(`[${instance}:STREAM ${streamId}] Done`);
-      };
-
-      try {
-        console.log(`[SYNC:${instance}] Starting, chunk=${CHUNK}, streams=${STREAMS}`);
-        const firstRes = await fetch(`/api/deliverability/sync?instance=${instance}`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ startPage: 1, pagesPerChunk: CHUNK }),
-        });
-        if (!firstRes.ok) {
-          console.error(`[SYNC:${instance}] First chunk failed`);
-          patchInstance(instance, { status: "failed", error: `HTTP ${firstRes.status}` });
-          return false;
-        }
-        const firstResult = await firstRes.json();
-        const lastPage = firstResult.lastPage || 1;
-        if (firstResult.failedPages?.length) anyChunkFailed = true;
-        console.log(`[SYNC:${instance}] First chunk done: ${firstResult.synced} inboxes, lastPage=${lastPage}`);
-        patchInstance(instance, {
-          synced: firstResult.synced || 0,
-          page: Math.min(CHUNK, lastPage),
-          lastPage,
-        });
-
-        const startAfterFirst = 1 + CHUNK;
-        const remaining = lastPage - startAfterFirst + 1;
-        if (remaining > 0) {
-          const perStream = Math.ceil(remaining / STREAMS);
-          const ranges = Array.from({ length: STREAMS }, (_, i) => ({
-            start: startAfterFirst + i * perStream,
-            end: Math.min(startAfterFirst + (i + 1) * perStream - 1, lastPage),
-          })).filter((r) => r.start <= lastPage);
-          console.log(`[SYNC:${instance}] Launching ${ranges.length} streams:`, ranges.map((r) => `${r.start}-${r.end}`).join(", "));
-          await Promise.all(ranges.map((r, i) => runStream(i + 1, r.start, r.end)));
+          if (complete) break;
+          if (!nextCursor) {
+            // Server said not complete but returned no cursor — bail safely
+            // rather than looping forever.
+            console.error(`[SYNC:${instance}] no nextCursor from server, stopping walk`);
+            anyChunkFailed = true;
+            break;
+          }
+          cursor = nextCursor;
         }
 
         if (!anyChunkFailed) {
@@ -1610,11 +1594,17 @@ function DeliverabilityPageInner() {
                       {p.synced.toLocaleString()} inboxes
                     </span>
                   </div>
-                  {p.lastPage > 0 && (
+                  {p.lastPage > 0 ? (
                     <span className="text-xs text-muted-foreground shrink-0 tabular-nums">
                       {p.page.toLocaleString()}/{p.lastPage.toLocaleString()} pages ({Math.round(pct)}%)
                     </span>
-                  )}
+                  ) : p.status === "running" || p.status === "done" ? (
+                    // Cursor pagination doesn't tell us the total upfront — show
+                    // the running page count so the user sees progress.
+                    <span className="text-xs text-muted-foreground shrink-0 tabular-nums">
+                      {p.page.toLocaleString()} pages walked
+                    </span>
+                  ) : null}
                 </div>
                 <div className="h-1 rounded-full bg-muted overflow-hidden">
                   <div

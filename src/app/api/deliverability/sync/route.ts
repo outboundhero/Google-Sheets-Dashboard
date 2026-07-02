@@ -3,13 +3,13 @@ import { getSupabaseAdmin } from "@/lib/supabase";
 import { bisonFetch, resolveInstance } from "@/lib/bison";
 import { isInstanceSlug, type BisonInstanceSlug } from "@/lib/bison-instances";
 
-// Give a chunk room to finish (with backoff/retries) before the platform kills
-// it — a slow instance + a couple of rate-limit waits used to 504.
+// Give the chunk room to walk a lot of cursor pages before the platform kills
+// it. Cursor pagination is inherently sequential so raw throughput is lower
+// than the old parallel-offset streams, but we walk *all* the data now
+// (offset was capped at 1000 pages × 15 = 15k senders per index route).
 export const maxDuration = 60;
 
-const PER_PAGE = 15;
-const CONCURRENT = 2;         // gentler: 4 streams × 2 = ~8 concurrent, fewer 429s than ×3
-const BATCH_DELAY_MS = 800;
+const BATCH_DELAY_MS = 100;   // small gap between cursor pages to be gentle on Bison
 const PAGE_RETRIES = 4;       // transient (429/5xx/network) retries per page
 
 function sleep(ms: number): Promise<void> {
@@ -39,80 +39,104 @@ interface SenderEmail {
   updated_at: string;
 }
 
-// Fetch one page, retrying transient failures (rate-limit / 5xx / network) with
-// exponential backoff + jitter. This is the core fix for "B2B #2 errors every
-// time": the big instances get rate-limited mid-crawl, and without backoff a
-// single 429 used to throw and fail the whole chunk → whole instance red.
-async function fetchPage(instance: BisonInstanceSlug, page: number, attempt = 0): Promise<{ data: SenderEmail[]; lastPage: number }> {
+// Fetch one cursor page, retrying transient failures (429 / 5xx / network) with
+// exponential backoff + jitter. Honors Retry-After when present. Throws on
+// terminal failure so the caller can classify the whole chunk correctly.
+async function fetchCursorPage(
+  instance: BisonInstanceSlug,
+  cursor: string | null,
+  attempt = 0,
+): Promise<{ data: SenderEmail[]; nextCursor: string | null }> {
+  const qs = cursor
+    ? `pagination_type=cursor&cursor=${encodeURIComponent(cursor)}`
+    : `pagination_type=cursor`;
   let status = 0;
   try {
-    const res = await bisonFetch(instance, `/sender-emails?page=${page}&per_page=${PER_PAGE}`);
+    const res = await bisonFetch(instance, `/sender-emails?${qs}`);
     if (res.ok) {
       const json = await res.json();
       const payload = Array.isArray(json) ? json[0] : json;
-      return { data: payload.data || [], lastPage: payload.meta?.last_page || 1 };
+      return {
+        data: payload?.data || [],
+        nextCursor: payload?.meta?.next_cursor ?? null,
+      };
     }
     status = res.status;
-    // Honor Retry-After on a 429 when present.
     if ((status === 429 || status >= 500) && attempt < PAGE_RETRIES) {
       const ra = parseInt(res.headers.get("retry-after") || "", 10);
       const wait = Number.isFinite(ra) && ra > 0 ? ra * 1000 : Math.min(8000, 500 * 2 ** attempt);
       await sleep(wait + Math.floor(Math.random() * 300));
-      return fetchPage(instance, page, attempt + 1);
+      return fetchCursorPage(instance, cursor, attempt + 1);
     }
   } catch (e) {
-    // Network/abort → also transient.
     if (attempt < PAGE_RETRIES) {
       await sleep(Math.min(8000, 500 * 2 ** attempt) + Math.floor(Math.random() * 300));
-      return fetchPage(instance, page, attempt + 1);
+      return fetchCursorPage(instance, cursor, attempt + 1);
     }
     throw e;
   }
-  throw new Error(`API error ${status} on page ${page}`);
+  throw new Error(`Bison ${status} on cursor page`);
 }
 
+/**
+ * POST /api/deliverability/sync?instance=<slug>
+ * Body: { cursor?: string | null, pagesPerChunk?: number }
+ *
+ * Cursor pagination (Bison's per_page is fixed at 15, and offset is hard-
+ * capped at 1000 pages so an instance with >15k senders never got the tail).
+ * Walks up to `pagesPerChunk` cursor pages sequentially in a single request,
+ * upserts what it collected, and returns the next cursor. The FE loops on
+ * the returned cursor until `complete: true`.
+ */
 export async function POST(request: Request) {
   const t0 = Date.now();
   try {
     const { searchParams } = new URL(request.url);
     const instance = resolveInstance(searchParams.get("instance"));
-    const { startPage = 1, pagesPerChunk = 20 } = await request.json().catch(() => ({}));
+    const body = await request.json().catch(() => ({}));
+    // Accept both {cursor} (new) and {startPage:1} (legacy: 1 means "start over").
+    // Anything else in the legacy shape is ignored — old FE code with startPage
+    // > 1 wouldn't have made sense with cursor anyway, since cursor tokens are
+    // opaque.
+    const cursorIn: string | null = typeof body?.cursor === "string" && body.cursor.length > 0 ? body.cursor : null;
+    const pagesPerChunk: number = Number.isFinite(body?.pagesPerChunk) ? Math.max(1, Math.min(200, body.pagesPerChunk)) : 40;
     const supabase = getSupabaseAdmin();
 
-    // 1. Fetch first page
-    const first = await fetchPage(instance, startPage);
-    const { lastPage } = first;
-    let allInboxes: SenderEmail[] = [...first.data];
+    let cursor: string | null = cursorIn;
+    const allInboxes: SenderEmail[] = [];
+    const failedCursors: string[] = [];
+    let pagesWalked = 0;
+    let reachedEnd = false;
+    let hadFatalError = false;
 
-    // 2. Fetch remaining pages concurrently
-    const endPage = Math.min(startPage + pagesPerChunk - 1, lastPage);
-    const remainingPages: number[] = [];
-    for (let p = startPage + 1; p <= endPage; p++) remainingPages.push(p);
-
-    // fetchPage already retries 429/5xx with backoff, so we no longer "stop
-    // early" on a rate-limit (that silently skipped the rest of the chunk's
-    // pages → those inboxes went stale and could be pruned). If a page still
-    // fails after all retries, we record it so the chunk reports incomplete
-    // rather than pretending it synced everything.
-    const failedPages: number[] = [];
-    for (let i = 0; i < remainingPages.length; i += CONCURRENT) {
-      const batch = remainingPages.slice(i, i + CONCURRENT);
-      const results = await Promise.allSettled(batch.map((p) => fetchPage(instance, p)));
-      results.forEach((r, idx) => {
-        if (r.status === "fulfilled") {
-          allInboxes = allInboxes.concat(r.value.data);
-        } else {
-          failedPages.push(batch[idx]);
-          console.warn(`[SYNC:${instance}] Page ${batch[idx]} failed after retries: ${String(r.reason).slice(0, 120)}`);
-        }
-      });
-      if (i + CONCURRENT < remainingPages.length) {
-        await sleep(BATCH_DELAY_MS);
+    for (let p = 0; p < pagesPerChunk; p++) {
+      // Guard against creeping past the platform ceiling — leave a few seconds
+      // of headroom for the Supabase upserts below.
+      if (Date.now() - t0 > 50_000) break;
+      let page: { data: SenderEmail[]; nextCursor: string | null };
+      try {
+        page = await fetchCursorPage(instance, cursor);
+      } catch (e) {
+        // After PAGE_RETRIES, still failing. Log the cursor and bail — the FE
+        // will retry the chunk (this cursor will be redriven on next call).
+        const msg = e instanceof Error ? e.message : String(e);
+        console.warn(`[SYNC:${instance}] cursor ${cursor ?? "<start>"} failed: ${msg.slice(0, 200)}`);
+        failedCursors.push(cursor ?? "<start>");
+        hadFatalError = true;
+        break;
       }
+      pagesWalked++;
+      if (page.data.length > 0) allInboxes.push(...page.data);
+      cursor = page.nextCursor;
+      if (cursor == null) {
+        reachedEnd = true;
+        break;
+      }
+      if (p < pagesPerChunk - 1) await sleep(BATCH_DELAY_MS);
     }
     const fetchMs = Date.now() - t0;
 
-    // 3. Upsert inboxes (tagged with this instance)
+    // Upsert inboxes and their (instance, domain) rows.
     const tDb = Date.now();
     const inboxRows = allInboxes.map((inbox) => ({
       id: inbox.id,
@@ -140,7 +164,9 @@ export async function POST(request: Request) {
       synced_at: new Date().toISOString(),
     })).filter((r) => r.domain);
 
-    // Ensure (instance, domain) rows exist first — minimal upsert
+    // Minimal (instance, domain) upserts to make sure the domain row exists
+    // before the inbox row references it. Doesn't clobber inbox_count owned
+    // by rebuild_domain_stats.
     const domainSet = new Map<string, string>();
     for (const inbox of allInboxes) {
       const domain = inbox.email.split("@")[1]?.toLowerCase();
@@ -156,7 +182,6 @@ export async function POST(request: Request) {
       warmup_status: "open",
       synced_at: new Date().toISOString(),
     }));
-    // Insert domains that don't exist yet for this (instance, domain) pair
     for (let i = 0; i < minimalDomains.length; i += 500) {
       const batch = minimalDomains.slice(i, i + 500);
       const { error: domErr } = await supabase
@@ -165,7 +190,6 @@ export async function POST(request: Request) {
       if (domErr) console.error(`[SYNC:${instance}] Domain insert error:`, domErr);
     }
 
-    // Upsert inboxes in batches of 500
     for (let i = 0; i < inboxRows.length; i += 500) {
       const batch = inboxRows.slice(i, i + 500);
       const { error: inboxErr } = await supabase
@@ -173,7 +197,7 @@ export async function POST(request: Request) {
         .upsert(batch, { onConflict: "instance,id", ignoreDuplicates: false });
       if (inboxErr) {
         console.error(`[SYNC:${instance}] Inbox upsert error (batch ${i}-${i + batch.length}):`, inboxErr);
-        // Try one by one to find the failing row
+        // Fall back to one-by-one so one bad row doesn't stall the whole batch.
         for (const row of batch) {
           const { error: singleErr } = await supabase
             .from("deliverability_inboxes")
@@ -183,22 +207,25 @@ export async function POST(request: Request) {
       }
     }
     const dbMs = Date.now() - tDb;
-
-    const nextPage = startPage + pagesPerChunk;
-    const complete = nextPage > lastPage;
     const totalMs = Date.now() - t0;
 
-    console.log(`[SYNC:${instance}] Pages ${startPage}-${endPage}: ${allInboxes.length} inboxes${failedPages.length ? ` | ${failedPages.length} pages failed` : ""} | fetch=${fetchMs}ms db=${dbMs}ms total=${totalMs}ms`);
+    const complete = reachedEnd && !hadFatalError;
+    console.log(
+      `[SYNC:${instance}] cursor ${cursorIn ? cursorIn.slice(0, 12) + "…" : "<start>"} → ${cursor ? cursor.slice(0, 12) + "…" : "<end>"}: ${allInboxes.length} inboxes across ${pagesWalked} pages${failedCursors.length ? ` | ${failedCursors.length} cursors failed` : ""} | fetch=${fetchMs}ms db=${dbMs}ms total=${totalMs}ms`,
+    );
 
     return NextResponse.json({
       instance,
       synced: allInboxes.length,
-      startPage,
-      nextPage: complete ? null : nextPage,
-      lastPage,
+      pagesWalked,
+      nextCursor: complete ? null : cursor,
       complete,
       domains: domainSet.size,
-      failedPages,              // pages that couldn't be fetched even after retries (usually [])
+      failedCursors,
+      // Legacy field kept so any lingering caller reading it doesn't NPE. It
+      // has no meaning in cursor mode — the FE progress card should switch
+      // to `pagesWalked` for display.
+      failedPages: failedCursors,
     });
   } catch (error) {
     console.error(`[SYNC] ERROR after ${Date.now() - t0}ms:`, error);
@@ -207,8 +234,8 @@ export async function POST(request: Request) {
   }
 }
 
-// PUT — rebuild all domain stats from inboxes via SQL (call after full sync)
-// The SQL function now groups by (instance, domain), so this rebuilds for ALL instances at once.
+// PUT — rebuild all domain stats from inboxes via SQL (call after full sync).
+// SQL groups by (instance, domain), so this rebuilds for ALL instances at once.
 export async function PUT() {
   const t0 = Date.now();
   try {
@@ -234,7 +261,6 @@ export async function GET(request: Request) {
     const instanceParam = searchParams.get("instance");
     const supabase = getSupabaseAdmin();
 
-    // Multi-instance: ?instances=outboundhero,cleaningoutbound
     if (instancesParam) {
       const slugs = instancesParam
         .split(",")
@@ -266,7 +292,6 @@ export async function GET(request: Request) {
       return NextResponse.json({ inboxCount, domainCount, instance });
     }
 
-    // No instance: totals across everything
     const { count: inboxCount } = await supabase
       .from("deliverability_inboxes")
       .select("*", { count: "exact", head: true });
