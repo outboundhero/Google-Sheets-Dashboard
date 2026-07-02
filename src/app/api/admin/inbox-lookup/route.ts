@@ -110,10 +110,51 @@ export async function GET(request: Request) {
     const senderIdParam = parseInt(searchParams.get("senderId") || "", 10);
 
     let live: BisonSender | null = null;
+    let resolvedVia: "senderId" | "search" | "supabase_pending_reconnect_work" | "supabase_deliverability_inboxes" | null = null;
+
     if (Number.isFinite(senderIdParam) && senderIdParam > 0) {
       live = await findSenderById(instance, senderIdParam);
+      if (live) resolvedVia = "senderId";
     } else if (emailParam.length > 0) {
+      // Try 1: Bison's fuzzy search endpoint. Fast but misses some emails
+      // (dots in local-part etc).
       live = await findSenderByEmail(instance, emailParam);
+      if (live) resolvedVia = "search";
+
+      // Try 2: fall back to Supabase — pending_reconnect_work often has the
+      // sender_id already resolved from a recent webhook. Deterministic.
+      if (!live) {
+        const supabase = getSupabaseAdmin();
+        const { data: fromQueue } = await supabase
+          .from("pending_reconnect_work")
+          .select("sender_id")
+          .eq("instance", instance)
+          .eq("sender_email", emailParam)
+          .order("enqueued_at", { ascending: false })
+          .limit(1)
+          .maybeSingle();
+        const senderIdFromQueue = (fromQueue as { sender_id?: number } | null)?.sender_id;
+        if (typeof senderIdFromQueue === "number" && senderIdFromQueue > 0) {
+          live = await findSenderById(instance, senderIdFromQueue);
+          if (live) resolvedVia = "supabase_pending_reconnect_work";
+        }
+      }
+
+      // Try 3: deliverability_inboxes cache — last resort.
+      if (!live) {
+        const supabase = getSupabaseAdmin();
+        const { data: fromCache } = await supabase
+          .from("deliverability_inboxes")
+          .select("id")
+          .eq("instance", instance)
+          .eq("email", emailParam)
+          .maybeSingle();
+        const senderIdFromCache = (fromCache as { id?: number } | null)?.id;
+        if (typeof senderIdFromCache === "number" && senderIdFromCache > 0) {
+          live = await findSenderById(instance, senderIdFromCache);
+          if (live) resolvedVia = "supabase_deliverability_inboxes";
+        }
+      }
     } else {
       return NextResponse.json({ error: "Pass ?email= or ?senderId=" }, { status: 400 });
     }
@@ -122,7 +163,7 @@ export async function GET(request: Request) {
       return NextResponse.json({
         instance,
         found_in_bison: false,
-        note: "Sender not found on Bison",
+        note: "Sender not found on Bison via search + Supabase fallbacks. Try ?senderId= directly.",
       });
     }
 
@@ -149,6 +190,7 @@ export async function GET(request: Request) {
     return NextResponse.json({
       instance,
       found_in_bison: true,
+      resolved_via: resolvedVia,
       bison_live: {
         id: live.id,
         email: live.email,
