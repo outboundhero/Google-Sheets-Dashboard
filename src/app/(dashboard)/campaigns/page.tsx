@@ -298,7 +298,7 @@ export default function CampaignsPage() {
   const [clientFilters, setClientFilters] = useState<string[]>([]);
   // Client lifecycle filter: campaigns whose client tag is currently active vs
   // churned (per the Client Tracker sheet). "all" = no filter (default).
-  const [clientStatusFilter, setClientStatusFilter] = useState<"all" | "active" | "churned">("all");
+  const [clientStatusFilter, setClientStatusFilter] = useState<"all" | "active" | "paused" | "churned">("all");
   const { clients: trackerClients } = useClientTracker();
   const [selectedCampaign, setSelectedCampaign] = useState<Campaign | null>(null);
   const [lowLeadsOpen, setLowLeadsOpen] = useState(true);
@@ -421,20 +421,53 @@ export default function CampaignsPage() {
     [churnedTags],
   );
 
+  // Paused client tags: status is "Paused" OR "Limited Operations" in the
+  // Client Tracker sheet. Both statuses collapse into one "Paused clients"
+  // bucket per product spec. Case-insensitive match on the tracker status.
+  const pausedTags = useMemo(() => {
+    const set = new Set<string>();
+    for (const c of trackerClients) {
+      const status = (c.status || "").trim().toLowerCase();
+      if (status !== "paused" && status !== "limited operations") continue;
+      const tag = (c.clientAbbr || "").trim().toUpperCase();
+      if (tag) set.add(tag);
+    }
+    return set;
+  }, [trackerClients]);
+
+  const isPausedCampaign = useCallback(
+    (c: Campaign) => !!c.client_tag && pausedTags.has(c.client_tag.trim().toUpperCase()),
+    [pausedTags],
+  );
+
   // Pill counts come from ALL campaigns (not the current filter view) — same
   // convention the existing status chips use, so the totals stay stable as
   // other filters change.
+  //
+  // Precedence when a client is BOTH churned AND paused → churned wins
+  // (matches the existing "churn date reached" semantic). So the buckets
+  // are strictly mutually exclusive and active = total - churned - paused.
   const clientStatusCounts = useMemo(() => {
     let churned = 0;
-    for (const c of campaigns) if (isChurnedCampaign(c)) churned++;
-    return { all: campaigns.length, active: campaigns.length - churned, churned };
-  }, [campaigns, isChurnedCampaign]);
+    let paused = 0;
+    for (const c of campaigns) {
+      if (isChurnedCampaign(c)) churned++;
+      else if (isPausedCampaign(c)) paused++;
+    }
+    return {
+      all: campaigns.length,
+      active: campaigns.length - churned - paused,
+      paused,
+      churned,
+    };
+  }, [campaigns, isChurnedCampaign, isPausedCampaign]);
 
   const filtered = useMemo(() => {
     let result = campaigns;
     if (statusFilter !== "all") result = result.filter((c) => normStatus(c.status) === statusFilter);
     if (clientFilters.length > 0) result = result.filter((c) => clientFilters.includes(c.client_tag));
-    if (clientStatusFilter === "active") result = result.filter((c) => !isChurnedCampaign(c));
+    if (clientStatusFilter === "active") result = result.filter((c) => !isChurnedCampaign(c) && !isPausedCampaign(c));
+    else if (clientStatusFilter === "paused") result = result.filter((c) => !isChurnedCampaign(c) && isPausedCampaign(c));
     else if (clientStatusFilter === "churned") result = result.filter((c) => isChurnedCampaign(c));
     // Search supports a comma-separated list of client tag abbreviations (or any
     // substring): a campaign matches if its name or tag contains ANY of the terms.
@@ -453,7 +486,7 @@ export default function CampaignsPage() {
       }
       return sortDir === "desc" ? b[sortField] - a[sortField] : a[sortField] - b[sortField];
     });
-  }, [campaigns, statusFilter, clientFilters, clientStatusFilter, isChurnedCampaign, search, sortField, sortDir]);
+  }, [campaigns, statusFilter, clientFilters, clientStatusFilter, isChurnedCampaign, isPausedCampaign, search, sortField, sortDir]);
 
   // Clients with <1500 remaining leads (active only)
   const lowLeadsClients = useMemo(() => {
@@ -763,12 +796,16 @@ export default function CampaignsPage() {
           );
         })}
 
-        {/* Client lifecycle (sourced from Client Tracker sheet: status === "Churned"
-            AND churn date already reached → churned; otherwise active). */}
+        {/* Client lifecycle (sourced from Client Tracker sheet):
+              - churned: status === "Churned" AND churn date already reached (churned wins over paused if both)
+              - paused: status ∈ {"Paused", "Limited Operations"}
+              - active: everything else
+            The three lifecycle buckets are mutually exclusive. */}
         <div className="flex items-center gap-1 pl-2 ml-1 border-l">
           {([
             { key: "all",     label: "All clients",     count: clientStatusCounts.all },
             { key: "active",  label: "Active clients",  count: clientStatusCounts.active },
+            { key: "paused",  label: "Paused clients",  count: clientStatusCounts.paused },
             { key: "churned", label: "Churned clients", count: clientStatusCounts.churned },
           ] as const).map((p) => (
             <button
@@ -778,14 +815,18 @@ export default function CampaignsPage() {
                 clientStatusFilter === p.key
                   ? p.key === "churned"
                     ? "bg-zinc-500 text-zinc-50 border-zinc-500"
-                    : "bg-primary text-primary-foreground border-primary"
+                    : p.key === "paused"
+                      ? "bg-amber-500 text-amber-50 border-amber-500"
+                      : "bg-primary text-primary-foreground border-primary"
                   : "border-border text-muted-foreground hover:border-foreground hover:text-foreground"
               }`}
               title={p.key === "churned"
                 ? "Campaigns whose client tag is marked Churned in the Client Tracker (with the churn date already reached)"
-                : p.key === "active"
-                  ? "Campaigns whose client tag is NOT churned yet"
-                  : "Show all client tags"}
+                : p.key === "paused"
+                  ? "Campaigns whose client tag is marked Paused or Limited Operations in the Client Tracker"
+                  : p.key === "active"
+                    ? "Campaigns whose client tag is NOT churned or paused"
+                    : "Show all client tags"}
             >
               {p.label}
               <span className="ml-1 opacity-60">{p.count}</span>
