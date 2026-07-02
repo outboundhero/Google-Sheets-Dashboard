@@ -183,10 +183,14 @@ function TagFilterDropdown({
   allTags,
   selected,
   onChange,
+  mode,
+  onModeChange,
 }: {
   allTags: string[];
   selected: string[];
   onChange: (tags: string[]) => void;
+  mode: "AND" | "OR";
+  onModeChange: (m: "AND" | "OR") => void;
 }) {
   const [open, setOpen] = useState(false);
   const [search, setSearch] = useState("");
@@ -200,13 +204,72 @@ function TagFilterDropdown({
     return () => document.removeEventListener("mousedown", handler);
   }, []);
 
-  const filtered = useMemo(
-    () => allTags.filter((t) => t.toLowerCase().includes(search.toLowerCase())),
-    [allTags, search]
+  // Comma-separated search: typing "fcs, jpc, pps" narrows the list to any
+  // tag whose name contains ANY of those terms. Single search (no commas)
+  // behaves like a plain substring match.
+  const searchTerms = useMemo(
+    () =>
+      search
+        .split(",")
+        .map((s) => s.trim().toLowerCase())
+        .filter(Boolean),
+    [search],
   );
+  const filtered = useMemo(() => {
+    if (searchTerms.length === 0) return allTags;
+    return allTags.filter((t) => {
+      const lower = t.toLowerCase();
+      return searchTerms.some((term) => lower.includes(term));
+    });
+  }, [allTags, searchTerms]);
 
-  const toggle = (tag: string) => {
-    onChange(selected.includes(tag) ? selected.filter((t) => t !== tag) : [...selected, tag]);
+  // Drag-select over the visible tag rows. Mirrors the pattern used in the
+  // main domain table (search "handleDragStart" in this file). Mousedown on
+  // a row starts a drag whose "select vs deselect" mode is the opposite of
+  // that row's current state; hovering subsequent rows applies the same mode.
+  const isDragging = useRef(false);
+  const dragMode = useRef<"select" | "deselect">("select");
+  const dragStartIdx = useRef(-1);
+  const dragLastIdx = useRef(-1);
+
+  useEffect(() => {
+    const up = () => {
+      isDragging.current = false;
+      dragStartIdx.current = -1;
+      dragLastIdx.current = -1;
+    };
+    document.addEventListener("mouseup", up);
+    return () => document.removeEventListener("mouseup", up);
+  }, []);
+
+  const applyRangeSelection = (fromIdx: number, toIdx: number, list: string[]) => {
+    const [lo, hi] = fromIdx < toIdx ? [fromIdx, toIdx] : [toIdx, fromIdx];
+    const range = list.slice(lo, hi + 1);
+    const next = new Set(selected);
+    for (const t of range) {
+      if (dragMode.current === "select") next.add(t);
+      else next.delete(t);
+    }
+    onChange([...next]);
+  };
+
+  const onRowMouseDown = (idx: number, tag: string) => {
+    isDragging.current = true;
+    dragStartIdx.current = idx;
+    dragLastIdx.current = idx;
+    const wasSelected = selected.includes(tag);
+    dragMode.current = wasSelected ? "deselect" : "select";
+    // Apply to the starting row immediately.
+    const next = new Set(selected);
+    if (dragMode.current === "select") next.add(tag);
+    else next.delete(tag);
+    onChange([...next]);
+  };
+
+  const onRowMouseEnter = (idx: number) => {
+    if (!isDragging.current || idx === dragLastIdx.current) return;
+    dragLastIdx.current = idx;
+    applyRangeSelection(dragStartIdx.current, idx, filtered);
   };
 
   return (
@@ -225,19 +288,51 @@ function TagFilterDropdown({
             {selected.length}
           </span>
         )}
+        {selected.length > 1 && (
+          <span className="text-[10px] font-medium uppercase tracking-wide opacity-70">
+            {mode}
+          </span>
+        )}
         <ChevronDown className={`h-3.5 w-3.5 transition-transform ${open ? "rotate-180" : ""}`} />
       </button>
 
       {open && (
         <div className="absolute top-full left-0 mt-1.5 z-50 w-64 rounded-xl border bg-popover shadow-lg overflow-hidden">
-          {/* Search */}
+          {/* AND / OR toggle */}
+          <div className="flex items-center gap-1 px-3 py-2 border-b">
+            <span className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground mr-1">Match</span>
+            <button
+              onClick={() => onModeChange("OR")}
+              className={`text-xs px-2 py-0.5 rounded-full border transition-colors ${
+                mode === "OR"
+                  ? "bg-primary text-primary-foreground border-primary"
+                  : "border-border text-muted-foreground hover:border-foreground hover:text-foreground"
+              }`}
+              title="Show domains carrying ANY of the selected tags"
+            >
+              Any (OR)
+            </button>
+            <button
+              onClick={() => onModeChange("AND")}
+              className={`text-xs px-2 py-0.5 rounded-full border transition-colors ${
+                mode === "AND"
+                  ? "bg-primary text-primary-foreground border-primary"
+                  : "border-border text-muted-foreground hover:border-foreground hover:text-foreground"
+              }`}
+              title="Show domains carrying ALL of the selected tags"
+            >
+              All (AND)
+            </button>
+          </div>
+
+          {/* Search — supports comma-separated multi-term filtering */}
           <div className="flex items-center gap-2 px-3 py-2 border-b">
             <Search className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
             <input
               autoFocus
               value={search}
               onChange={(e) => setSearch(e.target.value)}
-              placeholder="Search tags…"
+              placeholder="Search tags… (comma-separated OK)"
               className="flex-1 text-sm bg-transparent outline-none placeholder:text-muted-foreground"
             />
             {search && (
@@ -247,26 +342,48 @@ function TagFilterDropdown({
             )}
           </div>
 
-          {/* Clear all */}
-          {selected.length > 0 && (
-            <button
-              onClick={() => { onChange([]); }}
-              className="w-full text-left px-3 py-1.5 text-xs text-muted-foreground hover:bg-accent border-b"
-            >
-              Clear all ({selected.length} selected)
-            </button>
+          {/* Bulk actions row */}
+          {(filtered.length > 0 || selected.length > 0) && (
+            <div className="flex items-center justify-between px-3 py-1.5 text-xs border-b">
+              {filtered.length > 0 ? (
+                <button
+                  onClick={() => {
+                    const next = new Set(selected);
+                    for (const t of filtered) next.add(t);
+                    onChange([...next]);
+                  }}
+                  className="text-muted-foreground hover:text-foreground"
+                >
+                  Select all {searchTerms.length > 0 ? `matches (${filtered.length})` : ""}
+                </button>
+              ) : <span />}
+              {selected.length > 0 && (
+                <button
+                  onClick={() => onChange([])}
+                  className="text-muted-foreground hover:text-foreground"
+                >
+                  Clear ({selected.length})
+                </button>
+              )}
+            </div>
           )}
 
-          {/* Tag list */}
-          <div className="max-h-64 overflow-y-auto">
+          {/* Tag list — drag to select/deselect a range */}
+          <div className="max-h-64 overflow-y-auto select-none">
             {filtered.length === 0 ? (
               <div className="px-3 py-4 text-sm text-muted-foreground text-center">No tags found</div>
             ) : (
-              filtered.map((tag) => (
-                <button
+              filtered.map((tag, idx) => (
+                <div
                   key={tag}
-                  onClick={() => toggle(tag)}
-                  className="w-full flex items-center gap-2 px-3 py-2 text-sm hover:bg-accent text-left transition-colors"
+                  onMouseDown={(e) => { e.preventDefault(); onRowMouseDown(idx, tag); }}
+                  onMouseEnter={() => onRowMouseEnter(idx)}
+                  onClick={(e) => {
+                    // A simple click without dragging is handled by mousedown
+                    // already — swallow to prevent double-toggle.
+                    e.preventDefault();
+                  }}
+                  className="w-full flex items-center gap-2 px-3 py-2 text-sm hover:bg-accent text-left transition-colors cursor-pointer"
                 >
                   <div className={`h-4 w-4 rounded border flex items-center justify-center shrink-0 transition-colors ${
                     selected.includes(tag) ? "bg-primary border-primary" : "border-border"
@@ -274,7 +391,7 @@ function TagFilterDropdown({
                     {selected.includes(tag) && <Check className="h-2.5 w-2.5 text-primary-foreground" />}
                   </div>
                   <span className="truncate">{tag}</span>
-                </button>
+                </div>
               ))
             )}
           </div>
@@ -282,6 +399,12 @@ function TagFilterDropdown({
       )}
     </div>
   );
+
+  // Note: onRowMouseDown toggles the starting row (that's why plain-click
+  // still works — a click IS a mousedown+mouseup with no enter). We swallow
+  // the onClick handler to avoid the row's default click semantics doubling
+  // that toggle. The two usages of TagFilterDropdown both receive `mode`
+  // + `onModeChange` from the parent DeliverabilityPageInner.
 }
 // ------------------------------------------------
 
@@ -318,6 +441,11 @@ function DeliverabilityPageInner() {
     const t = searchParams.get("tags");
     return t ? t.split(",").map((s) => s.trim()).filter(Boolean) : [];
   });
+  // How multiple tag filters combine. Default OR matches user expectation:
+  // "show any domain carrying at least one of these tags". AND is the strict
+  // intersection — used to be the only mode and can be turned on inside the
+  // Tags dropdown.
+  const [tagMatchMode, setTagMatchMode] = useState<"AND" | "OR">("OR");
   const [warmupFilter, setWarmupFilter] = useState<"all" | "open" | "done">("open");
   const [warmupTypeFilter, setWarmupTypeFilter] = useState<"all" | "outlook" | "google">("all");
   const [activeTab, setActiveTab] = useState<"inboxes" | "warmup">("inboxes");
@@ -992,9 +1120,12 @@ function DeliverabilityPageInner() {
         })
         .filter((d) => {
           if (tagFilters.length === 0) return true;
-          return d.tags && tagFilters.every((tag) => d.tags!.includes(tag));
+          if (!d.tags) return false;
+          return tagMatchMode === "AND"
+            ? tagFilters.every((tag) => d.tags!.includes(tag))
+            : tagFilters.some((tag) => d.tags!.includes(tag));
         }),
-    [domains, warmupFilter, warmupSearch, showReserve, warmupTypeFilter, tagFilters, isDomainReserve, now]
+    [domains, warmupFilter, warmupSearch, showReserve, warmupTypeFilter, tagFilters, tagMatchMode, isDomainReserve, now]
   );
 
   // Flag computation helper — returns human-readable reason strings
@@ -1315,9 +1446,12 @@ function DeliverabilityPageInner() {
   const filteredDomains = useMemo(() => {
     let result = domains;
     if (tagFilters.length > 0) {
-      result = result.filter((d) =>
-        d.tags && tagFilters.every((tag) => d.tags!.includes(tag))
-      );
+      result = result.filter((d) => {
+        if (!d.tags) return false;
+        return tagMatchMode === "AND"
+          ? tagFilters.every((tag) => d.tags!.includes(tag))
+          : tagFilters.some((tag) => d.tags!.includes(tag));
+      });
     }
     if (domainSearch.trim()) {
       // Comma-separated: matches a domain if it contains ANY of the terms.
@@ -1453,7 +1587,7 @@ function DeliverabilityPageInner() {
       });
     }
     return result;
-  }, [domains, tagFilters, domainSearch, redirectSearch, typeFilter, showFlagged, flagSubFilter, showHealthy, showBlacklisted, showNotBlacklisted, showSpamhausListed, showSpamhausClean, showReserve, showAssigned, showMultiClient, warmupDaysFilter, warmupDaysFrom, warmupDaysTo, filterConditions, filterMatchMode, sortField, sortDir, isDomainFlagged, hasReplyIssue, hasBounceIssue, isDomainReserve, isDomainAssigned, isDomainMultiClient, now]);
+  }, [domains, tagFilters, tagMatchMode, domainSearch, redirectSearch, typeFilter, showFlagged, flagSubFilter, showHealthy, showBlacklisted, showNotBlacklisted, showSpamhausListed, showSpamhausClean, showReserve, showAssigned, showMultiClient, warmupDaysFilter, warmupDaysFrom, warmupDaysTo, filterConditions, filterMatchMode, sortField, sortDir, isDomainFlagged, hasReplyIssue, hasBounceIssue, isDomainReserve, isDomainAssigned, isDomainMultiClient, now]);
 
   const flaggedCount = useMemo(() => domains.filter(isDomainFlagged).length, [domains, isDomainFlagged]);
   const healthyCount = useMemo(() => domains.filter((d) => !isDomainFlagged(d)).length, [domains, isDomainFlagged]);
@@ -2156,6 +2290,8 @@ function DeliverabilityPageInner() {
               allTags={allTags}
               selected={tagFilters}
               onChange={setTagFilters}
+              mode={tagMatchMode}
+              onModeChange={setTagMatchMode}
             />
 
             {/* Type filter */}
@@ -3177,6 +3313,8 @@ function DeliverabilityPageInner() {
               allTags={allTags}
               selected={tagFilters}
               onChange={setTagFilters}
+              mode={tagMatchMode}
+              onModeChange={setTagMatchMode}
             />
 
             {/* Type filter */}
