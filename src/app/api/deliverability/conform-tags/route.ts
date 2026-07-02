@@ -10,15 +10,30 @@ export const maxDuration = 300;
  * POST /api/deliverability/conform-tags?instances=<csv>
  *
  * LeadSync's deliverability_domains.tags is the source of truth for what tags
- * a domain should have. For every domain in scope, this route queries Bison
- * LIVE for the senders currently on that domain (so deleted/disconnected senders
- * that linger in our cache don't get false-positive plans), and for each live
- * sender it computes which of the domain's wanted tags they're missing and
- * attaches them.
+ * a domain should have. For every domain in scope, this route finds senders
+ * on that domain who are missing any of the domain's wanted tags and attaches
+ * the missing tags.
  *
- * Phase 1 — Plan: { dryRun: true } returns counts + a 100-row sample.
- * Phase 2 — Apply: { dryRun: false } actually attaches the tags via Bison
- *   /tags/attach-to-sender-emails, grouped by (instance, tag).
+ * Plan phase (dryRun: true):
+ *   Sources senders from Supabase's deliverability_inboxes cache instead of
+ *   hitting Bison live. Bison's /sender-emails endpoint is fixed at 15 rows
+ *   per page and offset-capped at 1000 pages, and a live per-domain scan of
+ *   3000+ domains simply cannot complete inside Vercel's 300s ceiling. The
+ *   nightly (well, every-2-days) sync-deliverability cron — now on cursor
+ *   pagination so it actually walks past the 15,000-sender cap — keeps
+ *   deliverability_inboxes complete. We report the cache freshness per
+ *   instance in the response so the UI can flag staleness.
+ *
+ *   Trade-off: senders added since the last cron pass won't be in the plan
+ *   until the next pass. Not a correctness issue — Bison's attach endpoint is
+ *   idempotent on the apply side.
+ *
+ * Apply phase (dryRun: false):
+ *   Re-derives the plan from Supabase (idempotent), resolves each wanted tag
+ *   to its Bison tag_id per instance (creating it if missing), then attaches
+ *   in batches of 100 via /tags/attach-to-sender-emails. Batches retry on
+ *   429/5xx with jittered backoff so a transient blip no longer inflates the
+ *   failed count. Per-sender events are appended to conform_tag_events.
  */
 
 interface DomainRow {
@@ -27,15 +42,17 @@ interface DomainRow {
   tags: string[] | null;
 }
 
-interface BisonTag { id: number; name: string }
-
-interface BisonSender {
+interface InboxRow {
   id: number;
-  email: string;
-  name?: string;
-  status?: string;
-  tags?: BisonTag[];
+  instance: BisonInstanceSlug;
+  email: string | null;
+  domain: string | null;
+  status: string | null;
+  tags: { id?: number; name?: string }[] | null;
+  synced_at: string | null;
 }
+
+interface BisonTag { id: number; name: string }
 
 interface PerInstance {
   instance: BisonInstanceSlug;
@@ -43,46 +60,16 @@ interface PerInstance {
   domainsAffected: number;
   sendersAffected: number;
   attachmentsPlanned: number;
+  sendersSkippedDisconnected: number;
+  cacheSyncedAt: string | null;
 }
 
 interface PlanSampleRow {
   instance: BisonInstanceSlug;
   domain: string;
-  sender_email: string;
+  sender_email: string | null;
   sender_id: number;
   missing_tags: string[];
-}
-
-/** Fetch every sender on a given domain from Bison, paginated. The search param
- *  filters by free-text; we double-check the returned senders' email domain
- *  matches exactly to guard against fuzzy matches (e.g. "acme.com" matching
- *  "acme.com.au"). */
-async function fetchLiveSendersByDomain(
-  instance: BisonInstanceSlug,
-  domain: string,
-): Promise<BisonSender[]> {
-  const out: BisonSender[] = [];
-  const target = domain.toLowerCase();
-  let page = 1;
-  for (;;) {
-    const res = await bisonFetch(
-      instance,
-      `/sender-emails?search=${encodeURIComponent(domain)}&per_page=100&page=${page}`,
-    );
-    if (!res.ok) {
-      throw new Error(`Bison /sender-emails ${res.status} for ${domain}`);
-    }
-    const json = await res.json();
-    const items: BisonSender[] = json.data || [];
-    for (const s of items) {
-      const senderDomain = s.email?.split("@")[1]?.toLowerCase();
-      if (senderDomain === target) out.push(s);
-    }
-    const lastPage = json.meta?.last_page || 1;
-    if (page >= lastPage) break;
-    page++;
-  }
-  return out;
 }
 
 function looksDisconnected(status: string): boolean {
@@ -94,23 +81,87 @@ function looksDisconnected(status: string): boolean {
   );
 }
 
-/** Run an async fn on items with a fixed concurrency cap. */
-async function pool<T, R>(
-  items: T[],
-  concurrency: number,
-  fn: (item: T) => Promise<R>,
-): Promise<R[]> {
-  const results: R[] = new Array(items.length);
-  let idx = 0;
-  const workers = Array.from({ length: Math.min(concurrency, items.length) }, async () => {
-    while (true) {
-      const i = idx++;
-      if (i >= items.length) return;
-      results[i] = await fn(items[i]);
+function sleep(ms: number): Promise<void> {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+// Retry Bison writes on transient 429/5xx with jittered backoff. Without this
+// a single burst could inflate the failed count with attaches that would have
+// succeeded on retry. Non-transient failures (400/404/422) return immediately
+// so the caller can classify them.
+async function bisonPostWithRetry(
+  instance: BisonInstanceSlug,
+  path: string,
+  body: unknown,
+  attempts = 4,
+): Promise<Response> {
+  let last: Response | null = null;
+  for (let i = 0; i < attempts; i++) {
+    const res = await bisonFetch(instance, path, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    if (res.ok) return res;
+    if (res.status === 429 || res.status === 502 || res.status === 503 || res.status === 504) {
+      last = res;
+      const ra = parseInt(res.headers.get("retry-after") || "", 10);
+      const wait = Number.isFinite(ra) && ra > 0 ? ra * 1000 : Math.min(8000, 500 * 2 ** i);
+      await sleep(wait + Math.floor(Math.random() * 300));
+      continue;
     }
-  });
-  await Promise.all(workers);
-  return results;
+    return res;
+  }
+  return last as Response;
+}
+
+/** Paginated read of deliverability_inboxes for the requested instances. */
+async function loadInboxes(instances: BisonInstanceSlug[]): Promise<InboxRow[]> {
+  const supabase = getSupabaseAdmin();
+  const out: InboxRow[] = [];
+  const PAGE = 1000;
+  let offset = 0;
+  while (true) {
+    const { data, error } = await supabase
+      .from("deliverability_inboxes")
+      .select("id, instance, email, domain, status, tags, synced_at")
+      .in("instance", instances)
+      .range(offset, offset + PAGE - 1);
+    if (error) throw new Error(`inboxes read: ${error.message}`);
+    if (!data || data.length === 0) break;
+    out.push(...(data as InboxRow[]));
+    if (data.length < PAGE) break;
+    offset += PAGE;
+  }
+  return out;
+}
+
+/** Domains with non-empty tags for the requested instances → wanted set map. */
+async function loadDomainWantedMap(
+  instances: BisonInstanceSlug[],
+): Promise<{ byKey: Map<string, Set<string>>; scannedByInstance: Map<BisonInstanceSlug, number> }> {
+  const supabase = getSupabaseAdmin();
+  const { data, error } = await supabase
+    .from("deliverability_domains")
+    .select("instance, domain, tags")
+    .in("instance", instances);
+  if (error) throw new Error(`domains read: ${error.message}`);
+  const rows = (data || []) as DomainRow[];
+  const byKey = new Map<string, Set<string>>();
+  const scannedByInstance = new Map<BisonInstanceSlug, number>();
+  for (const inst of instances) scannedByInstance.set(inst, 0);
+  for (const r of rows) {
+    if (!Array.isArray(r.tags) || r.tags.length === 0) continue;
+    const wanted = new Set<string>();
+    for (const t of r.tags) {
+      const u = (t || "").trim().toUpperCase();
+      if (u) wanted.add(u);
+    }
+    if (wanted.size === 0) continue;
+    byKey.set(`${r.instance}::${r.domain}`, wanted);
+    scannedByInstance.set(r.instance, (scannedByInstance.get(r.instance) ?? 0) + 1);
+  }
+  return { byKey, scannedByInstance };
 }
 
 export async function POST(request: Request) {
@@ -120,139 +171,134 @@ export async function POST(request: Request) {
     const body = await request.json().catch(() => ({}));
     const dryRun = body?.dryRun !== false;
     const skipDisconnected = body?.skipDisconnected !== false;
-    const supabase = getSupabaseAdmin();
 
-    // 1. Domains with non-empty tags, scoped to requested instances.
-    const { data: rawDomains, error: dErr } = await supabase
-      .from("deliverability_domains")
-      .select("instance, domain, tags")
-      .in("instance", instances);
-    if (dErr) throw new Error(`domains: ${dErr.message}`);
-    const domains = (rawDomains || []).filter(
-      (d): d is DomainRow =>
-        Array.isArray((d as DomainRow).tags) && ((d as DomainRow).tags?.length ?? 0) > 0,
-    );
+    // ── Common: build wanted-tags-per-domain + load all inboxes for scope ──
+    const [wantedRes, inboxes] = await Promise.all([
+      loadDomainWantedMap(instances),
+      loadInboxes(instances),
+    ]);
+    const { byKey: wantedByKey, scannedByInstance } = wantedRes;
 
-    // Group domains by instance for parallel processing per Bison.
-    const domainsByInstance = new Map<BisonInstanceSlug, DomainRow[]>();
-    for (const inst of instances) domainsByInstance.set(inst, []);
-    for (const d of domains) {
-      const arr = domainsByInstance.get(d.instance);
-      if (arr) arr.push(d);
+    // Freshest synced_at seen per instance — surfaced in the response so the
+    // dialog can show "cache X hours old" for each Bison.
+    const cacheSyncedAt = new Map<BisonInstanceSlug, string | null>();
+    for (const inst of instances) cacheSyncedAt.set(inst, null);
+    for (const i of inboxes) {
+      if (!i.synced_at) continue;
+      const cur = cacheSyncedAt.get(i.instance);
+      if (!cur || i.synced_at > cur) cacheSyncedAt.set(i.instance, i.synced_at);
     }
 
-    // 2. For each (instance, domain): fetch live senders from Bison, diff against
-    //    the domain's wanted tags, accumulate a plan.
+    // ── Build the plan by diffing each inbox against its domain's wanted set ──
     const planByInstanceTag = new Map<BisonInstanceSlug, Map<string, Set<number>>>();
-    // Keep sender metadata so the apply phase can emit a per-sender result
-    // and persist conform_tag_events rows.
     const senderMetaByKey = new Map<string, { instance: BisonInstanceSlug; domain: string; email: string | null }>();
-    const perInstanceStats = new Map<BisonInstanceSlug, PerInstance>();
+    const perInstance = new Map<BisonInstanceSlug, PerInstance>();
     const sample: PlanSampleRow[] = [];
-    let totalAttachments = 0;
 
-    // Run all 4 instances in parallel; within each instance, 5 domain lookups in flight.
-    await Promise.all(
-      instances.map(async (inst) => {
-        const instDomains = domainsByInstance.get(inst) || [];
-        const tagToSenders = new Map<string, Set<number>>();
-        const affectedDomains = new Set<string>();
-        const affectedSenders = new Set<number>();
-        let instAttachments = 0;
+    for (const inst of instances) {
+      planByInstanceTag.set(inst, new Map<string, Set<number>>());
+      perInstance.set(inst, {
+        instance: inst,
+        domainsScanned: scannedByInstance.get(inst) ?? 0,
+        domainsAffected: 0,
+        sendersAffected: 0,
+        attachmentsPlanned: 0,
+        sendersSkippedDisconnected: 0,
+        cacheSyncedAt: cacheSyncedAt.get(inst) ?? null,
+      });
+    }
 
-        await pool(instDomains, 5, async (dRow) => {
-          const wanted = new Set((dRow.tags ?? []).map((t) => t.toUpperCase()));
-          if (wanted.size === 0) return;
+    const affectedDomainsByInstance = new Map<BisonInstanceSlug, Set<string>>();
+    const affectedSendersByInstance = new Map<BisonInstanceSlug, Set<number>>();
+    for (const inst of instances) {
+      affectedDomainsByInstance.set(inst, new Set());
+      affectedSendersByInstance.set(inst, new Set());
+    }
 
-          let liveSenders: BisonSender[];
-          try {
-            liveSenders = await fetchLiveSendersByDomain(inst, dRow.domain);
-          } catch (e) {
-            // Skip this domain on Bison error; record it in stats? Keep silent for now.
-            console.warn(`[conform-tags:${inst}] ${dRow.domain}: ${(e as Error).message}`);
-            return;
-          }
+    for (const inbox of inboxes) {
+      if (!inbox.email || !inbox.domain) continue;
+      const inst = inbox.instance;
+      const stats = perInstance.get(inst);
+      if (!stats) continue;
 
-          for (const sender of liveSenders) {
-            if (skipDisconnected && looksDisconnected((sender.status ?? "").toLowerCase())) continue;
-            const has = new Set(
-              (sender.tags || [])
-                .map((t) => (t?.name ?? "").toUpperCase())
-                .filter(Boolean),
-            );
-            const missing: string[] = [];
-            for (const w of wanted) {
-              if (!has.has(w)) missing.push(w);
-            }
-            if (missing.length === 0) continue;
+      if (skipDisconnected && looksDisconnected((inbox.status ?? "").toLowerCase())) {
+        stats.sendersSkippedDisconnected++;
+        continue;
+      }
 
-            affectedDomains.add(dRow.domain);
-            affectedSenders.add(sender.id);
-            instAttachments += missing.length;
-            senderMetaByKey.set(`${inst}:${sender.id}`, {
-              instance: inst,
-              domain: dRow.domain,
-              email: sender.email ?? null,
-            });
+      const wanted = wantedByKey.get(`${inst}::${inbox.domain}`);
+      if (!wanted || wanted.size === 0) continue;
 
-            for (const tagU of missing) {
-              let bag = tagToSenders.get(tagU);
-              if (!bag) { bag = new Set(); tagToSenders.set(tagU, bag); }
-              bag.add(sender.id);
-            }
+      const has = new Set<string>();
+      for (const t of inbox.tags || []) {
+        const u = (t?.name || "").trim().toUpperCase();
+        if (u) has.add(u);
+      }
+      const missing: string[] = [];
+      for (const w of wanted) if (!has.has(w)) missing.push(w);
+      if (missing.length === 0) continue;
 
-            if (sample.length < 100) {
-              sample.push({
-                instance: inst,
-                domain: dRow.domain,
-                sender_email: sender.email,
-                sender_id: sender.id,
-                missing_tags: missing,
-              });
-            }
-          }
-        });
+      affectedDomainsByInstance.get(inst)!.add(inbox.domain);
+      affectedSendersByInstance.get(inst)!.add(inbox.id);
+      stats.attachmentsPlanned += missing.length;
 
-        planByInstanceTag.set(inst, tagToSenders);
-        totalAttachments += instAttachments;
-        perInstanceStats.set(inst, {
+      senderMetaByKey.set(`${inst}:${inbox.id}`, {
+        instance: inst,
+        domain: inbox.domain,
+        email: inbox.email,
+      });
+
+      const tagMap = planByInstanceTag.get(inst)!;
+      for (const tagU of missing) {
+        let bag = tagMap.get(tagU);
+        if (!bag) { bag = new Set(); tagMap.set(tagU, bag); }
+        bag.add(inbox.id);
+      }
+
+      if (sample.length < 100) {
+        sample.push({
           instance: inst,
-          domainsScanned: instDomains.length,
-          domainsAffected: affectedDomains.size,
-          sendersAffected: affectedSenders.size,
-          attachmentsPlanned: instAttachments,
+          domain: inbox.domain,
+          sender_email: inbox.email,
+          sender_id: inbox.id,
+          missing_tags: missing,
         });
-      }),
-    );
+      }
+    }
+
+    for (const inst of instances) {
+      const stats = perInstance.get(inst)!;
+      stats.domainsAffected = affectedDomainsByInstance.get(inst)!.size;
+      stats.sendersAffected = affectedSendersByInstance.get(inst)!.size;
+    }
 
     if (dryRun) {
       return NextResponse.json({
         dryRun: true,
-        live: true,
+        source: "supabase-cache",
         instances,
         totals: {
-          domainsScanned: [...perInstanceStats.values()].reduce((s, p) => s + p.domainsScanned, 0),
-          domainsAffected: [...perInstanceStats.values()].reduce((s, p) => s + p.domainsAffected, 0),
-          sendersAffected: [...perInstanceStats.values()].reduce((s, p) => s + p.sendersAffected, 0),
-          attachmentsPlanned: totalAttachments,
+          domainsScanned: [...perInstance.values()].reduce((s, p) => s + p.domainsScanned, 0),
+          domainsAffected: [...perInstance.values()].reduce((s, p) => s + p.domainsAffected, 0),
+          sendersAffected: [...perInstance.values()].reduce((s, p) => s + p.sendersAffected, 0),
+          attachmentsPlanned: [...perInstance.values()].reduce((s, p) => s + p.attachmentsPlanned, 0),
+          sendersSkippedDisconnected: [...perInstance.values()].reduce((s, p) => s + p.sendersSkippedDisconnected, 0),
         },
-        perInstance: [...perInstanceStats.values()],
+        perInstance: [...perInstance.values()],
+        cacheSyncedAt: Object.fromEntries(cacheSyncedAt),
         sample,
       });
     }
 
-    // ─── Apply phase ─── resolve tag IDs per instance (creating if missing), then attach.
-    // Also track per-sender applied tags so we can return + persist the list.
+    // ─── Apply phase ──────────────────────────────────────────────────────
     const batchId = randomUUID();
     let applied = 0;
     let failed = 0;
     const failures: { instance: string; tag: string; reason: string }[] = [];
-    // Per (instance, sender_id) → applied tag names
     const appliedBySender = new Map<
       string,
       { instance: BisonInstanceSlug; sender_id: number; sender_email: string | null; domain: string; applied_tags: string[] }
     >();
-    // Event rows to insert into conform_tag_events at the end (one per attempt).
     type EventRow = {
       batch_id: string;
       instance: string;
@@ -269,16 +315,17 @@ export async function POST(request: Request) {
     for (const [inst, tagToSenders] of planByInstanceTag) {
       if (tagToSenders.size === 0) continue;
 
-      const tagsRes = await bisonFetch(inst, `/tags`);
-      if (!tagsRes.ok) {
-        const reason = `Failed to list tags: ${tagsRes.status}`;
+      // Resolve tag names → IDs; create missing tags.
+      const listRes = await bisonFetch(inst, `/tags`);
+      if (!listRes.ok) {
+        const reason = `Failed to list tags: ${listRes.status}`;
         for (const tag of tagToSenders.keys()) {
           failures.push({ instance: inst, tag, reason });
           failed++;
         }
         continue;
       }
-      const tagsJson = await tagsRes.json();
+      const tagsJson = await listRes.json();
       const currentTags: BisonTag[] = tagsJson.data || [];
       const byUpperName = new Map(currentTags.map((t) => [t.name.toUpperCase(), t]));
 
@@ -309,14 +356,13 @@ export async function POST(request: Request) {
         let okThisTag = 0;
         for (let i = 0; i < ids.length; i += 100) {
           const batch = ids.slice(i, i + 100);
-          const attachRes = await bisonFetch(inst, `/tags/attach-to-sender-emails`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ tag_ids: [resolved.id], sender_email_ids: batch }),
-          });
+          const attachRes = await bisonPostWithRetry(
+            inst,
+            `/tags/attach-to-sender-emails`,
+            { tag_ids: [resolved.id], sender_email_ids: batch },
+          );
           if (attachRes.ok) {
             okThisTag += batch.length;
-            // Record successes
             for (const senderId of batch) {
               const key = `${inst}:${senderId}`;
               const meta = senderMetaByKey.get(key);
@@ -348,7 +394,6 @@ export async function POST(request: Request) {
             const txt = await attachRes.text().catch(() => "");
             const reason = `attach batch ${i}-${i + batch.length}: ${attachRes.status} ${txt.slice(0, 150)}`;
             failures.push({ instance: inst, tag: resolved.name, reason });
-            // Record failures
             for (const senderId of batch) {
               const meta = senderMetaByKey.get(`${inst}:${senderId}`);
               eventRows.push({
@@ -370,11 +415,11 @@ export async function POST(request: Request) {
       }
     }
 
-    // Persist events to Supabase. Soft-fail if the table doesn't exist yet —
-    // the apply already happened on Bison, and we don't want to fail the
-    // whole response over a logging miss. The SQL is in
-    // supabase-conform-tag-events.sql for the operator to run.
+    // Persist events. Soft-fail if the table doesn't exist yet — the Bison
+    // work already happened and we don't want to fail the response over a
+    // logging miss. SQL is in supabase-conform-tag-events.sql.
     if (eventRows.length > 0) {
+      const supabase = getSupabaseAdmin();
       try {
         for (let i = 0; i < eventRows.length; i += 500) {
           const batch = eventRows.slice(i, i + 500);
@@ -391,13 +436,14 @@ export async function POST(request: Request) {
 
     return NextResponse.json({
       dryRun: false,
-      live: true,
+      source: "supabase-cache",
       instances,
       batchId,
       applied,
       failed,
       failures: failures.slice(0, 50),
-      perInstance: [...perInstanceStats.values()],
+      perInstance: [...perInstance.values()],
+      cacheSyncedAt: Object.fromEntries(cacheSyncedAt),
       appliedSenders: [...appliedBySender.values()],
     });
   } catch (error) {

@@ -1,12 +1,19 @@
 import { NextResponse } from "next/server";
+import { Redis } from "@upstash/redis";
 import { getSupabaseAdmin } from "@/lib/supabase";
 import { bisonFetch } from "@/lib/bison";
 import type { BisonInstanceSlug } from "@/lib/bison-instances";
 
-const PER_PAGE = 15;
-const CONCURRENT = 3;
-const BATCH_DELAY_MS = 800;
+// Bison's per_page is fixed at 15 (docs.emailbison.com/get-started/pagination),
+// AND its traditional offset pagination is hard-capped at 1000 pages per index
+// route. That's 15,000 senders max — an instance with 30k+ inboxes silently
+// truncated at 15k with offset. Cursor pagination is the only way to walk the
+// full set. So this cron now stores an opaque cursor token in Redis instead of
+// a page number and follows meta.next_cursor until it returns null.
+const CONCURRENT_UPSERT_BATCH = 500;
+const BATCH_DELAY_MS = 150;
 const STATS_REBUILD_GRACE_MS = 8000;
+const MAX_RUN_MS = 60_000;
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -39,32 +46,40 @@ function getRedis() {
   const url = process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_REST_URL;
   const token = process.env.KV_REST_API_TOKEN || process.env.UPSTASH_REDIS_REST_TOKEN;
   if (!url || !token) return null;
-  const { Redis } = require("@upstash/redis") as typeof import("@upstash/redis");
   return new Redis({ url, token });
 }
 
 function cursorKey(instance: BisonInstanceSlug): string {
-  return `cron:deliverability:cursor:${instance}`;
+  // v2 suffix because the pre-cursor key stored a numeric page. If we reused
+  // the same key an old integer would be read back as a truthy string and
+  // sent to Bison as an "opaque" cursor — Bison would reject it.
+  return `cron:deliverability:cursorv2:${instance}`;
 }
 
-async function getCursor(instance: BisonInstanceSlug): Promise<number> {
+// Returns the next opaque Bison cursor to fetch, or null to start a fresh pass
+// from the beginning of the sender list.
+async function getCursor(instance: BisonInstanceSlug): Promise<string | null> {
   const redis = getRedis();
-  if (!redis) return 1;
-  const val = await redis.get<number>(cursorKey(instance));
-  return typeof val === "number" && val > 0 ? val : 1;
+  if (!redis) return null;
+  const val = await redis.get<string>(cursorKey(instance));
+  return typeof val === "string" && val.length > 0 ? val : null;
 }
 
-async function setCursor(instance: BisonInstanceSlug, page: number): Promise<void> {
+async function setCursor(instance: BisonInstanceSlug, cursor: string | null): Promise<void> {
   const redis = getRedis();
   if (!redis) return;
-  await redis.set(cursorKey(instance), page);
+  if (cursor == null) {
+    await redis.del(cursorKey(instance));
+  } else {
+    await redis.set(cursorKey(instance), cursor);
+  }
 }
 
 // --- Pruning-pass tracking ----------------------------------------------------
-// A "pass" = one full crawl of an instance's inboxes (cursor 1 -> lastPage),
-// which may span several cron runs. Every synced row is stamped with synced_at;
-// rows not re-stamped during a clean, complete pass are stale (deleted in
-// Bison) and get pruned. `clean` flips false if any page/upsert error occurs.
+// A "pass" = one full walk (null cursor → last page → null cursor), which may
+// span several cron runs. Every synced row is stamped with synced_at; rows not
+// re-stamped during a clean, complete pass are stale (deleted in Bison) and
+// get pruned. `clean` flips false if any page/upsert error occurs.
 interface PassState {
   startedAt: string;
   clean: boolean;
@@ -93,65 +108,86 @@ async function clearPass(instance: BisonInstanceSlug): Promise<void> {
   await redis.del(passKey(instance));
 }
 
-async function fetchPage(
+// One page of /sender-emails via cursor pagination. `cursor === null` means
+// "start from the beginning" — Bison ignores the missing cursor param and
+// returns the first page. Returns `nextCursor: null` when the walk has ended.
+async function fetchCursorPage(
   instance: BisonInstanceSlug,
-  page: number,
-): Promise<{ data: SenderEmail[]; lastPage: number }> {
-  const res = await bisonFetch(instance, `/sender-emails?page=${page}&per_page=${PER_PAGE}`);
-  if (!res.ok) throw new Error(`Bison ${res.status} on page ${page}`);
+  cursor: string | null,
+): Promise<{ data: SenderEmail[]; nextCursor: string | null; status: number }> {
+  const qs = cursor
+    ? `pagination_type=cursor&cursor=${encodeURIComponent(cursor)}`
+    : `pagination_type=cursor`;
+  const res = await bisonFetch(instance, `/sender-emails?${qs}`);
+  if (!res.ok) {
+    // Preserve status in a throwable so the caller can distinguish 429 (pause
+    // the run) from other errors (mark pass unclean).
+    const err = new Error(`Bison ${res.status}`) as Error & { status: number };
+    err.status = res.status;
+    throw err;
+  }
   const json = await res.json();
+  // Some Bison endpoints wrap the payload in a single-element array; guard.
   const payload = Array.isArray(json) ? json[0] : json;
-  return { data: payload.data || [], lastPage: payload.meta?.last_page || 1 };
+  return {
+    data: payload?.data || [],
+    nextCursor: payload?.meta?.next_cursor ?? null,
+    status: res.status,
+  };
 }
 
 export async function runDeliverabilitySync(instance: BisonInstanceSlug): Promise<NextResponse> {
   const t0 = Date.now();
-  const deadline = t0 + 60_000 - STATS_REBUILD_GRACE_MS;
+  const deadline = t0 + MAX_RUN_MS - STATS_REBUILD_GRACE_MS;
   const supabase = getSupabaseAdmin();
 
   try {
-    const startPage = await getCursor(instance);
-    // A cursor at page 1 starts a fresh pruning pass.
-    if (startPage === 1) {
+    const startCursor = await getCursor(instance);
+    const isNewPass = startCursor == null;
+    if (isNewPass) {
       await setPass(instance, { startedAt: new Date().toISOString(), clean: true });
     }
-    const first = await fetchPage(instance, startPage);
-    const lastPage = first.lastPage;
-    const collected: SenderEmail[] = [...first.data];
 
-    let nextPage = startPage + 1;
-    let stoppedForRateLimit = false;
+    const collected: SenderEmail[] = [];
+    let cursor: string | null = startCursor;
     let hadError = false;
-    while (nextPage <= lastPage && Date.now() < deadline) {
-      const batchEnd = Math.min(nextPage + CONCURRENT - 1, lastPage);
-      const pages: number[] = [];
-      for (let p = nextPage; p <= batchEnd; p++) pages.push(p);
-      const results = await Promise.allSettled(pages.map((p) => fetchPage(instance, p)));
-      let sawRateLimit = false;
-      for (const r of results) {
-        if (r.status === "fulfilled") {
-          collected.push(...r.value.data);
+    let stoppedForRateLimit = false;
+    let reachedEnd = false;
+    let pagesWalked = 0;
+
+    // Cursor is inherently sequential — each next_cursor is only known after
+    // the current response arrives. Walk pages one at a time until we hit the
+    // per-run deadline or the walk ends (next_cursor === null).
+    for (;;) {
+      if (Date.now() >= deadline) break;
+      let page;
+      try {
+        page = await fetchCursorPage(instance, cursor);
+      } catch (e) {
+        const err = e as Error & { status?: number };
+        if (err.status === 429) {
+          stoppedForRateLimit = true;
+          console.warn(`[cron/deliverability:${instance}] Bison 429 at page ${pagesWalked + 1} — resuming next run`);
         } else {
-          const reasonStr = String(r.reason);
-          if (reasonStr.includes("429")) sawRateLimit = true;
-          else {
-            hadError = true;
-            console.error(`[cron/deliverability:${instance}] page fetch failed:`, r.reason);
-          }
+          hadError = true;
+          console.error(`[cron/deliverability:${instance}] cursor fetch failed:`, err.message);
         }
-      }
-      if (sawRateLimit) {
-        stoppedForRateLimit = true;
-        console.warn(`[cron/deliverability:${instance}] Bison rate-limited, pausing this run at page ${nextPage}`);
         break;
       }
-      nextPage = batchEnd + 1;
-      if (nextPage <= lastPage && Date.now() < deadline) {
-        await sleep(BATCH_DELAY_MS);
+      pagesWalked++;
+      if (page.data.length > 0) collected.push(...page.data);
+      cursor = page.nextCursor;
+      if (cursor == null) {
+        // Bison signaled end-of-walk. We've seen every sender for this pass.
+        reachedEnd = true;
+        break;
       }
+      // Small pacing gap. Cursor mode is one request per iteration (no
+      // concurrent batches) so we can be much gentler than offset mode.
+      if (Date.now() < deadline) await sleep(BATCH_DELAY_MS);
     }
 
-    const completedFullPass = nextPage > lastPage && !stoppedForRateLimit;
+    const completedFullPass = reachedEnd && !stoppedForRateLimit && !hadError;
 
     // Upsert (instance, domain) — insert-only, don't clobber inbox_count owned by rebuild_domain_stats
     const domainEarliest = new Map<string, string>();
@@ -168,10 +204,10 @@ export async function runDeliverabilitySync(instance: BisonInstanceSlug): Promis
       warmup_status: "open",
       synced_at: new Date().toISOString(),
     }));
-    for (let i = 0; i < domainRows.length; i += 500) {
+    for (let i = 0; i < domainRows.length; i += CONCURRENT_UPSERT_BATCH) {
       const { error } = await supabase
         .from("deliverability_domains")
-        .upsert(domainRows.slice(i, i + 500), { onConflict: "instance,domain", ignoreDuplicates: true });
+        .upsert(domainRows.slice(i, i + CONCURRENT_UPSERT_BATCH), { onConflict: "instance,domain", ignoreDuplicates: true });
       if (error) console.error(`[cron/deliverability:${instance}] domain upsert failed:`, error.message);
     }
 
@@ -203,10 +239,10 @@ export async function runDeliverabilitySync(instance: BisonInstanceSlug): Promis
         updated_at: i.updated_at,
         synced_at: new Date().toISOString(),
       }));
-    for (let i = 0; i < inboxRows.length; i += 500) {
+    for (let i = 0; i < inboxRows.length; i += CONCURRENT_UPSERT_BATCH) {
       const { error } = await supabase
         .from("deliverability_inboxes")
-        .upsert(inboxRows.slice(i, i + 500), { onConflict: "instance,id", ignoreDuplicates: false });
+        .upsert(inboxRows.slice(i, i + CONCURRENT_UPSERT_BATCH), { onConflict: "instance,id", ignoreDuplicates: false });
       if (error) {
         hadError = true;
         console.error(`[cron/deliverability:${instance}] inbox upsert failed:`, error.message);
@@ -217,7 +253,8 @@ export async function runDeliverabilitySync(instance: BisonInstanceSlug): Promis
     let statsRebuilt = false;
     let pruned = 0;
     if (completedFullPass) {
-      await setCursor(instance, 1);
+      // Clear cursor → next cron run starts a fresh pass from the top.
+      await setCursor(instance, null);
 
       // Prune inboxes that no longer exist in Bison: rows for this instance not
       // re-stamped during this pass (synced_at older than the pass start).
@@ -260,8 +297,11 @@ export async function runDeliverabilitySync(instance: BisonInstanceSlug): Promis
       if (rpcErr) console.error(`[cron/deliverability:${instance}] rebuild_domain_stats failed:`, rpcErr.message);
       else statsRebuilt = true;
     } else {
-      await setCursor(instance, nextPage);
-      // Carry an error forward so the run that completes the pass skips pruning.
+      // Save where we left off so next cron run resumes from this cursor.
+      // If we bailed for a rate limit, `cursor` still holds the cursor of the
+      // page we were about to fetch; on any other error, save it too so we
+      // don't lose ground.
+      await setCursor(instance, cursor);
       if (hadError) {
         const pass = await getPass(instance);
         if (pass && pass.clean) await setPass(instance, { ...pass, clean: false });
@@ -270,19 +310,20 @@ export async function runDeliverabilitySync(instance: BisonInstanceSlug): Promis
 
     const durationMs = Date.now() - t0;
     console.log(
-      `[cron/deliverability:${instance}] pages=${startPage}-${nextPage - 1}/${lastPage} inboxes=${inboxRows.length} domains=${domainRows.length} fullPass=${completedFullPass} pruned=${pruned} statsRebuilt=${statsRebuilt} duration=${durationMs}ms`,
+      `[cron/deliverability:${instance}] pages=${pagesWalked} inboxes=${inboxRows.length} domains=${domainRows.length} fullPass=${completedFullPass} pruned=${pruned} statsRebuilt=${statsRebuilt} rateLimited=${stoppedForRateLimit} duration=${durationMs}ms`,
     );
     return NextResponse.json({
       instance,
-      startPage,
-      endPage: nextPage - 1,
-      lastPage,
+      pagesWalked,
       inboxes: inboxRows.length,
       domains: domainRows.length,
       completedFullPass,
+      rateLimited: stoppedForRateLimit,
+      hadError,
       pruned,
       statsRebuilt,
-      nextCursor: completedFullPass ? 1 : nextPage,
+      // The cursor to resume from on the next run (null = start a fresh pass).
+      nextCursor: completedFullPass ? null : cursor,
       durationMs,
     });
   } catch (error) {

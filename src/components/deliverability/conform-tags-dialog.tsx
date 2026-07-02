@@ -48,6 +48,8 @@ interface PerInstance {
   domainsAffected: number;
   sendersAffected: number;
   attachmentsPlanned: number;
+  sendersSkippedDisconnected?: number;
+  cacheSyncedAt?: string | null;
 }
 
 interface PlanRow {
@@ -60,9 +62,16 @@ interface PlanRow {
 
 interface PlanResponse {
   dryRun: true;
-  live?: boolean;
-  totals: { domainsScanned?: number; domainsAffected: number; sendersAffected: number; attachmentsPlanned: number };
+  source?: string;
+  totals: {
+    domainsScanned?: number;
+    domainsAffected: number;
+    sendersAffected: number;
+    attachmentsPlanned: number;
+    sendersSkippedDisconnected?: number;
+  };
   perInstance: PerInstance[];
+  cacheSyncedAt?: Record<string, string | null>;
   sample: PlanRow[];
 }
 
@@ -93,6 +102,55 @@ interface Props {
   onComplete: () => void;
 }
 
+// Vercel occasionally returns an HTML error page ("An error occurred...")
+// when a route times out or crashes. Calling res.json() on that HTML throws
+// with "Unexpected token 'A'" which the UI used to surface directly. This
+// wrapper reads the body as text first, tries JSON, and turns non-JSON into
+// a friendly error message tagged with the HTTP status.
+async function safeJsonFetch(input: RequestInfo, init?: RequestInit): Promise<unknown> {
+  const res = await fetch(input, init);
+  const text = await res.text();
+  let parsed: unknown = null;
+  try { parsed = text ? JSON.parse(text) : null; }
+  catch {
+    // Non-JSON body — almost always Vercel's edge error page.
+    const snippet = text.slice(0, 60).replace(/\s+/g, " ").trim();
+    throw new Error(
+      res.status >= 500
+        ? `Server error (HTTP ${res.status}) — the scan ran too long or crashed. Try again.`
+        : `Unexpected non-JSON response (HTTP ${res.status}): ${snippet}…`,
+    );
+  }
+  if (!res.ok) {
+    const err = (parsed as { error?: string })?.error;
+    throw new Error(err || `HTTP ${res.status}`);
+  }
+  return parsed;
+}
+
+// Turns an ISO date into "3h ago" / "yesterday" / "5d ago". Returns "" if unset.
+function formatAge(iso: string | null | undefined): string {
+  if (!iso) return "never synced";
+  const t = new Date(iso).getTime();
+  if (!Number.isFinite(t)) return "never synced";
+  const mins = Math.max(0, Math.round((Date.now() - t) / 60_000));
+  if (mins < 60) return `${mins}m ago`;
+  const hrs = Math.round(mins / 60);
+  if (hrs < 48) return `${hrs}h ago`;
+  const days = Math.round(hrs / 24);
+  return `${days}d ago`;
+}
+
+function ageTone(iso: string | null | undefined): "fresh" | "warn" | "stale" {
+  if (!iso) return "stale";
+  const t = new Date(iso).getTime();
+  if (!Number.isFinite(t)) return "stale";
+  const hrs = (Date.now() - t) / (60 * 60 * 1000);
+  if (hrs < 24) return "fresh";
+  if (hrs < 72) return "warn";
+  return "stale";
+}
+
 export function ConformTagsDialog({ open, onOpenChange, instancesQuery, onComplete }: Props) {
   const [phase, setPhase] = useState<Phase>("planning");
   const [plan, setPlan] = useState<PlanResponse | null>(null);
@@ -121,13 +179,11 @@ export function ConformTagsDialog({ open, onOpenChange, instancesQuery, onComple
     setPlan(null);
     setResult(null);
     try {
-      const res = await fetch(`/api/deliverability/conform-tags?${q}`, {
+      const data = await safeJsonFetch(`/api/deliverability/conform-tags?${q}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ dryRun: true, skipDisconnected: true }),
       });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
       setPlan(data as PlanResponse);
       setPhase("review");
     } catch (e) {
@@ -139,25 +195,27 @@ export function ConformTagsDialog({ open, onOpenChange, instancesQuery, onComple
   // Reset to "all" when the dialog opens, then auto-scan with whatever the
   // effective query is.
   useEffect(() => {
+    // Reset scope selector when the dialog opens.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     if (open) setSelectedSlug("all");
   }, [open]);
 
   useEffect(() => {
+    // loadPlan intentionally drives the plan/error state as an async side-effect
+    // when the dialog opens or the scope changes.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     if (open) loadPlan(effectiveQuery);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, effectiveQuery]);
 
   const apply = async () => {
     setPhase("applying");
     setError(null);
     try {
-      const res = await fetch(`/api/deliverability/conform-tags?${effectiveQuery}`, {
+      const data = await safeJsonFetch(`/api/deliverability/conform-tags?${effectiveQuery}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ dryRun: false, skipDisconnected: true }),
       });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
       setResult(data as ApplyResponse);
       setPhase("done");
       onComplete();
@@ -189,9 +247,11 @@ export function ConformTagsDialog({ open, onOpenChange, instancesQuery, onComple
           </DialogTitle>
           <DialogDescription>
             Push each domain&apos;s tags down to every sender on that domain.
-            LeadSync&apos;s domain tags are the source of truth. The scan queries
-            Bison live for each domain&apos;s current senders, so deleted /
-            disconnected senders that linger in the LeadSync cache are skipped.
+            LeadSync&apos;s domain tags are the source of truth. The scan reads
+            senders from LeadSync&apos;s cache (refreshed by the deliverability
+            cron), diffs each sender&apos;s tags against its domain&apos;s wanted
+            set, and attaches whatever&apos;s missing on Bison. Disconnected
+            senders are skipped by default.
           </DialogDescription>
         </DialogHeader>
 
@@ -220,12 +280,9 @@ export function ConformTagsDialog({ open, onOpenChange, instancesQuery, onComple
         {phase === "planning" && (
           <div className="flex flex-col items-center justify-center py-12 gap-3">
             <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
-            <span className="text-sm text-muted-foreground">Scanning Bison live for missing tags…</span>
+            <span className="text-sm text-muted-foreground">Building plan from cache…</span>
             <span className="text-xs text-muted-foreground/70">
-              {selectedSlug === "all"
-                ? "One lookup per tagged domain across all selected Bisons in parallel."
-                : `One lookup per tagged domain on ${BISON_INSTANCES[selectedSlug]?.label ?? selectedSlug}.`}
-              {" "}May take 30–60s.
+              Reads deliverability_inboxes for {selectedSlug === "all" ? "all selected instances" : BISON_INSTANCES[selectedSlug]?.label ?? selectedSlug} and diffs each sender against its domain&apos;s tags. Usually done in a couple of seconds.
             </span>
           </div>
         )}
@@ -237,6 +294,33 @@ export function ConformTagsDialog({ open, onOpenChange, instancesQuery, onComple
               <StatCard label="Domains affected" value={plan.totals.domainsAffected} />
               <StatCard label="Tag attachments" value={plan.totals.attachmentsPlanned} />
             </div>
+
+            {/* Cache freshness — one pill per instance, coloured by age. If any
+                instance's cache is >72h old this is where you find out. */}
+            {plan.cacheSyncedAt && Object.keys(plan.cacheSyncedAt).length > 0 && (
+              <div className="flex flex-wrap items-center gap-1.5 text-[11px]">
+                <span className="text-muted-foreground">Cache freshness:</span>
+                {Object.entries(plan.cacheSyncedAt).map(([slug, iso]) => {
+                  const tone = ageTone(iso);
+                  const cls =
+                    tone === "fresh"
+                      ? "border-emerald-500/30 bg-emerald-950/20 text-emerald-300"
+                      : tone === "warn"
+                      ? "border-amber-500/30 bg-amber-950/20 text-amber-300"
+                      : "border-red-500/30 bg-red-950/20 text-red-300";
+                  return (
+                    <span key={slug} className={`px-2 py-0.5 rounded-full border ${cls}`}>
+                      {BISON_INSTANCES[slug as BisonInstanceSlug]?.label ?? slug}: {formatAge(iso)}
+                    </span>
+                  );
+                })}
+                {plan.totals.sendersSkippedDisconnected != null && plan.totals.sendersSkippedDisconnected > 0 && (
+                  <span className="ml-auto text-muted-foreground">
+                    {plan.totals.sendersSkippedDisconnected.toLocaleString()} disconnected sender{plan.totals.sendersSkippedDisconnected === 1 ? "" : "s"} skipped
+                  </span>
+                )}
+              </div>
+            )}
 
             {plan.totals.sendersAffected === 0 ? (
               <div className="flex items-center gap-2 rounded-md border border-emerald-500/30 bg-emerald-950/20 px-3 py-2 text-sm text-emerald-200">
