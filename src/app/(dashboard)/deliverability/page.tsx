@@ -172,6 +172,10 @@ interface InstanceSyncProgress {
   lastPage: number;
   status: "pending" | "running" | "done" | "failed";
   error?: string;
+  // Timestamps for the live throughput + freshness indicator. Not persisted;
+  // reset every time handleSync starts a new run.
+  startedAt?: number;
+  lastUpdateAt?: number;
 }
 
 // ---------- Tag Multi-Select Dropdown ----------
@@ -301,6 +305,14 @@ function DeliverabilityPageInner() {
   const [loading, setLoading] = useState(true);
   const [syncing, setSyncing] = useState(false);
   const [syncProgresses, setSyncProgresses] = useState<InstanceSyncProgress[] | null>(null);
+  // Ticks every second while a sync is running so the "N s ago" freshness
+  // text and the throughput rate re-render live. No-op when idle.
+  const [nowTick, setNowTick] = useState<number>(() => Date.now());
+  useEffect(() => {
+    if (!syncing) return;
+    const id = setInterval(() => setNowTick(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, [syncing]);
   const [syncStats, setSyncStats] = useState<{ inboxCount: number; domainCount: number } | null>(null);
   const [tagFilters, setTagFilters] = useState<string[]>(() => {
     const t = searchParams.get("tags");
@@ -774,7 +786,10 @@ function DeliverabilityPageInner() {
     // returning a nextCursor for the FE to feed back in. We used to run 4
     // parallel offset streams per instance, but offset is hard-capped at 1000
     // pages × 15 = 15k senders and silently truncated big instances.
-    const PAGES_PER_CHUNK = 40;
+    // 80 pages per chunk with prefetch pipeline runs ~30s wall on the server,
+    // safely under the 60s Vercel ceiling and roughly half the FE↔server
+    // round trips vs the old 40. Tradeoff: fewer live progress updates.
+    const PAGES_PER_CHUNK = 80;
     localStorage.removeItem("deliverability_next_page");
     setSavedPage(null);
 
@@ -792,12 +807,19 @@ function DeliverabilityPageInner() {
       setSyncProgresses((prev) => prev?.map((p) => p.slug === slug ? { ...p, ...patch } : p) ?? null);
     };
     const incInstance = (slug: BisonInstanceSlug, syncedDelta: number, pagesDelta: number) => {
-      setSyncProgresses((prev) => prev?.map((p) => p.slug === slug ? { ...p, synced: p.synced + syncedDelta, page: p.page + pagesDelta } : p) ?? null);
+      const now = Date.now();
+      setSyncProgresses((prev) => prev?.map((p) => p.slug === slug ? {
+        ...p,
+        synced: p.synced + syncedDelta,
+        page: p.page + pagesDelta,
+        lastUpdateAt: now,
+      } : p) ?? null);
     };
 
     // Crawl one Bison instance end-to-end via cursor pagination + per-instance prune.
     const syncOneInstance = async (instance: BisonInstanceSlug): Promise<boolean> => {
-      patchInstance(instance, { status: "running" });
+      const nowStart = Date.now();
+      patchInstance(instance, { status: "running", startedAt: nowStart, lastUpdateAt: nowStart });
       const syncStartedAt = new Date().toISOString();
       let anyChunkFailed = false;
       let cursor: string | null = null;
@@ -1579,6 +1601,20 @@ function DeliverabilityPageInner() {
           </div>
           {syncProgresses.map((p) => {
             const pct = p.lastPage > 0 ? Math.min(100, (p.page / p.lastPage) * 100) : 0;
+            // Live throughput + freshness (only when running). Rate is
+            // inboxes/s over the whole run so far; secsSinceUpdate is what
+            // makes "is it stuck?" answerable at a glance.
+            const runningSecs = p.startedAt ? Math.max(0, (nowTick - p.startedAt) / 1000) : 0;
+            const rate = p.status === "running" && runningSecs > 2 ? p.synced / runningSecs : 0;
+            const secsSinceUpdate = p.lastUpdateAt ? Math.floor((nowTick - p.lastUpdateAt) / 1000) : 0;
+            const freshTone =
+              p.status !== "running"
+                ? "text-muted-foreground"
+                : secsSinceUpdate < 15
+                  ? "text-emerald-400"
+                  : secsSinceUpdate < 60
+                    ? "text-amber-400"
+                    : "text-red-400";
             return (
               <div key={p.slug} className="space-y-1">
                 <div className="flex items-center justify-between text-sm">
@@ -1593,6 +1629,21 @@ function DeliverabilityPageInner() {
                     <span className="text-xs text-muted-foreground shrink-0">
                       {p.synced.toLocaleString()} inboxes
                     </span>
+                    {p.status === "running" && rate > 0 && (
+                      <span className="text-xs text-muted-foreground shrink-0 tabular-nums">
+                        · {rate.toFixed(0)}/s
+                      </span>
+                    )}
+                    {p.status === "running" && p.lastUpdateAt && (
+                      <span className={`text-xs shrink-0 tabular-nums ${freshTone}`}>
+                        · updated {secsSinceUpdate}s ago
+                      </span>
+                    )}
+                    {p.status === "done" && p.startedAt && (
+                      <span className="text-xs text-muted-foreground shrink-0 tabular-nums">
+                        · walked in {Math.round(runningSecs)}s
+                      </span>
+                    )}
                   </div>
                   {p.lastPage > 0 ? (
                     <span className="text-xs text-muted-foreground shrink-0 tabular-nums">
@@ -1606,7 +1657,7 @@ function DeliverabilityPageInner() {
                     </span>
                   ) : null}
                 </div>
-                <div className="h-1 rounded-full bg-muted overflow-hidden">
+                <div className={`h-1 rounded-full bg-muted overflow-hidden ${p.status === "running" ? "animate-pulse" : ""}`}>
                   <div
                     className={`h-full rounded-full transition-all duration-300 ${
                       p.status === "done"
@@ -1615,7 +1666,20 @@ function DeliverabilityPageInner() {
                           ? "bg-red-500"
                           : "bg-primary"
                     }`}
-                    style={{ width: `${p.status === "done" ? 100 : pct}%` }}
+                    // When cursor mode leaves us without a percentage, show a
+                    // steady half-full bar with the pulse animation above so
+                    // the user knows the sync is *alive*, not stuck at 0%.
+                    style={{
+                      width: `${
+                        p.status === "done"
+                          ? 100
+                          : p.lastPage > 0
+                            ? pct
+                            : p.status === "running"
+                              ? 50
+                              : 0
+                      }%`,
+                    }}
                   />
                 </div>
                 {p.error && (

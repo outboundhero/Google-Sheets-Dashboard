@@ -9,7 +9,6 @@ import { isInstanceSlug, type BisonInstanceSlug } from "@/lib/bison-instances";
 // (offset was capped at 1000 pages × 15 = 15k senders per index route).
 export const maxDuration = 60;
 
-const BATCH_DELAY_MS = 100;   // small gap between cursor pages to be gentle on Bison
 const PAGE_RETRIES = 4;       // transient (429/5xx/network) retries per page
 
 function sleep(ms: number): Promise<void> {
@@ -109,31 +108,51 @@ export async function POST(request: Request) {
     let reachedEnd = false;
     let hadFatalError = false;
 
+    // Prefetch pipeline: as soon as we know a cursor's next_cursor, fire the
+    // next request WHILE processing the current page's data. Depth 1 — we
+    // always have at most one Bison fetch in flight beyond the one we're
+    // currently awaiting. Cursor is still sequential per chain (we can only
+    // learn cursor N+1 after N returns), so this doesn't break Bison's model.
+    let inFlight: Promise<{ data: SenderEmail[]; nextCursor: string | null }> | null =
+      fetchCursorPage(instance, cursor);
+    let inFlightCursor: string | null = cursor;
+
     for (let p = 0; p < pagesPerChunk; p++) {
       // Guard against creeping past the platform ceiling — leave a few seconds
       // of headroom for the Supabase upserts below.
       if (Date.now() - t0 > 50_000) break;
+      if (inFlight == null) break;
       let page: { data: SenderEmail[]; nextCursor: string | null };
       try {
-        page = await fetchCursorPage(instance, cursor);
+        page = await inFlight;
       } catch (e) {
-        // After PAGE_RETRIES, still failing. Log the cursor and bail — the FE
-        // will retry the chunk (this cursor will be redriven on next call).
         const msg = e instanceof Error ? e.message : String(e);
-        console.warn(`[SYNC:${instance}] cursor ${cursor ?? "<start>"} failed: ${msg.slice(0, 200)}`);
-        failedCursors.push(cursor ?? "<start>");
+        console.warn(`[SYNC:${instance}] cursor ${inFlightCursor ?? "<start>"} failed: ${msg.slice(0, 200)}`);
+        failedCursors.push(inFlightCursor ?? "<start>");
         hadFatalError = true;
         break;
       }
       pagesWalked++;
-      if (page.data.length > 0) allInboxes.push(...page.data);
       cursor = page.nextCursor;
-      if (cursor == null) {
+
+      // Kick off the NEXT fetch immediately so its network wait overlaps with
+      // this page's data-push. Skip on last iteration or when the walk ends.
+      if (page.nextCursor != null && p < pagesPerChunk - 1) {
+        inFlightCursor = page.nextCursor;
+        inFlight = fetchCursorPage(instance, page.nextCursor);
+      } else {
+        inFlight = null;
+      }
+
+      if (page.data.length > 0) allInboxes.push(...page.data);
+      if (page.nextCursor == null) {
         reachedEnd = true;
         break;
       }
-      if (p < pagesPerChunk - 1) await sleep(BATCH_DELAY_MS);
     }
+    // Best-effort catch of any in-flight promise so we don't leak an unhandled
+    // rejection when we bail on the deadline.
+    if (inFlight) inFlight.catch(() => {});
     const fetchMs = Date.now() - t0;
 
     // Upsert inboxes and their (instance, domain) rows.
