@@ -10,10 +10,10 @@
     { "path": "/api/cron/churn-check",           "schedule": "0 14 * * *" },
     { "path": "/api/cron/churn-auto-fire",       "schedule": "5 17 * * *" },
 
-    { "path": "/api/cron/campaigns-outboundhero",     "schedule": "0 17 * * *" },
-    { "path": "/api/cron/campaigns-cleaningoutbound", "schedule": "15 17 * * *" },
-    { "path": "/api/cron/campaigns-facilityreach",    "schedule": "30 17 * * *" },
-    { "path": "/api/cron/campaigns-outboundclean",    "schedule": "45 17 * * *" },
+    { "path": "/api/cron/campaigns-outboundhero",     "schedule": "0 */6 * * *" },
+    { "path": "/api/cron/campaigns-cleaningoutbound", "schedule": "15 */6 * * *" },
+    { "path": "/api/cron/campaigns-facilityreach",    "schedule": "30 */6 * * *" },
+    { "path": "/api/cron/campaigns-outboundclean",    "schedule": "45 */6 * * *" },
 
     { "path": "/api/cron/deliverability-outboundhero",     "schedule": "0 12 */2 * *" },
     { "path": "/api/cron/deliverability-cleaningoutbound", "schedule": "30 12 */2 * *" },
