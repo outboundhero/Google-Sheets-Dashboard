@@ -39,6 +39,7 @@ import { ConformTagsDialog } from "@/components/deliverability/conform-tags-dial
 import { ChangeRedirectDialog } from "@/components/deliverability/change-redirect-dialog";
 import { SendToSheetDialog } from "@/components/deliverability/send-to-sheet-dialog";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import {
@@ -2707,35 +2708,26 @@ function DeliverabilityPageInner() {
               )}
             </button>
 
-            {/* Provider lifecycle filter (Inboxing / MilkBox). Populated by
-                /api/cron/provider-domain-status-check. Click again to clear
-                back to "All". */}
-            <div className="flex items-center gap-1 pl-2 ml-1 border-l">
-              <span className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground pr-1">Provider</span>
-              {([
-                { key: "active",   label: "Active",   activeCls: "bg-emerald-500/15 text-emerald-400 border-emerald-500/30" },
-                { key: "canceled", label: "Canceled", activeCls: "bg-red-500/15 text-red-400 border-red-500/30" },
-                { key: "unknown",  label: "Unknown",  activeCls: "bg-muted text-muted-foreground border-border" },
-              ] as const).map((opt) => (
-                <button
-                  key={opt.key}
-                  onClick={() => setProviderStatusFilter(providerStatusFilter === opt.key ? "all" : opt.key)}
-                  className={`text-[11px] px-2.5 py-1 rounded-full border transition-colors ${
-                    providerStatusFilter === opt.key
-                      ? opt.activeCls
-                      : "border-border text-muted-foreground hover:border-foreground hover:text-foreground"
-                  }`}
-                  title={
-                    opt.key === "active"
-                      ? "Domains confirmed active at Inboxing / MilkBox as of the last daily check"
-                      : opt.key === "canceled"
-                        ? "Domains that Inboxing / MilkBox reports as not active — deleted, failed, deactivating, or not on the account anymore"
-                        : "Domains with no Inboxing/Milkbox tag, or not checked yet by the daily cron"
-                  }
-                >
-                  {opt.label}
-                </button>
-              ))}
+            {/* Domain Status dropdown (Inboxing / MilkBox lifecycle). Populated
+                by /api/cron/provider-domain-status-check. Rows without a cache
+                entry (no Inboxing/Milkbox tag, or not yet checked by the cron)
+                render as "Unknown". */}
+            <div className="flex items-center gap-1.5 pl-2 ml-1 border-l">
+              <span className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">Domain Status</span>
+              <Select
+                value={providerStatusFilter}
+                onValueChange={(v) => setProviderStatusFilter(v as "all" | "active" | "canceled" | "unknown")}
+              >
+                <SelectTrigger className="h-7 text-xs w-[110px]">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all">All</SelectItem>
+                  <SelectItem value="active">Active</SelectItem>
+                  <SelectItem value="canceled">Canceled</SelectItem>
+                  <SelectItem value="unknown">Unknown</SelectItem>
+                </SelectContent>
+              </Select>
             </div>
 
             {/* Warmup days filter */}

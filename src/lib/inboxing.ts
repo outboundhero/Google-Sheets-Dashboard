@@ -3,17 +3,31 @@ import type {
   ProviderStatusResult,
 } from "@/types/inbox-order";
 
-function env() {
+// Read-only Inboxing calls (GET, redirect PATCH, DELETE, etc) only need the
+// API key + base URL. The registrar + cloudflare credential IDs are used
+// exclusively by createDomain(). Splitting these lets the provider-status
+// cron work even on environments where the create-time credentials weren't
+// configured (which was the root cause of ~2842/2902 rows failing on the
+// first cron run — env() throwing before the API was ever hit).
+function envRead() {
   const key = process.env.INBOXING_API_KEY;
   const base = process.env.INBOXING_BASE_URL || "https://v2.inboxing.com/api/v2";
+  if (!key) {
+    throw new Error("Inboxing env missing (INBOXING_API_KEY)");
+  }
+  return { key, base };
+}
+
+function env() {
+  const readEnv = envRead();
   const registrarId = process.env.INBOXING_REGISTRAR_CREDENTIAL_ID;
   const cloudflareId = process.env.INBOXING_CLOUDFLARE_CREDENTIAL_ID;
-  if (!key || !registrarId || !cloudflareId) {
+  if (!registrarId || !cloudflareId) {
     throw new Error(
-      "Inboxing env missing (INBOXING_API_KEY / INBOXING_REGISTRAR_CREDENTIAL_ID / INBOXING_CLOUDFLARE_CREDENTIAL_ID)"
+      "Inboxing env missing (INBOXING_REGISTRAR_CREDENTIAL_ID / INBOXING_CLOUDFLARE_CREDENTIAL_ID)"
     );
   }
-  return { key, base, registrarId, cloudflareId };
+  return { ...readEnv, registrarId, cloudflareId };
 }
 
 async function call<T>(
@@ -21,7 +35,7 @@ async function call<T>(
   path: string,
   body?: unknown
 ): Promise<T> {
-  const { key, base } = env();
+  const { key, base } = envRead();
   const init: RequestInit = {
     method,
     headers: {
