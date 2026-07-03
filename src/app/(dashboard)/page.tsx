@@ -32,7 +32,6 @@ import { CrossTagAuditCard } from "@/components/dashboard/cross-tag-audit-card";
 import { DuplicateDomainsCard } from "@/components/dashboard/duplicate-domains-card";
 import { AttachFailuresCard } from "@/components/dashboard/attach-failures-card";
 import { PendingOffboardingsCard } from "@/components/dashboard/pending-offboardings-card";
-import { MrlPacePanel } from "@/components/dashboard/mrl-pace-panel";
 import { OffboardingProgressCard, type OffboardingPlan } from "@/components/dashboard/offboarding-progress-card";
 import { ChurnedOffboardDialog } from "@/components/dashboard/churned-offboard-dialog";
 import {
@@ -332,9 +331,10 @@ export default function DashboardPage() {
         </div>
       )}
 
-      {/* Clients off-pace for their MRL threshold — fully self-resolving,
-          recomputed by the mrl-pace-check cron every 4h. Hidden when empty. */}
-      <MrlPacePanel />
+      {/* MRL pace panel intentionally NOT mounted yet — user doesn't want it
+          client-visible for now. The cron + table + /api/mrl-pace-status keep
+          running so data accrues; to re-enable, render <MrlPacePanel /> here
+          (import from @/components/dashboard/mrl-pace-panel). */}
 
       {/* Stale Clients Alert */}
       {analytics.clientsWithoutRecentMeetingReady.length > 0 && (

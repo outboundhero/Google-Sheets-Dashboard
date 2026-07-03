@@ -20,19 +20,26 @@ const WEEKEND_WEIGHT = 0.1;
 const WEIGHTED_DAYS_PER_MONTH = (DAYS_PER_MONTH * (5 + 2 * WEEKEND_WEIGHT)) / 7;
 const FLAG_THRESHOLD = 0.75; // flagged when actual < 75% of pace (i.e. ≥25% behind)
 
-export type TierBucket = "T0.5/1" | "T2";
+// Meeting-ready-lead monthly targets per tier (per user, 2026-07):
+//   Tier 0.5 → 15 · Tier 1 → 20 · Tier 2 → 40
+// qlMonthly follows the original 75%-of-MRL convention (T1 20→15, T2 40→30);
+// Tier 0.5's 11 is 15 × 0.75 rounded — adjust if a real QL commitment differs.
+export type TierBucket = "T0.5" | "T1" | "T2";
 export const TARGETS: Record<TierBucket, { mrMonthly: number; qlMonthly: number }> = {
-  "T0.5/1": { mrMonthly: 20, qlMonthly: 15 },
+  "T0.5": { mrMonthly: 15, qlMonthly: 11 },
+  "T1": { mrMonthly: 20, qlMonthly: 15 },
   "T2": { mrMonthly: 40, qlMonthly: 30 },
 };
 const BUCKET_LABEL: Record<TierBucket, string> = {
-  "T0.5/1": "Tier 0.5 + 1",
+  "T0.5": "Tier 0.5",
+  "T1": "Tier 1",
   "T2": "Tier 2",
 };
 
 function tierBucketFromPlan(plan: string): TierBucket | null {
   const p = plan.toLowerCase();
-  if (p.includes("tier 0.5") || p.includes("tier 1")) return "T0.5/1";
+  if (p.includes("tier 0.5")) return "T0.5";
+  if (p.includes("tier 1")) return "T1";
   if (p.includes("tier 2")) return "T2";
   return null; // PPQM / PPQL / blank → not a tiered client
 }
@@ -252,7 +259,7 @@ export async function buildDailyReport(dateStr: string): Promise<DailyReport> {
     weekday: "long", month: "long", day: "numeric", year: "numeric", timeZone: "UTC",
   });
 
-  const buckets = (["T0.5/1", "T2"] as TierBucket[]).map((bucket) => {
+  const buckets = (["T0.5", "T1", "T2"] as TierBucket[]).map((bucket) => {
     const inBucket = clients.filter((c) => c.bucket === bucket);
     const actual = inBucket.reduce(
       (n, c) => n + c.leads.filter((l) => isMeetingReady(l) && leadDeliveredOn(l, dateStr)).length, 0);
