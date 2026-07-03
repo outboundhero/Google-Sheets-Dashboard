@@ -2,10 +2,11 @@
 // tagged Inboxing / MilkBox domains and returns rows ready to upsert into
 // `provider_domain_status`.
 //
-// Design lives in the approved plan file: for MilkBox we do ONE list-scan
-// per run and index by lowercase domain name; for Inboxing we look up per
-// domain (using a cached provider_domain_id when we have one, falling back
-// to a search-by-name).
+// Design: for BOTH providers, one paginated list scan per run indexes by
+// lowercase domain name. Zero per-domain HTTP calls. This scales cleanly to
+// thousands of tagged domains without hitting provider rate limits (the
+// original per-domain search approach got 98% of Inboxing calls 429'd on
+// the first cron run).
 
 import * as inboxing from "@/lib/inboxing";
 import * as milkbox from "@/lib/milkbox";
@@ -18,7 +19,10 @@ export interface RefreshEntry {
   instance: BisonInstanceSlug;
   domain: string;
   provider: ProviderStatusProvider;
-  /** Previously-resolved provider id (Inboxing UUID / MilkBox UUID) or null. */
+  /** Previously-resolved provider id (Inboxing UUID / MilkBox UUID) or null.
+   *  Not required — the list scans return ids fresh — but preserved on the
+   *  upsert row so we keep the cached value if the domain isn't in the current
+   *  list. */
   cached_provider_domain_id: string | null;
 }
 
@@ -38,24 +42,6 @@ export interface RefreshResult {
   results: UpsertRow[];
 }
 
-const INBOXING_CONCURRENCY = 8;
-
-// Simple worker-pool runner. Same shape used elsewhere in the codebase
-// (handle-sender-reconnect, attach-campaigns).
-async function pool<T, R>(items: T[], concurrency: number, fn: (item: T) => Promise<R>): Promise<R[]> {
-  const results: R[] = new Array(items.length);
-  let cursor = 0;
-  const workers = Array.from({ length: Math.min(concurrency, items.length) }, async () => {
-    while (true) {
-      const i = cursor++;
-      if (i >= items.length) return;
-      results[i] = await fn(items[i]);
-    }
-  });
-  await Promise.all(workers);
-  return results;
-}
-
 /**
  * Refresh the provider-lifecycle status for a batch of tagged domains.
  * Never throws — per-entry errors are captured on the row itself
@@ -70,7 +56,7 @@ export async function refreshProviderDomainStatus(entries: RefreshEntry[]): Prom
   let ok = 0;
   let failed = 0;
 
-  // ── MilkBox: one list-scan, index by lowercase name, walk entries. ──
+  // ── MilkBox: one list scan, index by lowercase name, walk entries. ──
   if (milkboxEntries.length > 0) {
     let byName: Map<string, { id: string; status: string | null; active: boolean }> | null = null;
     let listError: string | null = null;
@@ -127,71 +113,60 @@ export async function refreshProviderDomainStatus(entries: RefreshEntry[]): Prom
     }
   }
 
-  // ── Inboxing: per-entry lookup, cached id preferred. ──
+  // ── Inboxing: same shape as MilkBox — one list scan, in-memory join. ──
   if (inboxingEntries.length > 0) {
-    const inbResults = await pool(inboxingEntries, INBOXING_CONCURRENCY, async (entry) => {
-      try {
-        let id = entry.cached_provider_domain_id;
-        if (!id) {
-          const found = await inboxing.findDomainByName(entry.domain);
-          if (!found) {
-            // Not on the account at all — treat as canceled/deleted.
-            return {
-              instance: entry.instance,
-              domain: entry.domain,
-              provider: "inboxing" as const,
-              provider_domain_id: null,
-              status: "canceled" as const,
-              raw_status: "not_found",
-              failure_reason: null,
-            };
-          }
-          id = found.id;
-        }
-        try {
-          const s = await inboxing.getDomainStatus(id);
-          return {
-            instance: entry.instance,
-            domain: entry.domain,
-            provider: "inboxing" as const,
-            provider_domain_id: id,
-            status: s.status === "active" ? "active" as const : "canceled" as const,
-            raw_status: s.rawStatus,
-            failure_reason: s.failureReason,
-          };
-        } catch (e) {
-          const msg = e instanceof Error ? e.message : "Inboxing status failed";
-          // 404 on the status endpoint → domain has been removed provider-side.
-          if (/\b404\b/.test(msg)) {
-            return {
-              instance: entry.instance,
-              domain: entry.domain,
-              provider: "inboxing" as const,
-              provider_domain_id: id,
-              status: "canceled" as const,
-              raw_status: "not_found",
-              failure_reason: null,
-            };
-          }
-          throw e;
-        }
-      } catch (e) {
-        const msg = e instanceof Error ? e.message : "refresh failed";
-        return {
+    let byName: Map<string, { id: string; status: string }> | null = null;
+    let listError: string | null = null;
+    try {
+      const list = await inboxing.listDomainsWithLifecycle();
+      byName = new Map(
+        list.map((d) => [d.name.toLowerCase(), { id: d.id, status: d.status }]),
+      );
+    } catch (e) {
+      listError = e instanceof Error ? e.message : "Inboxing list failed";
+    }
+
+    for (const entry of inboxingEntries) {
+      if (listError || byName == null) {
+        results.push({
           instance: entry.instance,
           domain: entry.domain,
-          provider: "inboxing" as const,
+          provider: "inboxing",
           provider_domain_id: entry.cached_provider_domain_id,
-          status: "canceled" as const,
+          status: "canceled",
           raw_status: "error",
-          failure_reason: msg.slice(0, 300),
-        };
+          failure_reason: (listError || "Inboxing list failed").slice(0, 300),
+        });
+        failed++;
+        continue;
       }
-    });
-    for (const r of inbResults) {
-      results.push(r);
-      if (r.raw_status === "error") failed++;
-      else ok++;
+      const hit = byName.get(entry.domain.toLowerCase());
+      if (!hit) {
+        // Domain not on the Inboxing account list → deleted/removed there.
+        results.push({
+          instance: entry.instance,
+          domain: entry.domain,
+          provider: "inboxing",
+          provider_domain_id: entry.cached_provider_domain_id,
+          status: "canceled",
+          raw_status: "not_in_list",
+          failure_reason: null,
+        });
+        ok++;
+        continue;
+      }
+      const rawLower = (hit.status || "").toLowerCase();
+      const isActive = rawLower === "active";
+      results.push({
+        instance: entry.instance,
+        domain: entry.domain,
+        provider: "inboxing",
+        provider_domain_id: hit.id,
+        status: isActive ? "active" : "canceled",
+        raw_status: hit.status || null,
+        failure_reason: null,
+      });
+      ok++;
     }
   }
 

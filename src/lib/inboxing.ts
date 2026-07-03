@@ -30,6 +30,15 @@ function env() {
   return { ...readEnv, registrarId, cloudflareId };
 }
 
+function sleep(ms: number): Promise<void> {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+// Retry-aware transport. Inboxing rate-limits aggressively on the search
+// endpoint; a bulk provider-status pass without retry gets ~98% of requests
+// 429'd. We honor Retry-After when present, otherwise back off exponentially
+// with jitter, up to 5 attempts on 429 / 5xx. Non-retryable statuses (400,
+// 401, 403, 404) return immediately.
 async function call<T>(
   method: "GET" | "POST" | "PUT" | "DELETE",
   path: string,
@@ -45,24 +54,36 @@ async function call<T>(
     },
   };
   if (body !== undefined) init.body = JSON.stringify(body);
-  const res = await fetch(`${base}${path}`, init);
-  const text = await res.text();
-  let parsed: unknown = null;
-  if (text) {
-    try {
-      parsed = JSON.parse(text);
-    } catch {
-      // not JSON
+
+  const MAX_ATTEMPTS = 5;
+  for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+    const res = await fetch(`${base}${path}`, init);
+    const text = await res.text();
+    let parsed: unknown = null;
+    if (text) {
+      try {
+        parsed = JSON.parse(text);
+      } catch {
+        // not JSON
+      }
     }
-  }
-  if (!res.ok) {
+    if (res.ok) return (parsed ?? {}) as T;
+    const retryable = res.status === 429 || res.status >= 500;
+    if (retryable && attempt < MAX_ATTEMPTS - 1) {
+      const ra = parseInt(res.headers.get("retry-after") || "", 10);
+      const waitMs = Number.isFinite(ra) && ra > 0
+        ? ra * 1000
+        : Math.min(15_000, 800 * 2 ** attempt);
+      await sleep(waitMs + Math.floor(Math.random() * 400));
+      continue;
+    }
     const msg =
       (parsed && typeof parsed === "object" && (parsed as { error?: string }).error) ||
       text.slice(0, 300) ||
       `HTTP ${res.status}`;
     throw new Error(`Inboxing ${method} ${path}: ${msg}`);
   }
-  return (parsed ?? {}) as T;
+  throw new Error(`Inboxing ${method} ${path}: exhausted retries`);
 }
 
 interface InboxingDomain {
@@ -177,6 +198,46 @@ export async function findDomainByName(
     }
   }
   return null;
+}
+
+export interface InboxingListedDomainWithLifecycle {
+  id: string;
+  name: string;
+  /** Raw status string from the API — "active" | "failed" | "deleting" | "deleted" | "pending" | ... */
+  status: string;
+}
+
+/**
+ * List every domain visible to this API key on Inboxing, paginating through
+ * all pages. Each row carries the raw lifecycle `status` field which lets
+ * the provider-status cron determine active vs canceled without a per-domain
+ * GET /domains/{id}/status call. Mirrors milkbox.listDomainsWithLifecycle().
+ *
+ * Trades 2 × N per-domain calls (findDomainByName + getDomainStatus) for
+ * ~ceil(N / per_page) paginated list calls. On our fleet that's ~60 calls
+ * instead of ~5800 — well within Inboxing's rate ceiling with the retry
+ * helper doing its job on the occasional 429.
+ */
+export async function listDomainsWithLifecycle(): Promise<InboxingListedDomainWithLifecycle[]> {
+  const out: InboxingListedDomainWithLifecycle[] = [];
+  const perPage = 100;
+  for (let page = 1; page < 500; page++) {
+    const result = await call<{
+      data?: Array<{ id: string | number; domain: string; status?: string }>;
+    }>("GET", `/domains?per_page=${perPage}&page=${page}`);
+    const rows = result.data || [];
+    for (const d of rows) {
+      if (d?.id === undefined || !d?.domain) continue;
+      out.push({
+        id: String(d.id),
+        name: d.domain,
+        status: typeof d.status === "string" ? d.status : "",
+      });
+    }
+    // Terminate when the page returns fewer than per_page rows (or empty).
+    if (rows.length < perPage) break;
+  }
+  return out;
 }
 
 export async function deleteDomain(domainId: string): Promise<void> {
