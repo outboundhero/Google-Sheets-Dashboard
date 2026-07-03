@@ -25,11 +25,14 @@ interface CachedStatusRow {
 
 function providerFromTags(tags: string[] | null): "inboxing" | "milkbox" | null {
   if (!Array.isArray(tags)) return null;
-  // Case-insensitive match — tags in this table are stored as free-form
-  // strings and casing drifts (Inboxing / inboxing / MilkBox / Milkbox).
-  const lower = new Set(tags.map((t) => (t || "").trim().toLowerCase()).filter(Boolean));
-  if (lower.has("inboxing")) return "inboxing";
-  if (lower.has("milkbox")) return "milkbox";
+  // Match ANY tag that STARTS WITH the provider name (case-insensitive).
+  // Real tags in prod include variants like "Milkbox - Microsoft" and
+  // possibly "Milkbox - Google" per user's operating pattern; anchoring on
+  // the prefix catches all of them without over-matching (an "Inboxing +
+  // Nurture" tag would still match Inboxing, which is what we want).
+  const lower = tags.map((t) => (t || "").trim().toLowerCase()).filter(Boolean);
+  if (lower.some((t) => t.startsWith("inboxing"))) return "inboxing";
+  if (lower.some((t) => t.startsWith("milkbox"))) return "milkbox";
   return null;
 }
 
