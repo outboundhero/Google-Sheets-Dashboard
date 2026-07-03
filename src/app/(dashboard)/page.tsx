@@ -231,10 +231,6 @@ export default function DashboardPage() {
       {/* Pending offboardings — admin only; self-hides when there are none. */}
       {isAdmin && <PendingOffboardingsCard />}
 
-      {/* Clients off-pace for their MRL threshold — fully self-resolving,
-          recomputed by the mrl-pace-check cron every 4h. Hidden when empty. */}
-      <MrlPacePanel />
-
       {/* Live offboarding progress (top of dashboard) — fires when an admin
           clicks Offboard on a churned client row and confirms. */}
       {isAdmin && activeChurnedOffboarding && (
@@ -335,6 +331,10 @@ export default function DashboardPage() {
           )}
         </div>
       )}
+
+      {/* Clients off-pace for their MRL threshold — fully self-resolving,
+          recomputed by the mrl-pace-check cron every 4h. Hidden when empty. */}
+      <MrlPacePanel />
 
       {/* Stale Clients Alert */}
       {analytics.clientsWithoutRecentMeetingReady.length > 0 && (
