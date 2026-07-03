@@ -331,11 +331,6 @@ export default function DashboardPage() {
         </div>
       )}
 
-      {/* MRL pace panel intentionally NOT mounted yet — user doesn't want it
-          client-visible for now. The cron + table + /api/mrl-pace-status keep
-          running so data accrues; to re-enable, render <MrlPacePanel /> here
-          (import from @/components/dashboard/mrl-pace-panel). */}
-
       {/* Stale Clients Alert */}
       {analytics.clientsWithoutRecentMeetingReady.length > 0 && (
         <div className="rounded-xl border-2 border-amber-400 dark:border-amber-600 bg-amber-50 dark:bg-amber-950/30 p-5">

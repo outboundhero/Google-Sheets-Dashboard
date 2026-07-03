@@ -20,15 +20,15 @@ const WEEKEND_WEIGHT = 0.1;
 const WEIGHTED_DAYS_PER_MONTH = (DAYS_PER_MONTH * (5 + 2 * WEEKEND_WEIGHT)) / 7;
 const FLAG_THRESHOLD = 0.75; // flagged when actual < 75% of pace (i.e. ≥25% behind)
 
-// Meeting-ready-lead monthly targets per tier (per user, 2026-07):
-//   Tier 0.5 → 15 · Tier 1 → 20 · Tier 2 → 40
-// qlMonthly follows the original 75%-of-MRL convention (T1 20→15, T2 40→30);
-// Tier 0.5's 11 is 15 × 0.75 rounded — adjust if a real QL commitment differs.
+// Monthly targets per tier (per user, 2026-07):
+//   Tier 0.5 → 15 MRLs /  5 QLs
+//   Tier 1   → 20 MRLs / 10 QLs
+//   Tier 2   → 40 MRLs / 20 QLs
 export type TierBucket = "T0.5" | "T1" | "T2";
 export const TARGETS: Record<TierBucket, { mrMonthly: number; qlMonthly: number }> = {
-  "T0.5": { mrMonthly: 15, qlMonthly: 11 },
-  "T1": { mrMonthly: 20, qlMonthly: 15 },
-  "T2": { mrMonthly: 40, qlMonthly: 30 },
+  "T0.5": { mrMonthly: 15, qlMonthly: 5 },
+  "T1": { mrMonthly: 20, qlMonthly: 10 },
+  "T2": { mrMonthly: 40, qlMonthly: 20 },
 };
 const BUCKET_LABEL: Record<TierBucket, string> = {
   "T0.5": "Tier 0.5",

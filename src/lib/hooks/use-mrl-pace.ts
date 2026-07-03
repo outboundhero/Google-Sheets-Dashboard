@@ -14,28 +14,43 @@ export interface MrlPaceClient {
   cycleLength: number;
   daysElapsed: number;
   daysRemaining: number;
+  bizDaysTotal: number;
+  bizDaysElapsed: number;
+  bizDaysRemaining: number;
   actualMrls: number;
   expectedMrlsToDate: number;
-  paceRatio: number;
+  pctBehind: number;
   velocity7d: number;
+  maxVelocity7d: number;
+  velocityDaily: number[];
   projectedTotal: number;
   priorCycleActualAtSameDay: number | null;
-  severity: "at_risk" | "critical";
-  rootCauseHint: string;
+  priorCycleTotal: number | null;
+  isFirstCycle: boolean;
+  historicallyRecovers: boolean;
+  severity: "critical" | "at_risk" | "on_track";
+  rootCauseTag: string;
+  rootCauseDetail: string | null;
+  rootCauseConfidence: "high" | "medium" | null;
+  daysInSeverity: number | null;
+  dayNCritical: number | null;
   signals: {
     leadsInPipeline: number;
-    healthyDomains: number;
-    flaggedDomains: number;
+    totalContacts: number;
+    healthyAccounts: number;
+    totalAccounts: number;
+    nurtureCampaigns: number;
+    failedCampaigns: number;
   };
 }
 
 interface MrlPaceResponse {
-  flagged: MrlPaceClient[];
+  clients: MrlPaceClient[];
   evaluatedAt: string | null;
 }
 
-/** Clients currently off-pace for their MRL threshold (At Risk / Critical),
- *  worst first. Recomputed by the mrl-pace-check cron every 4 hours. */
+/** All evaluated clients (three tiers), sorted critical → at_risk → on_track,
+ *  worst pace-gap first within tier. Recomputed daily by mrl-pace-check. */
 export function useMrlPace() {
   const { data, error, isLoading, mutate } = useSWR<MrlPaceResponse>(
     "/api/mrl-pace-status",
@@ -51,7 +66,7 @@ export function useMrlPace() {
   );
 
   return {
-    flagged: data?.flagged ?? [],
+    clients: data?.clients ?? [],
     evaluatedAt: data?.evaluatedAt ?? null,
     isLoading,
     error,

@@ -1,104 +1,103 @@
-// MRL pace evaluation — the pure calculator behind the "Clients off-pace for
-// MRL threshold" dashboard panel.
+// MRL pace evaluation (v2) — the pure calculator behind the "Clients off-pace
+// for MRL threshold" panel + daily Slack digest.
 //
-// For one client it answers: given their billing cycle, tier threshold, and
-// delivered MRLs so far, are they On Track / At Risk / Critical — and if
-// they're behind, what's the most likely reason?
+// v2 changes vs v1 (per the client's build spec, LeadSync MRL Pacing Spec.pdf):
+//   - Pace on BUSINESS DAYS (Mon–Fri), not calendar days. We only send
+//     weekdays, so calendar pacing made every client look behind after each
+//     weekend.
+//   - Recoverability uses MAX recent velocity — the client's best 7-day
+//     rolling MRL rate (per business day) in the trailing 28 days — not the
+//     current rate. "Unrecoverable" now means: even at their best recent
+//     form they'd miss the threshold.
+//   - New severity bands: On Track ≤10% behind pace · At Risk 10–30% behind
+//     AND recoverable · Critical >30% behind OR unrecoverable.
+//   - Hard Critical override: ≤3 business days remaining and still below
+//     threshold → forced Critical regardless of the math.
+//   - First-cycle + "historically recovers" annotations.
 //
-// Everything here is pure (no I/O): the cron loads leads / campaigns /
-// domains once and calls evaluateClientPace per client. Keeping it pure makes
-// the pace math trivially testable and reusable.
+// Root-cause diagnosis moved to src/lib/mrl-root-cause.ts (ordered engine).
 //
-// Definitions (all reuse existing codebase conventions):
-//   MRL           = "deliverable" lead per makeDeliverablePredicate() —
-//                   currentCategory contains "meeting", falling back to
-//                   status === "Quality Lead" for clients whose sheets never
-//                   set currentCategory (e.g. BHS).
-//   delivery date = timeWeGotReply || replyTime (analytics.ts convention)
-//   billing cycle = monthly anniversary of the client's Start Date (falls
-//                   back to Go Live Date), same anchoring as the analytics
-//                   billing-month buckets. Cycle length is the real number of
-//                   days between anniversaries (28–31), not hardcoded 30.
-//   threshold     = tier target from the Client Tracker "Plan" column
-//                   (T0.5/1 → 20 MRLs, T2 → 40) — client-reports.ts TARGETS.
+// Reused conventions (unchanged):
+//   MRL           = "deliverable" per makeDeliverablePredicate()
+//   delivery date = timeWeGotReply || replyTime
+//   billing cycle = monthly anniversary of Start Date (fallback Go Live Date)
+//   threshold     = tier target from Client Tracker "Plan" (client-reports TARGETS)
 
 import type { Lead } from "@/types/lead";
 import { parseDate, makeDeliverablePredicate } from "@/lib/analytics";
-import { isDomainFlagged, isDomainAssessable, type HealthCheckDomain } from "@/lib/inbox-health";
 
 export type PaceSeverity = "on_track" | "at_risk" | "critical";
-export type PaceRootCause =
-  | "low_infrastructure"
-  | "low_pipeline"
-  | "leads_not_converting"
-  | "velocity_dropping"
-  | "unknown"
-  | "in_grace_period";
 
-// Tuning knobs — exported so any future admin surface shows the real values.
-export const GRACE_PERIOD_DAYS = 7;       // don't evaluate before day 7 of a cycle
-export const PACE_ON_TRACK = 0.9;         // ≥90% of expected pace → on_track
-export const PACE_AT_RISK_MIN = 0.6;      // ≥60% (or recoverable) → at_risk, below → critical
-// Root-cause heuristic: to close a gap of N MRLs, the client needs roughly
-// N × this many uncontacted leads in campaigns (assumes a ~3% lead→MRL
-// conversion; deliberately conservative so `low_pipeline` only fires when the
-// pipeline is genuinely thin, not merely tight).
-export const PIPELINE_LEADS_PER_MRL = 30;
+// Tuning knobs — exported so any admin surface shows the real values.
+export const GRACE_PERIOD_DAYS = 7;            // calendar days before we evaluate at all
+export const ON_TRACK_MAX_BEHIND = 0.10;       // ≤10% behind expected pace → on_track
+export const AT_RISK_MAX_BEHIND = 0.30;        // ≤30% behind AND recoverable → at_risk
+export const HARD_CRITICAL_BIZ_DAYS_LEFT = 3;  // ≤3 biz days left + below threshold → critical
+export const MAX_VELOCITY_LOOKBACK_DAYS = 28;  // window scanned for the best 7-day run
 
-export interface PaceSignals {
-  leadsInPipeline: number;
-  healthyDomains: number;
-  flaggedDomains: number;
-}
+const DAY_MS = 24 * 60 * 60 * 1000;
 
 export interface ClientPaceEvaluation {
   clientTag: string;
   companyName: string;
   plan: string;
   threshold: number;
-  cycleStart: string;      // ISO date (yyyy-mm-dd)
+  cycleStart: string;          // ISO date (yyyy-mm-dd)
   cycleEnd: string;
-  cycleLength: number;     // real days in this cycle (28–31)
-  daysElapsed: number;     // day 1 = cycle start day
-  daysRemaining: number;
+  cycleLength: number;         // calendar days in this cycle (28–31)
+  daysElapsed: number;         // calendar, day 1 = cycle start day
+  daysRemaining: number;       // calendar
+  bizDaysTotal: number;        // Mon–Fri days in the cycle
+  bizDaysElapsed: number;
+  bizDaysRemaining: number;
   actualMrls: number;
-  expectedMrlsToDate: number;
-  paceRatio: number;                       // actual / expected (1 = exactly on pace)
-  velocity7d: number;                      // MRLs per day over the trailing 7 days
-  projectedTotal: number;                  // actual + velocity7d × daysRemaining
-  priorCycleActualAtSameDay: number | null; // same-day-of-cycle count last cycle (null = no prior cycle)
+  expectedMrlsToDate: number;  // business-day-paced expectation
+  pctBehind: number;           // 1 − actual/expected (0 = on pace, 0.4 = 40% behind)
+  paceRatio: number;           // actual/expected (kept for continuity)
+  velocity7d: number;          // CURRENT trailing-7d rate, MRLs per business day
+  maxVelocity7d: number;       // BEST 7d rolling rate in lookback, MRLs per business day
+  velocityDaily: number[];     // MRLs delivered per day, oldest→newest, last 7 days
+  projectedTotal: number;      // actual + maxVelocity7d × bizDaysRemaining
+  recoverable: boolean;        // projectedTotal ≥ threshold
+  hardCriticalOverride: boolean;
+  priorCycleActualAtSameDay: number | null;
   priorCycleTotal: number | null;
+  isFirstCycle: boolean;
+  historicallyRecovers: boolean;
   severity: PaceSeverity;
-  signals: PaceSignals;
-  rootCauseHint: PaceRootCause;
+  inGracePeriod: boolean;
 }
 
 export interface EvaluateClientPaceInput {
   clientTag: string;
   companyName: string;
   plan: string;
-  /** Tier monthly MRL target (TARGETS[bucket].mrMonthly). */
   threshold: number;
   /** Billing anchor — client's Start Date, falling back to Go Live Date. */
   cycleAnchor: Date;
-  /** All leads for this client's sheet(s). */
   leads: Lead[];
-  /** Sum of remaining (uncontacted) leads across the client's live campaigns. */
-  leadsInPipeline: number;
-  /** The client's tagged domains, for infrastructure health. */
-  domains: HealthCheckDomain[];
-  /** Injected clock, defaults to now. */
   now?: Date;
 }
-
-const DAY_MS = 24 * 60 * 60 * 1000;
 
 function isoDate(d: Date): string {
   return d.toISOString().slice(0, 10);
 }
 
-/** Monthly anniversary of `anchor` shifted by `months`, clamped for short months
- *  (anchor on the 31st → Feb gives Feb 28/29), matching JS Date rollover-free math. */
+/** Mon–Fri days in [from, to). Day-level; ignores time-of-day + holidays. */
+export function countBusinessDays(from: Date, to: Date): number {
+  if (to <= from) return 0;
+  let count = 0;
+  const cur = new Date(from.getFullYear(), from.getMonth(), from.getDate());
+  const end = new Date(to.getFullYear(), to.getMonth(), to.getDate());
+  while (cur < end) {
+    const dow = cur.getDay();
+    if (dow !== 0 && dow !== 6) count++;
+    cur.setDate(cur.getDate() + 1);
+  }
+  return count;
+}
+
+/** Monthly anniversary of `anchor` shifted by `months`, clamped for short months. */
 function anniversary(anchor: Date, months: number): Date {
   const y = anchor.getFullYear();
   const m = anchor.getMonth() + months;
@@ -109,7 +108,6 @@ function anniversary(anchor: Date, months: number): Date {
 
 /** Latest cycle start ≤ now, as a whole number of months after the anchor. */
 function currentCycleStart(anchor: Date, now: Date): { start: Date; index: number } {
-  // Approximate month count, then correct by stepping.
   let months =
     (now.getFullYear() - anchor.getFullYear()) * 12 + (now.getMonth() - anchor.getMonth());
   if (anniversary(anchor, months) > now) months--;
@@ -128,7 +126,14 @@ export function evaluateClientPace(input: EvaluateClientPaceInput): ClientPaceEv
   );
   const daysRemaining = Math.max(0, cycleLength - daysElapsed);
 
-  // ── Count deliverables ────────────────────────────────────────────────
+  // Business-day pacing. Elapsed counts [cycleStart, tomorrow) so a delivery
+  // expected "today" is included; remaining counts [tomorrow, cycleEnd).
+  const startOfTomorrow = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1);
+  const bizDaysTotal = Math.max(1, countBusinessDays(cycleStart, cycleEnd));
+  const bizDaysElapsed = Math.min(bizDaysTotal, countBusinessDays(cycleStart, startOfTomorrow));
+  const bizDaysRemaining = Math.max(0, bizDaysTotal - bizDaysElapsed);
+
+  // ── Deliverables ──────────────────────────────────────────────────────
   const isDeliverable = makeDeliverablePredicate(input.leads);
   const deliveredAt: Date[] = [];
   for (const lead of input.leads) {
@@ -139,37 +144,84 @@ export function evaluateClientPace(input: EvaluateClientPaceInput): ClientPaceEv
 
   const actualMrls = deliveredAt.filter((d) => d >= cycleStart && d <= now).length;
 
-  const sevenDaysAgo = new Date(now.getTime() - 7 * DAY_MS);
-  const last7 = deliveredAt.filter((d) => d > sevenDaysAgo && d <= now).length;
-  const velocity7d = last7 / 7;
+  // Daily counts, last 7 calendar days (oldest → newest) — sparkline data.
+  const velocityDaily: number[] = [];
+  for (let i = 6; i >= 0; i--) {
+    const dayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate() - i);
+    const dayEnd = new Date(dayStart.getTime() + DAY_MS);
+    velocityDaily.push(deliveredAt.filter((d) => d >= dayStart && d < dayEnd).length);
+  }
 
-  // Prior cycle (for the "vs last cycle at the same day" line + the
-  // velocity_dropping heuristic). Only when the client has completed ≥1 cycle.
+  // Current trailing-7d rate per BUSINESS day.
+  const sevenDaysAgo = new Date(now.getTime() - 7 * DAY_MS);
+  const last7Count = deliveredAt.filter((d) => d > sevenDaysAgo && d <= now).length;
+  const bizDaysInLast7 = Math.max(1, countBusinessDays(sevenDaysAgo, startOfTomorrow));
+  const velocity7d = last7Count / bizDaysInLast7;
+
+  // MAX recent velocity: best 7-calendar-day window in the trailing lookback
+  // (clamped to cycle start so a hot streak from a previous cycle can't make
+  // this cycle look recoverable), per business day of that window.
+  const lookbackStart = new Date(
+    Math.max(cycleStart.getTime(), now.getTime() - MAX_VELOCITY_LOOKBACK_DAYS * DAY_MS),
+  );
+  let maxVelocity7d = velocity7d;
+  for (
+    let winStart = new Date(lookbackStart);
+    winStart <= now;
+    winStart = new Date(winStart.getTime() + DAY_MS)
+  ) {
+    const winEnd = new Date(Math.min(winStart.getTime() + 7 * DAY_MS, now.getTime()));
+    const count = deliveredAt.filter((d) => d >= winStart && d <= winEnd).length;
+    const biz = Math.max(1, countBusinessDays(winStart, new Date(winEnd.getTime() + DAY_MS)));
+    const rate = count / biz;
+    if (rate > maxVelocity7d) maxVelocity7d = rate;
+  }
+
+  // ── Prior cycle ───────────────────────────────────────────────────────
+  const isFirstCycle = cycleIndex === 0;
   let priorCycleActualAtSameDay: number | null = null;
   let priorCycleTotal: number | null = null;
-  if (cycleIndex >= 1) {
+  if (!isFirstCycle) {
     const prevStart = anniversary(input.cycleAnchor, cycleIndex - 1);
     const prevSameDay = new Date(prevStart.getTime() + daysElapsed * DAY_MS);
     priorCycleActualAtSameDay = deliveredAt.filter((d) => d >= prevStart && d < prevSameDay).length;
     priorCycleTotal = deliveredAt.filter((d) => d >= prevStart && d < cycleStart).length;
   }
+  // "Historically recovers": last cycle they were doing the same or worse at
+  // this point in the cycle, yet still finished at/above threshold.
+  const historicallyRecovers =
+    priorCycleActualAtSameDay !== null &&
+    priorCycleTotal !== null &&
+    priorCycleActualAtSameDay <= actualMrls &&
+    priorCycleTotal >= input.threshold;
 
   // ── Pace math ─────────────────────────────────────────────────────────
-  const expectedMrlsToDate = (daysElapsed / cycleLength) * input.threshold;
+  const expectedMrlsToDate = (bizDaysElapsed / bizDaysTotal) * input.threshold;
   const paceRatio = expectedMrlsToDate > 0 ? actualMrls / expectedMrlsToDate : 1;
-  const projectedTotal = Math.round(actualMrls + velocity7d * daysRemaining);
+  const pctBehind = Math.max(0, 1 - paceRatio);
+  const projectedTotal = Math.round(actualMrls + maxVelocity7d * bizDaysRemaining);
+  const recoverable = projectedTotal >= input.threshold;
 
-  // ── Signals ───────────────────────────────────────────────────────────
-  const assessable = input.domains.filter(isDomainAssessable);
-  const flaggedDomains = assessable.filter(isDomainFlagged).length;
-  const healthyDomains = assessable.length - flaggedDomains;
-  const signals: PaceSignals = {
-    leadsInPipeline: input.leadsInPipeline,
-    healthyDomains,
-    flaggedDomains,
-  };
+  const inGracePeriod = daysElapsed < GRACE_PERIOD_DAYS;
+  const hardCriticalOverride =
+    !inGracePeriod &&
+    bizDaysRemaining <= HARD_CRITICAL_BIZ_DAYS_LEFT &&
+    actualMrls < input.threshold;
 
-  const base = {
+  let severity: PaceSeverity;
+  if (inGracePeriod) {
+    severity = "on_track";
+  } else if (hardCriticalOverride) {
+    severity = "critical";
+  } else if (pctBehind <= ON_TRACK_MAX_BEHIND) {
+    severity = "on_track";
+  } else if (pctBehind <= AT_RISK_MAX_BEHIND && recoverable) {
+    severity = "at_risk";
+  } else {
+    severity = "critical";
+  }
+
+  return {
     clientTag: input.clientTag,
     companyName: input.companyName,
     plan: input.plan,
@@ -179,53 +231,24 @@ export function evaluateClientPace(input: EvaluateClientPaceInput): ClientPaceEv
     cycleLength,
     daysElapsed,
     daysRemaining,
+    bizDaysTotal,
+    bizDaysElapsed,
+    bizDaysRemaining,
     actualMrls,
     expectedMrlsToDate: Math.round(expectedMrlsToDate * 10) / 10,
+    pctBehind: Math.round(pctBehind * 100) / 100,
     paceRatio: Math.round(paceRatio * 100) / 100,
     velocity7d: Math.round(velocity7d * 100) / 100,
+    maxVelocity7d: Math.round(maxVelocity7d * 100) / 100,
+    velocityDaily,
     projectedTotal,
+    recoverable,
+    hardCriticalOverride,
     priorCycleActualAtSameDay,
     priorCycleTotal,
-    signals,
+    isFirstCycle,
+    historicallyRecovers,
+    severity,
+    inGracePeriod,
   };
-
-  // ── Grace period ──────────────────────────────────────────────────────
-  if (daysElapsed < GRACE_PERIOD_DAYS) {
-    return { ...base, severity: "on_track", rootCauseHint: "in_grace_period" };
-  }
-
-  // ── Severity ──────────────────────────────────────────────────────────
-  let severity: PaceSeverity;
-  if (paceRatio >= PACE_ON_TRACK) {
-    severity = "on_track";
-  } else if (paceRatio >= PACE_AT_RISK_MIN || projectedTotal >= input.threshold) {
-    severity = "at_risk";
-  } else {
-    severity = "critical";
-  }
-
-  if (severity === "on_track") {
-    return { ...base, severity, rootCauseHint: "unknown" };
-  }
-
-  // ── Root cause (heuristic, first match wins) ─────────────────────────
-  const mrlsNeeded = Math.max(0, input.threshold - actualMrls);
-  let rootCauseHint: PaceRootCause = "unknown";
-  if (assessable.length > 0 && flaggedDomains > healthyDomains) {
-    rootCauseHint = "low_infrastructure";
-  } else if (input.leadsInPipeline < mrlsNeeded * PIPELINE_LEADS_PER_MRL) {
-    rootCauseHint = "low_pipeline";
-  } else if (daysRemaining > 0 && velocity7d < (mrlsNeeded / daysRemaining) * 0.5) {
-    // Plenty of pipeline + healthy infra, but delivering at less than half
-    // the rate needed from here → leads aren't converting to MRLs.
-    rootCauseHint = "leads_not_converting";
-  } else if (
-    priorCycleTotal !== null &&
-    priorCycleTotal > 0 &&
-    velocity7d < (priorCycleTotal / cycleLength) * 0.6
-  ) {
-    rootCauseHint = "velocity_dropping";
-  }
-
-  return { ...base, severity, rootCauseHint };
 }

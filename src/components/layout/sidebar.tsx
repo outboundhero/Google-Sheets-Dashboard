@@ -16,6 +16,7 @@ import {
   PackagePlus,
   PlugZap,
   Recycle,
+  Gauge,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -38,6 +39,7 @@ const allNavItems: { href: string; label: string; icon: typeof LayoutDashboard; 
   { href: "/deliverability/inbox-orders", label: "Inbox Orders", icon: PackagePlus, roles: ["admin"] },
   { href: "/account-status", label: "Account Status", icon: PlugZap, roles: ["admin", "viewer"] },
   { href: "/campaigns", label: "Campaigns", icon: Send, roles: ["admin"] },
+  { href: "/mrl-pacing", label: "MRL Pacing", icon: Gauge, roles: ["admin"] },
   { href: "/domains", label: "Domains", icon: Globe, roles: ["admin"] },
   { href: "/replacement", label: "Replacement", icon: Recycle, roles: ["admin"] },
   { href: "/settings", label: "Settings", icon: Settings, roles: ["admin"] },
