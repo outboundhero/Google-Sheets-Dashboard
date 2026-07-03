@@ -173,13 +173,36 @@ export interface MilkboxListedDomain {
 }
 
 /**
+ * Extended lifecycle-aware shape returned by `listDomainsWithLifecycle()`.
+ * `status` is the raw provider string (e.g. "ACTIVE", "PENDING"); `active`
+ * mirrors the boolean flag in the API response. The provider-status cron
+ * uses these to bucket into our "active" vs "canceled" domain classification.
+ */
+export interface MilkboxListedDomainWithLifecycle extends MilkboxListedDomain {
+  status: string | null;
+  active: boolean;
+}
+
+/**
  * List every domain on the MilkBox account. Cursor-paginated. Used by the
  * bulk change-redirect route to resolve a domain name → MilkBox UUID when
  * the domain isn't tracked in our inbox_orders cache (e.g. it was ordered
  * outside LeadSync).
  */
 export async function listDomains(): Promise<MilkboxListedDomain[]> {
-  const all: MilkboxListedDomain[] = [];
+  const rows = await listDomainsWithLifecycle();
+  return rows.map((r) => ({ id: r.id, name: r.name }));
+}
+
+/**
+ * Same walk as `listDomains()`, but preserves the `status` and `active`
+ * fields the MilkBox API returns per row. Used by the provider-domain
+ * status cron to detect canceled domains without a per-domain HTTP call —
+ * a single list scan tells us the lifecycle state of every MilkBox domain
+ * on the account.
+ */
+export async function listDomainsWithLifecycle(): Promise<MilkboxListedDomainWithLifecycle[]> {
+  const all: MilkboxListedDomainWithLifecycle[] = [];
   let cursor: string | null = null;
   // Hard upper bound just in case the API never returns a null next_cursor.
   for (let safety = 0; safety < 500; safety++) {
@@ -187,11 +210,19 @@ export async function listDomains(): Promise<MilkboxListedDomain[]> {
       ? `/domains?cursor=${encodeURIComponent(cursor)}`
       : `/domains`;
     const result: {
-      data?: Array<{ id: string | number; name: string }>;
+      data?: Array<{ id: string | number; name: string; status?: string | null; active?: boolean }>;
       pagination?: { next_cursor?: string | null };
     } = await call("GET", path);
     for (const d of result.data || []) {
-      if (d?.id !== undefined && d?.name) all.push({ id: String(d.id), name: d.name });
+      if (d?.id === undefined || !d?.name) continue;
+      all.push({
+        id: String(d.id),
+        name: d.name,
+        status: typeof d.status === "string" ? d.status : null,
+        // Treat missing `active` as true to avoid false-flagging historic
+        // rows where the field isn't populated yet.
+        active: d.active !== false,
+      });
     }
     const next: string | null | undefined = result.pagination?.next_cursor;
     if (!next) break;

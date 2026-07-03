@@ -13,6 +13,7 @@ const VIEWER_API_GETS = [
   "/api/deliverability/tags",
   "/api/deliverability/bulk-tags",
   "/api/deliverability/sync",
+  "/api/deliverability/provider-status",
   "/api/client-tags",
   "/api/campaigns",
   "/api/leads/not-delivered-today",

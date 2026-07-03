@@ -25,6 +25,8 @@
 
     { "path": "/api/cron/reconnect-worker",                "schedule": "*/5 * * * *" },
 
+    { "path": "/api/cron/provider-domain-status-check",    "schedule": "0 8 * * *" },
+
     { "path": "/api/cron/daily-account-status-report",     "schedule": "55 7 * * *" },
 
     { "path": "/api/cron/snapshot-deliverability",         "schedule": "0 15 * * *" },

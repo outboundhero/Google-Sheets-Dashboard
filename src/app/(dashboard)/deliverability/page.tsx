@@ -51,9 +51,11 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { useAuth } from "@/lib/auth-context";
 import { useInstance } from "@/lib/instance-context";
+import { useProviderStatus } from "@/lib/hooks/use-provider-status";
 import { ALL_INSTANCE_SLUGS, BISON_INSTANCES, type BisonInstanceSlug } from "@/lib/bison-instances";
 
 interface DomainRow {
+  instance: BisonInstanceSlug;
   domain: string;
   inbox_count: number;
   domain_created_at: string | null;
@@ -144,7 +146,7 @@ function evalCondition(d: DomainRow, c: FilterCondition): boolean {
 // and the show/hide toggle). `field` doubles as the sort key + visibility key.
 // Domain is non-toggleable (always shown). ---
 type ColField =
-  | "domain" | "blacklisted" | "spamhaus_dbl" | "redirect_url" | "inbox_count" | "total_sent" | "total_replied"
+  | "domain" | "blacklisted" | "spamhaus_dbl" | "redirect_url" | "provider_status" | "inbox_count" | "total_sent" | "total_replied"
   | "reply_rate" | "reply_trailing" | "total_bounced" | "bounce_rate"
   | "bounce_trailing" | "daily_limit" | "warmup_days";
 const TABLE_COLUMNS: { field: ColField; label: string; align: string; width: string; toggleable: boolean }[] = [
@@ -152,6 +154,7 @@ const TABLE_COLUMNS: { field: ColField; label: string; align: string; width: str
   { field: "blacklisted", label: "SURBL", align: "text-center", width: "80px", toggleable: true },
   { field: "spamhaus_dbl", label: "Spamhaus DBL", align: "text-center", width: "110px", toggleable: true },
   { field: "redirect_url", label: "Redirect URL", align: "text-left", width: "180px", toggleable: true },
+  { field: "provider_status", label: "Provider", align: "text-center", width: "100px", toggleable: true },
   { field: "inbox_count", label: "Inboxes", align: "text-center", width: "90px", toggleable: true },
   { field: "total_sent", label: "Sent", align: "text-center", width: "70px", toggleable: true },
   { field: "total_replied", label: "Replied", align: "text-center", width: "70px", toggleable: true },
@@ -421,6 +424,8 @@ function DeliverabilityPageInner() {
   const { role } = useAuth();
   const isAdmin = role === "admin";
   const { instancesQuery, instances } = useInstance();
+  // Cached Inboxing/MilkBox lifecycle map by "instance:domain".
+  const { statuses: providerStatusMap } = useProviderStatus(instancesQuery);
   const [bisonTags, setBisonTags] = useState<string[]>([]);
   const [domains, setDomains] = useState<DomainRow[]>([]);
   // Days of snapshot history collected (drives the trailing-rate warm-up note)
@@ -463,6 +468,11 @@ function DeliverabilityPageInner() {
   const [showMultiClient, setShowMultiClient] = useState(() => searchParams.get("multiClient") === "true");
   const [flagSubFilter, setFlagSubFilter] = useState<"all" | "reply" | "bounce">("all");
   const [showReserve, setShowReserve] = useState(false);
+  // Provider lifecycle status filter (Inboxing / MilkBox). Cache populated by
+  // /api/cron/provider-domain-status-check daily; domains without a cache
+  // row (missing the Inboxing/Milkbox tag, or never checked yet) render as
+  // "Unknown".
+  const [providerStatusFilter, setProviderStatusFilter] = useState<"all" | "active" | "canceled" | "unknown">("all");
   const [warmupDaysFilter, setWarmupDaysFilter] = useState<string>("all");
   const [warmupDaysFrom, setWarmupDaysFrom] = useState("");
   const [warmupDaysTo, setWarmupDaysTo] = useState("");
@@ -475,7 +485,7 @@ function DeliverabilityPageInner() {
   // Column show/hide (persisted). Missing key = visible.
   const [columnVisibility, setColumnVisibility] = useState<Record<string, boolean>>({});
   const [showColumnMenu, setShowColumnMenu] = useState(false);
-  const [sortField, setSortField] = useState<"domain" | "blacklisted" | "spamhaus_dbl" | "redirect_url" | "inbox_count" | "total_sent" | "total_replied" | "reply_rate" | "reply_trailing" | "total_bounced" | "bounce_rate" | "bounce_trailing" | "daily_limit" | "warmup_days" | null>(null);
+  const [sortField, setSortField] = useState<"domain" | "blacklisted" | "spamhaus_dbl" | "redirect_url" | "provider_status" | "inbox_count" | "total_sent" | "total_replied" | "reply_rate" | "reply_trailing" | "total_bounced" | "bounce_rate" | "bounce_trailing" | "daily_limit" | "warmup_days" | null>(null);
   const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
   const [attachDialogOpen, setAttachDialogOpen] = useState(false);
   const [conformTagsOpen, setConformTagsOpen] = useState(false);
@@ -1506,6 +1516,17 @@ function DeliverabilityPageInner() {
     if (showAssigned) {
       result = result.filter(isDomainAssigned);
     }
+    // Provider lifecycle filter. Rows without an entry in providerStatusMap
+    // are treated as "unknown" (missing Inboxing/Milkbox tag, or the daily
+    // cron hasn't reached them yet).
+    if (providerStatusFilter !== "all") {
+      result = result.filter((d) => {
+        const entry = providerStatusMap[`${d.instance}:${d.domain}`];
+        if (providerStatusFilter === "unknown") return !entry;
+        if (!entry) return false;
+        return entry.status === providerStatusFilter;
+      });
+    }
     if (showMultiClient) {
       result = result.filter(isDomainMultiClient);
     }
@@ -1587,7 +1608,7 @@ function DeliverabilityPageInner() {
       });
     }
     return result;
-  }, [domains, tagFilters, tagMatchMode, domainSearch, redirectSearch, typeFilter, showFlagged, flagSubFilter, showHealthy, showBlacklisted, showNotBlacklisted, showSpamhausListed, showSpamhausClean, showReserve, showAssigned, showMultiClient, warmupDaysFilter, warmupDaysFrom, warmupDaysTo, filterConditions, filterMatchMode, sortField, sortDir, isDomainFlagged, hasReplyIssue, hasBounceIssue, isDomainReserve, isDomainAssigned, isDomainMultiClient, now]);
+  }, [domains, tagFilters, tagMatchMode, domainSearch, redirectSearch, typeFilter, showFlagged, flagSubFilter, showHealthy, showBlacklisted, showNotBlacklisted, showSpamhausListed, showSpamhausClean, showReserve, showAssigned, showMultiClient, providerStatusFilter, providerStatusMap, warmupDaysFilter, warmupDaysFrom, warmupDaysTo, filterConditions, filterMatchMode, sortField, sortDir, isDomainFlagged, hasReplyIssue, hasBounceIssue, isDomainReserve, isDomainAssigned, isDomainMultiClient, now]);
 
   const flaggedCount = useMemo(() => domains.filter(isDomainFlagged).length, [domains, isDomainFlagged]);
   const healthyCount = useMemo(() => domains.filter((d) => !isDomainFlagged(d)).length, [domains, isDomainFlagged]);
@@ -2686,6 +2707,37 @@ function DeliverabilityPageInner() {
               )}
             </button>
 
+            {/* Provider lifecycle filter (Inboxing / MilkBox). Populated by
+                /api/cron/provider-domain-status-check. Click again to clear
+                back to "All". */}
+            <div className="flex items-center gap-1 pl-2 ml-1 border-l">
+              <span className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground pr-1">Provider</span>
+              {([
+                { key: "active",   label: "Active",   activeCls: "bg-emerald-500/15 text-emerald-400 border-emerald-500/30" },
+                { key: "canceled", label: "Canceled", activeCls: "bg-red-500/15 text-red-400 border-red-500/30" },
+                { key: "unknown",  label: "Unknown",  activeCls: "bg-muted text-muted-foreground border-border" },
+              ] as const).map((opt) => (
+                <button
+                  key={opt.key}
+                  onClick={() => setProviderStatusFilter(providerStatusFilter === opt.key ? "all" : opt.key)}
+                  className={`text-[11px] px-2.5 py-1 rounded-full border transition-colors ${
+                    providerStatusFilter === opt.key
+                      ? opt.activeCls
+                      : "border-border text-muted-foreground hover:border-foreground hover:text-foreground"
+                  }`}
+                  title={
+                    opt.key === "active"
+                      ? "Domains confirmed active at Inboxing / MilkBox as of the last daily check"
+                      : opt.key === "canceled"
+                        ? "Domains that Inboxing / MilkBox reports as not active — deleted, failed, deactivating, or not on the account anymore"
+                        : "Domains with no Inboxing/Milkbox tag, or not checked yet by the daily cron"
+                  }
+                >
+                  {opt.label}
+                </button>
+              ))}
+            </div>
+
             {/* Warmup days filter */}
             <div className="flex items-center gap-1">
               {[
@@ -3148,6 +3200,40 @@ function DeliverabilityPageInner() {
                       ) : (
                         <span className="text-muted-foreground/40">—</span>
                       )}
+                    </div>
+                    )}
+
+                    {/* Provider lifecycle status (Inboxing / MilkBox). Missing
+                        entry = domain lacks the Inboxing/Milkbox tag OR the
+                        daily cron hasn't caught it yet → render as em-dash. */}
+                    {isColVisible("provider_status") && (
+                    <div className="text-center text-xs">
+                      {(() => {
+                        const entry = providerStatusMap[`${d.instance}:${d.domain}`];
+                        if (!entry) {
+                          return <span className="text-muted-foreground/40" title="Not checked">—</span>;
+                        }
+                        const raw = entry.raw_status || entry.status;
+                        const tooltip = `${entry.provider} · ${raw}${entry.failure_reason ? ` — ${entry.failure_reason}` : ""} · checked ${new Date(entry.checked_at).toLocaleString()}`;
+                        if (entry.status === "active") {
+                          return (
+                            <span
+                              className="inline-flex items-center px-1.5 py-0.5 rounded-full border border-emerald-500/30 bg-emerald-950/20 text-emerald-300 text-[10px]"
+                              title={tooltip}
+                            >
+                              Active
+                            </span>
+                          );
+                        }
+                        return (
+                          <span
+                            className="inline-flex items-center px-1.5 py-0.5 rounded-full border border-red-500/30 bg-red-950/20 text-red-300 text-[10px]"
+                            title={tooltip}
+                          >
+                            Canceled
+                          </span>
+                        );
+                      })()}
                     </div>
                     )}
 
