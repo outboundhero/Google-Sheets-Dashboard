@@ -27,6 +27,8 @@
 
     { "path": "/api/cron/provider-domain-status-check",    "schedule": "0 8 * * *" },
 
+    { "path": "/api/cron/mrl-pace-check",                  "schedule": "0 */4 * * *" },
+
     { "path": "/api/cron/daily-account-status-report",     "schedule": "55 7 * * *" },
 
     { "path": "/api/cron/snapshot-deliverability",         "schedule": "0 15 * * *" },

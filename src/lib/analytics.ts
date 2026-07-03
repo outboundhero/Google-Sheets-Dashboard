@@ -11,7 +11,7 @@ function groupBy<T>(items: T[], keyFn: (item: T) => string): Record<string, T[]>
   return result;
 }
 
-function parseDate(dateStr: string): Date | null {
+export function parseDate(dateStr: string): Date | null {
   if (!dateStr) return null;
 
   // Try standard parsing first (handles ISO, "3/9/2026", "3/9/2026 14:30:00", etc.)
@@ -42,7 +42,7 @@ function parseDate(dateStr: string): Date | null {
  * categories (`currentCategory` includes "meeting"). For clients whose sheets
  * never populate `currentCategory` (e.g. BHS), fall back to status === "Quality Lead".
  */
-function makeDeliverablePredicate(leads: Lead[]): (l: Lead) => boolean {
+export function makeDeliverablePredicate(leads: Lead[]): (l: Lead) => boolean {
   const usesMeetingCategory = leads.some((l) =>
     (l.currentCategory || "").toLowerCase().includes("meeting")
   );

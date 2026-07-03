@@ -18,6 +18,7 @@ const VIEWER_API_GETS = [
   "/api/campaigns",
   "/api/leads/not-delivered-today",
   "/api/account-status",
+  "/api/mrl-pace-status",
 ];
 
 export async function middleware(request: NextRequest) {

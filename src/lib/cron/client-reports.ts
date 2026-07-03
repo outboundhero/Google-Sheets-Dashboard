@@ -21,7 +21,7 @@ const WEIGHTED_DAYS_PER_MONTH = (DAYS_PER_MONTH * (5 + 2 * WEEKEND_WEIGHT)) / 7;
 const FLAG_THRESHOLD = 0.75; // flagged when actual < 75% of pace (i.e. ≥25% behind)
 
 export type TierBucket = "T0.5/1" | "T2";
-const TARGETS: Record<TierBucket, { mrMonthly: number; qlMonthly: number }> = {
+export const TARGETS: Record<TierBucket, { mrMonthly: number; qlMonthly: number }> = {
   "T0.5/1": { mrMonthly: 20, qlMonthly: 15 },
   "T2": { mrMonthly: 40, qlMonthly: 30 },
 };
@@ -37,7 +37,7 @@ function tierBucketFromPlan(plan: string): TierBucket | null {
   return null; // PPQM / PPQL / blank → not a tiered client
 }
 
-interface TrackerEntry { plan: string; status: string; bucket: TierBucket | null }
+export interface TrackerEntry { plan: string; status: string; bucket: TierBucket | null }
 
 // Read Client Tracker → map of UPPERCASE Client Abbreviation → tier/status.
 export async function getClientTierMap(): Promise<Map<string, TrackerEntry>> {
@@ -88,7 +88,7 @@ export async function getClientTierMap(): Promise<Map<string, TrackerEntry>> {
 // markets ("JPCIN / JPCHI", "DBSM/DBSA", "TM & VC") — try the whole tag first,
 // then each part split on "/" and " & " (the codebase keeps "&"-without-spaces
 // abbreviations like K&LCS / TM&VC intact).
-function resolveTier(clientTag: string, map: Map<string, TrackerEntry>): TrackerEntry | null {
+export function resolveTier(clientTag: string, map: Map<string, TrackerEntry>): TrackerEntry | null {
   const candidates = new Set<string>();
   candidates.add(clientTag.trim().toUpperCase());
   for (const slash of clientTag.split("/")) {

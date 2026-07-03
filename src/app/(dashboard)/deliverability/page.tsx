@@ -53,6 +53,7 @@ import {
 import { useAuth } from "@/lib/auth-context";
 import { useInstance } from "@/lib/instance-context";
 import { useProviderStatus } from "@/lib/hooks/use-provider-status";
+import { getDomainFlagReasons } from "@/lib/inbox-health";
 import { ALL_INSTANCE_SLUGS, BISON_INSTANCES, type BisonInstanceSlug } from "@/lib/bison-instances";
 
 interface DomainRow {
@@ -1139,28 +1140,10 @@ function DeliverabilityPageInner() {
     [domains, warmupFilter, warmupSearch, showReserve, warmupTypeFilter, tagFilters, tagMatchMode, isDomainReserve, now]
   );
 
-  // Flag computation helper — returns human-readable reason strings
-  // Uses rate-based thresholds: reply rate < 1%, bounce rate > 3%, min 100 sent
-  const getFlagReasons = useCallback((d: DomainRow): string[] => {
-    const reasons: string[] = [];
-    const isGoogle = (d.google_count || 0) > 0 && (d.outlook_count || 0) === 0;
-    const isOutlook = (d.outlook_count || 0) > 0 && (d.google_count || 0) === 0;
-    const totalSent = d.total_sent || 0;
-    if (!(isGoogle || isOutlook) || totalSent <= 100) return reasons;
-
-    const replied = d.total_replied || 0;
-    const bounced = d.total_bounced || 0;
-    const replyRate = totalSent > 0 ? replied / totalSent : 0;
-    const bounceRate = totalSent > 0 ? bounced / totalSent : 0;
-
-    if (replyRate < 0.01) {
-      reasons.push(`Low replies (${(replyRate * 100).toFixed(1)}% with ${totalSent.toLocaleString()} sent)`);
-    }
-    if (bounceRate > 0.03) {
-      reasons.push(`High bounces (${(bounceRate * 100).toFixed(1)}% with ${totalSent.toLocaleString()} sent)`);
-    }
-    return reasons;
-  }, []);
+  // Flag computation helper — returns human-readable reason strings.
+  // Logic lives in src/lib/inbox-health.ts so the MRL pace cron computes
+  // per-client infrastructure health with the exact same rule.
+  const getFlagReasons = useCallback((d: DomainRow): string[] => getDomainFlagReasons(d), []);
 
   const isDomainFlagged = useCallback((d: DomainRow) => getFlagReasons(d).length > 0, [getFlagReasons]);
 
