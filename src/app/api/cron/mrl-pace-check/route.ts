@@ -347,8 +347,13 @@ export async function GET() {
     }
 
     // ── Slack digest (Critical only + all-clear). Never fails the cron. ──
+    // DISABLED unless MRL_PACING_SLACK_ENABLED=true is set in Vercel — the
+    // user doesn't want the daily digest yet. Flip the env var to turn it
+    // back on; no code change needed.
+    const slackEnabled = process.env.MRL_PACING_SLACK_ENABLED === "true";
     const digestDate = pstDateString(now);
-    let slackResult: { ok: boolean; reason?: string } = { ok: false, reason: "not attempted" };
+    let slackResult: { ok: boolean; reason?: string } = { ok: false, reason: "disabled (set MRL_PACING_SLACK_ENABLED=true to enable)" };
+    if (slackEnabled) {
     try {
       const channel = process.env.SLACK_MRL_PACING_CHANNEL_ID;
       let text: string;
@@ -379,6 +384,7 @@ export async function GET() {
     } catch (e) {
       slackResult = { ok: false, reason: e instanceof Error ? e.message : "slack threw" };
       console.warn(`[cron/mrl-pace] Slack digest threw:`, e);
+    }
     }
 
     const bySeverity = { on_track: 0, at_risk: 0, critical: 0 };
