@@ -350,8 +350,12 @@ export async function buildWeeklyReport(endDateStr: string): Promise<WeeklyRepor
   lines.push(`Weekly Lead Performance Report — ${range} (PST, last 7 days)`);
   lines.push("");
 
-  // Totals by bucket
-  const bucketTotals = (["T0.5/1", "T2"] as TierBucket[]).map((bucket) => {
+  // Totals by bucket. NOTE: no `as` assertion — a satisfies-checked literal
+  // array so a future tier rename breaks the build instead of silently
+  // rendering an "undefined · 0 clients" card (which is exactly what happened
+  // when T0.5/1 split into T0.5 + T1 and this list was missed).
+  const WEEKLY_BUCKETS: TierBucket[] = ["T0.5", "T1", "T2"];
+  const bucketTotals = WEEKLY_BUCKETS.map((bucket) => {
     const inB = rows.filter((r) => r.bucket === bucket);
     return {
       label: BUCKET_LABEL[bucket], count: inB.length,
