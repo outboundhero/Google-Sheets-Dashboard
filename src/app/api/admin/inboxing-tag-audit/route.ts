@@ -47,19 +47,28 @@ async function fetchActiveInboxingDomains(): Promise<InboxingDomain[]> {
   const perPage = 100;
   for (let page = 1; page < 500; page++) {
     let res: Response | null = null;
-    // Light retry on 429/5xx.
-    for (let attempt = 0; attempt < 5; attempt++) {
+    // Inboxing's rate-limit window appears to be per-minute — short exponential
+    // backoff can burn every attempt inside one throttled window (that's how the
+    // first run of this audit died on page 1). Honor Retry-After when present,
+    // otherwise wait long enough to clear the window.
+    for (let attempt = 0; attempt < 6; attempt++) {
       res = await fetch(`${base}/domains?status=active&per_page=${perPage}&page=${page}`, {
         headers: { Accept: "application/json", "X-API-Key": key },
       });
       if (res.ok) break;
       if (res.status === 429 || res.status >= 500) {
-        await sleep(Math.min(10_000, 800 * 2 ** attempt));
+        const ra = parseInt(res.headers.get("retry-after") || "", 10);
+        const waitMs = Number.isFinite(ra) && ra > 0
+          ? ra * 1000 + 500
+          : 15_000 + attempt * 10_000; // 15s, 25s, 35s… — clears a per-minute window
+        await sleep(waitMs);
         continue;
       }
       throw new Error(`Inboxing /domains page ${page}: HTTP ${res.status}`);
     }
-    if (!res || !res.ok) throw new Error(`Inboxing /domains page ${page}: exhausted retries`);
+    if (!res || !res.ok) {
+      throw new Error(`Inboxing /domains page ${page}: exhausted retries (last HTTP ${res?.status ?? "?"})`);
+    }
     const json = (await res.json()) as { data?: InboxingDomain[] };
     const rows = json.data || [];
     for (const d of rows) {
