@@ -52,7 +52,10 @@ async function fetchActiveInboxingDomains(): Promise<InboxingDomain[]> {
     // first run of this audit died on page 1). Honor Retry-After when present,
     // otherwise wait long enough to clear the window.
     for (let attempt = 0; attempt < 6; attempt++) {
-      res = await fetch(`${base}/domains?status=active&per_page=${perPage}&page=${page}`, {
+      // NOTE: no `status=active` query param — Inboxing's API 500s on it
+      // consistently (verified: same request without the filter works).
+      // We filter to active client-side below instead.
+      res = await fetch(`${base}/domains?per_page=${perPage}&page=${page}`, {
         headers: { Accept: "application/json", "X-API-Key": key },
       });
       if (res.ok) break;
@@ -72,7 +75,10 @@ async function fetchActiveInboxingDomains(): Promise<InboxingDomain[]> {
     const json = (await res.json()) as { data?: InboxingDomain[] };
     const rows = json.data || [];
     for (const d of rows) {
-      if (d?.domain) out.push({ id: String(d.id), domain: d.domain, status: d.status, tags: d.tags || [] });
+      // Client-side active filter (the server-side ?status=active 500s).
+      if (d?.domain && (d.status || "").toLowerCase() === "active") {
+        out.push({ id: String(d.id), domain: d.domain, status: d.status, tags: d.tags || [] });
+      }
     }
     if (rows.length < perPage) break;
   }
