@@ -207,6 +207,15 @@ async function removeCandidates(
     }
     if (res.status === 422 || res.status === 400) {
       const text = await res.text().catch(() => "");
+      // Bison refuses to remove a campaign's LAST senders ("No other sender
+      // emails available for reassignment") — i.e. every sender in this
+      // campaign belongs to the flagged domains. No retry can fix that;
+      // classify it cleanly and skip the pointless membership crawl.
+      if (text.includes("No other sender emails available")) {
+        throw new Error(
+          "fully contaminated: every sender in this campaign belongs to the flagged domains — Bison won't remove the last senders. Archive the campaign or attach the correct client's inboxes first.",
+        );
+      }
       // Laravel names the invalid array indices — drop exactly those.
       const badIdx = new Set<number>();
       try {
@@ -241,6 +250,11 @@ async function removeCandidates(
           });
           if (!r2.ok) {
             const t2 = await r2.text().catch(() => "");
+            if (t2.includes("No other sender emails available")) {
+              throw new Error(
+                "fully contaminated: every sender in this campaign belongs to the flagged domains — Bison won't remove the last senders. Archive the campaign or attach the correct client's inboxes first.",
+              );
+            }
             throw new Error(`exact remove: HTTP ${r2.status} ${t2.slice(0, 120)}`);
           }
           submitted += b2.length;
@@ -248,6 +262,7 @@ async function removeCandidates(
         return submitted;
       } catch (e) {
         const msg = e instanceof Error ? e.message : "fallback failed";
+        if (msg.startsWith("fully contaminated")) throw e;
         throw new Error(`Bison rejected removal (${reason}); fallback: ${msg}`);
       }
     }

@@ -17,9 +17,10 @@ const RUN_BATCH = 50;
 // to unique campaigns first (the same ~200 campaigns repeat across thousands
 // of flagged domains) — each request processes a slice of those, so progress
 // ticks every batch and each campaign is cleaned exactly once. Server-side
-// each campaign is now ~4 Bison calls (status → pause → blind remove →
-// resume), so a batch clears in seconds.
-const CAMPAIGN_BATCH = 25;
+// each campaign is ~4-6 Bison calls (status → pause → remove rounds →
+// resume). Kept small enough that a batch stays under Vercel's 300s limit
+// even when Bison rate-limits and the server waits out full windows.
+const CAMPAIGN_BATCH = 12;
 
 export function CrossTagAuditCard() {
   const [open, setOpen] = useState(false);
