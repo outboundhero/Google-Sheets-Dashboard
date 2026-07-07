@@ -50,8 +50,12 @@ interface JobResult {
 
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-const CAMPAIGN_CONC = 4;       // campaign jobs in flight per request
-const PAGE_CONC = 12;          // parallel offset pages per campaign fetch
+// Concurrency budget: CAMPAIGN_CONC × PAGE_CONC is the worst-case number of
+// simultaneous requests against ONE Bison instance (flagged domains cluster
+// heavily on a single instance). The first run at 4×12=48 exhausted retries
+// on ~half the campaigns — Bison's ceiling is nearer ~20-25 sustained.
+const CAMPAIGN_CONC = 3;       // campaign jobs in flight per request
+const PAGE_CONC = 7;           // parallel offset pages per campaign fetch (3×7=21)
 const OFFSET_PAGE_CAP = 990;   // Bison caps offset pagination at 1000 pages
 const DELETE_BATCH = 300;      // ids per remove call (downshifts on 4xx)
 
@@ -59,7 +63,7 @@ async function bisonWithRetry(
   instance: BisonInstanceSlug,
   path: string,
   init?: RequestInit,
-  attempts = 5,
+  attempts = 7,
 ): Promise<Response> {
   let last: Response | null = null;
   for (let i = 0; i < attempts; i++) {
@@ -68,8 +72,10 @@ async function bisonWithRetry(
     if (res.status === 429 || res.status === 502 || res.status === 503 || res.status === 504) {
       last = res;
       const ra = parseInt(res.headers.get("retry-after") || "", 10);
-      const wait = Number.isFinite(ra) && ra > 0 ? ra * 1000 : Math.min(8000, 500 * 2 ** i);
-      await delay(wait + Math.floor(Math.random() * 300));
+      // Patient backoff — under sustained load a burst of 429s needs to be
+      // waited OUT, not raced. Caps at 20s; total patience ≈ 60s.
+      const wait = Number.isFinite(ra) && ra > 0 ? ra * 1000 : Math.min(20_000, 700 * 2 ** i);
+      await delay(wait + Math.floor(Math.random() * 400));
       continue;
     }
     return res;
