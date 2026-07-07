@@ -426,8 +426,8 @@ function DeliverabilityPageInner() {
   const { role } = useAuth();
   const isAdmin = role === "admin";
   const { instancesQuery, instances } = useInstance();
-  // Cached Inboxing/MilkBox lifecycle map by "instance:domain".
-  const { statuses: providerStatusMap } = useProviderStatus(instancesQuery);
+  // Cached Inboxing/MilkBox/ScaledMail lifecycle map by "instance:domain".
+  const { statuses: providerStatusMap, mutate: mutateProviderStatus } = useProviderStatus(instancesQuery);
   const [bisonTags, setBisonTags] = useState<string[]>([]);
   const [domains, setDomains] = useState<DomainRow[]>([]);
   // Days of snapshot history collected (drives the trailing-rate warm-up note)
@@ -968,7 +968,11 @@ function DeliverabilityPageInner() {
           }
         }),
       );
-      await loadDomains();
+      // Refresh BOTH stores the table reads from: the domain rows AND the
+      // provider-status SWR map (revalidateIfStale is off, so without an
+      // explicit mutate the Provider column keeps rendering the pre-check
+      // snapshot for up to 5 minutes).
+      await Promise.all([loadDomains(), mutateProviderStatus()]);
     } finally {
       setProviderChecking(false);
     }
