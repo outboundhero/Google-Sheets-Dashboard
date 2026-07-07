@@ -130,6 +130,7 @@ export function CrossTagAuditCard() {
     let removedTotal = 0;
 
     setRemoveProgress({ done: 0, total: jobList.length, current: `${jobList.length} unique campaigns across ${targets.length} domains` });
+    const startedAt = Date.now();
     try {
       for (let i = 0; i < jobList.length; i += CAMPAIGN_BATCH) {
         const batch = jobList.slice(i, i + CAMPAIGN_BATCH);
@@ -161,10 +162,19 @@ export function CrossTagAuditCard() {
           chunkErrors.push(`Batch ${Math.floor(i / CAMPAIGN_BATCH) + 1}: ${e instanceof Error ? e.message : "network error"}`);
           for (const j of batch) failedJobKeys.add(`${j.instance}:${j.id}`);
         }
+        // Surface failures + errors LIVE, not just at the end of the run —
+        // the red panels below update after every batch.
+        setFailures([...collectedFailures]);
+        if (chunkErrors.length) setError(chunkErrors.join(" · "));
+
+        const done = Math.min(i + CAMPAIGN_BATCH, jobList.length);
+        const elapsed = (Date.now() - startedAt) / 1000;
+        const etaSec = done > 0 ? Math.round((elapsed / done) * (jobList.length - done)) : 0;
+        const eta = etaSec >= 60 ? `~${Math.ceil(etaSec / 60)}m left` : `~${etaSec}s left`;
         setRemoveProgress({
-          done: Math.min(i + CAMPAIGN_BATCH, jobList.length),
+          done,
           total: jobList.length,
-          current: `${removedTotal.toLocaleString()} inbox removals queued${collectedFailures.length ? ` · ${collectedFailures.length} campaigns failed` : ""}`,
+          current: `${removedTotal.toLocaleString()} inbox removals queued · ${eta}${collectedFailures.length ? ` · ${collectedFailures.length} campaigns failed` : ""}`,
         });
       }
 

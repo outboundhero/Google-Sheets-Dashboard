@@ -56,7 +56,9 @@ interface JobResult {
 
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-const CAMPAIGN_CONC = 5;       // campaign jobs in flight (few calls each now)
+const CAMPAIGN_CONC = 10;      // campaign jobs in flight — each holds at most
+                               // one Bison call at a time, well under the
+                               // ~20-25 sustained per-instance ceiling
 const DELETE_BATCH = 2000;     // async queue endpoint; downshifts on 4xx
 
 // States that cannot send — contamination in them is inert, skip.
@@ -279,19 +281,30 @@ export async function POST(request: Request) {
           results.push({ instance, campaignId: job.id, name, ok: true, removed: 0, note: `skipped (${liveStatus} — cannot send)` });
           return;
         }
+        let pauseError: string | null = null;
         if (!REMOVABLE_STATUSES.has(liveStatus)) {
-          // active / launching / queued / anything else sendable → pause first.
+          // active / launching / queued / anything else → try to pause first.
+          // Some states (e.g. "failed", "stopped") reject the pause call but
+          // still accept removal — so a failed pause is NOT fatal: we attempt
+          // the removal regardless and only report the pause error if the
+          // removal also fails.
           const p = await bisonWithRetry(instance, `/campaigns/${job.id}/pause`, { method: "PATCH" });
-          if (!p.ok) {
+          if (p.ok) {
+            pausedByUs = true;
+            await delay(300);
+          } else {
             const t = await p.text().catch(() => "");
-            throw new Error(`pause (${liveStatus}): ${p.status} ${t.slice(0, 120)}`);
+            pauseError = `pause (status ${liveStatus}): HTTP ${p.status} ${t.slice(0, 120)}`;
           }
-          pausedByUs = true;
-          await delay(300);
         }
 
-        const removed = await removeCandidates(instance, job.id, candidates, candidateSet);
-        results.push({ instance, campaignId: job.id, name, ok: true, removed });
+        try {
+          const removed = await removeCandidates(instance, job.id, candidates, candidateSet);
+          results.push({ instance, campaignId: job.id, name, ok: true, removed });
+        } catch (e) {
+          const msg = e instanceof Error ? e.message : "remove failed";
+          throw new Error(pauseError ? `${pauseError} → then ${msg}` : msg);
+        }
       } catch (e) {
         results.push({
           instance, campaignId: job.id, name, ok: false, removed: 0,
