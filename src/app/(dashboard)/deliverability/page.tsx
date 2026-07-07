@@ -491,6 +491,9 @@ function DeliverabilityPageInner() {
   const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
   const [attachDialogOpen, setAttachDialogOpen] = useState(false);
   const [conformTagsOpen, setConformTagsOpen] = useState(false);
+  // Manual trigger for the daily Inboxing/MilkBox domain-status check.
+  const [providerChecking, setProviderChecking] = useState(false);
+  const [providerCheckMsg, setProviderCheckMsg] = useState<string | null>(null);
   const [changeRedirectOpen, setChangeRedirectOpen] = useState(false);
   const [clientTags, setClientTags] = useState<Set<string>>(new Set());
   const [selectedDomains, setSelectedDomains] = useState<Set<string>>(new Set());
@@ -917,6 +920,32 @@ function DeliverabilityPageInner() {
     loadStats();
     loadTags();
   }, [loadDomains, loadStats, loadTags]);
+
+  // Fires the same check the daily cron runs: every domain tagged
+  // Inboxing/MilkBox gets its live status pulled from the provider's API.
+  const handleProviderCheck = async () => {
+    if (providerChecking) return;
+    setProviderChecking(true);
+    setProviderCheckMsg(null);
+    try {
+      const res = await fetch("/api/cron/provider-domain-status-check", { cache: "no-store" });
+      const text = await res.text();
+      let d: { scanned?: number; processed?: number; canceled?: number; failed?: number; durationMs?: number; error?: string } | null = null;
+      try { d = text ? JSON.parse(text) : null; } catch { /* non-JSON (timeout page) */ }
+      if (!d || !res.ok || d.error) {
+        setProviderCheckMsg(`Provider status check failed: ${d?.error || (res.status >= 500 ? "server timed out" : `HTTP ${res.status}`)}`);
+      } else {
+        setProviderCheckMsg(
+          `Provider status: checked ${(d.processed ?? 0).toLocaleString()} of ${(d.scanned ?? 0).toLocaleString()} Inboxing/MilkBox domains · ${d.canceled ?? 0} canceled · ${d.failed ?? 0} failed · ${Math.round((d.durationMs ?? 0) / 1000)}s`,
+        );
+        await loadDomains();
+      }
+    } catch (e) {
+      setProviderCheckMsg(`Provider status check failed: ${e instanceof Error ? e.message : "network error"}`);
+    } finally {
+      setProviderChecking(false);
+    }
+  };
 
   const handleSync = async (slugs: BisonInstanceSlug[] = [...ALL_INSTANCE_SLUGS]) => {
     if (syncing) return;
@@ -1699,6 +1728,17 @@ function DeliverabilityPageInner() {
                 <Tags className="h-4 w-4" />
                 Conform Tags
               </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={handleProviderCheck}
+                disabled={providerChecking}
+                className="gap-2"
+                title="Pull live active/canceled status from Inboxing + MilkBox for every tagged domain (also runs automatically every 24h)"
+              >
+                {providerChecking ? <Loader2 className="h-4 w-4 animate-spin" /> : <CheckCircle2 className="h-4 w-4" />}
+                {providerChecking ? "Checking…" : "Check Provider Status"}
+              </Button>
               <DropdownMenu>
                 <DropdownMenuTrigger asChild>
                   <Button
@@ -1729,6 +1769,14 @@ function DeliverabilityPageInner() {
           )}
         </div>
       </PageHeader>
+
+      {/* Provider status check result (manual trigger of the daily cron) */}
+      {providerCheckMsg && (
+        <div className={`flex items-start gap-2 rounded-lg border px-4 py-2.5 text-xs ${providerCheckMsg.includes("failed:") ? "border-destructive/30 bg-destructive/5 text-destructive" : "bg-muted/30 text-muted-foreground"}`}>
+          <span className="flex-1">{providerCheckMsg}</span>
+          <button onClick={() => setProviderCheckMsg(null)} className="shrink-0 opacity-60 hover:opacity-100" title="Dismiss">✕</button>
+        </div>
+      )}
 
       {/* Sync Progress — one row per Bison instance, all 4 in parallel */}
       {syncProgresses && (
