@@ -2,9 +2,11 @@ import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
 import { createServerSupabaseClient } from "@/lib/supabase";
 
-// One-shot diagnostic: hits Inboxing + MilkBox list endpoints and returns
-// enough of the raw response to verify what's actually coming back — total
-// counts, status distribution, sample rows, and any errors. Admin-only.
+// One-shot diagnostic: hits Inboxing + MilkBox + ScaledMail list endpoints
+// and returns enough of the raw response to verify what's actually coming
+// back — total counts, status distribution, sample rows, and any errors.
+// Admin-only. `?only=scaledmail` (or inboxing/milkbox) probes one provider
+// without burning the others' rate limits.
 //
 // We DON'T route through our lib helpers here — we call the providers with
 // raw fetch so we can see the RAW paginated response shape (including any
@@ -13,8 +15,9 @@ import { createServerSupabaseClient } from "@/lib/supabase";
 export const maxDuration = 60;
 
 interface ProbeResult {
-  inboxing: unknown;
-  milkbox: unknown;
+  inboxing?: unknown;
+  milkbox?: unknown;
+  scaledmail?: unknown;
 }
 
 async function inboxingProbe() {
@@ -145,7 +148,48 @@ async function milkboxProbe() {
   };
 }
 
-export async function GET() {
+async function scaledmailProbe() {
+  const key = process.env.SCALEDMAIL_API_KEY;
+  const orgId = process.env.SCALEDMAIL_ORGANIZATION_ID;
+  if (!key || !orgId) return { error: "SCALEDMAIL_API_KEY / SCALEDMAIL_ORGANIZATION_ID not set" };
+
+  const url = new URL("https://server.scaledmail.com/api/v1/domains");
+  url.searchParams.set("organization_id", orgId);
+  const res = await fetch(url.toString(), {
+    headers: { Accept: "application/json", Authorization: `Bearer ${key}` },
+  });
+  const text = await res.text();
+  let json: unknown = null;
+  try { json = JSON.parse(text); } catch { /* not JSON */ }
+
+  // The docs don't document this response shape, so surface everything the
+  // parser needs to be built against: envelope keys, where the array lives,
+  // the first rows verbatim, and status distribution.
+  const obj = (json && typeof json === "object" && !Array.isArray(json)) ? json as Record<string, unknown> : {};
+  const arr: Array<Record<string, unknown>> = Array.isArray(json)
+    ? json as Array<Record<string, unknown>>
+    : Array.isArray(obj.domains) ? obj.domains as Array<Record<string, unknown>>
+    : Array.isArray(obj.data) ? obj.data as Array<Record<string, unknown>>
+    : [];
+  const statusCounts: Record<string, number> = {};
+  for (const row of arr) {
+    const s = String((row as { status?: unknown }).status ?? "<no status field>");
+    statusCounts[s] = (statusCounts[s] ?? 0) + 1;
+  }
+  return {
+    http_status: res.status,
+    is_json: json !== null,
+    top_level_type: Array.isArray(json) ? "array" : typeof json,
+    top_level_keys: Array.isArray(json) ? null : Object.keys(obj),
+    row_count: arr.length,
+    status_counts: statusCounts,
+    first_row_keys: arr[0] ? Object.keys(arr[0]) : [],
+    sample_rows: arr.slice(0, 3),
+    raw_head: json === null ? text.slice(0, 1500) : undefined,
+  };
+}
+
+export async function GET(request: Request) {
   const cookieStore = await cookies();
   const supabaseAuth = createServerSupabaseClient(cookieStore);
   const { data: { user } } = await supabaseAuth.auth.getUser();
@@ -154,16 +198,28 @@ export async function GET() {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
 
-  const result: ProbeResult = { inboxing: null, milkbox: null };
-  try {
-    result.inboxing = await inboxingProbe();
-  } catch (e) {
-    result.inboxing = { error: e instanceof Error ? e.message : "probe failed" };
+  const only = new URL(request.url).searchParams.get("only");
+  const result: ProbeResult = {};
+  if (!only || only === "inboxing") {
+    try {
+      result.inboxing = await inboxingProbe();
+    } catch (e) {
+      result.inboxing = { error: e instanceof Error ? e.message : "probe failed" };
+    }
   }
-  try {
-    result.milkbox = await milkboxProbe();
-  } catch (e) {
-    result.milkbox = { error: e instanceof Error ? e.message : "probe failed" };
+  if (!only || only === "milkbox") {
+    try {
+      result.milkbox = await milkboxProbe();
+    } catch (e) {
+      result.milkbox = { error: e instanceof Error ? e.message : "probe failed" };
+    }
+  }
+  if (!only || only === "scaledmail") {
+    try {
+      result.scaledmail = await scaledmailProbe();
+    } catch (e) {
+      result.scaledmail = { error: e instanceof Error ? e.message : "probe failed" };
+    }
   }
   return NextResponse.json(result);
 }
