@@ -12,12 +12,12 @@ interface WrongCampaign { id: number; name: string; status: string; clientTag: s
 interface FlaggedDomain { instance: string; domain: string; clientTag: string; wrongCampaigns: WrongCampaign[] }
 
 const short: Record<string, string> = { outboundhero: "B2B1·OH", cleaningoutbound: "B2C1·CO", facilityreach: "B2B2·FR", outboundclean: "B2C2·OC" };
-const RUN_BATCH = 40;
-// Domains per removal request. The endpoint is campaign-centric (unique
-// campaigns dominate the wall clock, and they repeat massively across
-// domains), so large chunks are cheap — this mostly bounds payload size and
-// keeps each request comfortably under the 300s route budget.
-const REMOVE_CHUNK = 800;
+const RUN_BATCH = 50;
+// Campaign jobs per removal request. The FE dedups the whole selection down
+// to unique campaigns first (the same ~200 campaigns repeat across thousands
+// of flagged domains) — each request processes a slice of those, so progress
+// ticks every batch and each campaign is cleaned exactly once.
+const CAMPAIGN_BATCH = 16;
 
 export function CrossTagAuditCard() {
   const [open, setOpen] = useState(false);
@@ -98,59 +98,89 @@ export function CrossTagAuditCard() {
     }
   };
 
-  // Campaign-centric bulk removal. The old flow looped domains one at a time
-  // and re-fetched each campaign's sender list per domain — with the same
-  // ~200 campaigns shared across 2,000+ domains that took hours. The new
-  // endpoint dedups by campaign, pauses/removes/resumes each unique campaign
-  // ONCE for all its domains, and bulk-clears cleaned rows.
+  // Campaign-centric bulk removal. The FE dedups the whole selection down to
+  // UNIQUE campaigns (the same ~200 campaigns repeat across thousands of
+  // flagged domains) and sends them in small batches — each campaign gets
+  // its senders fetched once (parallel offset pages server-side), the
+  // intersection removed once, paused/resumed once. Domains whose every
+  // campaign succeeded are bulk-cleared at the end.
   const removeSelected = async () => {
     const targets = flagged.filter((f) => selected.has(key(f)));
     if (targets.length === 0) return;
     setRemoving(true); setError(null); setFailures([]);
-    let cleared = 0;
+
+    // Group by unique (instance, campaign).
+    interface Job { instance: string; id: number; name: string; status: string; domains: string[] }
+    const jobMap = new Map<string, Job>();
+    for (const f of targets) {
+      for (const c of f.wrongCampaigns) {
+        const jk = `${f.instance}:${c.id}`;
+        let job = jobMap.get(jk);
+        if (!job) { job = { instance: f.instance, id: c.id, name: c.name, status: c.status, domains: [] }; jobMap.set(jk, job); }
+        job.domains.push(f.domain);
+      }
+    }
+    const jobList = [...jobMap.values()];
+    const failedJobKeys = new Set<string>();
     const collectedFailures: { name: string; instance: string; error: string }[] = [];
     const chunkErrors: string[] = [];
-    setRemoveProgress({ done: 0, total: targets.length, current: "grouping campaigns…" });
+    let removedTotal = 0;
+
+    setRemoveProgress({ done: 0, total: jobList.length, current: `${jobList.length} unique campaigns across ${targets.length} domains` });
     try {
-      for (let i = 0; i < targets.length; i += REMOVE_CHUNK) {
-        const chunk = targets.slice(i, i + REMOVE_CHUNK);
-        const chunkNo = Math.floor(i / REMOVE_CHUNK) + 1;
-        const chunkCount = Math.ceil(targets.length / REMOVE_CHUNK);
-        setRemoveProgress({ done: i, total: targets.length, current: `cleaning chunk ${chunkNo}/${chunkCount}…` });
+      for (let i = 0; i < jobList.length; i += CAMPAIGN_BATCH) {
+        const batch = jobList.slice(i, i + CAMPAIGN_BATCH);
         try {
           const res = await fetch("/api/replacement/cross-tag-remove", {
             method: "POST", headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              items: chunk.map((f) => ({
-                instance: f.instance,
-                domain: f.domain,
-                campaigns: f.wrongCampaigns.map((c) => ({ id: c.id, name: c.name, status: c.status })),
-              })),
-            }),
+            body: JSON.stringify({ campaigns: batch }),
           });
-          // JSON-safe parse: a Vercel timeout returns an HTML error page,
-          // which res.json() would turn into a cryptic parse error.
+          // JSON-safe parse: a Vercel timeout returns an HTML page, not JSON.
           const text = await res.text();
-          let d: { error?: string; domainsCleared?: number; failures?: { name: string; instance: string; error?: string }[] } | null = null;
+          let d: { error?: string; removed?: number; results?: { instance: string; campaignId: number; name: string; ok: boolean; removed: number; error?: string }[] } | null = null;
           try { d = text ? JSON.parse(text) : null; } catch { /* non-JSON */ }
-          if (!d) {
-            chunkErrors.push(`Chunk ${chunkNo}: server ${res.status >= 500 ? "timed out or crashed" : `returned non-JSON (HTTP ${res.status})`} — its domains stay flagged, re-run to retry`);
-          } else if (!res.ok || d.error) {
-            chunkErrors.push(`Chunk ${chunkNo}: ${d.error || `HTTP ${res.status}`} — its domains stay flagged, re-run to retry`);
+          if (!d || !res.ok || d.error) {
+            const why = !d
+              ? (res.status >= 500 ? "server timed out or crashed" : `non-JSON response (HTTP ${res.status})`)
+              : (d.error || `HTTP ${res.status}`);
+            chunkErrors.push(`Batch ${Math.floor(i / CAMPAIGN_BATCH) + 1}: ${why}`);
+            for (const j of batch) failedJobKeys.add(`${j.instance}:${j.id}`);
           } else {
-            cleared += d.domainsCleared || 0;
-            for (const f of d.failures || []) {
-              collectedFailures.push({ name: f.name, instance: f.instance, error: f.error || "failed" });
+            removedTotal += d.removed || 0;
+            for (const r of d.results || []) {
+              if (!r.ok) {
+                failedJobKeys.add(`${r.instance}:${r.campaignId}`);
+                collectedFailures.push({ name: r.name, instance: r.instance, error: r.error || "failed" });
+              }
             }
           }
         } catch (e) {
-          chunkErrors.push(`Chunk ${chunkNo}: ${e instanceof Error ? e.message : "network error"} — its domains stay flagged, re-run to retry`);
+          chunkErrors.push(`Batch ${Math.floor(i / CAMPAIGN_BATCH) + 1}: ${e instanceof Error ? e.message : "network error"}`);
+          for (const j of batch) failedJobKeys.add(`${j.instance}:${j.id}`);
         }
         setRemoveProgress({
-          done: Math.min(i + REMOVE_CHUNK, targets.length),
-          total: targets.length,
-          current: `${cleared} domains cleared${collectedFailures.length ? ` · ${collectedFailures.length} campaigns failed` : ""}`,
+          done: Math.min(i + CAMPAIGN_BATCH, jobList.length),
+          total: jobList.length,
+          current: `${removedTotal.toLocaleString()} inboxes detached${collectedFailures.length ? ` · ${collectedFailures.length} campaigns failed` : ""}`,
         });
+      }
+
+      // Clear domains whose every wrong campaign succeeded; failures stay
+      // flagged so a re-run retries exactly what's left.
+      const clearable = targets.filter((f) =>
+        f.wrongCampaigns.every((c) => !failedJobKeys.has(`${f.instance}:${c.id}`)),
+      );
+      setRemoveProgress({ done: jobList.length, total: jobList.length, current: `clearing ${clearable.length} cleaned domains…` });
+      for (let i = 0; i < clearable.length; i += 500) {
+        try {
+          await fetch("/api/replacement/cross-tag-remove", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              action: "clearDomains",
+              domains: clearable.slice(i, i + 500).map((f) => ({ instance: f.instance, domain: f.domain })),
+            }),
+          });
+        } catch { /* rows stay; harmless — next audit reconciles */ }
       }
     } finally {
       // Never leave the card stuck — buttons re-enable no matter what threw.
@@ -254,8 +284,8 @@ export function CrossTagAuditCard() {
               {removeProgress && (
                 <div className="space-y-1">
                   <div className="flex justify-between text-[11px] text-muted-foreground">
-                    <span>Removing {removeProgress.done}/{removeProgress.total}</span>
-                    <span className="truncate max-w-[200px]">{removeProgress.current}</span>
+                    <span>Cleaning campaign {removeProgress.done}/{removeProgress.total}</span>
+                    <span className="truncate max-w-[320px]">{removeProgress.current}</span>
                   </div>
                   <div className="h-1.5 rounded-full bg-muted overflow-hidden">
                     <div className="h-full bg-primary transition-all" style={{ width: `${removeProgress.total ? (removeProgress.done / removeProgress.total) * 100 : 0}%` }} />

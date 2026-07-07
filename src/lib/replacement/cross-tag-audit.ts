@@ -15,8 +15,11 @@ import { ALL_INSTANCE_SLUGS, type BisonInstanceSlug } from "@/lib/bison-instance
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const clientTagOf = (name: string) => (name.split(":")[0] || "").trim();
 
-const SAMPLE_PER_DOMAIN = 8;   // inboxes sampled per domain to reveal its campaigns
-const INBOX_CONC = 4;          // concurrent per-inbox lookups (× DOMAIN_CONC ≤ ~20 in flight)
+// Sampling: bulk attach/remove flows touch a domain's inboxes uniformly, so a
+// small evenly-spread sample reveals the campaign set. 4 (was 8) halves the
+// audit's Bison call count — the dominant cost at ~4,700 domains.
+const SAMPLE_PER_DOMAIN = 4;
+const INBOX_CONC = 4;          // concurrent per-inbox lookups (× DOMAIN_CONC ≈ 32 in flight)
 
 export interface WrongCampaign { id: number; name: string; status: string; clientTag: string; instance: string }
 export interface FlaggedDomain { instance: string; domain: string; clientTag: string; wrongCampaigns: WrongCampaign[] }
@@ -95,7 +98,7 @@ async function pool<T>(items: T[], conc: number, fn: (item: T) => Promise<void>)
   await Promise.all(Array.from({ length: Math.min(conc, items.length) }, () => worker()));
 }
 
-const DOMAIN_CONC = 5;         // domains audited concurrently within a batch
+const DOMAIN_CONC = 8;         // domains audited concurrently within a batch
 
 /** Audit a batch of domains. Returns the ones with wrong-tag campaign memberships.
  *  Bulk-reads Supabase once for the whole batch (tags + inbox ids), then audits
