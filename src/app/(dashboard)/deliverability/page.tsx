@@ -491,9 +491,19 @@ function DeliverabilityPageInner() {
   const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
   const [attachDialogOpen, setAttachDialogOpen] = useState(false);
   const [conformTagsOpen, setConformTagsOpen] = useState(false);
-  // Manual trigger for the daily Inboxing/MilkBox domain-status check.
+  // Manual trigger for the Inboxing/MilkBox/ScaledMail domain-status check —
+  // one row per provider in the progress panel at the top of the page.
+  interface ProviderCheckRow {
+    provider: string;
+    label: string;
+    state: "running" | "done" | "error";
+    scanned?: number;
+    canceled?: number;
+    failed?: number;
+    error?: string;
+  }
   const [providerChecking, setProviderChecking] = useState(false);
-  const [providerCheckMsg, setProviderCheckMsg] = useState<string | null>(null);
+  const [providerCheckRows, setProviderCheckRows] = useState<ProviderCheckRow[] | null>(null);
   const [changeRedirectOpen, setChangeRedirectOpen] = useState(false);
   const [clientTags, setClientTags] = useState<Set<string>>(new Set());
   const [selectedDomains, setSelectedDomains] = useState<Set<string>>(new Set());
@@ -921,27 +931,44 @@ function DeliverabilityPageInner() {
     loadTags();
   }, [loadDomains, loadStats, loadTags]);
 
-  // Fires the same check the daily cron runs: every domain tagged
-  // Inboxing/MilkBox gets its live status pulled from the provider's API.
+  // Fires the same check the daily cron runs — every domain tagged
+  // Inboxing/MilkBox/ScaledMail gets its live status pulled from the
+  // provider's API. One request per provider, all three in parallel, each
+  // updating its own row in the progress panel.
   const handleProviderCheck = async () => {
     if (providerChecking) return;
     setProviderChecking(true);
-    setProviderCheckMsg(null);
+    const providers: { provider: string; label: string }[] = [
+      { provider: "inboxing", label: "Inboxing" },
+      { provider: "milkbox", label: "MilkBox" },
+      { provider: "scaledmail", label: "ScaledMail" },
+    ];
+    setProviderCheckRows(providers.map((p) => ({ ...p, state: "running" as const })));
+    const patchRow = (provider: string, patch: Partial<ProviderCheckRow>) =>
+      setProviderCheckRows((rows) => (rows ? rows.map((r) => (r.provider === provider ? { ...r, ...patch } : r)) : rows));
     try {
-      const res = await fetch("/api/cron/provider-domain-status-check", { cache: "no-store" });
-      const text = await res.text();
-      let d: { scanned?: number; processed?: number; canceled?: number; failed?: number; durationMs?: number; error?: string } | null = null;
-      try { d = text ? JSON.parse(text) : null; } catch { /* non-JSON (timeout page) */ }
-      if (!d || !res.ok || d.error) {
-        setProviderCheckMsg(`Provider status check failed: ${d?.error || (res.status >= 500 ? "server timed out" : `HTTP ${res.status}`)}`);
-      } else {
-        setProviderCheckMsg(
-          `Provider status: checked ${(d.processed ?? 0).toLocaleString()} of ${(d.scanned ?? 0).toLocaleString()} Inboxing/MilkBox domains · ${d.canceled ?? 0} canceled · ${d.failed ?? 0} failed · ${Math.round((d.durationMs ?? 0) / 1000)}s`,
-        );
-        await loadDomains();
-      }
-    } catch (e) {
-      setProviderCheckMsg(`Provider status check failed: ${e instanceof Error ? e.message : "network error"}`);
+      await Promise.all(
+        providers.map(async ({ provider }) => {
+          try {
+            const res = await fetch("/api/deliverability/provider-status-check", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ provider }),
+            });
+            const text = await res.text();
+            let d: { scanned?: number; canceled?: number; failed?: number; error?: string } | null = null;
+            try { d = text ? JSON.parse(text) : null; } catch { /* non-JSON (timeout page) */ }
+            if (!d || !res.ok || d.error) {
+              patchRow(provider, { state: "error", error: d?.error || (res.status >= 500 ? "server timed out" : `HTTP ${res.status}`) });
+            } else {
+              patchRow(provider, { state: "done", scanned: d.scanned ?? 0, canceled: d.canceled ?? 0, failed: d.failed ?? 0 });
+            }
+          } catch (e) {
+            patchRow(provider, { state: "error", error: e instanceof Error ? e.message : "network error" });
+          }
+        }),
+      );
+      await loadDomains();
     } finally {
       setProviderChecking(false);
     }
@@ -1734,7 +1761,7 @@ function DeliverabilityPageInner() {
                 onClick={handleProviderCheck}
                 disabled={providerChecking}
                 className="gap-2"
-                title="Pull live active/canceled status from Inboxing + MilkBox for every tagged domain (also runs automatically every 24h)"
+                title="Pull live active/canceled status from Inboxing, MilkBox + ScaledMail for every tagged domain (also runs automatically every 24h)"
               >
                 {providerChecking ? <Loader2 className="h-4 w-4 animate-spin" /> : <CheckCircle2 className="h-4 w-4" />}
                 {providerChecking ? "Checking…" : "Check Provider Status"}
@@ -1770,11 +1797,35 @@ function DeliverabilityPageInner() {
         </div>
       </PageHeader>
 
-      {/* Provider status check result (manual trigger of the daily cron) */}
-      {providerCheckMsg && (
-        <div className={`flex items-start gap-2 rounded-lg border px-4 py-2.5 text-xs ${providerCheckMsg.includes("failed:") ? "border-destructive/30 bg-destructive/5 text-destructive" : "bg-muted/30 text-muted-foreground"}`}>
-          <span className="flex-1">{providerCheckMsg}</span>
-          <button onClick={() => setProviderCheckMsg(null)} className="shrink-0 opacity-60 hover:opacity-100" title="Dismiss">✕</button>
+      {/* Provider status check — one row per provider, all 3 in parallel */}
+      {providerCheckRows && (
+        <div className="rounded-lg border bg-muted/30 px-4 py-3 space-y-2">
+          <div className="flex items-center justify-between text-xs text-muted-foreground">
+            <span>Checking provider domain status (active / canceled at the provider)</span>
+            {!providerChecking && (
+              <button onClick={() => setProviderCheckRows(null)} className="shrink-0 opacity-60 hover:opacity-100" title="Dismiss">✕</button>
+            )}
+          </div>
+          {providerCheckRows.map((r) => (
+            <div key={r.provider} className="flex items-center gap-3 text-xs">
+              <span className="w-24 shrink-0 font-medium">{r.label}</span>
+              {r.state === "running" && (
+                <span className="flex items-center gap-1.5 text-muted-foreground">
+                  <Loader2 className="h-3 w-3 animate-spin" /> checking…
+                </span>
+              )}
+              {r.state === "done" && (
+                <span className="text-muted-foreground">
+                  <span className="text-foreground">{(r.scanned ?? 0).toLocaleString()}</span> domains checked
+                  {" · "}
+                  <span className={r.canceled ? "text-amber-500" : ""}>{r.canceled ?? 0} canceled</span>
+                  {r.failed ? <span className="text-destructive"> · {r.failed} failed</span> : null}
+                  <CheckCircle2 className="ml-1.5 inline h-3 w-3 text-emerald-500" />
+                </span>
+              )}
+              {r.state === "error" && <span className="text-destructive truncate">{r.error}</span>}
+            </div>
+          ))}
         </div>
       )}
 

@@ -208,3 +208,52 @@ export async function cancelOrder(orderId: string): Promise<void> {
   const { orgId } = env();
   await call("DELETE", `/orders/${encodeURIComponent(orderId)}`, { organization_id: orgId });
 }
+
+/** Account-wide domain list (GET /domains?organization_id=) for the daily
+ *  provider-status check. Standalone fetch instead of call(): env() demands
+ *  the full order-flow credential set (price id, Porkbun login), but a read
+ *  only needs the API key + org id. The response shape isn't documented, so
+ *  parsing is defensive: accepts a bare array or {domains|data: [...]}, and
+ *  domain/name + status/active under common key variants. */
+export async function listDomainsWithLifecycle(): Promise<
+  { id: string; name: string; status: string | null }[]
+> {
+  const key = process.env.SCALEDMAIL_API_KEY;
+  const orgId = process.env.SCALEDMAIL_ORGANIZATION_ID;
+  if (!key || !orgId) {
+    throw new Error("ScaledMail env missing (SCALEDMAIL_API_KEY / SCALEDMAIL_ORGANIZATION_ID)");
+  }
+  const url = new URL(`${BASE}/domains`);
+  url.searchParams.set("organization_id", orgId);
+  const res = await fetch(url.toString(), {
+    headers: { Accept: "application/json", Authorization: `Bearer ${key}` },
+  });
+  const text = await res.text();
+  if (!res.ok) {
+    throw new Error(`ScaledMail GET /domains: HTTP ${res.status} ${text.slice(0, 200)}`);
+  }
+  let parsed: unknown = null;
+  try { parsed = text ? JSON.parse(text) : null; } catch {
+    throw new Error("ScaledMail GET /domains: non-JSON response");
+  }
+  const arr: unknown[] = Array.isArray(parsed)
+    ? parsed
+    : (parsed as { domains?: unknown[]; data?: unknown[] })?.domains
+      ?? (parsed as { data?: unknown[] })?.data
+      ?? [];
+  const out: { id: string; name: string; status: string | null }[] = [];
+  for (const raw of arr) {
+    if (!raw || typeof raw !== "object") continue;
+    const r = raw as Record<string, unknown>;
+    const name = String(r.domain ?? r.name ?? "").trim().toLowerCase();
+    if (!name) continue;
+    const status =
+      typeof r.status === "string" && r.status
+        ? r.status
+        : typeof r.active === "boolean"
+          ? (r.active ? "active" : "inactive")
+          : null;
+    out.push({ id: String(r.id ?? r.domain_id ?? ""), name, status });
+  }
+  return out;
+}
