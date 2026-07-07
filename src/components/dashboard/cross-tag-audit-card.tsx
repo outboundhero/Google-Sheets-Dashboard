@@ -12,7 +12,12 @@ interface WrongCampaign { id: number; name: string; status: string; clientTag: s
 interface FlaggedDomain { instance: string; domain: string; clientTag: string; wrongCampaigns: WrongCampaign[] }
 
 const short: Record<string, string> = { outboundhero: "B2B1·OH", cleaningoutbound: "B2C1·CO", facilityreach: "B2B2·FR", outboundclean: "B2C2·OC" };
-const RUN_BATCH = 20;
+const RUN_BATCH = 40;
+// Domains per removal request. The endpoint is campaign-centric (unique
+// campaigns dominate the wall clock, and they repeat massively across
+// domains), so large chunks are cheap — this mostly bounds payload size and
+// keeps each request comfortably under the 300s route budget.
+const REMOVE_CHUNK = 800;
 
 export function CrossTagAuditCard() {
   const [open, setOpen] = useState(false);
@@ -80,33 +85,51 @@ export function CrossTagAuditCard() {
     setRunning(false); setRunProgress(null);
   };
 
+  // Campaign-centric bulk removal. The old flow looped domains one at a time
+  // and re-fetched each campaign's sender list per domain — with the same
+  // ~200 campaigns shared across 2,000+ domains that took hours. The new
+  // endpoint dedups by campaign, pauses/removes/resumes each unique campaign
+  // ONCE for all its domains, and bulk-clears cleaned rows.
   const removeSelected = async () => {
     const targets = flagged.filter((f) => selected.has(key(f)));
     if (targets.length === 0) return;
     setRemoving(true); setError(null);
-    setRemoveProgress({ done: 0, total: targets.length, current: targets[0]?.domain ?? null });
-    for (let i = 0; i < targets.length; i++) {
-      const f = targets[i];
-      setRemoveProgress({ done: i, total: targets.length, current: f.domain });
+    let cleared = 0;
+    let failedCampaigns = 0;
+    setRemoveProgress({ done: 0, total: targets.length, current: "grouping campaigns…" });
+    for (let i = 0; i < targets.length; i += REMOVE_CHUNK) {
+      const chunk = targets.slice(i, i + REMOVE_CHUNK);
+      setRemoveProgress({
+        done: i,
+        total: targets.length,
+        current: `cleaning chunk ${Math.floor(i / REMOVE_CHUNK) + 1}/${Math.ceil(targets.length / REMOVE_CHUNK)}…`,
+      });
       try {
-        const res = await fetch("/api/deliverability/remove-from-campaigns", {
+        const res = await fetch("/api/replacement/cross-tag-remove", {
           method: "POST", headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            domains: [f.domain],
-            campaigns: f.wrongCampaigns.map((c) => ({ id: c.id, instance: c.instance, name: c.name, status: c.status })),
+            items: chunk.map((f) => ({
+              instance: f.instance,
+              domain: f.domain,
+              campaigns: f.wrongCampaigns.map((c) => ({ id: c.id, name: c.name, status: c.status })),
+            })),
           }),
         });
         const d = await res.json();
-        // Clear the domain from the audit only if nothing errored.
-        const anyError = !res.ok || d.error || (d.details || []).some((x: { error?: string }) => x.error);
-        if (!anyError) {
-          await fetch("/api/replacement/cross-tag-audit", {
-            method: "POST", headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ action: "clearDomain", instance: f.instance, domain: f.domain }),
-          });
+        if (!res.ok || d.error) {
+          setError(d.error || `Chunk failed (HTTP ${res.status}) — failed domains stay flagged for retry`);
+        } else {
+          cleared += d.domainsCleared || 0;
+          failedCampaigns += d.campaignsFailed || 0;
         }
-      } catch { /* keep going; row stays flagged for retry */ }
-      setRemoveProgress({ done: i + 1, total: targets.length, current: f.domain });
+      } catch {
+        setError("Network error on a chunk — affected domains stay flagged for retry");
+      }
+      setRemoveProgress({
+        done: Math.min(i + REMOVE_CHUNK, targets.length),
+        total: targets.length,
+        current: `${cleared} domains cleared${failedCampaigns ? ` · ${failedCampaigns} campaigns failed` : ""}`,
+      });
     }
     setRemoving(false); setRemoveProgress(null);
     setSelected(new Set());

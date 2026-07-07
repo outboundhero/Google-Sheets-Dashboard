@@ -16,7 +16,7 @@ const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const clientTagOf = (name: string) => (name.split(":")[0] || "").trim();
 
 const SAMPLE_PER_DOMAIN = 8;   // inboxes sampled per domain to reveal its campaigns
-const INBOX_CONC = 8;          // concurrent per-inbox lookups
+const INBOX_CONC = 4;          // concurrent per-inbox lookups (× DOMAIN_CONC ≤ ~20 in flight)
 
 export interface WrongCampaign { id: number; name: string; status: string; clientTag: string; instance: string }
 export interface FlaggedDomain { instance: string; domain: string; clientTag: string; wrongCampaigns: WrongCampaign[] }
@@ -63,14 +63,18 @@ function sampleEvenly<T>(arr: T[], n: number): T[] {
   return out;
 }
 
-/** Campaigns one inbox is attached to (paginated, transient-retry). */
+/** Campaigns one inbox is attached to. Cursor pagination — Bison caps
+ *  per_page at 15 on every index route and cursor traversal is faster. */
 async function inboxCampaigns(instance: BisonInstanceSlug, inboxId: number): Promise<{ id: number; name: string; status: string }[]> {
   const out: { id: number; name: string; status: string }[] = [];
-  let page = 1;
-  while (true) {
-    let json: { data?: { id: number; name: string; status: string }[]; meta?: { last_page?: number } } | null = null;
+  let cursor: string | null = null;
+  for (let guard = 0; guard < 200; guard++) {
+    const qs = cursor
+      ? `pagination_type=cursor&cursor=${encodeURIComponent(cursor)}`
+      : `pagination_type=cursor`;
+    let json: { data?: { id: number; name: string; status: string }[]; meta?: { next_cursor?: string | null } } | null = null;
     for (let a = 0; a < 5; a++) {
-      const res = await bisonFetch(instance, `/sender-emails/${inboxId}/campaigns?page=${page}&per_page=100`);
+      const res = await bisonFetch(instance, `/sender-emails/${inboxId}/campaigns?${qs}`);
       if (res.status === 404) { json = { data: [] }; break; }
       if (res.ok) { try { json = await res.json(); break; } catch { /* retry */ } }
       const ra = parseInt(res.headers.get("retry-after") || "", 10);
@@ -78,8 +82,9 @@ async function inboxCampaigns(instance: BisonInstanceSlug, inboxId: number): Pro
     }
     if (!json) break;
     for (const c of json.data || []) out.push({ id: c.id, name: c.name, status: c.status });
-    if (page >= (json.meta?.last_page || 1)) break;
-    page++;
+    const next = json.meta?.next_cursor ?? null;
+    if (!next || (json.data || []).length === 0) break;
+    cursor = next;
   }
   return out;
 }
@@ -90,28 +95,75 @@ async function pool<T>(items: T[], conc: number, fn: (item: T) => Promise<void>)
   await Promise.all(Array.from({ length: Math.min(conc, items.length) }, () => worker()));
 }
 
-/** Audit a batch of domains. Returns the ones with wrong-tag campaign memberships. */
+const DOMAIN_CONC = 5;         // domains audited concurrently within a batch
+
+/** Audit a batch of domains. Returns the ones with wrong-tag campaign memberships.
+ *  Bulk-reads Supabase once for the whole batch (tags + inbox ids), then audits
+ *  domains concurrently — the old per-domain sequential version spent most of
+ *  its wall clock on 2 Supabase round-trips per domain. */
 export async function auditDomainsBatch(rows: DomainRef[], knownTags: Set<string>): Promise<FlaggedDomain[]> {
   const supabase = getSupabaseAdmin();
   const flagged: FlaggedDomain[] = [];
+  if (rows.length === 0) return flagged;
 
-  for (const { instance, domain } of rows) {
-    // The domain's own client tag(s).
-    const { data: domRows } = await supabase.from("deliverability_domains").select("tags").eq("instance", instance).eq("domain", domain).limit(1);
-    let tags: unknown = domRows?.[0]?.tags;
+  // ── Bulk read: domain tags + inbox ids for the whole batch, per instance ──
+  const byInstance = new Map<BisonInstanceSlug, string[]>();
+  for (const r of rows) {
+    let arr = byInstance.get(r.instance);
+    if (!arr) { arr = []; byInstance.set(r.instance, arr); }
+    arr.push(r.domain);
+  }
+
+  const tagsByKey = new Map<string, unknown>();          // `${instance}:${domain}` → raw tags
+  const inboxIdsByKey = new Map<string, number[]>();     // `${instance}:${domain}` → ids (cap 80)
+
+  await Promise.all(
+    [...byInstance.entries()].map(async ([instance, domains]) => {
+      const { data: domRows } = await supabase
+        .from("deliverability_domains")
+        .select("domain, tags")
+        .eq("instance", instance)
+        .in("domain", domains);
+      for (const r of (domRows || []) as { domain: string; tags: unknown }[]) {
+        tagsByKey.set(`${instance}:${r.domain}`, r.tags);
+      }
+      // Inbox ids for all domains in one paginated read.
+      let offset = 0;
+      while (true) {
+        const { data } = await supabase
+          .from("deliverability_inboxes")
+          .select("id, domain")
+          .eq("instance", instance)
+          .in("domain", domains)
+          .range(offset, offset + 999);
+        if (!data || data.length === 0) break;
+        for (const r of data as { id: number; domain: string }[]) {
+          const k = `${instance}:${r.domain}`;
+          const arr = inboxIdsByKey.get(k) || [];
+          if (arr.length < 80) arr.push(r.id);
+          inboxIdsByKey.set(k, arr);
+        }
+        if (data.length < 1000) break;
+        offset += 1000;
+      }
+    }),
+  );
+
+  // ── Audit domains concurrently ──
+  await pool(rows, DOMAIN_CONC, async ({ instance, domain }) => {
+    const key = `${instance}:${domain}`;
+    let tags: unknown = tagsByKey.get(key);
     if (typeof tags === "string") { try { tags = JSON.parse(tags); } catch { tags = []; } }
     const domTags = new Set(
       ((tags as unknown[]) || [])
         .map((t) => String(t && typeof t === "object" ? (t as { name?: string }).name : t).trim())
         .filter((t) => knownTags.has(t)),
     );
-    if (domTags.size === 0) continue;            // reserve / unassigned — nothing to audit
+    if (domTags.size === 0) return;              // reserve / unassigned — nothing to audit
     const ownTag = [...domTags][0];
 
-    // Sample inboxes → union of campaigns they're in.
-    const { data: inb } = await supabase.from("deliverability_inboxes").select("id").eq("instance", instance).eq("domain", domain).limit(80);
-    const ids = (inb || []).map((r) => r.id as number);
-    if (ids.length === 0) continue;
+    const ids = inboxIdsByKey.get(key) || [];
+    if (ids.length === 0) return;
     const sample = sampleEvenly(ids, SAMPLE_PER_DOMAIN);
 
     const campMap = new Map<number, { name: string; status: string }>();
@@ -131,7 +183,8 @@ export async function auditDomainsBatch(rows: DomainRef[], knownTags: Set<string
       wrong.sort((a, b) => a.name.localeCompare(b.name));
       flagged.push({ instance, domain, clientTag: ownTag, wrongCampaigns: wrong });
     }
-  }
+  });
+
   return flagged;
 }
 

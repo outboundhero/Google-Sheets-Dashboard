@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { getSupabaseAdmin } from "@/lib/supabase";
 import { bisonFetch } from "@/lib/bison";
 import { isInstanceSlug, ALL_INSTANCE_SLUGS, type BisonInstanceSlug } from "@/lib/bison-instances";
+import { fetchCampaignSenderEmails } from "@/lib/attach-campaigns";
 
 export const maxDuration = 300;
 
@@ -67,9 +68,14 @@ async function discoverCampaigns(instance: BisonInstanceSlug, inboxIds: number[]
   const CONC = 10;
   const campaignMap = new Map<number, { name: string; status: string; inboxIds: number[] }>();
 
-  async function fetchPage(inboxId: number, page: number): Promise<{ data?: { id: number; name: string; status: string }[]; meta?: { last_page?: number } } | null> {
+  // Cursor pagination — Bison caps per_page at 15 on every index route, and
+  // cursor traversal is faster than offset.
+  async function fetchPage(inboxId: number, cursor: string | null): Promise<{ data?: { id: number; name: string; status: string }[]; meta?: { next_cursor?: string | null } } | null> {
+    const qs = cursor
+      ? `pagination_type=cursor&cursor=${encodeURIComponent(cursor)}`
+      : `pagination_type=cursor`;
     for (let a = 0; a < 5; a++) {
-      const res = await bisonFetch(instance, `/sender-emails/${inboxId}/campaigns?page=${page}&per_page=100`);
+      const res = await bisonFetch(instance, `/sender-emails/${inboxId}/campaigns?${qs}`);
       if (res.status === 404) return { data: [] };
       if (res.ok) { try { return await res.json(); } catch { return null; } }
       // transient (429/5xx) → honor Retry-After, else exp backoff
@@ -81,13 +87,14 @@ async function discoverCampaigns(instance: BisonInstanceSlug, inboxIds: number[]
 
   async function lookup(inboxId: number) {
     const campaigns: { id: number; name: string; status: string }[] = [];
-    let page = 1;
-    while (true) {
-      const json = await fetchPage(inboxId, page);
+    let cursor: string | null = null;
+    for (let guard = 0; guard < 200; guard++) {
+      const json = await fetchPage(inboxId, cursor);
       if (!json) break;
       for (const c of json.data || []) campaigns.push({ id: c.id, name: c.name, status: c.status });
-      if (page >= (json.meta?.last_page || 1)) break;
-      page++;
+      const next = json.meta?.next_cursor ?? null;
+      if (!next || (json.data || []).length === 0) break;
+      cursor = next;
     }
     return campaigns;
   }
@@ -110,49 +117,22 @@ async function discoverCampaigns(instance: BisonInstanceSlug, inboxIds: number[]
 }
 
 /**
- * Fetch all sender_email IDs currently attached to a campaign.
- *
- * Bison hard-caps per_page on this endpoint at 15, so large campaigns have
- * many pages. The previous version silently broke the loop on any non-200
- * (e.g. a transient 429) and returned a partial list → the caller's
- * intersection then missed entries and reported "0 removed". This version
- * retries each page up to 3x with backoff, and throws if a page fails after
- * retries so the caller surfaces a real error rather than silently truncating.
+ * Fetch all sender_email IDs currently attached to a campaign. Delegates to
+ * the shared cursor-paginated helper (attach-campaigns lib): Bison hard-caps
+ * per_page at 15 and its offset pagination is capped at 1000 pages, so cursor
+ * traversal is both faster and complete on large campaigns. The helper
+ * retries transient 429/5xx and throws on persistent failure — never a
+ * silent partial list.
  */
-const SENDER_PAGE_RETRIES = 6;
 async function fetchCampaignSenderIds(instance: BisonInstanceSlug, campaignId: number): Promise<number[]> {
-  const ids: number[] = [];
-  let page = 1;
-  while (true) {
-    let attempt = 0;
-    let json: { data?: { id: number }[]; meta?: { last_page?: number } } | null = null;
-    while (attempt < SENDER_PAGE_RETRIES) {
-      const res = await bisonFetch(
-        instance,
-        `/campaigns/${campaignId}/sender-emails?page=${page}&per_page=100`,
-      );
-      if (res.status === 404) return ids;
-      if (res.ok) {
-        try { json = await res.json(); break; } catch { /* parse error → retry */ }
-        attempt++;
-        if (attempt < SENDER_PAGE_RETRIES) await delay(600 * 2 ** attempt);
-        continue;
-      }
-      // Transient (rate-limit / 5xx): honor Retry-After, else exponential backoff.
-      const ra = parseInt(res.headers.get("retry-after") || "", 10);
-      const wait = Number.isFinite(ra) && ra > 0 ? ra * 1000 : Math.min(10000, 600 * 2 ** attempt);
-      attempt++;
-      if (attempt < SENDER_PAGE_RETRIES) await delay(wait + Math.floor(Math.random() * 300));
-    }
-    if (!json) {
-      throw new Error(`failed to fetch campaign ${campaignId} senders page ${page} after retries`);
-    }
-    for (const item of json.data || []) ids.push(item.id);
-    const lastPage = json.meta?.last_page || 1;
-    if (page >= lastPage) break;
-    page++;
+  try {
+    return await fetchCampaignSenderEmails(instance, campaignId);
+  } catch (e) {
+    // Preserve the historical 404 semantics: campaign gone → empty list.
+    const msg = e instanceof Error ? e.message : "";
+    if (/\b404\b/.test(msg)) return [];
+    throw e;
   }
-  return ids;
 }
 
 /**
