@@ -2,7 +2,6 @@ import { NextResponse } from "next/server";
 import { getSupabaseAdmin } from "@/lib/supabase";
 import { bisonFetch } from "@/lib/bison";
 import { isInstanceSlug, type BisonInstanceSlug } from "@/lib/bison-instances";
-import { fetchCampaignSenderEmails } from "@/lib/attach-campaigns";
 
 export const maxDuration = 300;
 
@@ -143,9 +142,42 @@ async function loadInboxIds(
   }
 }
 
-/** Submit candidate ids for deletion, blind, in large batches. Downshifts
- *  batch size on 4xx; falls back to exact intersect-removal if even small
- *  blind batches are rejected. Returns ids submitted. */
+/** Laravel-style validation key: errors["sender_email_ids.42"] → index 42. */
+const VALIDATION_IDX = /^sender_email_ids\.(\d+)$/;
+
+/** Patient cursor walk of a campaign's actual sender IDs. Inline (not the
+ *  attach-campaigns helper) so it uses bisonWithRetry's long backoff — the
+ *  4-attempt helper dies on 429 when several campaigns crawl concurrently. */
+async function crawlSenderIds(instance: BisonInstanceSlug, campaignId: number): Promise<number[]> {
+  const ids: number[] = [];
+  let cursor: string | null = null;
+  for (let guard = 0; guard < 5000; guard++) {
+    const qs = cursor
+      ? `pagination_type=cursor&cursor=${encodeURIComponent(cursor)}`
+      : `pagination_type=cursor`;
+    const res = await bisonWithRetry(instance, `/campaigns/${campaignId}/sender-emails?${qs}`);
+    if (res.status === 404) return ids;
+    if (!res.ok) throw new Error(`sender crawl: HTTP ${res.status}`);
+    const json = (await res.json()) as { data?: { id: number }[]; meta?: { next_cursor?: string | null } };
+    for (const e of json.data || []) ids.push(e.id);
+    const next = json.meta?.next_cursor ?? null;
+    if (!next || (json.data || []).length === 0) return ids;
+    cursor = next;
+  }
+  throw new Error(`sender crawl cursor runaway (campaign ${campaignId})`);
+}
+
+/** Submit candidate ids for deletion, blind, in large batches.
+ *
+ *  Bison validates the payload (Laravel), so a batch containing an id it
+ *  won't accept 422s AS A WHOLE — but the validation body names the exact
+ *  offending indices (`errors["sender_email_ids.N"]`). Strategy:
+ *    1. submit blind
+ *    2. on 422 with named indices → drop exactly those ids, resubmit the rest
+ *    3. on 422 without indices → downshift batch size, then LAST resort:
+ *       patient crawl of actual membership + exact intersect, carrying the
+ *       original 422 message into any error so the real cause is visible.
+ *  Returns ids submitted to the async deletion queue. */
 async function removeCandidates(
   instance: BisonInstanceSlug,
   campaignId: number,
@@ -154,9 +186,10 @@ async function removeCandidates(
 ): Promise<number> {
   let batchSize = DELETE_BATCH;
   let submitted = 0;
-  let i = 0;
-  while (i < candidates.length) {
-    const batch = candidates.slice(i, i + batchSize);
+  let queue = [...candidates];
+  let dropRounds = 0;
+  while (queue.length > 0) {
+    const batch = queue.slice(0, batchSize);
     const res = await bisonWithRetry(instance, `/campaigns/${campaignId}/remove-sender-emails`, {
       method: "DELETE",
       headers: { "Content-Type": "application/json" },
@@ -164,37 +197,62 @@ async function removeCandidates(
     });
     if (res.ok) {
       submitted += batch.length;
-      i += batchSize;
+      queue = queue.slice(batch.length);
       continue;
     }
     if (res.status === 404) return submitted; // campaign vanished mid-run
-    if ((res.status === 400 || res.status === 413 || res.status === 422) && batchSize > 100) {
-      batchSize = batchSize > 500 ? 500 : 100; // payload too big → downshift
+    if (res.status === 413 && batchSize > 100) {
+      batchSize = batchSize > 500 ? 500 : 100; // payload too large → downshift
       continue;
     }
-    if (res.status === 422) {
-      // Even small blind batches rejected → this Bison build wants exact
-      // membership. Fall back once: cursor-walk actual senders, intersect.
-      const actual = await fetchCampaignSenderEmails(instance, campaignId);
-      const toRemove = actual.filter((id) => candidateSet.has(id));
-      let exact = 0;
-      for (let j = 0; j < toRemove.length; j += 100) {
-        const b2 = toRemove.slice(j, j + 100);
-        const r2 = await bisonWithRetry(instance, `/campaigns/${campaignId}/remove-sender-emails`, {
-          method: "DELETE",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ sender_email_ids: b2 }),
-        });
-        if (!r2.ok) {
-          const t = await r2.text().catch(() => "");
-          throw new Error(`exact remove: ${r2.status} ${t.slice(0, 120)}`);
+    if (res.status === 422 || res.status === 400) {
+      const text = await res.text().catch(() => "");
+      // Laravel names the invalid array indices — drop exactly those.
+      const badIdx = new Set<number>();
+      try {
+        const j = JSON.parse(text) as { errors?: Record<string, unknown> };
+        for (const k of Object.keys(j.errors || {})) {
+          const m = VALIDATION_IDX.exec(k);
+          if (m) badIdx.add(Number(m[1]));
         }
-        exact += b2.length;
+      } catch { /* not JSON */ }
+      if (badIdx.size > 0 && dropRounds++ < 60) {
+        const keep = batch.filter((_, idx) => !badIdx.has(idx));
+        queue = [...keep, ...queue.slice(batch.length)];
+        continue;
       }
-      return exact;
+      if (batchSize > 100) {
+        batchSize = batchSize > 500 ? 500 : 100;
+        continue;
+      }
+      // No indices to drop even at the smallest batch → exact-membership
+      // fallback. If the crawl or the exact removal fails, the ORIGINAL 422
+      // message is what actually explains the failure — carry it along.
+      const reason = text.slice(0, 160) || `HTTP ${res.status}`;
+      try {
+        const actual = await crawlSenderIds(instance, campaignId);
+        const toRemove = actual.filter((id) => candidateSet.has(id));
+        for (let j = 0; j < toRemove.length; j += 100) {
+          const b2 = toRemove.slice(j, j + 100);
+          const r2 = await bisonWithRetry(instance, `/campaigns/${campaignId}/remove-sender-emails`, {
+            method: "DELETE",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ sender_email_ids: b2 }),
+          });
+          if (!r2.ok) {
+            const t2 = await r2.text().catch(() => "");
+            throw new Error(`exact remove: HTTP ${r2.status} ${t2.slice(0, 120)}`);
+          }
+          submitted += b2.length;
+        }
+        return submitted;
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : "fallback failed";
+        throw new Error(`Bison rejected removal (${reason}); fallback: ${msg}`);
+      }
     }
     const t = await res.text().catch(() => "");
-    throw new Error(`remove batch at ${i}: ${res.status} ${t.slice(0, 120)}`);
+    throw new Error(`remove: HTTP ${res.status} ${t.slice(0, 160)}`);
   }
   return submitted;
 }
