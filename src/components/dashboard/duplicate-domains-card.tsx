@@ -13,7 +13,9 @@ interface DupInstance { instance: string; inboxes: number }
 interface DuplicateDomain { domain: string; instances: DupInstance[] }
 interface PendingDeletion { instance: string; domain: string; scheduledAt: string; status: string }
 
-const short: Record<string, string> = { outboundhero: "B2B1·OH", cleaningoutbound: "B2C1·CO", facilityreach: "B2B2·FR", outboundclean: "B2C2·OC" };
+import { INSTANCE_SHORT_LABELS } from "@/lib/bison-instances";
+
+const short: Record<string, string> = INSTANCE_SHORT_LABELS;
 
 export function DuplicateDomainsCard() {
   const [open, setOpen] = useState(false);

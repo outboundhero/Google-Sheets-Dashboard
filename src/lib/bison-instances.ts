@@ -61,6 +61,14 @@ export const ALL_INSTANCE_SLUGS: BisonInstanceSlug[] = [
 export const DEFAULT_INSTANCE: BisonInstanceSlug = "outboundhero";
 export const DEFAULT_GROUP: BisonGroup = 1;
 
+/** Compact per-instance labels for dense UI (chips, table cells). */
+export const INSTANCE_SHORT_LABELS: Record<BisonInstanceSlug, string> = {
+  outboundhero: "B2B1·OH",
+  cleaningoutbound: "B2C1·CO",
+  facilityreach: "B2B2·FR",
+  outboundclean: "B2C2·OC",
+};
+
 export function isInstanceSlug(v: unknown): v is BisonInstanceSlug {
   return (
     v === "outboundhero" ||

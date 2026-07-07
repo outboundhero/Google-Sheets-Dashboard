@@ -14,7 +14,9 @@ interface AuditData { wrong: Issue[]; missing: Issue[]; multiTag: Issue[]; okCou
 
 // Instance labels: tier+group AND the instance short-name. B2B#1 = outboundhero,
 // B2C#1 = cleaningoutbound, B2B#2 = facilityreach, B2C#2 = outboundclean.
-const short: Record<string, string> = { outboundhero: "B2B1·OH", cleaningoutbound: "B2C1·CO", facilityreach: "B2B2·FR", outboundclean: "B2C2·OC" };
+import { INSTANCE_SHORT_LABELS } from "@/lib/bison-instances";
+
+const short: Record<string, string> = INSTANCE_SHORT_LABELS;
 const withProto = (u: string) => (/^https?:\/\//i.test(u) ? u : `https://${u}`);
 
 export function RedirectIssuesCard() {

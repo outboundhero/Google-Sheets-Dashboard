@@ -53,8 +53,9 @@ import {
 import { useAuth } from "@/lib/auth-context";
 import { useInstance } from "@/lib/instance-context";
 import { useProviderStatus } from "@/lib/hooks/use-provider-status";
+import { useDomainInstances } from "@/lib/hooks/use-domain-instances";
 import { getDomainFlagReasons } from "@/lib/inbox-health";
-import { ALL_INSTANCE_SLUGS, BISON_INSTANCES, type BisonInstanceSlug } from "@/lib/bison-instances";
+import { ALL_INSTANCE_SLUGS, BISON_INSTANCES, INSTANCE_SHORT_LABELS, type BisonInstanceSlug } from "@/lib/bison-instances";
 
 interface DomainRow {
   instance: BisonInstanceSlug;
@@ -85,32 +86,89 @@ interface DomainRow {
   bounce_30?: number | null;
 }
 
-// --- Numeric multi-condition filter (up to 5, combined with AND or OR) -------
+// --- Multi-condition filter (up to 8, combined with AND or OR). Fields are
+// typed by KIND: number (comparison ops), boolean (is Yes/No), enum
+// (is / is not a picked value), text (contains / doesn't contain). -------
 type FilterField =
   | "inbox_count" | "total_sent" | "total_replied" | "reply_rate"
   | "total_bounced" | "bounce_rate" | "daily_limit_total"
-  | "reply_10" | "reply_15" | "reply_30" | "bounce_10" | "bounce_15" | "bounce_30";
-type FilterOp = ">=" | ">" | "=" | "<" | "<=";
+  | "reply_10" | "reply_15" | "reply_30" | "bounce_10" | "bounce_15" | "bounce_30"
+  | "domain_age_days" | "warmup_days_left" | "outlook_count" | "google_count" | "warmup_limit_total"
+  | "blacklisted" | "spamhaus_dbl" | "warmup_complete" | "provider_status"
+  | "instance_presence"
+  | "tags_text" | "redirect_url_text";
+type FilterOp = ">=" | ">" | "=" | "<" | "<=" | "is" | "is_not" | "contains" | "not_contains";
+type FilterFieldKind = "number" | "boolean" | "enum" | "text";
 interface FilterCondition { id: number; field: FilterField; op: FilterOp; value: string; }
 
-const FILTER_FIELDS: { value: FilterField; label: string }[] = [
-  { value: "total_sent", label: "Emails sent" },
-  { value: "total_replied", label: "Replies" },
-  { value: "total_bounced", label: "Bounces" },
-  { value: "inbox_count", label: "Inboxes" },
-  { value: "daily_limit_total", label: "Daily limit" },
-  { value: "reply_rate", label: "Reply rate % (all)" },
-  { value: "bounce_rate", label: "Bounce rate % (all)" },
-  { value: "reply_10", label: "Reply rate % (10d)" },
-  { value: "reply_15", label: "Reply rate % (15d)" },
-  { value: "reply_30", label: "Reply rate % (30d)" },
-  { value: "bounce_10", label: "Bounce rate % (10d)" },
-  { value: "bounce_15", label: "Bounce rate % (15d)" },
-  { value: "bounce_30", label: "Bounce rate % (30d)" },
-];
-const FILTER_OPS: FilterOp[] = [">=", ">", "=", "<", "<="];
+interface FilterFieldDef {
+  value: FilterField;
+  label: string;
+  kind: FilterFieldKind;
+  group: string;
+  options?: { value: string; label: string }[]; // enum choices
+}
 
-// Resolve a domain's numeric value for a filter field (null = not evaluable).
+const FILTER_FIELDS: FilterFieldDef[] = [
+  // Volume
+  { value: "total_sent", label: "Emails sent", kind: "number", group: "Volume" },
+  { value: "total_replied", label: "Replies", kind: "number", group: "Volume" },
+  { value: "total_bounced", label: "Bounces", kind: "number", group: "Volume" },
+  { value: "inbox_count", label: "Inboxes", kind: "number", group: "Volume" },
+  { value: "outlook_count", label: "Outlook inboxes", kind: "number", group: "Volume" },
+  { value: "google_count", label: "Google inboxes", kind: "number", group: "Volume" },
+  { value: "daily_limit_total", label: "Daily limit", kind: "number", group: "Volume" },
+  { value: "warmup_limit_total", label: "Warmup limit", kind: "number", group: "Volume" },
+  // Rates
+  { value: "reply_rate", label: "Reply rate % (all)", kind: "number", group: "Rates" },
+  { value: "bounce_rate", label: "Bounce rate % (all)", kind: "number", group: "Rates" },
+  { value: "reply_10", label: "Reply rate % (10d)", kind: "number", group: "Rates" },
+  { value: "reply_15", label: "Reply rate % (15d)", kind: "number", group: "Rates" },
+  { value: "reply_30", label: "Reply rate % (30d)", kind: "number", group: "Rates" },
+  { value: "bounce_10", label: "Bounce rate % (10d)", kind: "number", group: "Rates" },
+  { value: "bounce_15", label: "Bounce rate % (15d)", kind: "number", group: "Rates" },
+  { value: "bounce_30", label: "Bounce rate % (30d)", kind: "number", group: "Rates" },
+  // Domain / warmup
+  { value: "domain_age_days", label: "Domain age (days)", kind: "number", group: "Domain" },
+  { value: "warmup_days_left", label: "Warmup days left", kind: "number", group: "Domain" },
+  { value: "warmup_complete", label: "Warmup complete", kind: "boolean", group: "Domain" },
+  // Status
+  { value: "blacklisted", label: "SURBL listed", kind: "boolean", group: "Status" },
+  { value: "spamhaus_dbl", label: "Spamhaus listed", kind: "boolean", group: "Status" },
+  {
+    value: "provider_status", label: "Provider status", kind: "enum", group: "Status",
+    options: [
+      { value: "active", label: "Active" },
+      { value: "canceled", label: "Canceled" },
+      { value: "unknown", label: "Unknown" },
+    ],
+  },
+  // Instance
+  {
+    value: "instance_presence", label: "Exists in instance", kind: "enum", group: "Instance",
+    options: ALL_INSTANCE_SLUGS.map((s) => ({ value: s, label: INSTANCE_SHORT_LABELS[s] })),
+  },
+  // Text
+  { value: "tags_text", label: "Tag contains", kind: "text", group: "Text" },
+  { value: "redirect_url_text", label: "Redirect URL contains", kind: "text", group: "Text" },
+];
+
+const NUMBER_OPS: FilterOp[] = [">=", ">", "=", "<", "<="];
+const OPS_BY_KIND: Record<FilterFieldKind, { value: FilterOp; label: string }[]> = {
+  number: NUMBER_OPS.map((o) => ({ value: o, label: o })),
+  boolean: [{ value: "is", label: "is" }],
+  enum: [{ value: "is", label: "is" }, { value: "is_not", label: "is not" }],
+  text: [{ value: "contains", label: "contains" }, { value: "not_contains", label: "doesn't contain" }],
+};
+const filterFieldDef = (f: FilterField): FilterFieldDef =>
+  FILTER_FIELDS.find((d) => d.value === f) ?? FILTER_FIELDS[0];
+// Defaults applied when the user switches a condition to a new field.
+const defaultOpFor = (def: FilterFieldDef): FilterOp =>
+  def.kind === "number" ? ">=" : def.kind === "text" ? "contains" : "is";
+const defaultValueFor = (def: FilterFieldDef): string =>
+  def.kind === "boolean" ? "yes" : def.kind === "enum" ? def.options![0].value : "";
+
+// Resolve a domain's numeric value for a number-kind field (null = not evaluable).
 function filterFieldValue(d: DomainRow, field: FilterField): number | null {
   switch (field) {
     case "inbox_count": return d.inbox_count ?? 0;
@@ -118,6 +176,9 @@ function filterFieldValue(d: DomainRow, field: FilterField): number | null {
     case "total_replied": return d.total_replied ?? 0;
     case "total_bounced": return d.total_bounced ?? 0;
     case "daily_limit_total": return d.daily_limit_total ?? 0;
+    case "warmup_limit_total": return d.warmup_limit_total ?? 0;
+    case "outlook_count": return d.outlook_count ?? 0;
+    case "google_count": return d.google_count ?? 0;
     case "reply_rate": return (d.total_sent || 0) > 0 ? (d.total_replied || 0) / (d.total_sent || 1) * 100 : 0;
     case "bounce_rate": return (d.total_sent || 0) > 0 ? (d.total_bounced || 0) / (d.total_sent || 1) * 100 : 0;
     case "reply_10": return d.reply_10 ?? null;
@@ -126,21 +187,70 @@ function filterFieldValue(d: DomainRow, field: FilterField): number | null {
     case "bounce_10": return d.bounce_10 ?? null;
     case "bounce_15": return d.bounce_15 ?? null;
     case "bounce_30": return d.bounce_30 ?? null;
+    case "domain_age_days": {
+      if (!d.domain_created_at) return null;
+      const t = new Date(d.domain_created_at).getTime();
+      return isNaN(t) ? null : Math.floor((Date.now() - t) / 86400000);
+    }
+    case "warmup_days_left": {
+      if (!d.domain_created_at) return null;
+      const t = new Date(d.domain_created_at).getTime();
+      return isNaN(t) ? null : Math.max(0, 21 - Math.floor((Date.now() - t) / 86400000));
+    }
+    default: return null;
   }
 }
 
-function evalCondition(d: DomainRow, c: FilterCondition): boolean {
-  if (c.value.trim() === "") return true; // empty value → ignore this row's condition
-  const target = parseFloat(c.value);
-  if (isNaN(target)) return true;
-  const v = filterFieldValue(d, c.field);
-  if (v == null) return false; // trailing not available yet → cannot match
-  switch (c.op) {
-    case ">=": return v >= target;
-    case ">": return v > target;
-    case "=": return v === target;
-    case "<": return v < target;
-    case "<=": return v <= target;
+// Cross-row context for enum fields (both maps already live on the page).
+interface FilterCtx {
+  providerStatusMap: Record<string, { status: "active" | "canceled" }>;
+  domainInstancesMap: Record<string, string[]>;
+}
+
+function evalCondition(d: DomainRow, c: FilterCondition, ctx: FilterCtx): boolean {
+  if (c.value.trim() === "") return true; // unset condition → ignore
+  const def = filterFieldDef(c.field);
+  switch (def.kind) {
+    case "number": {
+      const target = parseFloat(c.value);
+      if (isNaN(target)) return true;
+      const v = filterFieldValue(d, c.field);
+      if (v == null) return false; // not evaluable (no history/date) → cannot match
+      switch (c.op) {
+        case ">=": return v >= target;
+        case ">": return v > target;
+        case "=": return v === target;
+        case "<": return v < target;
+        case "<=": return v <= target;
+        default: return true;
+      }
+    }
+    case "boolean": {
+      const want = c.value === "yes";
+      const actual: boolean | null =
+        c.field === "blacklisted" ? (d.blacklisted ?? null)
+        : c.field === "spamhaus_dbl" ? (d.spamhaus_dbl ?? null)
+        : d.warmup_status === "done"; // warmup_complete
+      if (actual === null) return false; // never checked → matches neither Yes nor No
+      return actual === want;
+    }
+    case "enum": {
+      if (c.field === "provider_status") {
+        const actual = ctx.providerStatusMap[`${d.instance}:${d.domain}`]?.status ?? "unknown";
+        return c.op === "is_not" ? actual !== c.value : actual === c.value;
+      }
+      // instance_presence — where does this domain exist across all 4 instances?
+      const present = (ctx.domainInstancesMap[d.domain] ?? [d.instance]).includes(c.value);
+      return c.op === "is_not" ? !present : present;
+    }
+    case "text": {
+      const needle = c.value.trim().toLowerCase();
+      const hay = c.field === "tags_text"
+        ? (d.tags || []).join(" ").toLowerCase()
+        : (d.redirect_url || "").toLowerCase();
+      const has = hay.includes(needle);
+      return c.op === "not_contains" ? !has : has;
+    }
   }
 }
 
@@ -148,7 +258,7 @@ function evalCondition(d: DomainRow, c: FilterCondition): boolean {
 // and the show/hide toggle). `field` doubles as the sort key + visibility key.
 // Domain is non-toggleable (always shown). ---
 type ColField =
-  | "domain" | "blacklisted" | "spamhaus_dbl" | "redirect_url" | "provider_status" | "inbox_count" | "total_sent" | "total_replied"
+  | "domain" | "blacklisted" | "spamhaus_dbl" | "redirect_url" | "provider_status" | "instances" | "inbox_count" | "total_sent" | "total_replied"
   | "reply_rate" | "reply_trailing" | "total_bounced" | "bounce_rate"
   | "bounce_trailing" | "daily_limit" | "warmup_days";
 const TABLE_COLUMNS: { field: ColField; label: string; align: string; width: string; toggleable: boolean }[] = [
@@ -157,6 +267,7 @@ const TABLE_COLUMNS: { field: ColField; label: string; align: string; width: str
   { field: "spamhaus_dbl", label: "Spamhaus DBL", align: "text-center", width: "110px", toggleable: true },
   { field: "redirect_url", label: "Redirect URL", align: "text-left", width: "180px", toggleable: true },
   { field: "provider_status", label: "Provider", align: "text-center", width: "100px", toggleable: true },
+  { field: "instances", label: "Instances", align: "text-center", width: "110px", toggleable: true },
   { field: "inbox_count", label: "Inboxes", align: "text-center", width: "90px", toggleable: true },
   { field: "total_sent", label: "Sent", align: "text-center", width: "70px", toggleable: true },
   { field: "total_replied", label: "Replied", align: "text-center", width: "70px", toggleable: true },
@@ -428,6 +539,9 @@ function DeliverabilityPageInner() {
   const { instancesQuery, instances } = useInstance();
   // Cached Inboxing/MilkBox/ScaledMail lifecycle map by "instance:domain".
   const { statuses: providerStatusMap, mutate: mutateProviderStatus } = useProviderStatus(instancesQuery);
+  // Cross-instance presence: which of the 4 Bison instances each domain
+  // exists in (all instances, regardless of the sidebar switcher).
+  const { domainInstancesMap } = useDomainInstances();
   const [bisonTags, setBisonTags] = useState<string[]>([]);
   const [domains, setDomains] = useState<DomainRow[]>([]);
   // Days of snapshot history collected (drives the trailing-rate warm-up note)
@@ -487,7 +601,7 @@ function DeliverabilityPageInner() {
   // Column show/hide (persisted). Missing key = visible.
   const [columnVisibility, setColumnVisibility] = useState<Record<string, boolean>>({});
   const [showColumnMenu, setShowColumnMenu] = useState(false);
-  const [sortField, setSortField] = useState<"domain" | "blacklisted" | "spamhaus_dbl" | "redirect_url" | "provider_status" | "inbox_count" | "total_sent" | "total_replied" | "reply_rate" | "reply_trailing" | "total_bounced" | "bounce_rate" | "bounce_trailing" | "daily_limit" | "warmup_days" | null>(null);
+  const [sortField, setSortField] = useState<"domain" | "blacklisted" | "spamhaus_dbl" | "redirect_url" | "provider_status" | "instances" | "inbox_count" | "total_sent" | "total_replied" | "reply_rate" | "reply_trailing" | "total_bounced" | "bounce_rate" | "bounce_trailing" | "daily_limit" | "warmup_days" | null>(null);
   const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
   const [attachDialogOpen, setAttachDialogOpen] = useState(false);
   const [conformTagsOpen, setConformTagsOpen] = useState(false);
@@ -1598,13 +1712,14 @@ function DeliverabilityPageInner() {
         return daysLeft >= from && daysLeft <= to;
       });
     }
-    // Multi-condition numeric filter (AND = every / OR = some)
+    // Multi-condition filter (AND = every / OR = some)
     const activeConditions = filterConditions.filter((c) => c.value.trim() !== "");
     if (activeConditions.length > 0) {
+      const ctx: FilterCtx = { providerStatusMap, domainInstancesMap };
       result = result.filter((d) =>
         filterMatchMode === "all"
-          ? activeConditions.every((c) => evalCondition(d, c))
-          : activeConditions.some((c) => evalCondition(d, c))
+          ? activeConditions.every((c) => evalCondition(d, c, ctx))
+          : activeConditions.some((c) => evalCondition(d, c, ctx))
       );
     }
     // Sort
@@ -1647,12 +1762,16 @@ function DeliverabilityPageInner() {
             const bDays = b.domain_created_at ? Math.max(0, 21 - Math.floor((now - new Date(b.domain_created_at).getTime()) / 86400000)) : 0;
             av = aDays; bv = bDays; break;
           }
+          case "instances":
+            av = (domainInstancesMap[a.domain] ?? [a.instance]).length;
+            bv = (domainInstancesMap[b.domain] ?? [b.instance]).length;
+            break;
         }
         return dir * ((av as number) - (bv as number));
       });
     }
     return result;
-  }, [domains, tagFilters, tagMatchMode, domainSearch, redirectSearch, typeFilter, showFlagged, flagSubFilter, showHealthy, showBlacklisted, showNotBlacklisted, showSpamhausListed, showSpamhausClean, showReserve, showAssigned, showMultiClient, providerStatusFilter, providerStatusMap, warmupDaysFilter, warmupDaysFrom, warmupDaysTo, filterConditions, filterMatchMode, sortField, sortDir, isDomainFlagged, hasReplyIssue, hasBounceIssue, isDomainReserve, isDomainAssigned, isDomainMultiClient, now]);
+  }, [domains, tagFilters, tagMatchMode, domainSearch, redirectSearch, typeFilter, showFlagged, flagSubFilter, showHealthy, showBlacklisted, showNotBlacklisted, showSpamhausListed, showSpamhausClean, showReserve, showAssigned, showMultiClient, providerStatusFilter, providerStatusMap, domainInstancesMap, warmupDaysFilter, warmupDaysFrom, warmupDaysTo, filterConditions, filterMatchMode, sortField, sortDir, isDomainFlagged, hasReplyIssue, hasBounceIssue, isDomainReserve, isDomainAssigned, isDomainMultiClient, now]);
 
   const flaggedCount = useMemo(() => domains.filter(isDomainFlagged).length, [domains, isDomainFlagged]);
   const healthyCount = useMemo(() => domains.filter((d) => !isDomainFlagged(d)).length, [domains, isDomainFlagged]);
@@ -2505,29 +2624,74 @@ function DeliverabilityPageInner() {
                   <p className="text-xs text-muted-foreground/70">No conditions yet — add one below.</p>
                 )}
 
-                {filterConditions.map((c) => (
+                {filterConditions.map((c) => {
+                  const def = filterFieldDef(c.field);
+                  return (
                   <div key={c.id} className="flex items-center gap-2 flex-wrap">
                     <select
                       value={c.field}
-                      onChange={(e) => setFilterConditions((prev) => prev.map((x) => x.id === c.id ? { ...x, field: e.target.value as FilterField } : x))}
+                      onChange={(e) => {
+                        const field = e.target.value as FilterField;
+                        const nextDef = filterFieldDef(field);
+                        // Field kinds differ → reset op/value to the new kind's defaults.
+                        setFilterConditions((prev) => prev.map((x) => x.id === c.id
+                          ? { ...x, field, op: defaultOpFor(nextDef), value: defaultValueFor(nextDef) }
+                          : x));
+                      }}
                       className="text-xs rounded-lg border bg-background px-2 py-1.5 outline-none"
                     >
-                      {FILTER_FIELDS.map((f) => <option key={f.value} value={f.value}>{f.label}</option>)}
+                      {[...new Set(FILTER_FIELDS.map((f) => f.group))].map((g) => (
+                        <optgroup key={g} label={g}>
+                          {FILTER_FIELDS.filter((f) => f.group === g).map((f) => (
+                            <option key={f.value} value={f.value}>{f.label}</option>
+                          ))}
+                        </optgroup>
+                      ))}
                     </select>
                     <select
                       value={c.op}
                       onChange={(e) => setFilterConditions((prev) => prev.map((x) => x.id === c.id ? { ...x, op: e.target.value as FilterOp } : x))}
                       className="text-xs rounded-lg border bg-background px-2 py-1.5 outline-none"
                     >
-                      {FILTER_OPS.map((o) => <option key={o} value={o}>{o}</option>)}
+                      {OPS_BY_KIND[def.kind].map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
                     </select>
-                    <input
-                      type="number"
-                      value={c.value}
-                      onChange={(e) => setFilterConditions((prev) => prev.map((x) => x.id === c.id ? { ...x, value: e.target.value } : x))}
-                      placeholder="value"
-                      className="text-xs rounded-lg border bg-background px-2 py-1.5 w-24 outline-none"
-                    />
+                    {def.kind === "number" && (
+                      <input
+                        type="number"
+                        value={c.value}
+                        onChange={(e) => setFilterConditions((prev) => prev.map((x) => x.id === c.id ? { ...x, value: e.target.value } : x))}
+                        placeholder="value"
+                        className="text-xs rounded-lg border bg-background px-2 py-1.5 w-24 outline-none"
+                      />
+                    )}
+                    {def.kind === "text" && (
+                      <input
+                        type="text"
+                        value={c.value}
+                        onChange={(e) => setFilterConditions((prev) => prev.map((x) => x.id === c.id ? { ...x, value: e.target.value } : x))}
+                        placeholder="text…"
+                        className="text-xs rounded-lg border bg-background px-2 py-1.5 w-36 outline-none"
+                      />
+                    )}
+                    {def.kind === "boolean" && (
+                      <select
+                        value={c.value}
+                        onChange={(e) => setFilterConditions((prev) => prev.map((x) => x.id === c.id ? { ...x, value: e.target.value } : x))}
+                        className="text-xs rounded-lg border bg-background px-2 py-1.5 outline-none"
+                      >
+                        <option value="yes">Yes</option>
+                        <option value="no">No</option>
+                      </select>
+                    )}
+                    {def.kind === "enum" && (
+                      <select
+                        value={c.value}
+                        onChange={(e) => setFilterConditions((prev) => prev.map((x) => x.id === c.id ? { ...x, value: e.target.value } : x))}
+                        className="text-xs rounded-lg border bg-background px-2 py-1.5 outline-none"
+                      >
+                        {(def.options || []).map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+                      </select>
+                    )}
                     <button
                       onClick={() => setFilterConditions((prev) => prev.filter((x) => x.id !== c.id))}
                       className="text-muted-foreground hover:text-destructive"
@@ -2536,10 +2700,11 @@ function DeliverabilityPageInner() {
                       <X className="h-3.5 w-3.5" />
                     </button>
                   </div>
-                ))}
+                  );
+                })}
 
                 <div className="flex items-center gap-3 pt-1">
-                  {filterConditions.length < 5 ? (
+                  {filterConditions.length < 8 ? (
                     <button
                       onClick={() => setFilterConditions((prev) => [...prev, { id: filterIdRef.current++, field: "total_sent", op: ">=", value: "" }])}
                       className="text-xs px-2.5 py-1 rounded-lg border text-muted-foreground hover:text-foreground hover:border-foreground flex items-center gap-1"
@@ -2547,7 +2712,7 @@ function DeliverabilityPageInner() {
                       <Plus className="h-3 w-3" /> Add condition
                     </button>
                   ) : (
-                    <span className="text-[11px] text-muted-foreground">Max 5 conditions</span>
+                    <span className="text-[11px] text-muted-foreground">Max 8 conditions</span>
                   )}
                   {filterConditions.length > 0 && (
                     <button
@@ -3144,7 +3309,7 @@ function DeliverabilityPageInner() {
 
                 return (
                   <div
-                    key={d.domain}
+                    key={`${d.instance}:${d.domain}`}
                     onMouseEnter={() => handleDragEnter(domainIdx, filteredDomains)}
                     style={{ gridTemplateColumns }}
                     className={`grid gap-2 items-center rounded-xl border px-4 py-3 transition-colors select-none ${
@@ -3312,6 +3477,28 @@ function DeliverabilityPageInner() {
                           </span>
                         );
                       })()}
+                    </div>
+                    )}
+
+                    {/* Instances the domain exists in (across ALL 4, not just
+                        the current sidebar scope) */}
+                    {isColVisible("instances") && (
+                    <div className="text-center text-xs">
+                      <div className="flex items-center justify-center gap-1 flex-wrap">
+                        {(domainInstancesMap[d.domain] ?? [d.instance]).map((slug) => (
+                          <span
+                            key={slug}
+                            className={`inline-flex items-center px-1.5 py-0.5 rounded-full border text-[10px] ${
+                              slug === d.instance
+                                ? "border-primary/40 bg-primary/10 text-foreground"
+                                : "border-muted-foreground/25 text-muted-foreground"
+                            }`}
+                            title={BISON_INSTANCES[slug as BisonInstanceSlug]?.label ?? slug}
+                          >
+                            {INSTANCE_SHORT_LABELS[slug as BisonInstanceSlug] ?? slug}
+                          </span>
+                        ))}
+                      </div>
                     </div>
                     )}
 
@@ -3608,7 +3795,7 @@ function DeliverabilityPageInner() {
                 const isSelected = selectedDomains.has(d.domain);
                 return (
                   <div
-                    key={d.domain}
+                    key={`${d.instance}:${d.domain}`}
                     className={`flex items-center gap-3 rounded-xl border px-4 py-3 transition-colors ${
                       isSelected ? "bg-primary/5 border-primary/30" : "bg-card hover:bg-muted/30"
                     }`}

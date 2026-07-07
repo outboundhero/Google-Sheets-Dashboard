@@ -14,6 +14,7 @@ const VIEWER_API_GETS = [
   "/api/deliverability/bulk-tags",
   "/api/deliverability/sync",
   "/api/deliverability/provider-status",
+  "/api/deliverability/domain-instances",
   "/api/client-tags",
   "/api/campaigns",
   "/api/leads/not-delivered-today",

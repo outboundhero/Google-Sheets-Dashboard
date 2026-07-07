@@ -11,7 +11,9 @@ import { ChevronDown, ChevronRight, RefreshCw, Loader2, AlertTriangle, Trash2 } 
 interface WrongCampaign { id: number; name: string; status: string; clientTag: string; instance: string }
 interface FlaggedDomain { instance: string; domain: string; clientTag: string; wrongCampaigns: WrongCampaign[] }
 
-const short: Record<string, string> = { outboundhero: "B2B1·OH", cleaningoutbound: "B2C1·CO", facilityreach: "B2B2·FR", outboundclean: "B2C2·OC" };
+import { INSTANCE_SHORT_LABELS } from "@/lib/bison-instances";
+
+const short: Record<string, string> = INSTANCE_SHORT_LABELS;
 const RUN_BATCH = 50;
 // Campaign jobs per removal request. The FE dedups the whole selection down
 // to unique campaigns first (the same ~200 campaigns repeat across thousands
