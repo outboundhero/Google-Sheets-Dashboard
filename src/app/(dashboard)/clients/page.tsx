@@ -193,9 +193,11 @@ export default function ClientsPage() {
 
   // Filter by the selected Bison group. The allocation sheet maps each client
   // tag to group 1 or 2; tags NOT in the sheet are unallocated and show in both.
+  // The "all" master view shows every client regardless of allocation.
   const groupFiltered = useMemo(
     () =>
       clientStats.filter((c) => {
+        if (group === "all") return true;
         const g = allocations[c.clientTag.trim().toUpperCase()];
         return g === undefined || g === group;
       }),

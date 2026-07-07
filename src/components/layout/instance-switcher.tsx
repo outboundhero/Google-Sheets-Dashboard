@@ -15,7 +15,7 @@ import {
   TooltipContent,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
-import type { BisonGroup } from "@/lib/bison-instances";
+import type { GroupFilter } from "@/lib/instance-context";
 
 interface InstanceSwitcherProps {
   collapsed?: boolean;
@@ -30,11 +30,11 @@ export function InstanceSwitcher({ collapsed = false }: InstanceSwitcherProps) {
       <Tooltip delayDuration={0}>
         <TooltipTrigger asChild>
           <div className="mx-2 my-2 flex h-8 items-center justify-center rounded-md border bg-card text-[10px] font-medium">
-            G{group}
+            {group === "all" ? "G1+2" : `G${group}`}
           </div>
         </TooltipTrigger>
         <TooltipContent side="right">
-          Group {group} · {tier === "all" ? "All" : tier.toUpperCase()}
+          {group === "all" ? "Groups 1 + 2" : `Group ${group}`} · {tier === "all" ? "All" : tier.toUpperCase()}
         </TooltipContent>
       </Tooltip>
     );
@@ -49,12 +49,13 @@ export function InstanceSwitcher({ collapsed = false }: InstanceSwitcherProps) {
 
       <Select
         value={String(group)}
-        onValueChange={(v) => setGroup(Number(v) as BisonGroup)}
+        onValueChange={(v) => setGroup((v === "all" ? "all" : Number(v)) as GroupFilter)}
       >
         <SelectTrigger className="h-8 w-full text-xs">
           <SelectValue />
         </SelectTrigger>
         <SelectContent>
+          <SelectItem value="all">Group 1 + Group 2 · All instances</SelectItem>
           <SelectItem value="1">Group 1 · B2B#1 + B2C#1</SelectItem>
           <SelectItem value="2">Group 2 · B2B#2 + B2C#2</SelectItem>
         </SelectContent>
