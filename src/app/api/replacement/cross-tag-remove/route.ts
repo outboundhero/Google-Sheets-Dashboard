@@ -7,25 +7,31 @@ import { fetchCampaignSenderEmails } from "@/lib/attach-campaigns";
 export const maxDuration = 300;
 
 /**
- * POST /api/replacement/cross-tag-remove
+ * POST /api/replacement/cross-tag-remove  (v4 — spec-informed)
  *
- * Campaign-centric removal for the cross-tag audit. The FE groups the whole
- * selection by UNIQUE campaign and sends batches of campaign jobs — each
- * unique campaign is processed exactly once no matter how many domains feed
- * it (in practice ~200 shared campaigns across 2,000+ flagged domains).
+ * Campaign-centric removal for the cross-tag audit. Two facts from Bison's
+ * OpenAPI spec drive this design:
  *
- * Per campaign job:
- *   1. Resolve the involved domains' inbox IDs (bulk Supabase read).
- *   2. Fetch the campaign's CURRENT sender list — offset pages fetched in
- *      PARALLEL (pages are independent; a 200-page walk becomes ~14 rounds).
- *      Falls back to sequential cursor if the campaign exceeds the offset cap.
- *   3. Intersect → only genuinely-attached contaminating inboxes.
- *   4. Pause once (if active) → DELETE the intersection in batches → resume.
+ *   1. DELETE /campaigns/{id}/remove-sender-emails only works on a DRAFT or
+ *      PAUSED campaign ("allows the authenticated user to remove sender
+ *      emails from a draft or paused campaign"). So we check the campaign's
+ *      LIVE status first (stored audit status can be stale) and pause any
+ *      sendable campaign before removing — that was the systematic failure
+ *      in v3, which only paused when the stale stored status said "active".
  *
- * Second action — { action: "clearDomains", domains: [{instance, domain}] }:
- *   bulk-deletes cleaned rows from cross_tag_audit. The FE calls this after
- *   all campaign batches finish, only for domains whose every campaign
- *   succeeded.
+ *   2. The endpoint is an ASYNC QUEUE ("Sender emails sent for deletion.
+ *      This may take a moment") with no documented array cap — so we submit
+ *      the candidate inbox IDs BLIND in large batches and let Bison's queue
+ *      detach whatever is actually attached. No sender-list fetching: the
+ *      big nurture campaigns hold 10-15K senders at a hard 15/page cap
+ *      (~1,000 pages per campaign), which is what made v3 crawl.
+ *
+ * Campaigns that are ARCHIVED or COMPLETED are skipped as success — they
+ * can't send, so contamination in them is inert (and the audit no longer
+ * flags them).
+ *
+ * Second action — { action: "clearDomains", domains: [...] } bulk-deletes
+ * cleaned rows from cross_tag_audit.
  *
  * Admin-only via middleware.
  */
@@ -43,38 +49,36 @@ interface JobResult {
   campaignId: number;
   name: string;
   ok: boolean;
-  attached: number;   // campaign's total senders at fetch time
-  removed: number;    // contaminating inboxes actually detached
+  removed: number;   // candidate ids submitted for deletion (async queue)
+  note?: string;
   error?: string;
 }
 
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-// Concurrency budget: CAMPAIGN_CONC × PAGE_CONC is the worst-case number of
-// simultaneous requests against ONE Bison instance (flagged domains cluster
-// heavily on a single instance). The first run at 4×12=48 exhausted retries
-// on ~half the campaigns — Bison's ceiling is nearer ~20-25 sustained.
-const CAMPAIGN_CONC = 3;       // campaign jobs in flight per request
-const PAGE_CONC = 7;           // parallel offset pages per campaign fetch (3×7=21)
-const OFFSET_PAGE_CAP = 990;   // Bison caps offset pagination at 1000 pages
-const DELETE_BATCH = 300;      // ids per remove call (downshifts on 4xx)
+const CAMPAIGN_CONC = 5;       // campaign jobs in flight (few calls each now)
+const DELETE_BATCH = 2000;     // async queue endpoint; downshifts on 4xx
+
+// States that cannot send — contamination in them is inert, skip.
+const INERT_STATUSES = new Set(["archived", "completed"]);
+// States where removal works directly without pausing.
+const REMOVABLE_STATUSES = new Set(["draft", "paused"]);
 
 async function bisonWithRetry(
   instance: BisonInstanceSlug,
   path: string,
   init?: RequestInit,
-  attempts = 7,
+  attempts = 6,
 ): Promise<Response> {
   let last: Response | null = null;
   for (let i = 0; i < attempts; i++) {
     const res = await bisonFetch(instance, path, init);
     if (res.ok) return res;
-    if (res.status === 429 || res.status === 502 || res.status === 503 || res.status === 504) {
+    // 500 included: Bison intermittently 500s under load.
+    if (res.status === 429 || res.status === 500 || res.status === 502 || res.status === 503 || res.status === 504) {
       last = res;
       const ra = parseInt(res.headers.get("retry-after") || "", 10);
-      // Patient backoff — under sustained load a burst of 429s needs to be
-      // waited OUT, not raced. Caps at 20s; total patience ≈ 60s.
-      const wait = Number.isFinite(ra) && ra > 0 ? ra * 1000 : Math.min(20_000, 700 * 2 ** i);
+      const wait = Number.isFinite(ra) && ra > 0 ? ra * 1000 : Math.min(15_000, 600 * 2 ** i);
       await delay(wait + Math.floor(Math.random() * 400));
       continue;
     }
@@ -83,62 +87,31 @@ async function bisonWithRetry(
   return last as Response;
 }
 
-async function pool<T>(items: T[], conc: number, fn: (item: T, i: number) => Promise<void>): Promise<void> {
+async function pool<T>(items: T[], conc: number, fn: (item: T) => Promise<void>): Promise<void> {
   let next = 0;
   const worker = async () => {
     while (true) {
       const i = next++;
       if (i >= items.length) return;
-      await fn(items[i], i);
+      await fn(items[i]);
     }
   };
   await Promise.all(Array.from({ length: Math.min(conc, items.length) }, () => worker()));
 }
 
-/**
- * Fetch a campaign's full sender-ID list FAST: page 1 reveals last_page, then
- * remaining offset pages are fetched in parallel (they're independent).
- * Returns null when the campaign is gone (404). Falls back to the sequential
- * cursor walk if the campaign exceeds Bison's 1000-page offset cap.
- */
-async function fetchSenderIdsFast(instance: BisonInstanceSlug, campaignId: number): Promise<number[] | null> {
-  const first = await bisonWithRetry(instance, `/campaigns/${campaignId}/sender-emails?page=1&per_page=100`);
-  if (first.status === 404) return null;
-  if (!first.ok) {
-    const t = await first.text().catch(() => "");
-    throw new Error(`senders page 1: ${first.status} ${t.slice(0, 120)}`);
-  }
-  const json = (await first.json()) as { data?: { id: number }[]; meta?: { last_page?: number } };
-  const ids: number[] = (json.data || []).map((d) => d.id);
-  const lastPage = json.meta?.last_page || 1;
-  if (lastPage <= 1) return ids;
-
-  if (lastPage > OFFSET_PAGE_CAP) {
-    // Too big for offset pagination — sequential cursor walk (rare).
-    return fetchCampaignSenderEmails(instance, campaignId);
-  }
-
-  const pages = Array.from({ length: lastPage - 1 }, (_, i) => i + 2);
-  const perPage: number[][] = new Array(pages.length);
-  let pageError: string | null = null;
-  await pool(pages, PAGE_CONC, async (page, idx) => {
-    if (pageError) return;
-    const res = await bisonWithRetry(instance, `/campaigns/${campaignId}/sender-emails?page=${page}&per_page=100`);
-    if (!res.ok) { pageError = `senders page ${page}: HTTP ${res.status}`; return; }
-    try {
-      const j = (await res.json()) as { data?: { id: number }[] };
-      perPage[idx] = (j.data || []).map((d) => d.id);
-    } catch {
-      pageError = `senders page ${page}: bad JSON`;
-    }
-  });
-  if (pageError) throw new Error(pageError);
-  for (const arr of perPage) if (arr) ids.push(...arr);
-  return ids;
+/** Live campaign status — the stored audit status can be stale, and removal
+ *  semantics depend on the CURRENT state. Returns null when the campaign is
+ *  gone (404). */
+async function fetchLiveStatus(instance: BisonInstanceSlug, campaignId: number): Promise<string | null> {
+  const res = await bisonWithRetry(instance, `/campaigns/${campaignId}`);
+  if (res.status === 404) return null;
+  if (!res.ok) throw new Error(`campaign status: HTTP ${res.status}`);
+  const json = (await res.json()) as { data?: { status?: string }; status?: string };
+  return String(json.data?.status ?? json.status ?? "").trim().toLowerCase();
 }
 
 /** Bulk inbox-ID map for a set of domains on one instance (memoized per request). */
-async function getInboxIdMap(
+async function loadInboxIds(
   instance: BisonInstanceSlug,
   domains: string[],
   cache: Map<string, number[]>,
@@ -166,6 +139,62 @@ async function getInboxIdMap(
       offset += 1000;
     }
   }
+}
+
+/** Submit candidate ids for deletion, blind, in large batches. Downshifts
+ *  batch size on 4xx; falls back to exact intersect-removal if even small
+ *  blind batches are rejected. Returns ids submitted. */
+async function removeCandidates(
+  instance: BisonInstanceSlug,
+  campaignId: number,
+  candidates: number[],
+  candidateSet: Set<number>,
+): Promise<number> {
+  let batchSize = DELETE_BATCH;
+  let submitted = 0;
+  let i = 0;
+  while (i < candidates.length) {
+    const batch = candidates.slice(i, i + batchSize);
+    const res = await bisonWithRetry(instance, `/campaigns/${campaignId}/remove-sender-emails`, {
+      method: "DELETE",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sender_email_ids: batch }),
+    });
+    if (res.ok) {
+      submitted += batch.length;
+      i += batchSize;
+      continue;
+    }
+    if (res.status === 404) return submitted; // campaign vanished mid-run
+    if ((res.status === 400 || res.status === 413 || res.status === 422) && batchSize > 100) {
+      batchSize = batchSize > 500 ? 500 : 100; // payload too big → downshift
+      continue;
+    }
+    if (res.status === 422) {
+      // Even small blind batches rejected → this Bison build wants exact
+      // membership. Fall back once: cursor-walk actual senders, intersect.
+      const actual = await fetchCampaignSenderEmails(instance, campaignId);
+      const toRemove = actual.filter((id) => candidateSet.has(id));
+      let exact = 0;
+      for (let j = 0; j < toRemove.length; j += 100) {
+        const b2 = toRemove.slice(j, j + 100);
+        const r2 = await bisonWithRetry(instance, `/campaigns/${campaignId}/remove-sender-emails`, {
+          method: "DELETE",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ sender_email_ids: b2 }),
+        });
+        if (!r2.ok) {
+          const t = await r2.text().catch(() => "");
+          throw new Error(`exact remove: ${r2.status} ${t.slice(0, 120)}`);
+        }
+        exact += b2.length;
+      }
+      return exact;
+    }
+    const t = await res.text().catch(() => "");
+    throw new Error(`remove batch at ${i}: ${res.status} ${t.slice(0, 120)}`);
+  }
+  return submitted;
 }
 
 export async function POST(request: Request) {
@@ -214,13 +243,13 @@ export async function POST(request: Request) {
       domainsByInstance.set(j.instance, set);
     }
     await Promise.all(
-      [...domainsByInstance.entries()].map(([inst, doms]) => getInboxIdMap(inst, [...doms], inboxCache)),
+      [...domainsByInstance.entries()].map(([inst, doms]) => loadInboxIds(inst, [...doms], inboxCache)),
     );
 
     const results: JobResult[] = [];
     await pool(jobs, CAMPAIGN_CONC, async (job) => {
       if (!isInstanceSlug(job.instance)) {
-        results.push({ instance: job.instance, campaignId: job.id, name: job.name || `Campaign ${job.id}`, ok: false, attached: 0, removed: 0, error: `unknown instance ${job.instance}` });
+        results.push({ instance: job.instance, campaignId: job.id, name: job.name || `Campaign ${job.id}`, ok: false, removed: 0, error: `unknown instance ${job.instance}` });
         return;
       }
       const instance = job.instance;
@@ -230,65 +259,46 @@ export async function POST(request: Request) {
       for (const d of job.domains || []) {
         for (const id of inboxCache.get(`${instance}:${d}`) || []) candidateSet.add(id);
       }
-      if (candidateSet.size === 0) {
-        results.push({ instance, campaignId: job.id, name, ok: true, attached: 0, removed: 0 });
+      const candidates = [...candidateSet];
+      if (candidates.length === 0) {
+        results.push({ instance, campaignId: job.id, name, ok: true, removed: 0, note: "no inboxes resolved" });
         return;
       }
 
-      let paused = false;
-      const wasActive = (job.status || "").trim().toLowerCase() === "active";
+      let pausedByUs = false;
+      let liveStatus: string | null = null;
       try {
-        // 1. Current senders — parallel offset fetch.
-        const senders = await fetchSenderIdsFast(instance, job.id);
-        if (senders === null) {
-          // Campaign deleted in Bison — nothing to clean. Success.
-          results.push({ instance, campaignId: job.id, name, ok: true, attached: 0, removed: 0 });
+        // Removal only works on draft/paused campaigns — check the LIVE state.
+        liveStatus = await fetchLiveStatus(instance, job.id);
+        if (liveStatus === null) {
+          results.push({ instance, campaignId: job.id, name, ok: true, removed: 0, note: "campaign gone in Bison" });
           return;
         }
-        const toRemove = senders.filter((id) => candidateSet.has(id));
-        if (toRemove.length === 0) {
-          results.push({ instance, campaignId: job.id, name, ok: true, attached: senders.length, removed: 0 });
+        if (INERT_STATUSES.has(liveStatus)) {
+          // Archived / completed can't send — contamination is inert.
+          results.push({ instance, campaignId: job.id, name, ok: true, removed: 0, note: `skipped (${liveStatus} — cannot send)` });
           return;
         }
-
-        // 2. Pause once → remove intersection → resume once.
-        if (wasActive) {
+        if (!REMOVABLE_STATUSES.has(liveStatus)) {
+          // active / launching / queued / anything else sendable → pause first.
           const p = await bisonWithRetry(instance, `/campaigns/${job.id}/pause`, { method: "PATCH" });
-          paused = p.ok;
+          if (!p.ok) {
+            const t = await p.text().catch(() => "");
+            throw new Error(`pause (${liveStatus}): ${p.status} ${t.slice(0, 120)}`);
+          }
+          pausedByUs = true;
           await delay(300);
         }
 
-        let removed = 0;
-        let batchSize = DELETE_BATCH;
-        for (let i = 0; i < toRemove.length; ) {
-          const batch = toRemove.slice(i, i + batchSize);
-          const res = await bisonWithRetry(instance, `/campaigns/${job.id}/remove-sender-emails`, {
-            method: "DELETE",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ sender_email_ids: batch }),
-          });
-          if (res.ok) {
-            removed += batch.length;
-            i += batchSize;
-            continue;
-          }
-          if ((res.status === 413 || res.status === 422 || res.status === 400) && batchSize > 100) {
-            // Payload too big for Bison — downshift and retry the same window.
-            batchSize = 100;
-            continue;
-          }
-          const t = await res.text().catch(() => "");
-          throw new Error(`remove batch at ${i}: ${res.status} ${t.slice(0, 120)}`);
-        }
-
-        results.push({ instance, campaignId: job.id, name, ok: true, attached: senders.length, removed });
+        const removed = await removeCandidates(instance, job.id, candidates, candidateSet);
+        results.push({ instance, campaignId: job.id, name, ok: true, removed });
       } catch (e) {
         results.push({
-          instance, campaignId: job.id, name, ok: false, attached: 0, removed: 0,
+          instance, campaignId: job.id, name, ok: false, removed: 0,
           error: e instanceof Error ? e.message : "failed",
         });
       } finally {
-        if (paused) {
+        if (pausedByUs) {
           try { await bisonWithRetry(instance, `/campaigns/${job.id}/resume`, { method: "PATCH" }); } catch { /* best effort */ }
         }
       }
@@ -297,7 +307,7 @@ export async function POST(request: Request) {
     return NextResponse.json({
       results: results.map((r) => ({
         instance: r.instance, campaignId: r.campaignId, name: r.name,
-        ok: r.ok, attached: r.attached, removed: r.removed, error: r.error,
+        ok: r.ok, removed: r.removed, note: r.note, error: r.error,
       })),
       removed: results.reduce((s, r) => s + r.removed, 0),
       failed: results.filter((r) => !r.ok).length,

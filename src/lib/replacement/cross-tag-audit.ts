@@ -175,8 +175,13 @@ export async function auditDomainsBatch(rows: DomainRef[], knownTags: Set<string
     });
 
     // Campaigns whose client tag isn't one of the domain's tags = wrong.
+    // Archived/completed campaigns can't send, and Bison's remove endpoint
+    // only works on draft/paused states — flagging them would leave domains
+    // permanently uncleanable. Skip them: contamination there is inert.
     const wrong: WrongCampaign[] = [];
     for (const [id, c] of campMap) {
+      const st = String(c.status || "").trim().toLowerCase();
+      if (st === "archived" || st === "completed") continue;
       const ct = clientTagOf(c.name);
       if (ct && knownTags.has(ct) && !domTags.has(ct)) {
         wrong.push({ id, name: c.name, status: c.status, clientTag: ct, instance });

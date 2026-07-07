@@ -16,8 +16,10 @@ const RUN_BATCH = 50;
 // Campaign jobs per removal request. The FE dedups the whole selection down
 // to unique campaigns first (the same ~200 campaigns repeat across thousands
 // of flagged domains) — each request processes a slice of those, so progress
-// ticks every batch and each campaign is cleaned exactly once.
-const CAMPAIGN_BATCH = 16;
+// ticks every batch and each campaign is cleaned exactly once. Server-side
+// each campaign is now ~4 Bison calls (status → pause → blind remove →
+// resume), so a batch clears in seconds.
+const CAMPAIGN_BATCH = 25;
 
 export function CrossTagAuditCard() {
   const [open, setOpen] = useState(false);
@@ -100,10 +102,11 @@ export function CrossTagAuditCard() {
 
   // Campaign-centric bulk removal. The FE dedups the whole selection down to
   // UNIQUE campaigns (the same ~200 campaigns repeat across thousands of
-  // flagged domains) and sends them in small batches — each campaign gets
-  // its senders fetched once (parallel offset pages server-side), the
-  // intersection removed once, paused/resumed once. Domains whose every
-  // campaign succeeded are bulk-cleared at the end.
+  // flagged domains) and sends them in batches — server-side each campaign is
+  // paused (Bison only removes senders from draft/paused campaigns), the
+  // candidate inbox IDs are submitted blind to Bison's async deletion queue
+  // (no sender-list crawling), then resumed. Domains whose every campaign
+  // succeeded are bulk-cleared at the end.
   const removeSelected = async () => {
     const targets = flagged.filter((f) => selected.has(key(f)));
     if (targets.length === 0) return;
@@ -161,7 +164,7 @@ export function CrossTagAuditCard() {
         setRemoveProgress({
           done: Math.min(i + CAMPAIGN_BATCH, jobList.length),
           total: jobList.length,
-          current: `${removedTotal.toLocaleString()} inboxes detached${collectedFailures.length ? ` · ${collectedFailures.length} campaigns failed` : ""}`,
+          current: `${removedTotal.toLocaleString()} inbox removals queued${collectedFailures.length ? ` · ${collectedFailures.length} campaigns failed` : ""}`,
         });
       }
 
