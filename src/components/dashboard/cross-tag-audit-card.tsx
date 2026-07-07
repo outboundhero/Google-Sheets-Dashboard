@@ -28,6 +28,9 @@ export function CrossTagAuditCard() {
   const [removing, setRemoving] = useState(false);
   const [removeProgress, setRemoveProgress] = useState<{ done: number; total: number; current: string | null } | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Per-campaign failures from the last removal run — rendered as a clean
+  // dismissible list instead of being silently folded into a counter.
+  const [failures, setFailures] = useState<{ name: string; instance: string; error: string }[]>([]);
 
   const dragging = useRef(false);
   const dragAdd = useRef(true);
@@ -57,7 +60,8 @@ export function CrossTagAuditCard() {
   const startDrag = (k: string) => { dragging.current = true; dragAdd.current = !selected.has(k); applyDrag(k); };
 
   const runAudit = async () => {
-    setRunning(true); setError(null); setSelected(new Set());
+    setRunning(true); setError(null); setSelected(new Set()); setFailures([]);
+    let failedBatches = 0;
     try {
       const res = await fetch("/api/replacement/cross-tag-audit?list=domains", { cache: "no-store" });
       const d = await res.json();
@@ -72,17 +76,26 @@ export function CrossTagAuditCard() {
             method: "POST", headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ domains: batch, reset: i === 0 }),
           });
-          const rd = await r.json();
-          found += rd.flaggedCount || 0;
-        } catch { /* skip batch */ }
+          const text = await r.text();
+          let rd: { flaggedCount?: number; error?: string } | null = null;
+          try { rd = text ? JSON.parse(text) : null; } catch { /* non-JSON */ }
+          if (!rd || !r.ok || rd.error) failedBatches++;
+          else found += rd.flaggedCount || 0;
+        } catch { failedBatches++; }
         setRunProgress({ done: Math.min(i + RUN_BATCH, domains.length), total: domains.length, found });
         if (i % (RUN_BATCH * 5) === 0) await load(); // periodic refresh
       }
       await load();
+      if (failedBatches > 0) {
+        setError(`${failedBatches} audit batch${failedBatches === 1 ? "" : "es"} failed — results may be incomplete. Run the audit again to fill the gaps.`);
+      }
     } catch (e) {
       setError(e instanceof Error ? e.message : "Audit failed");
+    } finally {
+      // Never leave the card stuck.
+      setRunning(false);
+      setRunProgress(null);
     }
-    setRunning(false); setRunProgress(null);
   };
 
   // Campaign-centric bulk removal. The old flow looped domains one at a time
@@ -93,45 +106,59 @@ export function CrossTagAuditCard() {
   const removeSelected = async () => {
     const targets = flagged.filter((f) => selected.has(key(f)));
     if (targets.length === 0) return;
-    setRemoving(true); setError(null);
+    setRemoving(true); setError(null); setFailures([]);
     let cleared = 0;
-    let failedCampaigns = 0;
+    const collectedFailures: { name: string; instance: string; error: string }[] = [];
+    const chunkErrors: string[] = [];
     setRemoveProgress({ done: 0, total: targets.length, current: "grouping campaigns…" });
-    for (let i = 0; i < targets.length; i += REMOVE_CHUNK) {
-      const chunk = targets.slice(i, i + REMOVE_CHUNK);
-      setRemoveProgress({
-        done: i,
-        total: targets.length,
-        current: `cleaning chunk ${Math.floor(i / REMOVE_CHUNK) + 1}/${Math.ceil(targets.length / REMOVE_CHUNK)}…`,
-      });
-      try {
-        const res = await fetch("/api/replacement/cross-tag-remove", {
-          method: "POST", headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            items: chunk.map((f) => ({
-              instance: f.instance,
-              domain: f.domain,
-              campaigns: f.wrongCampaigns.map((c) => ({ id: c.id, name: c.name, status: c.status })),
-            })),
-          }),
-        });
-        const d = await res.json();
-        if (!res.ok || d.error) {
-          setError(d.error || `Chunk failed (HTTP ${res.status}) — failed domains stay flagged for retry`);
-        } else {
-          cleared += d.domainsCleared || 0;
-          failedCampaigns += d.campaignsFailed || 0;
+    try {
+      for (let i = 0; i < targets.length; i += REMOVE_CHUNK) {
+        const chunk = targets.slice(i, i + REMOVE_CHUNK);
+        const chunkNo = Math.floor(i / REMOVE_CHUNK) + 1;
+        const chunkCount = Math.ceil(targets.length / REMOVE_CHUNK);
+        setRemoveProgress({ done: i, total: targets.length, current: `cleaning chunk ${chunkNo}/${chunkCount}…` });
+        try {
+          const res = await fetch("/api/replacement/cross-tag-remove", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              items: chunk.map((f) => ({
+                instance: f.instance,
+                domain: f.domain,
+                campaigns: f.wrongCampaigns.map((c) => ({ id: c.id, name: c.name, status: c.status })),
+              })),
+            }),
+          });
+          // JSON-safe parse: a Vercel timeout returns an HTML error page,
+          // which res.json() would turn into a cryptic parse error.
+          const text = await res.text();
+          let d: { error?: string; domainsCleared?: number; failures?: { name: string; instance: string; error?: string }[] } | null = null;
+          try { d = text ? JSON.parse(text) : null; } catch { /* non-JSON */ }
+          if (!d) {
+            chunkErrors.push(`Chunk ${chunkNo}: server ${res.status >= 500 ? "timed out or crashed" : `returned non-JSON (HTTP ${res.status})`} — its domains stay flagged, re-run to retry`);
+          } else if (!res.ok || d.error) {
+            chunkErrors.push(`Chunk ${chunkNo}: ${d.error || `HTTP ${res.status}`} — its domains stay flagged, re-run to retry`);
+          } else {
+            cleared += d.domainsCleared || 0;
+            for (const f of d.failures || []) {
+              collectedFailures.push({ name: f.name, instance: f.instance, error: f.error || "failed" });
+            }
+          }
+        } catch (e) {
+          chunkErrors.push(`Chunk ${chunkNo}: ${e instanceof Error ? e.message : "network error"} — its domains stay flagged, re-run to retry`);
         }
-      } catch {
-        setError("Network error on a chunk — affected domains stay flagged for retry");
+        setRemoveProgress({
+          done: Math.min(i + REMOVE_CHUNK, targets.length),
+          total: targets.length,
+          current: `${cleared} domains cleared${collectedFailures.length ? ` · ${collectedFailures.length} campaigns failed` : ""}`,
+        });
       }
-      setRemoveProgress({
-        done: Math.min(i + REMOVE_CHUNK, targets.length),
-        total: targets.length,
-        current: `${cleared} domains cleared${failedCampaigns ? ` · ${failedCampaigns} campaigns failed` : ""}`,
-      });
+    } finally {
+      // Never leave the card stuck — buttons re-enable no matter what threw.
+      setRemoving(false);
+      setRemoveProgress(null);
     }
-    setRemoving(false); setRemoveProgress(null);
+    if (chunkErrors.length) setError(chunkErrors.join(" · "));
+    setFailures(collectedFailures);
     setSelected(new Set());
     await load();
   };
@@ -172,7 +199,37 @@ export function CrossTagAuditCard() {
             </div>
           )}
 
-          {error && <div className="flex items-center gap-2 text-xs text-destructive"><AlertTriangle className="h-3.5 w-3.5" />{error}</div>}
+          {error && (
+            <div className="flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs text-destructive">
+              <AlertTriangle className="h-3.5 w-3.5 mt-0.5 shrink-0" />
+              <span className="flex-1">{error}</span>
+              <button onClick={() => setError(null)} className="shrink-0 opacity-60 hover:opacity-100" title="Dismiss">✕</button>
+            </div>
+          )}
+
+          {/* Per-campaign failures from the last removal — the affected domains
+              stay flagged in the list below, so re-running Remove retries them. */}
+          {failures.length > 0 && (
+            <div className="rounded-md border border-destructive/30 bg-destructive/5">
+              <div className="flex items-center gap-2 px-3 py-1.5 text-xs text-destructive font-medium">
+                <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
+                {failures.length} campaign{failures.length === 1 ? "" : "s"} failed — their domains stay flagged, re-run Remove to retry
+                <button onClick={() => setFailures([])} className="ml-auto opacity-60 hover:opacity-100" title="Dismiss">✕</button>
+              </div>
+              <div className="max-h-36 overflow-y-auto divide-y divide-destructive/10 border-t border-destructive/20">
+                {failures.slice(0, 30).map((f, i) => (
+                  <div key={i} className="flex items-center gap-2 px-3 py-1 text-[11px]">
+                    <span className="font-medium truncate max-w-[240px]">{f.name}</span>
+                    <span className="text-muted-foreground shrink-0">{short[f.instance] ?? f.instance}</span>
+                    <span className="text-destructive/80 truncate">{f.error}</span>
+                  </div>
+                ))}
+                {failures.length > 30 && (
+                  <div className="px-3 py-1 text-[11px] text-muted-foreground">…and {failures.length - 30} more</div>
+                )}
+              </div>
+            </div>
+          )}
 
           {flagged.length === 0 && !running ? (
             <p className="text-sm text-emerald-600 dark:text-emerald-400">No cross-client contamination found. ✓</p>
