@@ -42,7 +42,11 @@ function sleep(ms: number): Promise<void> {
 async function call<T>(
   method: "GET" | "POST" | "PUT" | "DELETE",
   path: string,
-  body?: unknown
+  body?: unknown,
+  // Bulk-write ops set patient=true: Inboxing's rate window is per-minute,
+  // and the default exponential backoff (caps at 15s) can burn every attempt
+  // inside one throttled window. Patient mode waits 15s, 25s, 35s… instead.
+  patient = false
 ): Promise<T> {
   const { key, base } = envRead();
   const init: RequestInit = {
@@ -55,7 +59,7 @@ async function call<T>(
   };
   if (body !== undefined) init.body = JSON.stringify(body);
 
-  const MAX_ATTEMPTS = 5;
+  const MAX_ATTEMPTS = patient ? 6 : 5;
   for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
     const res = await fetch(`${base}${path}`, init);
     const text = await res.text();
@@ -72,8 +76,10 @@ async function call<T>(
     if (retryable && attempt < MAX_ATTEMPTS - 1) {
       const ra = parseInt(res.headers.get("retry-after") || "", 10);
       const waitMs = Number.isFinite(ra) && ra > 0
-        ? ra * 1000
-        : Math.min(15_000, 800 * 2 ** attempt);
+        ? ra * 1000 + 500
+        : patient
+          ? 15_000 + attempt * 10_000
+          : Math.min(15_000, 800 * 2 ** attempt);
       await sleep(waitMs + Math.floor(Math.random() * 400));
       continue;
     }
@@ -261,5 +267,83 @@ export async function getSlots(): Promise<InboxingSlots> {
     used: result.slots.used,
     remaining: result.slots.remaining,
     canProvision: result.system.can_provision,
+  };
+}
+
+// ── Tag sync + platform upload (move-domains workflow) ─────────────────────
+
+/** Inboxing caps a domain at 10 tags (PUT /domains/{id}/tags rejects more). */
+export const INBOXING_MAX_TAGS = 10;
+
+/** Replace ALL tags on an Inboxing domain (PUT /domains/{id}/tags). */
+export async function setDomainTags(domainId: string, tags: string[]): Promise<void> {
+  if (tags.length > INBOXING_MAX_TAGS) {
+    throw new Error(`Inboxing caps tags at ${INBOXING_MAX_TAGS} per domain (got ${tags.length})`);
+  }
+  await call("PUT", `/domains/${encodeURIComponent(domainId)}/tags`, { tags }, true);
+}
+
+export interface InboxingPlatformConnection {
+  id: string;
+  name: string;
+  /** e.g. "emailbison", "instantly", "smartlead", "plusvibe" */
+  platform: string;
+  verificationStatus: string;
+  verificationError: string | null;
+}
+
+/** All configured sequencer connections (GET /platform-connections). */
+export async function listPlatformConnections(): Promise<InboxingPlatformConnection[]> {
+  const result = await call<{
+    data?: Array<{
+      id: string;
+      name?: string;
+      platform?: string;
+      verification_status?: string;
+      verification_error?: string | null;
+    }>;
+  }>("GET", "/platform-connections");
+  return (result.data || []).map((c) => ({
+    id: String(c.id),
+    name: c.name || "",
+    platform: (c.platform || "").toLowerCase(),
+    verificationStatus: (c.verification_status || "").toLowerCase(),
+    verificationError: c.verification_error ?? null,
+  }));
+}
+
+export interface InboxingUploadResult {
+  jobsCreated: number;
+  connectionName: string;
+  message: string;
+}
+
+/**
+ * Upload a domain's mailboxes to a sequencer platform connection
+ * (POST /domains/{id}/upload). ASYNC on Inboxing's side: one upload job per
+ * mailbox, returns immediately with the job count — the accounts appear on
+ * the platform as workers process the jobs. skip_verified makes re-runs
+ * idempotent (already-uploaded emails on this connection are skipped);
+ * sync_tags pushes the Inboxing domain tags onto the uploaded accounts.
+ */
+export async function uploadDomainToPlatform(
+  domainId: string,
+  platformConnectionId: string,
+): Promise<InboxingUploadResult> {
+  const result = await call<{
+    success?: boolean;
+    jobs_created?: number;
+    connection_name?: string;
+    message?: string;
+  }>("POST", `/domains/${encodeURIComponent(domainId)}/upload`, {
+    platform_connection_id: platformConnectionId,
+    enable_warmup: true,
+    skip_verified: true,
+    sync_tags: true,
+  }, true);
+  return {
+    jobsCreated: result.jobs_created ?? 0,
+    connectionName: result.connection_name || "",
+    message: result.message || "",
   };
 }

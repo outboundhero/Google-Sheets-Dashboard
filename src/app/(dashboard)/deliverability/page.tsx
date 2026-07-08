@@ -26,6 +26,7 @@ import {
   SlidersHorizontal,
   Plus,
   ShieldAlert,
+  ArrowRightLeft,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -37,6 +38,7 @@ import { AttachToCampaignsDialog } from "@/components/deliverability/attach-to-c
 import { RemoveFromCampaignsDialog } from "@/components/deliverability/remove-from-campaigns-dialog";
 import { ConformTagsDialog } from "@/components/deliverability/conform-tags-dialog";
 import { ChangeRedirectDialog } from "@/components/deliverability/change-redirect-dialog";
+import { MoveDomainsDialog, type MoveJob } from "@/components/deliverability/move-domains-dialog";
 import { SendToSheetDialog } from "@/components/deliverability/send-to-sheet-dialog";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -541,7 +543,7 @@ function DeliverabilityPageInner() {
   const { statuses: providerStatusMap, mutate: mutateProviderStatus } = useProviderStatus(instancesQuery);
   // Cross-instance presence: which of the 4 Bison instances each domain
   // exists in (all instances, regardless of the sidebar switcher).
-  const { domainInstancesMap } = useDomainInstances();
+  const { domainInstancesMap, mutate: mutateDomainInstances } = useDomainInstances();
   const [bisonTags, setBisonTags] = useState<string[]>([]);
   const [domains, setDomains] = useState<DomainRow[]>([]);
   // Days of snapshot history collected (drives the trailing-rate warm-up note)
@@ -619,6 +621,20 @@ function DeliverabilityPageInner() {
   const [providerChecking, setProviderChecking] = useState(false);
   const [providerCheckRows, setProviderCheckRows] = useState<ProviderCheckRow[] | null>(null);
   const [changeRedirectOpen, setChangeRedirectOpen] = useState(false);
+  const [moveDialogOpen, setMoveDialogOpen] = useState(false);
+  // Live progress for the move-to-instance workflow — rendered in the panel
+  // at the top of the page (per-domain outcomes, never-stuck error surfacing).
+  interface MoveProgressState {
+    targetLabel: string;
+    connectionName: string;
+    done: number;
+    total: number;
+    counts: { done: number; uploading: number; skipped: number; failed: number };
+    failures: { domain: string; stage?: string; error: string }[];
+    uploading: string[];
+    running: boolean;
+  }
+  const [moveProgress, setMoveProgress] = useState<MoveProgressState | null>(null);
   const [clientTags, setClientTags] = useState<Set<string>>(new Set());
   const [selectedDomains, setSelectedDomains] = useState<Set<string>>(new Set());
   // Stable array of the selected domains — passed to dialogs so their effects
@@ -1089,6 +1105,74 @@ function DeliverabilityPageInner() {
       await Promise.all([loadDomains(), mutateProviderStatus()]);
     } finally {
       setProviderChecking(false);
+    }
+  };
+
+  // Drives the batched move-to-instance apply. The dialog only collects the
+  // job; all progress lives in the top panel so it's visible page-wide and
+  // survives the dialog closing. Small batches (4 domains/request) keep each
+  // request far under the serverless timeout even while it polls for sender
+  // arrival on the target.
+  const runMoveDomains = async (job: MoveJob) => {
+    const BATCH = 4;
+    const counts = { done: 0, uploading: 0, skipped: 0, failed: 0 };
+    const failures: { domain: string; stage?: string; error: string }[] = [];
+    const uploading: string[] = [];
+    const base = {
+      targetLabel: INSTANCE_SHORT_LABELS[job.targetInstance],
+      connectionName: job.connectionName,
+      total: job.domains.length,
+    };
+    setMoveProgress({ ...base, done: 0, counts: { ...counts }, failures: [], uploading: [], running: true });
+    try {
+      for (let i = 0; i < job.domains.length; i += BATCH) {
+        const batch = job.domains.slice(i, i + BATCH);
+        try {
+          const res = await fetch("/api/deliverability/move-domains", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              dryRun: false,
+              domains: batch,
+              targetInstance: job.targetInstance,
+              platformConnectionId: job.platformConnectionId,
+            }),
+          });
+          // JSON-safe parse — a serverless timeout returns an HTML page.
+          const text = await res.text();
+          let d: { error?: string; results?: { domain: string; status: string; stage?: string; error?: string }[] } | null = null;
+          try { d = text ? JSON.parse(text) : null; } catch { /* non-JSON */ }
+          if (!d || !res.ok || d.error) {
+            const why = !d
+              ? (res.status >= 500 ? "server timed out or crashed" : `non-JSON response (HTTP ${res.status})`)
+              : (d.error || `HTTP ${res.status}`);
+            for (const dom of batch) { counts.failed++; failures.push({ domain: dom, error: why }); }
+          } else {
+            for (const r of d.results || []) {
+              if (r.status === "done") counts.done++;
+              else if (r.status === "uploading") { counts.uploading++; uploading.push(r.domain); }
+              else if (r.status === "skipped") { counts.skipped++; }
+              else { counts.failed++; failures.push({ domain: r.domain, stage: r.stage, error: r.error || "failed" }); }
+            }
+          }
+        } catch (e) {
+          const why = e instanceof Error ? e.message : "network error";
+          for (const dom of batch) { counts.failed++; failures.push({ domain: dom, error: why }); }
+        }
+        setMoveProgress({
+          ...base,
+          done: Math.min(i + BATCH, job.domains.length),
+          counts: { ...counts },
+          failures: [...failures],
+          uploading: [...uploading],
+          running: true,
+        });
+      }
+    } finally {
+      // Never leave the panel stuck on "running".
+      setMoveProgress((prev) => (prev ? { ...prev, running: false } : prev));
+      setSelectedDomains(new Set());
+      await Promise.all([loadDomains(), mutateDomainInstances()]);
     }
   };
 
@@ -1949,6 +2033,63 @@ function DeliverabilityPageInner() {
               {r.state === "error" && <span className="text-destructive truncate">{r.error}</span>}
             </div>
           ))}
+        </div>
+      )}
+
+      {/* Move-to-instance progress — batched Inboxing platform-upload moves */}
+      {moveProgress && (
+        <div className="rounded-lg border bg-muted/30 px-4 py-3 space-y-2">
+          <div className="flex items-center justify-between text-xs">
+            <span className="flex items-center gap-2">
+              {moveProgress.running
+                ? <Loader2 className="h-3.5 w-3.5 animate-spin text-primary" />
+                : <CheckCircle2 className="h-3.5 w-3.5 text-emerald-500" />}
+              <span className="font-medium">
+                {moveProgress.running ? "Moving" : "Move finished —"} {moveProgress.done}/{moveProgress.total} domains → {moveProgress.targetLabel}
+              </span>
+              <span className="text-muted-foreground">via Inboxing “{moveProgress.connectionName}”</span>
+            </span>
+            {!moveProgress.running && (
+              <button onClick={() => setMoveProgress(null)} className="shrink-0 opacity-60 hover:opacity-100" title="Dismiss">✕</button>
+            )}
+          </div>
+          <div className="h-1.5 rounded-full bg-muted overflow-hidden">
+            <div className="h-full bg-primary transition-all" style={{ width: `${moveProgress.total ? (moveProgress.done / moveProgress.total) * 100 : 0}%` }} />
+          </div>
+          <div className="text-[11px] text-muted-foreground">
+            <span className={moveProgress.counts.done ? "text-emerald-500" : ""}>{moveProgress.counts.done} moved</span>
+            {" · "}
+            <span className={moveProgress.counts.uploading ? "text-amber-500" : ""}>{moveProgress.counts.uploading} still uploading</span>
+            {" · "}
+            <span>{moveProgress.counts.skipped} skipped</span>
+            {" · "}
+            <span className={moveProgress.counts.failed ? "text-destructive" : ""}>{moveProgress.counts.failed} failed</span>
+          </div>
+          {moveProgress.uploading.length > 0 && (
+            <div className="rounded-md border border-amber-500/30 bg-amber-950/10 px-3 py-1.5 text-[11px] text-amber-400">
+              Still uploading at Inboxing (nothing deleted from the source — re-run Move for these later to finish):{" "}
+              <span className="text-amber-300">{moveProgress.uploading.join(", ")}</span>
+            </div>
+          )}
+          {moveProgress.failures.length > 0 && (
+            <div className="rounded-md border border-destructive/30 bg-destructive/5">
+              <div className="px-3 py-1.5 text-[11px] text-destructive font-medium">
+                {moveProgress.failures.length} domain{moveProgress.failures.length === 1 ? "" : "s"} failed — they stay in place, re-run Move to retry
+              </div>
+              <div className="max-h-32 overflow-y-auto divide-y divide-destructive/10 border-t border-destructive/20">
+                {moveProgress.failures.slice(0, 30).map((f, i) => (
+                  <div key={i} className="flex items-center gap-2 px-3 py-1 text-[11px]">
+                    <span className="font-medium shrink-0">{f.domain}</span>
+                    {f.stage && <span className="text-muted-foreground shrink-0">[{f.stage}]</span>}
+                    <span className="text-destructive/80 truncate">{f.error}</span>
+                  </div>
+                ))}
+                {moveProgress.failures.length > 30 && (
+                  <div className="px-3 py-1 text-[11px] text-muted-foreground">…and {moveProgress.failures.length - 30} more</div>
+                )}
+              </div>
+            </div>
+          )}
         </div>
       )}
 
@@ -3179,6 +3320,17 @@ function DeliverabilityPageInner() {
                       <Link2 className="h-3 w-3" />
                       Change Redirect
                     </Button>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="h-7 text-xs gap-1.5"
+                      onClick={() => setMoveDialogOpen(true)}
+                      disabled={moveProgress?.running}
+                      title="Move Inboxing domains' inboxes to another Bison instance (tags sync → Inboxing platform upload → source cleanup)"
+                    >
+                      <ArrowRightLeft className="h-3 w-3" />
+                      Move to Instance
+                    </Button>
                     <div className="relative">
                       <Button
                         size="sm"
@@ -3959,6 +4111,16 @@ function DeliverabilityPageInner() {
         onOpenChange={setChangeRedirectOpen}
         selectedDomains={Array.from(selectedDomains)}
         onComplete={() => loadDomains()}
+      />
+
+      {/* Move to Instance — Inboxing domains only; the dialog collects the
+          target + connection, then runMoveDomains drives the batched apply
+          with live progress in the top panel */}
+      <MoveDomainsDialog
+        open={moveDialogOpen}
+        onOpenChange={setMoveDialogOpen}
+        selectedDomains={Array.from(selectedDomains)}
+        onStart={runMoveDomains}
       />
 
       {/* Send to Sheet Dialog */}

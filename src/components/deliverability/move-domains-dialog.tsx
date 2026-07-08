@@ -1,0 +1,311 @@
+"use client";
+
+/**
+ * Bulk move-to-instance dialog (Inboxing domains).
+ *
+ * Step 1 — on open, dry-runs /api/deliverability/move-domains: routes each
+ *   selected domain (must be an Inboxing domain, single source instance,
+ *   ≤10 tags) and loads the account's Email Bison platform connections.
+ * Step 2 — user picks the TARGET Bison instance; the matching Inboxing
+ *   platform connection is auto-suggested by name (override dropdown shown).
+ * Step 3 — "Move N domains" hands the job off to the page, which drives the
+ *   batched apply and renders live progress in the panel at the top of the
+ *   deliverability dashboard (per user requirement — progress must not be
+ *   trapped inside a dialog).
+ */
+import { useEffect, useMemo, useState } from "react";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
+import { AlertTriangle, ArrowRightLeft, Loader2, XCircle } from "lucide-react";
+import {
+  ALL_INSTANCE_SLUGS,
+  BISON_INSTANCES,
+  INSTANCE_SHORT_LABELS,
+  type BisonInstanceSlug,
+} from "@/lib/bison-instances";
+
+interface PlatformConnection {
+  id: string;
+  name: string;
+  platform: string;
+  verificationStatus: string;
+  verificationError: string | null;
+}
+
+interface PlanRow {
+  domain: string;
+  action: "move" | "skip";
+  skipReason?: string;
+  sourceInstances?: BisonInstanceSlug[];
+  inboxCount?: number;
+  tags?: string[];
+}
+
+interface PlanResponse {
+  connections: PlatformConnection[];
+  connectionsError: string | null;
+  plan: PlanRow[];
+  counts: { movable: number; skipped: number };
+}
+
+export interface MoveJob {
+  domains: string[];
+  targetInstance: BisonInstanceSlug;
+  platformConnectionId: string;
+  connectionName: string;
+}
+
+type Phase = "planning" | "review" | "error";
+
+interface Props {
+  open: boolean;
+  onOpenChange: (v: boolean) => void;
+  selectedDomains: string[];
+  /** Page takes over: runs the batched apply + renders the top progress panel. */
+  onStart: (job: MoveJob) => void;
+}
+
+/** Best-effort pairing of an Inboxing connection name to a Bison instance. */
+function connectionMatchesInstance(connName: string, slug: BisonInstanceSlug): boolean {
+  const norm = connName.toLowerCase().replace(/[^a-z0-9]/g, "");
+  if (norm.includes(slug)) return true;
+  const inst = BISON_INSTANCES[slug];
+  // e.g. "B2B #1" → "b2b1" appearing in "OH B2B1" style names
+  const tierGroup = `${inst.tier}${inst.group}`;
+  if (norm.includes(tierGroup)) return true;
+  // base-url host without dots, e.g. "appoutboundheroco"
+  const host = inst.baseUrl.replace(/^https?:\/\//, "").split("/")[0].replace(/[^a-z0-9]/g, "");
+  if (host && norm.includes(host)) return true;
+  return false;
+}
+
+export function MoveDomainsDialog({ open, onOpenChange, selectedDomains, onStart }: Props) {
+  const [phase, setPhase] = useState<Phase>("planning");
+  const [plan, setPlan] = useState<PlanResponse | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [target, setTarget] = useState<BisonInstanceSlug | "">("");
+  const [connectionId, setConnectionId] = useState<string>("");
+
+  // Snapshot the selection on the open transition only (parent rebuilds the
+  // array every render — depending on it would re-run the dry-run mid-review).
+  useEffect(() => {
+    if (!open) {
+      setPlan(null);
+      setError(null);
+      setTarget("");
+      setConnectionId("");
+      setPhase("planning");
+      return;
+    }
+    if (selectedDomains.length === 0) return;
+    setPhase("planning");
+    fetch("/api/deliverability/move-domains", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ dryRun: true, domains: selectedDomains }),
+    })
+      .then(async (res) => {
+        const text = await res.text();
+        let data: PlanResponse & { error?: string };
+        try { data = JSON.parse(text); } catch { throw new Error(`non-JSON response (HTTP ${res.status})`); }
+        if (!res.ok || data.error) throw new Error(data.error || `HTTP ${res.status}`);
+        setPlan(data);
+        setPhase("review");
+      })
+      .catch((e) => {
+        setError(e instanceof Error ? e.message : "Failed");
+        setPhase("error");
+      });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open]);
+
+  // Auto-suggest the connection when a target instance is picked.
+  const pickTarget = (slug: BisonInstanceSlug | "") => {
+    setTarget(slug);
+    if (!slug || !plan) return;
+    const match = plan.connections.find(
+      (c) => c.verificationStatus === "verified" && connectionMatchesInstance(c.name, slug),
+    ) ?? plan.connections.find((c) => connectionMatchesInstance(c.name, slug));
+    setConnectionId(match?.id ?? "");
+  };
+
+  const movable = useMemo(() => (plan?.plan || []).filter((p) => p.action === "move"), [plan]);
+  // Domains already sitting only on the chosen target are pointless to move.
+  const movableForTarget = useMemo(
+    () => movable.filter((p) => !(target && p.sourceInstances?.length === 1 && p.sourceInstances[0] === target)),
+    [movable, target],
+  );
+  const selectedConnection = plan?.connections.find((c) => c.id === connectionId) ?? null;
+  const canStart = Boolean(target && connectionId && movableForTarget.length > 0);
+
+  const start = () => {
+    if (!canStart || !target || !selectedConnection) return;
+    onStart({
+      domains: movableForTarget.map((p) => p.domain),
+      targetInstance: target,
+      platformConnectionId: selectedConnection.id,
+      connectionName: selectedConnection.name,
+    });
+    onOpenChange(false);
+  };
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="sm:!max-w-2xl max-h-[85vh] flex flex-col">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">
+            <ArrowRightLeft className="h-4 w-4" />
+            Move to Instance
+          </DialogTitle>
+          <DialogDescription>
+            Moves Inboxing domains&apos; inboxes to another Bison instance: tags sync to
+            Inboxing → Inboxing uploads the mailboxes to the target → senders are
+            removed from the source only after they arrive. Progress shows in the
+            panel at the top of the page.
+          </DialogDescription>
+        </DialogHeader>
+
+        {phase === "planning" && (
+          <div className="flex flex-col items-center justify-center py-12 gap-3">
+            <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
+            <span className="text-sm text-muted-foreground">
+              Checking {selectedDomains.length} domain{selectedDomains.length !== 1 ? "s" : ""} + platform connections…
+            </span>
+          </div>
+        )}
+
+        {phase === "review" && plan && (
+          <div className="flex flex-col gap-3 flex-1 overflow-hidden">
+            <div className="flex flex-wrap gap-2">
+              <Badge variant="outline" className="text-xs">{movableForTarget.length} movable</Badge>
+              {plan.counts.skipped > 0 && (
+                <Badge variant="outline" className="text-xs text-amber-500 border-amber-500/40">
+                  {plan.counts.skipped} will skip
+                </Badge>
+              )}
+            </div>
+
+            {plan.connectionsError && (
+              <div className="flex items-start gap-2 rounded-md border border-red-500/30 bg-red-950/20 px-3 py-2 text-xs text-red-300">
+                <XCircle className="h-3.5 w-3.5 mt-0.5 shrink-0" />
+                Couldn&apos;t load Inboxing platform connections: {plan.connectionsError}
+              </div>
+            )}
+
+            {/* Target instance + connection pickers */}
+            <div className="grid grid-cols-2 gap-3">
+              <div className="space-y-1.5">
+                <label className="text-xs font-medium">Target Bison instance</label>
+                <select
+                  value={target}
+                  onChange={(e) => pickTarget(e.target.value as BisonInstanceSlug | "")}
+                  className="w-full text-xs rounded-lg border bg-background px-2 py-2 outline-none"
+                >
+                  <option value="">Select instance…</option>
+                  {ALL_INSTANCE_SLUGS.map((s) => (
+                    <option key={s} value={s}>{INSTANCE_SHORT_LABELS[s]} — {BISON_INSTANCES[s].label}</option>
+                  ))}
+                </select>
+              </div>
+              <div className="space-y-1.5">
+                <label className="text-xs font-medium">Inboxing connection (auto-matched)</label>
+                <select
+                  value={connectionId}
+                  onChange={(e) => setConnectionId(e.target.value)}
+                  className="w-full text-xs rounded-lg border bg-background px-2 py-2 outline-none"
+                >
+                  <option value="">Select connection…</option>
+                  {plan.connections.map((c) => (
+                    <option key={c.id} value={c.id} disabled={c.verificationStatus !== "verified" && c.verificationStatus !== ""}>
+                      {c.name}{c.verificationStatus && c.verificationStatus !== "verified" ? ` (${c.verificationStatus})` : ""}
+                    </option>
+                  ))}
+                </select>
+                {target && !connectionId && plan.connections.length > 0 && (
+                  <p className="text-[11px] text-amber-400">No connection auto-matched — pick the one wired to {INSTANCE_SHORT_LABELS[target]}.</p>
+                )}
+                {selectedConnection?.verificationError && (
+                  <p className="text-[11px] text-red-400">{selectedConnection.verificationError}</p>
+                )}
+              </div>
+            </div>
+
+            {/* Per-domain preview */}
+            <div className="flex-1 overflow-y-auto rounded-md border min-h-[140px]">
+              <table className="w-full text-xs">
+                <thead className="text-left bg-muted/50 sticky top-0">
+                  <tr>
+                    <th className="px-2 py-1.5 font-medium">Domain</th>
+                    <th className="px-2 py-1.5 font-medium">From</th>
+                    <th className="px-2 py-1.5 font-medium">Plan</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y">
+                  {(plan.plan || []).map((r) => {
+                    const pointless = r.action === "move" && target && r.sourceInstances?.length === 1 && r.sourceInstances[0] === target;
+                    return (
+                      <tr key={r.domain} className={r.action === "skip" || pointless ? "bg-amber-950/10" : ""}>
+                        <td className="px-2 py-1 truncate max-w-[220px]">{r.domain}</td>
+                        <td className="px-2 py-1 text-muted-foreground">
+                          {(r.sourceInstances || []).map((s) => INSTANCE_SHORT_LABELS[s] ?? s).join(", ") || "—"}
+                        </td>
+                        <td className="px-2 py-1">
+                          {r.action === "skip" ? (
+                            <span className="text-amber-400 inline-flex items-center gap-1">
+                              <AlertTriangle className="h-3 w-3" />
+                              Skip — {r.skipReason}
+                            </span>
+                          ) : pointless ? (
+                            <span className="text-amber-400 inline-flex items-center gap-1">
+                              <AlertTriangle className="h-3 w-3" />
+                              Skip — already on target
+                            </span>
+                          ) : (
+                            <span className="text-muted-foreground">
+                              move {r.inboxCount ?? "?"} inboxes{target ? ` → ${INSTANCE_SHORT_LABELS[target]}` : ""}
+                            </span>
+                          )}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
+
+        {phase === "error" && (
+          <div className="flex items-start gap-3 rounded-md border border-red-500/30 bg-red-950/20 px-3 py-2">
+            <XCircle className="h-4 w-4 text-red-500 mt-0.5 shrink-0" />
+            <div className="text-sm text-red-200">{error}</div>
+          </div>
+        )}
+
+        <DialogFooter>
+          {phase === "review" && (
+            <>
+              <Button variant="ghost" onClick={() => onOpenChange(false)}>Cancel</Button>
+              <Button
+                onClick={start}
+                disabled={!canStart}
+                title={!target ? "Pick a target instance" : !connectionId ? "Pick the Inboxing connection" : movableForTarget.length === 0 ? "Nothing movable" : undefined}
+              >
+                Move {movableForTarget.length} domain{movableForTarget.length !== 1 ? "s" : ""}
+              </Button>
+            </>
+          )}
+          {phase === "error" && <Button onClick={() => onOpenChange(false)}>Close</Button>}
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
