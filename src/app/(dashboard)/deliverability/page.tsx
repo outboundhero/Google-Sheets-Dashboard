@@ -625,6 +625,7 @@ function DeliverabilityPageInner() {
   // Live progress for the move-to-instance workflow — rendered in the panel
   // at the top of the page (per-domain outcomes, never-stuck error surfacing).
   interface MoveProgressState {
+    id: number;
     targetLabel: string;
     connectionName: string;
     done: number;
@@ -633,6 +634,7 @@ function DeliverabilityPageInner() {
     failures: { domain: string; stage?: string; error: string }[];
     uploading: string[];
     running: boolean;
+    queued: boolean;
   }
   const [moveProgress, setMoveProgress] = useState<MoveProgressState | null>(null);
   const [clientTags, setClientTags] = useState<Set<string>>(new Set());
@@ -645,19 +647,44 @@ function DeliverabilityPageInner() {
   const [showAttachCampaigns, setShowAttachCampaigns] = useState(false);
   const [showRemoveFromCampaigns, setShowRemoveFromCampaigns] = useState(false);
 
-  // Background attach state
+  // Background attach state.
+  //
+  // Progress panels are LISTS of independent runs, not single slots: starting
+  // a new attach used to REPLACE the previous panel mid-flight (and corrupt
+  // the running loop via shared refs). Now every run gets its own id + panel
+  // stacked under existing ones, updated only by its own loop, and removed
+  // only by its own Dismiss button — never automatically.
   interface SkippedInbox { email: string; domain: string; reason: string; retryable?: boolean }
   interface AttachJob { campaign: string; status: "pending" | "running" | "done" | "error"; newly: number; existing: number; failed?: number; rateLimited?: number; failedInboxes?: SkippedInbox[]; error?: string }
-  const [attachJobs, setAttachJobs] = useState<AttachJob[]>([]);
-  const [attachRunning, setAttachRunning] = useState(false);
-  const attachDomainsRef = useRef<string[]>([]);
-  // Hold the campaigns from the last attach run so "Retry skipped" can re-run
-  // just the ones that had retryable (rate-limit / transient) skips.
-  const attachCampaignsRef = useRef<{ id: number; name: string; instance: BisonInstanceSlug }[]>([]);
-  const [showSkippedAttach, setShowSkippedAttach] = useState<number | null>(null);
+  interface AttachRun {
+    id: number;
+    domains: string[];
+    campaigns: { id: number; name: string; instance: BisonInstanceSlug }[];
+    jobs: AttachJob[];
+    running: boolean;
+    queued: boolean;
+  }
+  const [attachRuns, setAttachRuns] = useState<AttachRun[]>([]);
+  const runIdRef = useRef(1); // shared id sequence for every stacked-panel kind
+  const [showSkippedAttach, setShowSkippedAttach] = useState<string | null>(null); // "runId:jobIndex"
 
-  // Background tag + campaign combo state
-  interface TagCampaignJob {
+  // One-at-a-time execution for Bison-heavy background runs (attach / tag /
+  // move). Running several at once stacks onto Bison's per-minute rate limits
+  // and everything slows down or fails — so new runs render immediately as
+  // "Queued" and start only when the previous run finishes. Dismissing a
+  // queued run cancels it before it ever hits the API.
+  const bisonRunQueueRef = useRef<Promise<unknown>>(Promise.resolve());
+  const dismissedRunsRef = useRef<Set<number>>(new Set());
+  const enqueueBisonRun = useCallback(<T,>(fn: () => Promise<T>): Promise<T> => {
+    const run = bisonRunQueueRef.current.then(fn, fn);
+    bisonRunQueueRef.current = run.then(() => undefined, () => undefined);
+    return run;
+  }, []);
+
+  // Background tag + campaign combo state — same stacked-run model.
+  interface TagCampaignRun {
+    id: number;
+    info: TagApplyInfo;
     tagStatus: "running" | "done" | "error";
     tagLabel: string;
     tagAffected?: number;
@@ -672,24 +699,23 @@ function DeliverabilityPageInner() {
     sheetAdded?: number;
     sheetDuplicates?: number;
     sheetError?: string;
+    retry: { attempt: number; total: number; countdown: number } | null;
+    queued: boolean;
   }
-  const [tagCampaignJob, setTagCampaignJob] = useState<TagCampaignJob | null>(null);
-  // Retry orchestration for the tag/campaign/sheet card. lastTagInfoRef holds
-  // the args to re-run; the token cancels a pending auto-retry countdown when a
-  // new run starts (manual "Retry now" or Dismiss).
-  const lastTagInfoRef = useRef<TagApplyInfo | null>(null);
-  const tagRetryTokenRef = useRef(0);
-  const [tagRetry, setTagRetry] = useState<{ attempt: number; total: number; countdown: number } | null>(null);
-  const [domainsCopied, setDomainsCopied] = useState(false);
-  const [showSkippedList, setShowSkippedList] = useState(false);
-  const [skippedCopied, setSkippedCopied] = useState(false);
+  const [tagCampaignRuns, setTagCampaignRuns] = useState<TagCampaignRun[]>([]);
+  // Per-run retry token: cancels a pending auto-retry countdown for THAT run
+  // when the user hits "Retry now" or Dismiss on it.
+  const tagRetryTokensRef = useRef<Map<number, number>>(new Map());
+  const [domainsCopied, setDomainsCopied] = useState<number | null>(null);      // runId
+  const [showSkippedList, setShowSkippedList] = useState<number | null>(null);  // runId
+  const [skippedCopied, setSkippedCopied] = useState<number | null>(null);      // runId
   const [showExportMenu, setShowExportMenu] = useState(false);
   const [exportCopied, setExportCopied] = useState(false);
   const [showSendToSheet, setShowSendToSheet] = useState(false);
 
-  // Standalone sheet append state
-  interface SheetAppendJob { status: "running" | "done" | "error"; label: string; added?: number; duplicates?: number; error?: string; whitelist?: string }
-  const [sheetAppendJob, setSheetAppendJob] = useState<SheetAppendJob | null>(null);
+  // Standalone sheet append (Whitelist button) — stacked runs too.
+  interface SheetAppendJob { id: number; status: "running" | "done" | "error"; label: string; added?: number; duplicates?: number; error?: string; whitelist?: string }
+  const [sheetAppendJobs, setSheetAppendJobs] = useState<SheetAppendJob[]>([]);
 
   // Bulk limit update state
   const [limitDialog, setLimitDialog] = useState<{ type: "daily" | "warmup"; domains: string[] } | null>(null);
@@ -718,14 +744,25 @@ function DeliverabilityPageInner() {
   const dragSelectMode = useRef<boolean>(true); // true = selecting, false = deselecting
 
 
+  // Patch one attach run by id (no-op if the run was dismissed).
+  const patchAttachRun = useCallback((runId: number, patch: (run: AttachRun) => AttachRun) => {
+    setAttachRuns((prev) => prev.map((r) => (r.id === runId ? patch(r) : r)));
+  }, []);
+
   // Run the attach for one campaign (with 3x whole-request retry on hard
-  // failure) and write the result — including per-inbox skip reasons — into the
-  // job at jobIndex. Shared by the initial run and "Retry skipped".
+  // failure) and write the result — including per-inbox skip reasons — into
+  // its run's job at jobIndex. Shared by the initial run and "Retry skipped".
+  // Domains are passed explicitly (per-run closure), never via a shared ref —
+  // a second concurrent run must not change what the first is attaching.
   const runAttachForCampaign = useCallback(async (
+    runId: number,
     campaign: { id: number; name: string; instance: BisonInstanceSlug },
     jobIndex: number,
+    domains: string[],
   ) => {
-    setAttachJobs((prev) => prev.map((j, idx) => idx === jobIndex ? { ...j, status: "running" } : j));
+    const patchJob = (patch: Partial<AttachJob>) =>
+      patchAttachRun(runId, (r) => ({ ...r, jobs: r.jobs.map((j, idx) => (idx === jobIndex ? { ...j, ...patch } : j)) }));
+    patchJob({ status: "running" });
     let success = false;
     let lastError = "";
     for (let attempt = 1; attempt <= 3; attempt++) {
@@ -733,18 +770,18 @@ function DeliverabilityPageInner() {
         const res = await fetch(`/api/deliverability/attach-domains-to-campaign?instance=${campaign.instance}`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ campaign_id: campaign.id, domains: attachDomainsRef.current }),
+          body: JSON.stringify({ campaign_id: campaign.id, domains }),
         });
         const data = await res.json();
         if (res.ok) {
-          setAttachJobs((prev) => prev.map((j, idx) => idx === jobIndex ? {
-            ...j, status: "done",
+          patchJob({
+            status: "done",
             newly: data.newly_attached || 0,
             existing: data.already_attached || 0,
             failed: data.failed || 0,
             rateLimited: data.rateLimited || 0,
             failedInboxes: data.failedInboxes || [],
-          } : j));
+          });
           success = true;
           break;
         }
@@ -754,38 +791,55 @@ function DeliverabilityPageInner() {
       }
       if (attempt < 3) await new Promise((r) => setTimeout(r, 3000));
     }
-    if (!success) {
-      setAttachJobs((prev) => prev.map((j, idx) => idx === jobIndex ? { ...j, status: "error", error: lastError } : j));
-    }
-  }, []);
+    if (!success) patchJob({ status: "error", error: lastError });
+  }, [patchAttachRun]);
 
   const startBackgroundAttach = useCallback(async (campaigns: { id: number; name: string; instance: BisonInstanceSlug }[], domains: string[]) => {
-    attachDomainsRef.current = domains;
-    attachCampaignsRef.current = campaigns;
-    const jobs: AttachJob[] = campaigns.map((c) => ({ campaign: c.name, status: "pending" as const, newly: 0, existing: 0 }));
-    setAttachJobs(jobs);
-    setAttachRunning(true);
+    const runId = runIdRef.current++;
+    const run: AttachRun = {
+      id: runId,
+      domains,
+      campaigns,
+      jobs: campaigns.map((c) => ({ campaign: c.name, status: "pending" as const, newly: 0, existing: 0 })),
+      running: false,
+      queued: true,
+    };
+    // Append below any existing panels — never replaces a previous run.
+    setAttachRuns((prev) => [...prev, run]);
     setSelectedDomains(new Set());
 
-    for (let i = 0; i < campaigns.length; i++) {
-      await runAttachForCampaign(campaigns[i], i);
-    }
-    setAttachRunning(false);
-  }, [runAttachForCampaign]);
+    await enqueueBisonRun(async () => {
+      if (dismissedRunsRef.current.has(runId)) return; // dismissed while queued
+      patchAttachRun(runId, (r) => ({ ...r, queued: false, running: true }));
+      try {
+        for (let i = 0; i < campaigns.length; i++) {
+          if (dismissedRunsRef.current.has(runId)) return;
+          await runAttachForCampaign(runId, campaigns[i], i, domains);
+        }
+      } finally {
+        patchAttachRun(runId, (r) => ({ ...r, running: false }));
+      }
+    });
+  }, [runAttachForCampaign, patchAttachRun, enqueueBisonRun]);
 
-  // Re-run attach for just the campaigns that had retryable (rate-limit /
-  // transient) skips. Already-attached inboxes are filtered server-side, so this
-  // only re-attempts the ones that didn't make it. Plain fn so it always reads
-  // the latest job results (clicked only after a run completes).
-  const retrySkippedAttach = async () => {
-    const campaigns = attachCampaignsRef.current;
-    const jobs = attachJobs;
+  // Re-run attach for just the campaigns in ONE run that had retryable
+  // (rate-limit / transient) skips. Already-attached inboxes are filtered
+  // server-side, so this only re-attempts the ones that didn't make it.
+  const retrySkippedAttach = async (run: AttachRun) => {
     setShowSkippedAttach(null);
-    setAttachRunning(true);
-    for (let i = 0; i < campaigns.length; i++) {
-      if ((jobs[i]?.rateLimited ?? 0) > 0) await runAttachForCampaign(campaigns[i], i);
-    }
-    setAttachRunning(false);
+    patchAttachRun(run.id, (r) => ({ ...r, queued: true }));
+    await enqueueBisonRun(async () => {
+      if (dismissedRunsRef.current.has(run.id)) return;
+      patchAttachRun(run.id, (r) => ({ ...r, queued: false, running: true }));
+      try {
+        for (let i = 0; i < run.campaigns.length; i++) {
+          if (dismissedRunsRef.current.has(run.id)) return;
+          if ((run.jobs[i]?.rateLimited ?? 0) > 0) await runAttachForCampaign(run.id, run.campaigns[i], i, run.domains);
+        }
+      } finally {
+        patchAttachRun(run.id, (r) => ({ ...r, running: false }));
+      }
+    });
   };
 
   useEffect(() => {
@@ -877,17 +931,22 @@ function DeliverabilityPageInner() {
   // Re-runnable core of the tag + campaign + sheet operation. Returns true only
   // if every step succeeded. Partial skips (e.g. disconnected inboxes reported
   // as tagFailed) are NOT failures and don't trigger a retry.
-  const runTagCampaignOnce = useCallback(async (info: TagApplyInfo): Promise<boolean> => {
+  const runTagCampaignOnce = useCallback(async (info: TagApplyInfo, runId: number): Promise<boolean> => {
     const tagLabel = `${info.mode === "add" ? "Adding" : "Removing"} ${info.tagNames.join(", ")}`;
     const campaignJobs: AttachJob[] = info.campaigns.map((c) => ({ campaign: c.name, status: "pending" as const, newly: 0, existing: 0 }));
-    setTagCampaignJob({
+    // Patch THIS run only — dismissed runs no-op, concurrent runs untouched.
+    const patchRun = (patch: (r: TagCampaignRun) => TagCampaignRun) =>
+      setTagCampaignRuns((prev) => prev.map((r) => (r.id === runId ? patch(r) : r)));
+    // Reset the run's panel content for this attempt (fresh run or retry).
+    patchRun((r) => ({
+      ...r,
       tagStatus: "running", tagLabel, campaignJobs, campaignsDone: info.campaigns.length === 0, domains: info.domains,
+      tagAffected: undefined, tagFailed: undefined, tagFailedInboxes: undefined, tagError: undefined,
       sheetStatus: info.sheetAppend ? "running" : "skipped",
       sheetLabel: info.sheetAppend ? `Sending to ${info.sheetAppend.clientTag} sheet...` : undefined,
-    });
+      sheetAdded: undefined, sheetDuplicates: undefined, sheetError: undefined,
+    }));
     setSelectedDomains(new Set());
-    setDomainsCopied(false);
-    setShowSkippedList(false);
 
     let tagOk = true;
     let campaignsOk = true;
@@ -901,19 +960,19 @@ function DeliverabilityPageInner() {
     }).then(async (res) => {
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Failed");
-      setTagCampaignJob((prev) => prev ? { ...prev, tagStatus: "done", tagAffected: data.inboxesAffected || 0, tagFailed: data.failed || 0, tagFailedInboxes: data.failedInboxes || [] } : prev);
+      patchRun((r) => ({ ...r, tagStatus: "done", tagAffected: data.inboxesAffected || 0, tagFailed: data.failed || 0, tagFailedInboxes: data.failedInboxes || [] }));
     }).catch((err) => {
       tagOk = false;
-      setTagCampaignJob((prev) => prev ? { ...prev, tagStatus: "error", tagError: err instanceof Error ? err.message : "Failed" } : prev);
+      patchRun((r) => ({ ...r, tagStatus: "error", tagError: err instanceof Error ? err.message : "Failed" }));
     });
 
     const campaignPromise = (async () => {
       for (let i = 0; i < info.campaigns.length; i++) {
         const campaign = info.campaigns[i];
-        setTagCampaignJob((prev) => prev ? {
-          ...prev,
-          campaignJobs: prev.campaignJobs.map((j, idx) => idx === i ? { ...j, status: "running" } : j),
-        } : prev);
+        patchRun((r) => ({
+          ...r,
+          campaignJobs: r.campaignJobs.map((j, idx) => idx === i ? { ...j, status: "running" } : j),
+        }));
 
         try {
           const res = await fetch(`/api/deliverability/attach-domains-to-campaign?instance=${campaign.instance}`, {
@@ -923,19 +982,19 @@ function DeliverabilityPageInner() {
           });
           const data = await res.json();
           if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
-          setTagCampaignJob((prev) => prev ? {
-            ...prev,
-            campaignJobs: prev.campaignJobs.map((j, idx) => idx === i ? { ...j, status: "done", newly: data.newly_attached || 0, existing: data.already_attached || 0, failed: data.failed || 0 } : j),
-          } : prev);
+          patchRun((r) => ({
+            ...r,
+            campaignJobs: r.campaignJobs.map((j, idx) => idx === i ? { ...j, status: "done", newly: data.newly_attached || 0, existing: data.already_attached || 0, failed: data.failed || 0 } : j),
+          }));
         } catch (err) {
           campaignsOk = false;
-          setTagCampaignJob((prev) => prev ? {
-            ...prev,
-            campaignJobs: prev.campaignJobs.map((j, idx) => idx === i ? { ...j, status: "error", error: err instanceof Error ? err.message : "Failed" } : j),
-          } : prev);
+          patchRun((r) => ({
+            ...r,
+            campaignJobs: r.campaignJobs.map((j, idx) => idx === i ? { ...j, status: "error", error: err instanceof Error ? err.message : "Failed" } : j),
+          }));
         }
       }
-      setTagCampaignJob((prev) => prev ? { ...prev, campaignsDone: true } : prev);
+      patchRun((r) => ({ ...r, campaignsDone: true }));
     })();
 
     const sheetPromise = (async () => {
@@ -960,18 +1019,18 @@ function DeliverabilityPageInner() {
           const qData = await qRes.json();
           if (qRes.ok && qData.queued > 0) queuedLabel = ` · ${qData.queued} queued for whitelist email`;
         } catch {/* ignore queue errors */}
-        setTagCampaignJob((prev) => prev ? {
-          ...prev, sheetStatus: "done",
+        patchRun((r) => ({
+          ...r, sheetStatus: "done",
           sheetLabel: `Added to "${data.sheetName}" Domains tab${queuedLabel}`,
           sheetAdded: data.added, sheetDuplicates: data.duplicates,
-        } : prev);
+        }));
       } catch (err) {
         sheetOk = false;
-        setTagCampaignJob((prev) => prev ? {
-          ...prev, sheetStatus: "error",
+        patchRun((r) => ({
+          ...r, sheetStatus: "error",
           sheetLabel: "Sheet append failed",
           sheetError: err instanceof Error ? err.message : "Failed",
-        } : prev);
+        }));
       }
     })();
 
@@ -981,34 +1040,73 @@ function DeliverabilityPageInner() {
     return tagOk && campaignsOk && sheetOk;
   }, [loadDomains, loadTags]);
 
-  // After a failed run, auto-retry up to 3 times, 30s apart. The token guards
-  // against a superseding run (manual "Retry now" / Dismiss bumps it): a stale
-  // countdown or scheduling no-ops once the token changes.
-  const scheduleTagAutoRetry = useCallback(async (info: TagApplyInfo, attempt: number, token: number) => {
+  // After a failed run, auto-retry up to 3 times, 30s apart. Tokens are
+  // per-run: "Retry now" / Dismiss on a run bumps ITS token, so a stale
+  // countdown or scheduling no-ops without touching other stacked runs.
+  const scheduleTagAutoRetry = useCallback(async (info: TagApplyInfo, attempt: number, token: number, runId: number) => {
+    const patchRetry = (retry: TagCampaignRun["retry"]) =>
+      setTagCampaignRuns((prev) => prev.map((r) => (r.id === runId ? { ...r, retry } : r)));
     for (let s = 30; s > 0; s--) {
-      if (token !== tagRetryTokenRef.current) return;
-      setTagRetry({ attempt, total: 3, countdown: s });
+      if (token !== tagRetryTokensRef.current.get(runId)) return;
+      patchRetry({ attempt, total: 3, countdown: s });
       await new Promise((r) => setTimeout(r, 1000));
     }
-    if (token !== tagRetryTokenRef.current) return;
-    setTagRetry({ attempt, total: 3, countdown: 0 });
-    const ok = await runTagCampaignOnce(info);
-    if (token !== tagRetryTokenRef.current) return;
-    setTagRetry(null);
-    if (!ok && attempt < 3) scheduleTagAutoRetry(info, attempt + 1, token);
-  }, [runTagCampaignOnce]);
+    if (token !== tagRetryTokensRef.current.get(runId)) return;
+    patchRetry({ attempt, total: 3, countdown: 0 });
+    // Through the shared queue — a retry must not run alongside another
+    // Bison-heavy process either.
+    const ok = await enqueueBisonRun(() => runTagCampaignOnce(info, runId));
+    if (token !== tagRetryTokensRef.current.get(runId)) return;
+    patchRetry(null);
+    if (!ok && attempt < 3) scheduleTagAutoRetry(info, attempt + 1, token, runId);
+  }, [runTagCampaignOnce, enqueueBisonRun]);
+
+  // Re-run one stacked run in place (manual "Retry" on its panel).
+  const retryTagCampaignRun = useCallback(async (runId: number, info: TagApplyInfo) => {
+    const token = (tagRetryTokensRef.current.get(runId) ?? 0) + 1;
+    tagRetryTokensRef.current.set(runId, token);
+    setTagCampaignRuns((prev) => prev.map((r) => (r.id === runId ? { ...r, retry: null, queued: true } : r)));
+    const ok = await enqueueBisonRun(async () => {
+      if (dismissedRunsRef.current.has(runId)) return true;
+      setTagCampaignRuns((prev) => prev.map((r) => (r.id === runId ? { ...r, queued: false } : r)));
+      return runTagCampaignOnce(info, runId);
+    });
+    if (token !== tagRetryTokensRef.current.get(runId)) return;
+    if (!ok) scheduleTagAutoRetry(info, 1, token, runId);
+  }, [runTagCampaignOnce, scheduleTagAutoRetry, enqueueBisonRun]);
 
   const startBackgroundTagCampaign = useCallback(async (info: TagApplyInfo) => {
-    const token = ++tagRetryTokenRef.current; // cancels any pending auto-retry
-    lastTagInfoRef.current = info;
-    setTagRetry(null);
-    const ok = await runTagCampaignOnce(info);
-    if (token !== tagRetryTokenRef.current) return;
-    if (!ok) scheduleTagAutoRetry(info, 1, token);
-  }, [runTagCampaignOnce, scheduleTagAutoRetry]);
+    const runId = runIdRef.current++;
+    const token = 1;
+    tagRetryTokensRef.current.set(runId, token);
+    // Append a new panel below any existing ones — never replaces a prior
+    // run. Starts as "Queued" and executes when the shared queue frees up.
+    setTagCampaignRuns((prev) => [...prev, {
+      id: runId,
+      info,
+      tagStatus: "running",
+      tagLabel: `${info.mode === "add" ? "Adding" : "Removing"} ${info.tagNames.join(", ")}`,
+      campaignJobs: [],
+      campaignsDone: info.campaigns.length === 0,
+      domains: info.domains,
+      retry: null,
+      queued: true,
+    }]);
+    const ok = await enqueueBisonRun(async () => {
+      if (dismissedRunsRef.current.has(runId)) return true; // dismissed while queued
+      setTagCampaignRuns((prev) => prev.map((r) => (r.id === runId ? { ...r, queued: false } : r)));
+      return runTagCampaignOnce(info, runId);
+    });
+    if (token !== tagRetryTokensRef.current.get(runId)) return;
+    if (!ok) scheduleTagAutoRetry(info, 1, token, runId);
+  }, [runTagCampaignOnce, scheduleTagAutoRetry, enqueueBisonRun]);
 
   const startBackgroundSheetAppend = useCallback(async (doms: string[], clientTag: string) => {
-    setSheetAppendJob({ status: "running", label: `Whitelisting ${doms.length} domains for ${clientTag}...` });
+    const jobId = runIdRef.current++;
+    const patchJob = (patch: Partial<SheetAppendJob>) =>
+      setSheetAppendJobs((prev) => prev.map((j) => (j.id === jobId ? { ...j, ...patch } : j)));
+    // Stacked: appended below existing panels, dismissed only manually.
+    setSheetAppendJobs((prev) => [...prev, { id: jobId, status: "running", label: `Whitelisting ${doms.length} domains for ${clientTag}...` }]);
     setSelectedDomains(new Set());
     try {
       const res = await fetch("/api/deliverability/send-to-sheet", {
@@ -1041,13 +1139,13 @@ function DeliverabilityPageInner() {
       } catch (e) {
         whitelist = `Queue failed: ${e instanceof Error ? e.message : "error"}`;
       }
-      setSheetAppendJob({
+      patchJob({
         status: "done",
         label: `Added to "${data.sheetName}" Domains tab`,
         added: data.added, duplicates: data.duplicates, whitelist,
       });
     } catch (err) {
-      setSheetAppendJob({
+      patchJob({
         status: "error",
         label: "Whitelist failed",
         error: err instanceof Error ? err.message : "Failed",
@@ -1118,12 +1216,17 @@ function DeliverabilityPageInner() {
     const counts = { done: 0, uploading: 0, skipped: 0, failed: 0 };
     const failures: { domain: string; stage?: string; error: string }[] = [];
     const uploading: string[] = [];
+    const moveId = runIdRef.current++;
     const base = {
+      id: moveId,
       targetLabel: INSTANCE_SHORT_LABELS[job.targetInstance],
       connectionName: job.connectionName,
       total: job.domains.length,
     };
-    setMoveProgress({ ...base, done: 0, counts: { ...counts }, failures: [], uploading: [], running: true });
+    setMoveProgress({ ...base, done: 0, counts: { ...counts }, failures: [], uploading: [], running: false, queued: true });
+    await enqueueBisonRun(async () => {
+    if (dismissedRunsRef.current.has(moveId)) return; // cancelled while queued
+    setMoveProgress((prev) => (prev ? { ...prev, queued: false, running: true } : prev));
     try {
       for (let i = 0; i < job.domains.length; i += BATCH) {
         const batch = job.domains.slice(i, i + BATCH);
@@ -1166,6 +1269,7 @@ function DeliverabilityPageInner() {
           failures: [...failures],
           uploading: [...uploading],
           running: true,
+          queued: false,
         });
       }
     } finally {
@@ -1174,6 +1278,7 @@ function DeliverabilityPageInner() {
       setSelectedDomains(new Set());
       await Promise.all([loadDomains(), mutateDomainInstances()]);
     }
+    });
   };
 
   const handleSync = async (slugs: BisonInstanceSlug[] = [...ALL_INSTANCE_SLUGS]) => {
@@ -2041,16 +2146,27 @@ function DeliverabilityPageInner() {
         <div className="rounded-lg border bg-muted/30 px-4 py-3 space-y-2">
           <div className="flex items-center justify-between text-xs">
             <span className="flex items-center gap-2">
-              {moveProgress.running
+              {moveProgress.queued
+                ? <Clock className="h-3.5 w-3.5 text-amber-500" />
+                : moveProgress.running
                 ? <Loader2 className="h-3.5 w-3.5 animate-spin text-primary" />
                 : <CheckCircle2 className="h-3.5 w-3.5 text-emerald-500" />}
               <span className="font-medium">
-                {moveProgress.running ? "Moving" : "Move finished —"} {moveProgress.done}/{moveProgress.total} domains → {moveProgress.targetLabel}
+                {moveProgress.queued
+                  ? `Queued — waiting for the previous process… (${moveProgress.total} domains → ${moveProgress.targetLabel})`
+                  : `${moveProgress.running ? "Moving" : "Move finished —"} ${moveProgress.done}/${moveProgress.total} domains → ${moveProgress.targetLabel}`}
               </span>
               <span className="text-muted-foreground">via Inboxing “{moveProgress.connectionName}”</span>
             </span>
             {!moveProgress.running && (
-              <button onClick={() => setMoveProgress(null)} className="shrink-0 opacity-60 hover:opacity-100" title="Dismiss">✕</button>
+              <button
+                onClick={() => {
+                  dismissedRunsRef.current.add(moveProgress.id); // cancels if still queued
+                  setMoveProgress(null);
+                }}
+                className="shrink-0 opacity-60 hover:opacity-100"
+                title={moveProgress.queued ? "Cancel" : "Dismiss"}
+              >✕</button>
             )}
           </div>
           <div className="h-1.5 rounded-full bg-muted overflow-hidden">
@@ -2194,38 +2310,48 @@ function DeliverabilityPageInner() {
       )}
 
       {/* Background Attach Progress */}
-      {attachJobs.length > 0 && (() => {
-        const totalRetryable = attachJobs.reduce((s, j) => s + (j.rateLimited ?? 0), 0);
+      {/* Attach-to-campaigns runs — one stacked panel per run, newest at the
+          bottom, each dismissed only manually and never replaced by a new run */}
+      {attachRuns.map((run) => {
+        const totalRetryable = run.jobs.reduce((s, j) => s + (j.rateLimited ?? 0), 0);
         return (
-        <div className="rounded-lg border bg-muted/30 px-4 py-3">
+        <div key={run.id} className="rounded-lg border bg-muted/30 px-4 py-3">
           <div className="flex items-center justify-between mb-2">
             <div className="flex items-center gap-2 text-sm">
-              {attachRunning && <Loader2 className="h-3.5 w-3.5 animate-spin text-primary" />}
+              {run.queued ? <Clock className="h-3.5 w-3.5 text-amber-500" />
+                : run.running ? <Loader2 className="h-3.5 w-3.5 animate-spin text-primary" /> : null}
               <span className="font-medium">
-                {attachRunning ? "Attaching to campaigns..." : "Attachment complete"}
+                {run.queued ? "Queued — waiting for the previous process…"
+                  : run.running ? "Attaching to campaigns..." : "Attachment complete"}
               </span>
               <span className="text-xs text-muted-foreground">
-                {attachJobs.filter((j) => j.status === "done").length}/{attachJobs.length} campaigns
+                {run.jobs.filter((j) => j.status === "done").length}/{run.jobs.length} campaigns · {run.domains.length} domains
               </span>
             </div>
             <div className="flex items-center gap-3">
-              {!attachRunning && totalRetryable > 0 && (
+              {!run.running && !run.queued && totalRetryable > 0 && (
                 <button
-                  onClick={retrySkippedAttach}
+                  onClick={() => retrySkippedAttach(run)}
                   className="flex items-center gap-1 text-xs text-primary hover:underline"
                 >
                   <RefreshCw className="h-3 w-3" /> Retry {totalRetryable} skipped (rate-limited)
                 </button>
               )}
-              {!attachRunning && (
-                <button onClick={() => setAttachJobs([])} className="text-xs text-muted-foreground hover:text-foreground">
-                  Dismiss
+              {!run.running && (
+                <button
+                  onClick={() => {
+                    dismissedRunsRef.current.add(run.id); // cancels it if still queued
+                    setAttachRuns((prev) => prev.filter((r) => r.id !== run.id));
+                  }}
+                  className="text-xs text-muted-foreground hover:text-foreground"
+                >
+                  {run.queued ? "Cancel" : "Dismiss"}
                 </button>
               )}
             </div>
           </div>
           <div className="space-y-1 max-h-60 overflow-y-auto">
-            {attachJobs.map((job, i) => (
+            {run.jobs.map((job, i) => (
               <div key={i}>
                 <div className="flex items-center gap-2 text-xs">
                   {job.status === "running" && <Loader2 className="h-3 w-3 animate-spin text-primary shrink-0" />}
@@ -2239,10 +2365,10 @@ function DeliverabilityPageInner() {
                       +{job.newly} · {job.existing} existing
                       {(job.failed ?? 0) > 0 && (
                         <button
-                          onClick={() => setShowSkippedAttach((v) => (v === i ? null : i))}
+                          onClick={() => setShowSkippedAttach((v) => (v === `${run.id}:${i}` ? null : `${run.id}:${i}`))}
                           className="text-amber-500 hover:underline"
                         >
-                          {" "}({job.failed} skipped{(job.rateLimited ?? 0) > 0 ? `, ${job.rateLimited} retryable` : ""} — {showSkippedAttach === i ? "hide" : "why?"})
+                          {" "}({job.failed} skipped{(job.rateLimited ?? 0) > 0 ? `, ${job.rateLimited} retryable` : ""} — {showSkippedAttach === `${run.id}:${i}` ? "hide" : "why?"})
                         </button>
                       )}
                     </span>
@@ -2252,7 +2378,7 @@ function DeliverabilityPageInner() {
                   )}
                 </div>
                 {/* Per-campaign skip reasons — explains WHY each inbox was skipped */}
-                {showSkippedAttach === i && (job.failedInboxes?.length ?? 0) > 0 && (
+                {showSkippedAttach === `${run.id}:${i}` && (job.failedInboxes?.length ?? 0) > 0 && (
                   <div className="mt-1 mb-2 ml-5 rounded-lg border border-amber-500/30 bg-amber-500/5 max-h-48 overflow-y-auto divide-y divide-amber-500/10">
                     {job.failedInboxes!.map((f, k) => (
                       <div key={`${f.email}-${k}`} className="px-3 py-1.5 flex items-center justify-between gap-2">
@@ -2267,52 +2393,62 @@ function DeliverabilityPageInner() {
           </div>
         </div>
         );
-      })()}
+      })}
 
-      {/* Background Tag + Campaign + Sheet Progress */}
-      {tagCampaignJob && (() => {
-        const sheetDone = !tagCampaignJob.sheetStatus || tagCampaignJob.sheetStatus === "done" || tagCampaignJob.sheetStatus === "error" || tagCampaignJob.sheetStatus === "skipped";
-        const allDone = tagCampaignJob.tagStatus !== "running" && tagCampaignJob.campaignsDone && sheetDone;
-        const hasError = tagCampaignJob.tagStatus === "error"
-          || tagCampaignJob.campaignJobs.some((j) => j.status === "error")
-          || tagCampaignJob.sheetStatus === "error";
-        const retryNow = () => { if (lastTagInfoRef.current) startBackgroundTagCampaign(lastTagInfoRef.current); };
-        const dismiss = () => { tagRetryTokenRef.current++; setTagRetry(null); setTagCampaignJob(null); };
+      {/* Background Tag + Campaign + Sheet runs — stacked, manual dismiss only */}
+      {tagCampaignRuns.map((run) => {
+        const sheetDone = !run.sheetStatus || run.sheetStatus === "done" || run.sheetStatus === "error" || run.sheetStatus === "skipped";
+        const allDone = run.tagStatus !== "running" && run.campaignsDone && sheetDone;
+        const hasError = run.tagStatus === "error"
+          || run.campaignJobs.some((j) => j.status === "error")
+          || run.sheetStatus === "error";
+        const retryNow = () => retryTagCampaignRun(run.id, run.info);
+        const dismiss = () => {
+          tagRetryTokensRef.current.set(run.id, (tagRetryTokensRef.current.get(run.id) ?? 0) + 1);
+          dismissedRunsRef.current.add(run.id); // cancels it if still queued
+          setTagCampaignRuns((prev) => prev.filter((r) => r.id !== run.id));
+        };
         return (
-        <div className="rounded-lg border bg-muted/30 px-4 py-3">
+        <div key={run.id} className="rounded-lg border bg-muted/30 px-4 py-3">
           <div className="flex items-center justify-between mb-2">
             <div className="flex items-center gap-2 text-sm">
-              {tagRetry ? <Loader2 className="h-3.5 w-3.5 animate-spin text-amber-500" />
+              {run.queued ? <Clock className="h-3.5 w-3.5 text-amber-500" />
+                : run.retry ? <Loader2 className="h-3.5 w-3.5 animate-spin text-amber-500" />
                 : !allDone ? <Loader2 className="h-3.5 w-3.5 animate-spin text-primary" />
                 : hasError ? <AlertTriangle className="h-3.5 w-3.5 text-destructive" />
                 : <CheckCircle2 className="h-3.5 w-3.5 text-emerald-500" />}
               <span className="font-medium">
-                {tagRetry
-                  ? (tagRetry.countdown > 0
-                      ? `Retrying in ${tagRetry.countdown}s (attempt ${tagRetry.attempt} of ${tagRetry.total})`
-                      : `Retrying… (attempt ${tagRetry.attempt} of ${tagRetry.total})`)
+                {run.queued ? "Queued — waiting for the previous process…"
+                  : run.retry
+                  ? (run.retry.countdown > 0
+                      ? `Retrying in ${run.retry.countdown}s (attempt ${run.retry.attempt} of ${run.retry.total})`
+                      : `Retrying… (attempt ${run.retry.attempt} of ${run.retry.total})`)
                   : !allDone ? "Processing..."
                   : hasError ? "Completed with errors"
                   : "Complete"}
               </span>
+              <span className="text-xs text-muted-foreground">{run.domains.length} domains</span>
             </div>
-            {(allDone || tagRetry) && (
+            {run.queued && (
+              <button onClick={dismiss} className="text-xs text-muted-foreground hover:text-foreground">Cancel</button>
+            )}
+            {!run.queued && (allDone || run.retry) && (
               <div className="flex items-center gap-3">
-                {tagRetry ? (
+                {run.retry ? (
                   <button onClick={retryNow} className="text-xs text-primary hover:underline">Retry now</button>
                 ) : hasError ? (
                   <button onClick={retryNow} className="text-xs font-medium text-primary hover:underline">Retry</button>
                 ) : null}
-                {allDone && !tagRetry && (
+                {allDone && !run.retry && (
                   <button
                     onClick={() => {
-                      navigator.clipboard.writeText(tagCampaignJob.domains.join("\n"));
-                      setDomainsCopied(true);
-                      setTimeout(() => setDomainsCopied(false), 2000);
+                      navigator.clipboard.writeText(run.domains.join("\n"));
+                      setDomainsCopied(run.id);
+                      setTimeout(() => setDomainsCopied(null), 2000);
                     }}
                     className="text-xs text-primary hover:underline"
                   >
-                    {domainsCopied ? "Copied!" : "Copy Domains"}
+                    {domainsCopied === run.id ? "Copied!" : "Copy Domains"}
                   </button>
                 )}
                 <button onClick={dismiss} className="text-xs text-muted-foreground hover:text-foreground">Dismiss</button>
@@ -2322,28 +2458,28 @@ function DeliverabilityPageInner() {
           <div className="space-y-1 max-h-40 overflow-y-auto">
             {/* Tag status line */}
             <div className="flex items-center gap-2 text-xs">
-              {tagCampaignJob.tagStatus === "running" && <Loader2 className="h-3 w-3 animate-spin text-primary shrink-0" />}
-              {tagCampaignJob.tagStatus === "done" && (tagCampaignJob.tagFailed ?? 0) > 0 && <AlertTriangle className="h-3 w-3 text-amber-500 shrink-0" />}
-              {tagCampaignJob.tagStatus === "done" && (tagCampaignJob.tagFailed ?? 0) === 0 && <CheckCircle2 className="h-3 w-3 text-emerald-500 shrink-0" />}
-              {tagCampaignJob.tagStatus === "error" && <AlertTriangle className="h-3 w-3 text-destructive shrink-0" />}
-              <span className="text-muted-foreground">{tagCampaignJob.tagLabel}</span>
-              {tagCampaignJob.tagStatus === "done" && (
+              {run.tagStatus === "running" && <Loader2 className="h-3 w-3 animate-spin text-primary shrink-0" />}
+              {run.tagStatus === "done" && (run.tagFailed ?? 0) > 0 && <AlertTriangle className="h-3 w-3 text-amber-500 shrink-0" />}
+              {run.tagStatus === "done" && (run.tagFailed ?? 0) === 0 && <CheckCircle2 className="h-3 w-3 text-emerald-500 shrink-0" />}
+              {run.tagStatus === "error" && <AlertTriangle className="h-3 w-3 text-destructive shrink-0" />}
+              <span className="text-muted-foreground">{run.tagLabel}</span>
+              {run.tagStatus === "done" && (
                 <span className="shrink-0 ml-auto text-emerald-500">
-                  {tagCampaignJob.tagAffected} inboxes
-                  {(tagCampaignJob.tagFailed ?? 0) > 0 && (
+                  {run.tagAffected} inboxes
+                  {(run.tagFailed ?? 0) > 0 && (
                     <button
-                      onClick={() => setShowSkippedList((v) => !v)}
+                      onClick={() => setShowSkippedList((v) => (v === run.id ? null : run.id))}
                       className="text-amber-500 hover:underline"
                     >
-                      {" "}({tagCampaignJob.tagFailed} skipped — {showSkippedList ? "hide" : "view"})
+                      {" "}({run.tagFailed} skipped — {showSkippedList === run.id ? "hide" : "view"})
                     </button>
                   )}
                 </span>
               )}
-              {tagCampaignJob.tagStatus === "error" && <span className="shrink-0 ml-auto text-destructive">{tagCampaignJob.tagError}</span>}
+              {run.tagStatus === "error" && <span className="shrink-0 ml-auto text-destructive">{run.tagError}</span>}
             </div>
             {/* Campaign lines */}
-            {tagCampaignJob.campaignJobs.map((job, i) => (
+            {run.campaignJobs.map((job, i) => (
               <div key={i} className="flex items-center gap-2 text-xs">
                 {job.status === "running" && <Loader2 className="h-3 w-3 animate-spin text-primary shrink-0" />}
                 {job.status === "done" && <CheckCircle2 className="h-3 w-3 text-emerald-500 shrink-0" />}
@@ -2355,47 +2491,47 @@ function DeliverabilityPageInner() {
               </div>
             ))}
             {/* Sheet append line */}
-            {tagCampaignJob.sheetStatus && tagCampaignJob.sheetStatus !== "skipped" && (
+            {run.sheetStatus && run.sheetStatus !== "skipped" && (
               <div className="flex items-center gap-2 text-xs">
-                {tagCampaignJob.sheetStatus === "running" && <Loader2 className="h-3 w-3 animate-spin text-primary shrink-0" />}
-                {tagCampaignJob.sheetStatus === "done" && <CheckCircle2 className="h-3 w-3 text-emerald-500 shrink-0" />}
-                {tagCampaignJob.sheetStatus === "error" && <AlertTriangle className="h-3 w-3 text-destructive shrink-0" />}
-                <span className="text-muted-foreground">{tagCampaignJob.sheetLabel}</span>
-                {tagCampaignJob.sheetStatus === "done" && (
+                {run.sheetStatus === "running" && <Loader2 className="h-3 w-3 animate-spin text-primary shrink-0" />}
+                {run.sheetStatus === "done" && <CheckCircle2 className="h-3 w-3 text-emerald-500 shrink-0" />}
+                {run.sheetStatus === "error" && <AlertTriangle className="h-3 w-3 text-destructive shrink-0" />}
+                <span className="text-muted-foreground">{run.sheetLabel}</span>
+                {run.sheetStatus === "done" && (
                   <span className="shrink-0 ml-auto text-emerald-500">
-                    +{tagCampaignJob.sheetAdded} added
-                    {(tagCampaignJob.sheetDuplicates ?? 0) > 0 && (
-                      <span className="text-amber-500"> ({tagCampaignJob.sheetDuplicates} duplicates)</span>
+                    +{run.sheetAdded} added
+                    {(run.sheetDuplicates ?? 0) > 0 && (
+                      <span className="text-amber-500"> ({run.sheetDuplicates} duplicates)</span>
                     )}
                   </span>
                 )}
-                {tagCampaignJob.sheetStatus === "error" && <span className="shrink-0 ml-auto text-destructive">{tagCampaignJob.sheetError}</span>}
+                {run.sheetStatus === "error" && <span className="shrink-0 ml-auto text-destructive">{run.sheetError}</span>}
               </div>
             )}
           </div>
 
           {/* Skipped inboxes detail — disconnected / no-longer-existing accounts */}
-          {showSkippedList && (tagCampaignJob.tagFailedInboxes?.length ?? 0) > 0 && (
+          {showSkippedList === run.id && (run.tagFailedInboxes?.length ?? 0) > 0 && (
             <div className="mt-2 rounded-lg border border-amber-500/30 bg-amber-500/5">
               <div className="flex items-center justify-between px-3 py-1.5 border-b border-amber-500/20">
                 <span className="text-[11px] font-medium text-amber-500">
-                  {tagCampaignJob.tagFailedInboxes!.length} inboxes skipped — likely disconnected or no longer in the email tool
+                  {run.tagFailedInboxes!.length} inboxes skipped — likely disconnected or no longer in the email tool
                 </span>
                 <button
                   onClick={() => {
                     navigator.clipboard.writeText(
-                      tagCampaignJob.tagFailedInboxes!.map((f) => f.email).join("\n")
+                      run.tagFailedInboxes!.map((f) => f.email).join("\n")
                     );
-                    setSkippedCopied(true);
-                    setTimeout(() => setSkippedCopied(false), 2000);
+                    setSkippedCopied(run.id);
+                    setTimeout(() => setSkippedCopied(null), 2000);
                   }}
                   className="text-[11px] text-primary hover:underline shrink-0 ml-2"
                 >
-                  {skippedCopied ? "Copied!" : "Copy emails"}
+                  {skippedCopied === run.id ? "Copied!" : "Copy emails"}
                 </button>
               </div>
               <div className="max-h-56 overflow-y-auto divide-y divide-amber-500/10">
-                {tagCampaignJob.tagFailedInboxes!.map((f, i) => (
+                {run.tagFailedInboxes!.map((f, i) => (
                   <div key={`${f.email}-${i}`} className="px-3 py-1.5">
                     <div className="text-[11px] font-mono text-foreground/80 truncate">{f.email}</div>
                     <div className="text-[10px] text-muted-foreground/70 truncate">{f.domain} · {f.reason}</div>
@@ -2406,38 +2542,38 @@ function DeliverabilityPageInner() {
           )}
         </div>
         );
-      })()}
+      })}
 
-      {/* Standalone Sheet Append Progress */}
-      {sheetAppendJob && (
-        <div className="rounded-lg border bg-muted/30 px-4 py-3">
+      {/* Standalone Sheet Append (Whitelist) runs — stacked, manual dismiss */}
+      {sheetAppendJobs.map((job) => (
+        <div key={job.id} className="rounded-lg border bg-muted/30 px-4 py-3">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2 text-sm">
-              {sheetAppendJob.status === "running" && <Loader2 className="h-3.5 w-3.5 animate-spin text-primary" />}
-              {sheetAppendJob.status === "done" && <CheckCircle2 className="h-3.5 w-3.5 text-emerald-500" />}
-              {sheetAppendJob.status === "error" && <AlertTriangle className="h-3.5 w-3.5 text-destructive" />}
-              <span className="font-medium">{sheetAppendJob.label}</span>
-              {sheetAppendJob.status === "done" && (
+              {job.status === "running" && <Loader2 className="h-3.5 w-3.5 animate-spin text-primary" />}
+              {job.status === "done" && <CheckCircle2 className="h-3.5 w-3.5 text-emerald-500" />}
+              {job.status === "error" && <AlertTriangle className="h-3.5 w-3.5 text-destructive" />}
+              <span className="font-medium">{job.label}</span>
+              {job.status === "done" && (
                 <span className="text-xs text-emerald-500 ml-2">
-                  +{sheetAppendJob.added} added
-                  {(sheetAppendJob.duplicates ?? 0) > 0 && (
-                    <span className="text-amber-500"> ({sheetAppendJob.duplicates} duplicates)</span>
+                  +{job.added} added
+                  {(job.duplicates ?? 0) > 0 && (
+                    <span className="text-amber-500"> ({job.duplicates} duplicates)</span>
                   )}
-                  {sheetAppendJob.whitelist && (
-                    <span className="text-muted-foreground"> · {sheetAppendJob.whitelist}</span>
+                  {job.whitelist && (
+                    <span className="text-muted-foreground"> · {job.whitelist}</span>
                   )}
                 </span>
               )}
-              {sheetAppendJob.status === "error" && (
-                <span className="text-xs text-destructive ml-2">{sheetAppendJob.error}</span>
+              {job.status === "error" && (
+                <span className="text-xs text-destructive ml-2">{job.error}</span>
               )}
             </div>
-            {sheetAppendJob.status !== "running" && (
-              <button onClick={() => setSheetAppendJob(null)} className="text-xs text-muted-foreground hover:text-foreground">Dismiss</button>
+            {job.status !== "running" && (
+              <button onClick={() => setSheetAppendJobs((prev) => prev.filter((j) => j.id !== job.id))} className="text-xs text-muted-foreground hover:text-foreground">Dismiss</button>
             )}
           </div>
         </div>
-      )}
+      ))}
 
       {/* Bulk Limit Update Progress */}
       {limitJob && (
@@ -3325,7 +3461,7 @@ function DeliverabilityPageInner() {
                       variant="outline"
                       className="h-7 text-xs gap-1.5"
                       onClick={() => setMoveDialogOpen(true)}
-                      disabled={moveProgress?.running}
+                      disabled={moveProgress?.running || moveProgress?.queued}
                       title="Move Inboxing domains' inboxes to another Bison instance (tags sync → Inboxing platform upload → source cleanup)"
                     >
                       <ArrowRightLeft className="h-3 w-3" />
