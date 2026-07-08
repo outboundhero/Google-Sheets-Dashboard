@@ -24,9 +24,14 @@ export const maxDuration = 300;
  * Admin-only. Delete this route once the backfill is done.
  */
 
-// ⚠️ Set from the Inboxing API docs before running ?apply=1.
-// Placeholder deliberately throws so a blind apply can't fire a guessed write.
-const UPDATE_TAGS_ENDPOINT: { method: string; path: (id: string) => string; body: (tags: string[]) => unknown } | null = null;
+// From the Inboxing API docs: PUT /domains/{id}/tags with { tags: string[] }
+// — "Replace all tags on a domain". Max 10 tags per domain.
+const UPDATE_TAGS_ENDPOINT = {
+  method: "PUT",
+  path: (id: string) => `/domains/${encodeURIComponent(id)}/tags`,
+  body: (tags: string[]) => ({ tags }),
+};
+const MAX_TAGS = 10;
 
 interface InboxingDomain {
   id: string;
@@ -158,6 +163,7 @@ export async function GET(request: Request) {
           already_in_sync: alreadyInSync,
           to_update: plan.length,
           skipped_not_in_leadsync: skippedNotInLeadsync,
+          over_tag_cap: plan.filter((r) => r.to.length > MAX_TAGS).length,
         },
         sample: plan.slice(0, 25),
         note: "Tags will be REPLACED with LeadSync's set (union across instances). Run ?apply=1&limit=150 repeatedly until remaining=0.",
@@ -165,15 +171,14 @@ export async function GET(request: Request) {
     }
 
     // 4. Apply (paced ~1/sec; Inboxing rate-limits per-minute).
-    if (!UPDATE_TAGS_ENDPOINT) {
-      return NextResponse.json({
-        error: "UPDATE_TAGS_ENDPOINT not configured — set the method/path/body from the Inboxing API docs first.",
-      }, { status: 400 });
-    }
     const batch = plan.slice(0, limit);
     const failures: { domain: string; error: string }[] = [];
     let updated = 0;
     for (const row of batch) {
+      if (row.to.length > MAX_TAGS) {
+        failures.push({ domain: row.domain, error: `LeadSync has ${row.to.length} tags — Inboxing caps at ${MAX_TAGS}, skipped` });
+        continue;
+      }
       try {
         const res = await inboxingFetch(UPDATE_TAGS_ENDPOINT.path(row.id), {
           method: UPDATE_TAGS_ENDPOINT.method,
