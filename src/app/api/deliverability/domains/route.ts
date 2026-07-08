@@ -2,6 +2,34 @@ import { NextResponse } from "next/server";
 import { getSupabaseAdmin } from "@/lib/supabase";
 import { resolveInstances } from "@/lib/bison";
 
+// Explicit column list — everything the deliverability table's DomainRow
+// consumes, nothing more. daily_limit_total / warmup_limit_total are STORED
+// columns maintained by rebuild_domain_stats(); this route used to derive
+// them per-request by dragging the entire deliverability_inboxes table
+// (~183K rows, ~200 round-trips) into Node on every page load, which was the
+// dominant cost of opening the deliverability dashboard.
+const COLUMNS = [
+  "instance",
+  "domain",
+  "inbox_count",
+  "domain_created_at",
+  "warmup_status",
+  "tags",
+  "total_sent",
+  "total_replied",
+  "total_bounced",
+  "outlook_count",
+  "google_count",
+  "daily_limit_total",
+  "warmup_limit_total",
+  "redirect_url",
+  "redirect_checked_at",
+  "blacklisted",
+  "blacklist_checked_at",
+  "spamhaus_dbl",
+  "spamhaus_checked_at",
+].join(", ");
+
 export async function GET(request: Request) {
   try {
     const supabase = getSupabaseAdmin();
@@ -18,7 +46,7 @@ export async function GET(request: Request) {
     const buildQuery = () => {
       let q = supabase
         .from("deliverability_domains")
-        .select("*", { count: "exact" })
+        .select(COLUMNS, { count: "exact" })
         .in("instance", instances)
         .order("domain_created_at", { ascending: false, nullsFirst: false });
       if (tagNames.length > 0) q = q.overlaps("tags", tagNames);
@@ -29,7 +57,9 @@ export async function GET(request: Request) {
     const firstRes = await buildQuery().range(0, PAGE - 1);
     if (firstRes.error) throw firstRes.error;
     const total = firstRes.count || firstRes.data?.length || 0;
-    const allDomains: Record<string, unknown>[] = [...(firstRes.data || [])];
+    const allDomains: Record<string, unknown>[] = [
+      ...((firstRes.data || []) as unknown as Record<string, unknown>[]),
+    ];
 
     // Fetch remaining pages in parallel
     if (total > PAGE) {
@@ -40,70 +70,11 @@ export async function GET(request: Request) {
       }
       const pageResults = await Promise.all(pagePromises);
       for (const res of pageResults) {
-        if (res.data) allDomains.push(...res.data);
+        if (res.data) allDomains.push(...(res.data as unknown as Record<string, unknown>[]));
       }
     }
 
-    // Aggregate daily_limit and warmup_daily_limit from inboxes per domain
-    const domainNames = allDomains.map((d) => d.domain as string);
-    const limitMap = new Map<string, { daily_limit: number; warmup_limit: number }>();
-
-    if (domainNames.length > 0) {
-      // Run all domain batches in parallel — within each batch, paginate sequentially
-      const BATCH_SIZE = 200;
-      const batches: string[][] = [];
-      for (let i = 0; i < domainNames.length; i += BATCH_SIZE) {
-        batches.push(domainNames.slice(i, i + BATCH_SIZE));
-      }
-
-      const batchResults = await Promise.all(
-        batches.map(async (batch) => {
-          const localMap = new Map<string, { daily_limit: number; warmup_limit: number }>();
-          const seen = new Set<string>();
-          let offset = 0;
-          while (seen.size < batch.length) {
-            const { data: inboxData } = await supabase
-              .from("deliverability_inboxes")
-              .select("domain, daily_limit, warmup_daily_limit")
-              .in("instance", instances)
-              .in("domain", batch)
-              .range(offset, offset + 999);
-
-            if (!inboxData || inboxData.length === 0) break;
-            for (const inbox of inboxData) {
-              if (!seen.has(inbox.domain)) {
-                seen.add(inbox.domain);
-                localMap.set(inbox.domain, {
-                  daily_limit: inbox.daily_limit || 0,
-                  warmup_limit: inbox.warmup_daily_limit || 0,
-                });
-              }
-            }
-            if (inboxData.length < 1000) break;
-            offset += 1000;
-          }
-          return localMap;
-        })
-      );
-
-      for (const localMap of batchResults) {
-        for (const [domain, limits] of localMap) {
-          limitMap.set(domain, limits);
-        }
-      }
-    }
-
-    // Merge limit data into domains
-    const result = allDomains.map((d) => {
-      const limits = limitMap.get(d.domain as string);
-      return {
-        ...d,
-        daily_limit_total: limits?.daily_limit || 0,
-        warmup_limit_total: limits?.warmup_limit || 0,
-      };
-    });
-
-    return NextResponse.json(result);
+    return NextResponse.json(allDomains);
   } catch (error) {
     const message = error instanceof Error ? error.message : "Failed";
     return NextResponse.json({ error: message }, { status: 500 });

@@ -743,6 +743,36 @@ function DeliverabilityPageInner() {
   const isDragging = useRef(false);
   const dragSelectMode = useRef<boolean>(true); // true = selecting, false = deselecting
 
+  // Progressive rendering — at ~4,800 domains, mounting every row at once
+  // (~16 grid cells + tag chips each ≈ 100K+ DOM nodes) dominated load time.
+  // Render the first chunk and grow as the sentinel scrolls into view.
+  // Selection / counts / select-all still operate on the FULL filtered list.
+  const ROWS_STEP = 250;
+  const [visibleRows, setVisibleRows] = useState(ROWS_STEP);
+  const [warmupVisibleRows, setWarmupVisibleRows] = useState(ROWS_STEP);
+  const rowsObserverRef = useRef<IntersectionObserver | null>(null);
+  const warmupObserverRef = useRef<IntersectionObserver | null>(null);
+  const rowsSentinelRef = useCallback((el: HTMLDivElement | null) => {
+    rowsObserverRef.current?.disconnect();
+    rowsObserverRef.current = null;
+    if (!el) return;
+    const obs = new IntersectionObserver((entries) => {
+      if (entries.some((e) => e.isIntersecting)) setVisibleRows((v) => v + ROWS_STEP);
+    }, { rootMargin: "800px" });
+    obs.observe(el);
+    rowsObserverRef.current = obs;
+  }, []);
+  const warmupSentinelRef = useCallback((el: HTMLDivElement | null) => {
+    warmupObserverRef.current?.disconnect();
+    warmupObserverRef.current = null;
+    if (!el) return;
+    const obs = new IntersectionObserver((entries) => {
+      if (entries.some((e) => e.isIntersecting)) setWarmupVisibleRows((v) => v + ROWS_STEP);
+    }, { rootMargin: "800px" });
+    obs.observe(el);
+    warmupObserverRef.current = obs;
+  }, []);
+
 
   // Patch one attach run by id (no-op if the run was dismissed).
   const patchAttachRun = useCallback((runId: number, patch: (run: AttachRun) => AttachRun) => {
@@ -863,7 +893,9 @@ function DeliverabilityPageInner() {
   const loadDomains = useCallback(async () => {
     const seq = ++domainsSeqRef.current;
     setLoading(true);
-    setDomains([]);
+    // Keep the previous rows rendered while fresh data loads — wiping to []
+    // here used to blank the whole table to skeletons on every reload and
+    // instance switch, then re-mount ~4,800 rows from scratch.
     try {
       // Domains + trailing rates in parallel; trailing is best-effort.
       const [res, trailingRes] = await Promise.all([
@@ -1471,7 +1503,12 @@ function DeliverabilityPageInner() {
   }, [clientTags]);
   const multiClientCount = useMemo(() => domains.filter(isDomainMultiClient).length, [domains, isDomainMultiClient]);
 
-  const now = Date.now();
+  // Frozen per data load — a bare Date.now() here used to invalidate every
+  // memo that lists `now` in its deps on EVERY render, so the full 4,800-row
+  // filter+sort pipeline re-ran on each keystroke/hover. Day-level warmup
+  // math only needs to refresh when the data does.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const now = useMemo(() => Date.now(), [domains]);
 
   const warmupDomains = useMemo(
     () =>
@@ -1503,20 +1540,41 @@ function DeliverabilityPageInner() {
     [domains, warmupFilter, warmupSearch, showReserve, warmupTypeFilter, tagFilters, tagMatchMode, isDomainReserve, now]
   );
 
-  // Flag computation helper — returns human-readable reason strings.
-  // Logic lives in src/lib/inbox-health.ts so the MRL pace cron computes
-  // per-client infrastructure health with the exact same rule.
-  const getFlagReasons = useCallback((d: DomainRow): string[] => getDomainFlagReasons(d), []);
+  // Flag computation — ONE pass over the loaded domains, shared by the
+  // filter pipeline, every chip-count memo AND the row renderer. Logic lives
+  // in src/lib/inbox-health.ts so the MRL pace cron computes per-client
+  // infrastructure health with the exact same rule. (Previously each of ~12
+  // count memos + the row map re-derived reasons per domain per render.)
+  const flagMap = useMemo(() => {
+    const map = new Map<string, { reasons: string[]; flagged: boolean; replyIssue: boolean; bounceIssue: boolean }>();
+    for (const d of domains) {
+      const reasons = getDomainFlagReasons(d);
+      map.set(`${d.instance}:${d.domain}`, {
+        reasons,
+        flagged: reasons.length > 0,
+        replyIssue: reasons.some((r) => r.startsWith("Low replies")),
+        bounceIssue: reasons.some((r) => r.startsWith("High bounces")),
+      });
+    }
+    return map;
+  }, [domains]);
 
-  const isDomainFlagged = useCallback((d: DomainRow) => getFlagReasons(d).length > 0, [getFlagReasons]);
-
-  const hasReplyIssue = useCallback((d: DomainRow) => {
-    return getFlagReasons(d).some((r) => r.startsWith("Low replies"));
-  }, [getFlagReasons]);
-
-  const hasBounceIssue = useCallback((d: DomainRow) => {
-    return getFlagReasons(d).some((r) => r.startsWith("High bounces"));
-  }, [getFlagReasons]);
+  const getFlagReasons = useCallback(
+    (d: DomainRow): string[] => flagMap.get(`${d.instance}:${d.domain}`)?.reasons ?? [],
+    [flagMap],
+  );
+  const isDomainFlagged = useCallback(
+    (d: DomainRow) => flagMap.get(`${d.instance}:${d.domain}`)?.flagged ?? false,
+    [flagMap],
+  );
+  const hasReplyIssue = useCallback(
+    (d: DomainRow) => flagMap.get(`${d.instance}:${d.domain}`)?.replyIssue ?? false,
+    [flagMap],
+  );
+  const hasBounceIssue = useCallback(
+    (d: DomainRow) => flagMap.get(`${d.instance}:${d.domain}`)?.bounceIssue ?? false,
+    [flagMap],
+  );
 
   // Client-side filter: tag match (OR) + domain search + type filter + flagged
   // Export helpers — domain names only
@@ -1961,6 +2019,11 @@ function DeliverabilityPageInner() {
     }
     return result;
   }, [domains, tagFilters, tagMatchMode, domainSearch, redirectSearch, typeFilter, showFlagged, flagSubFilter, showHealthy, showBlacklisted, showNotBlacklisted, showSpamhausListed, showSpamhausClean, showReserve, showAssigned, showMultiClient, providerStatusFilter, providerStatusMap, domainInstancesMap, warmupDaysFilter, warmupDaysFrom, warmupDaysTo, filterConditions, filterMatchMode, sortField, sortDir, isDomainFlagged, hasReplyIssue, hasBounceIssue, isDomainReserve, isDomainAssigned, isDomainMultiClient, now]);
+
+  // Reset the progressive-render windows whenever the visible lists change
+  // (filters, sort, instance switch, data reload).
+  useEffect(() => { setVisibleRows(ROWS_STEP); }, [filteredDomains]);
+  useEffect(() => { setWarmupVisibleRows(ROWS_STEP); }, [warmupDomains]);
 
   const flaggedCount = useMemo(() => domains.filter(isDomainFlagged).length, [domains, isDomainFlagged]);
   const healthyCount = useMemo(() => domains.filter((d) => !isDomainFlagged(d)).length, [domains, isDomainFlagged]);
@@ -3322,16 +3385,23 @@ function DeliverabilityPageInner() {
                 {filteredDomains.length} domain{filteredDomains.length !== 1 ? "s" : ""}
               </span>
             )}
+            {loading && domains.length > 0 && (
+              <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                <Loader2 className="h-3 w-3 animate-spin" /> Refreshing…
+              </span>
+            )}
           </div>
 
-          {/* Domain Stats List */}
-          {loading ? (
+          {/* Domain Stats List — skeleton only on a truly empty first load;
+              reloads/instance switches keep the previous rows visible with a
+              small refreshing hint instead of blanking 4,800 rows */}
+          {loading && domains.length === 0 ? (
             <div className="space-y-2">
               {[...Array(5)].map((_, i) => (
                 <Skeleton key={i} className="h-16 rounded-xl" />
               ))}
             </div>
-          ) : filteredDomains.length === 0 ? (
+          ) : filteredDomains.length === 0 && !loading ? (
             <div className="flex flex-col items-center justify-center py-16 text-center">
               <Globe className="h-10 w-10 text-muted-foreground mb-3" />
               <h3 className="font-medium">
@@ -3571,7 +3641,7 @@ function DeliverabilityPageInner() {
                   return <>{cols.map(renderSort)}</>;
                 })()}
               </div>
-              {filteredDomains.map((d, domainIdx) => {
+              {filteredDomains.slice(0, visibleRows).map((d, domainIdx) => {
                 const daysOld = d.domain_created_at
                   ? Math.floor((now - new Date(d.domain_created_at).getTime()) / (1000 * 60 * 60 * 24))
                   : 0;
@@ -3908,6 +3978,11 @@ function DeliverabilityPageInner() {
                   </div>
                 );
               })}
+              {filteredDomains.length > visibleRows && (
+                <div ref={rowsSentinelRef} className="py-3 text-center text-xs text-muted-foreground">
+                  Showing {visibleRows.toLocaleString()} of {filteredDomains.length.toLocaleString()} domains — scroll for more
+                </div>
+              )}
             </div>
           )}
         </div>
@@ -4079,7 +4154,7 @@ function DeliverabilityPageInner() {
                 <span className="text-xs text-muted-foreground">{warmupDomains.length} domains</span>
               </div>
 
-              {warmupDomains.map((d) => {
+              {warmupDomains.slice(0, warmupVisibleRows).map((d) => {
                 const isSelected = selectedDomains.has(d.domain);
                 return (
                   <div
@@ -4160,6 +4235,11 @@ function DeliverabilityPageInner() {
                   </div>
                 );
               })}
+              {warmupDomains.length > warmupVisibleRows && (
+                <div ref={warmupSentinelRef} className="py-3 text-center text-xs text-muted-foreground">
+                  Showing {warmupVisibleRows.toLocaleString()} of {warmupDomains.length.toLocaleString()} domains — scroll for more
+                </div>
+              )}
             </div>
           )}
         </div>
