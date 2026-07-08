@@ -23,7 +23,7 @@ import { BulkTagDialog, type TagApplyInfo } from "@/components/deliverability/bu
 import { BulkDeleteDialog } from "@/components/deliverability/bulk-delete-dialog";
 import { AttachToCampaignsDialog } from "@/components/deliverability/attach-to-campaigns-dialog";
 import { RemoveFromCampaignsDialog } from "@/components/deliverability/remove-from-campaigns-dialog";
-import type { BisonInstanceSlug } from "@/lib/bison-instances";
+import { DEFAULT_INSTANCE, type BisonInstanceSlug } from "@/lib/bison-instances";
 import {
   Select,
   SelectContent,
@@ -915,6 +915,9 @@ function ClientDomainsDialog({
         selectedDomains={domains
           .filter((d) => selectedDomains.has(d.domain))
           .map((d) => ({ domain: d.domain, inbox_count: d.inbox_count }))}
+        // This page's domain list is default-instance-scoped (its fetch passes
+        // no instances param) — scope the delete identically.
+        instancesQuery={`instances=${DEFAULT_INSTANCE}`}
         onSuccess={() => {
           onDomainsChanged();
           setSelectedDomains(new Set());

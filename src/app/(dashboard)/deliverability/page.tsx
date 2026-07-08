@@ -4210,10 +4210,12 @@ function DeliverabilityPageInner() {
         selectedDomains={domains
           .filter((d) => selectedDomains.has(d.domain))
           .map((d) => ({ domain: d.domain, inbox_count: d.inbox_count }))}
+        instancesQuery={instancesQuery}
         onSuccess={() => {
           loadDomains();
           loadStats();
           setSelectedDomains(new Set());
+          mutateDomainInstances();
         }}
       />
 
