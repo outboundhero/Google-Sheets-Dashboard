@@ -82,3 +82,72 @@ export async function markSent(clientTag: string, domains: string[]): Promise<vo
     );
   if (error) throw new Error(error.message);
 }
+
+export interface ClientPartition {
+  /** sub-tag → the domains that carry that sub-tag in Bison */
+  buckets: Map<string, string[]>;
+  /** queued domains currently tagged Burnt — pointless to whitelist */
+  burnt: string[];
+  /** compound-tag domains matching NO sub-tag — left queued, surfaced */
+  unmatched: string[];
+}
+
+/**
+ * Partition a client's queued domains into per-recipient buckets.
+ *
+ * Compound client tags ("DBSM / DBSA / DBSNJ / DBSF") come from tracked
+ * sheets that serve several ReplyRouter clients at once — ReplyRouter has no
+ * client under the literal compound name (404s), which used to strand these
+ * queues forever. Each domain DOES carry its own sub-client tag in Bison
+ * (deliverability_domains.tags), so we split by that: one bucket per
+ * sub-tag, each emailed separately with only its own domains.
+ *
+ * Single (non-compound) tags come back as one bucket, unchanged behavior —
+ * except Burnt-tagged domains, which are excluded everywhere (asking a
+ * client to whitelist a domain being retired is noise).
+ */
+export async function partitionByClientSubTags(
+  clientTag: string,
+  domains: string[],
+): Promise<ClientPartition> {
+  const list = norm(domains);
+  const subTags = clientTag.split("/").map((s) => s.trim()).filter(Boolean);
+
+  // Domain → lowercase tag set from deliverability_domains (any instance).
+  const supabase = getSupabaseAdmin();
+  const tagsByDomain = new Map<string, Set<string>>();
+  for (let i = 0; i < list.length; i += 100) {
+    const { data, error } = await supabase
+      .from("deliverability_domains")
+      .select("domain, tags")
+      .in("domain", list.slice(i, i + 100));
+    if (error) throw new Error(error.message);
+    for (const r of (data || []) as { domain: string; tags: string[] | null }[]) {
+      const k = r.domain.toLowerCase();
+      const set = tagsByDomain.get(k) ?? new Set<string>();
+      for (const t of r.tags || []) set.add((t || "").trim().toLowerCase());
+      tagsByDomain.set(k, set);
+    }
+  }
+
+  const burnt = list.filter((d) => tagsByDomain.get(d)?.has("burnt"));
+  const live = list.filter((d) => !tagsByDomain.get(d)?.has("burnt"));
+
+  const buckets = new Map<string, string[]>();
+  const unmatched: string[] = [];
+  if (subTags.length <= 1) {
+    if (live.length > 0) buckets.set(subTags[0] ?? clientTag, live);
+    return { buckets, burnt, unmatched };
+  }
+  for (const d of live) {
+    const tags = tagsByDomain.get(d);
+    const matches = subTags.filter((s) => tags?.has(s.toLowerCase()));
+    if (matches.length === 0) {
+      unmatched.push(d);
+      continue;
+    }
+    // A domain tagged for several sub-clients goes in each of their emails.
+    for (const m of matches) (buckets.get(m) ?? buckets.set(m, []).get(m)!).push(d);
+  }
+  return { buckets, burnt, unmatched };
+}
