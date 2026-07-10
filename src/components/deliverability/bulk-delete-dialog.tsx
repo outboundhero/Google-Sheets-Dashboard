@@ -1,9 +1,10 @@
 "use client";
 
 /**
- * Bulk domain delete — deletes the selected domains' inboxes from their Bison
- * instance(s) (scoped by the sidebar switcher via `instancesQuery`) and from
- * LeadSync. One domain per request (Vercel-timeout-safe), sequential.
+ * Bulk domain delete — deletes the selected domains' inboxes from the CHECKED
+ * Bison instance(s) (a domain can live on several; the picker defaults to all
+ * the domains occupy) and from LeadSync. One domain per request
+ * (Vercel-timeout-safe), sequential.
  *
  * Result view breaks failures down BY REASON (grouped HTTP status/error) with
  * an expandable per-inbox list, offers "Retry failed" (re-runs only the
@@ -12,7 +13,7 @@
  * LeadSync anyway" purge for inboxes Bison persistently can't identify or
  * refuses to delete.
  */
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   Dialog,
   DialogContent,
@@ -21,6 +22,7 @@ import {
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { Loader2, AlertTriangle, Trash2, Copy } from "lucide-react";
+import { INSTANCE_SHORT_LABELS, BISON_INSTANCES, type BisonInstanceSlug } from "@/lib/bison-instances";
 
 interface DomainInfo {
   domain: string;
@@ -49,8 +51,10 @@ interface BulkDeleteDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   selectedDomains: DomainInfo[];
-  /** `instances=<csv>` from useInstance() — scopes which instances' rows get deleted. */
-  instancesQuery: string;
+  /** Instances the selected domains occupy — the picker options. */
+  availableInstances: BisonInstanceSlug[];
+  /** Pre-checked instances (defaults to all of availableInstances). */
+  defaultInstances: BisonInstanceSlug[];
   onSuccess: () => void;
 }
 
@@ -66,7 +70,8 @@ export function BulkDeleteDialog({
   open,
   onOpenChange,
   selectedDomains,
-  instancesQuery,
+  availableInstances,
+  defaultInstances,
   onSuccess,
 }: BulkDeleteDialogProps) {
   const [deleting, setDeleting] = useState(false);
@@ -76,8 +81,17 @@ export function BulkDeleteDialog({
   const [result, setResult] = useState<DeleteResult | null>(null);
   const [showFailureList, setShowFailureList] = useState(false);
   const [emailsCopied, setEmailsCopied] = useState(false);
+  // Which instances to delete from. Re-seeded from defaultInstances each time
+  // the dialog opens (the page reuses one dialog for both the bulk-bar delete
+  // and the post-move "remove from source" follow-up, which scope differently).
+  const [picked, setPicked] = useState<Set<string>>(new Set(defaultInstances));
+  useEffect(() => {
+    if (open) { setPicked(new Set(defaultInstances)); setResult(null); setError(null); }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open]);
 
-  const totalInboxes = selectedDomains.reduce((sum, d) => sum + d.inbox_count, 0);
+  const instancesQuery = useMemo(() => `instances=${[...picked].join(",")}`, [picked]);
+  const singleInstance = availableInstances.length <= 1;
 
   const runDelete = async (domains: DomainInfo[]) => {
     setDeleting(true);
@@ -304,16 +318,53 @@ export function BulkDeleteDialog({
           </div>
         ) : (
           <div className="space-y-4">
+            {/* Instance picker — a domain can live on multiple instances; only
+                the checked ones are deleted from. */}
+            <div className="space-y-1.5">
+              <div className="text-xs font-medium">Delete from instance{singleInstance ? "" : "s"}</div>
+              {singleInstance ? (
+                <div className="text-xs text-muted-foreground">
+                  {availableInstances[0]
+                    ? `${INSTANCE_SHORT_LABELS[availableInstances[0]]} — ${BISON_INSTANCES[availableInstances[0]].label}`
+                    : "—"}
+                </div>
+              ) : (
+                <div className="flex flex-wrap gap-1.5">
+                  {availableInstances.map((slug) => {
+                    const on = picked.has(slug);
+                    return (
+                      <button
+                        key={slug}
+                        onClick={() => setPicked((prev) => {
+                          const n = new Set(prev);
+                          if (n.has(slug)) n.delete(slug); else n.add(slug);
+                          return n;
+                        })}
+                        className={`text-xs rounded-full border px-2.5 py-1 transition-colors ${
+                          on ? "border-destructive/50 bg-destructive/10 text-foreground" : "border-muted-foreground/25 text-muted-foreground"
+                        }`}
+                        title={BISON_INSTANCES[slug].label}
+                      >
+                        {on ? "✓ " : ""}{INSTANCE_SHORT_LABELS[slug]}
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+
             <div className="flex items-start gap-3 rounded-lg border border-destructive/30 bg-destructive/5 p-3">
               <AlertTriangle className="h-4 w-4 text-destructive shrink-0 mt-0.5" />
               <div className="text-sm">
-                This will permanently delete{" "}
-                <span className="font-semibold">{totalInboxes} inbox{totalInboxes !== 1 ? "es" : ""}</span>{" "}
-                across{" "}
+                This permanently deletes the inboxes on{" "}
+                <span className="font-semibold">
+                  {[...picked].map((s) => INSTANCE_SHORT_LABELS[s as BisonInstanceSlug] ?? s).join(", ") || "—"}
+                </span>{" "}
+                for{" "}
                 <span className="font-semibold">
                   {selectedDomains.length} domain{selectedDomains.length !== 1 ? "s" : ""}
                 </span>{" "}
-                from EmailBison. This action cannot be undone.
+                from EmailBison and removes them from LeadSync. Copies on other instances stay put. This cannot be undone.
               </div>
             </div>
 
@@ -338,8 +389,9 @@ export function BulkDeleteDialog({
               <Button
                 variant="destructive"
                 size="sm"
-                disabled={deleting}
+                disabled={deleting || picked.size === 0}
                 onClick={() => runDelete(selectedDomains)}
+                title={picked.size === 0 ? "Pick at least one instance to delete from" : undefined}
               >
                 {deleting && <Loader2 className="h-3.5 w-3.5 animate-spin mr-1.5" />}
                 Delete {selectedDomains.length} Domain{selectedDomains.length !== 1 ? "s" : ""}

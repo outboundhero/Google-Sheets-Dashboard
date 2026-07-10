@@ -188,9 +188,10 @@ export function MoveDomainsDialog({ open, onOpenChange, selectedDomains, onStart
           </DialogTitle>
           <DialogDescription>
             Moves Inboxing domains&apos; inboxes to another Bison instance: tags sync to
-            Inboxing → Inboxing uploads the mailboxes to the target → senders are
-            removed from the source only after they arrive. Progress shows in the
-            panel at the top of the page.
+            Inboxing → Inboxing uploads the mailboxes to the target instance. The
+            domain <b>stays on the source instance</b> too — after the move you&apos;ll get a
+            one-click option to remove it from the source. Progress shows in the panel
+            at the top of the page.
           </DialogDescription>
         </DialogHeader>
 

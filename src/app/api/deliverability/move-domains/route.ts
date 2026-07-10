@@ -23,14 +23,18 @@ export const maxDuration = 300;
  *   1. sync LeadSync tags → Inboxing (PUT /domains/{id}/tags), so that
  *   2. POST /domains/{id}/upload (async job queue, sync_tags: true) lands
  *      the senders on the TARGET instance already carrying the right tags,
- *   3. we poll the target until the senders are visible,
- *   4. only then delete the senders from the SOURCE instance and reconcile
- *      Supabase (source rows out, target rows in, inbox_orders repointed).
+ *   3. we poll the target until the senders are visible, then register the
+ *      target rows in Supabase and repoint the order.
+ *
+ * The SOURCE copy is deliberately LEFT IN PLACE — after a move the domain
+ * lives on BOTH instances, and the FE offers a separate, confirmed "remove
+ * from previous instance" step (the Delete Domains flow) rather than deleting
+ * automatically.
  *
  * A domain that stalls mid-flight (upload jobs still processing when the
  * request budget runs out) is reported as "uploading" and is safe to re-run:
- *! the tag PUT replaces, the upload skips already-uploaded emails
- * (skip_verified), and source cleanup only ever happens after arrival.
+ * the tag PUT replaces and the upload skips already-uploaded emails
+ * (skip_verified).
  *
  * Body:
  *   { dryRun: true,  domains: string[] }                                → plan + connections
@@ -169,55 +173,6 @@ async function registerOnTarget(target: BisonInstanceSlug, domain: string, sende
   }
 }
 
-/** Delete the domain's senders from the source instance (bulk-delete's
- *  internals) + reconcile Supabase. Returns how many failed. */
-async function cleanupSource(source: BisonInstanceSlug, domain: string): Promise<{ deleted: number; failed: number }> {
-  const supabase = getSupabaseAdmin();
-  const { data: inboxes } = await supabase
-    .from("deliverability_inboxes")
-    .select("id")
-    .eq("instance", source)
-    .eq("domain", domain);
-  const ids = ((inboxes || []) as { id: number }[]).map((r) => r.id);
-  const deletedIds: number[] = [];
-  let failed = 0;
-  // Patient per-delete retry — a mass delete without backoff collapses the
-  // moment Bison's per-minute limit trips (the old bulk-delete lesson).
-  const deleteOne = async (id: number): Promise<boolean> => {
-    for (let attempt = 0; attempt < 5; attempt++) {
-      try {
-        const res = await bisonFetch(source, `/sender-emails/${id}`, { method: "DELETE", headers: { "Content-Type": "application/json" } });
-        if (res.ok || res.status === 404) return true;
-        if (res.status === 429 || res.status >= 500) {
-          const ra = parseInt(res.headers.get("retry-after") || "", 10);
-          const wait = Number.isFinite(ra) && ra > 0 ? ra * 1000 : Math.min(15_000, 600 * 2 ** attempt);
-          await sleep(wait + Math.floor(Math.random() * 300));
-          continue;
-        }
-        return false;
-      } catch {
-        await sleep(Math.min(15_000, 600 * 2 ** attempt));
-      }
-    }
-    return false;
-  };
-  for (let i = 0; i < ids.length; i += 10) {
-    const batch = ids.slice(i, i + 10);
-    const results = await Promise.all(batch.map(async (id) => ({ id, ok: await deleteOne(id) })));
-    for (const r of results) {
-      if (r.ok) deletedIds.push(r.id);
-      else failed++;
-    }
-  }
-  if (deletedIds.length > 0) {
-    await supabase.from("deliverability_inboxes").delete().eq("instance", source).in("id", deletedIds);
-  }
-  if (failed === 0) {
-    await supabase.from("deliverability_domains").delete().eq("instance", source).eq("domain", domain);
-  }
-  return { deleted: deletedIds.length, failed };
-}
-
 export async function POST(request: Request) {
   try {
     const body = await request.json();
@@ -295,6 +250,7 @@ export async function POST(request: Request) {
       stage?: string;
       detail?: string;
       error?: string;
+      sourceInstance?: BisonInstanceSlug;
     }
     const results: MoveResult[] = [];
     const supabase = getSupabaseAdmin();
@@ -373,20 +329,20 @@ export async function POST(request: Request) {
       });
     }
 
-    // Phase 3 — arrived: register on target, clean up source, repoint order.
+    // Phase 3 — arrived: register on target + repoint order. The source copy
+    // is deliberately LEFT IN PLACE — the domain now lives on BOTH instances,
+    // and the FE offers a separate "remove from previous instance" step
+    // (the Delete Domains flow) so removal is an explicit, confirmed action.
     for (const f of arrived) {
       try {
         await registerOnTarget(target, f.domain, f.senders!);
-        const cl = await cleanupSource(f.source, f.domain);
         await supabase.from("inbox_orders").update({ instance: target }).eq("provider", "inboxing").eq("domain", f.domain);
-        if (cl.failed > 0) {
-          results.push({
-            domain: f.domain, status: "failed", stage: "source_cleanup",
-            error: `${cl.failed} sender(s) could not be deleted from ${f.source} — domain now on both instances; re-run Move to retry cleanup`,
-          });
-        } else {
-          results.push({ domain: f.domain, status: "done", detail: `${f.senders!.length} inboxes now on ${target}, ${cl.deleted} removed from ${f.source}` });
-        }
+        results.push({
+          domain: f.domain,
+          status: "done",
+          sourceInstance: f.source,
+          detail: `${f.senders!.length} inboxes now on ${target} · still on ${f.source} (remove separately)`,
+        });
       } catch (e) {
         results.push({ domain: f.domain, status: "failed", stage: "finalize", error: e instanceof Error ? e.message : "failed" });
       }

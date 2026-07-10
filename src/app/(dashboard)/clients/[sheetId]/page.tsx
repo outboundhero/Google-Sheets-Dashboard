@@ -917,7 +917,8 @@ function ClientDomainsDialog({
           .map((d) => ({ domain: d.domain, inbox_count: d.inbox_count }))}
         // This page's domain list is default-instance-scoped (its fetch passes
         // no instances param) — scope the delete identically.
-        instancesQuery={`instances=${DEFAULT_INSTANCE}`}
+        availableInstances={[DEFAULT_INSTANCE]}
+        defaultInstances={[DEFAULT_INSTANCE]}
         onSuccess={() => {
           onDomainsChanged();
           setSelectedDomains(new Set());

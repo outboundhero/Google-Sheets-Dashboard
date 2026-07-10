@@ -28,6 +28,7 @@ import {
   ShieldAlert,
   ArrowRightLeft,
   Ban,
+  Trash2,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -637,6 +638,9 @@ function DeliverabilityPageInner() {
     uploading: string[];
     running: boolean;
     queued: boolean;
+    // Successfully moved domains grouped by the instance they were moved FROM,
+    // so the finished panel can offer "remove from previous instance".
+    movedBySource: Record<string, string[]>;
   }
   const [moveProgress, setMoveProgress] = useState<MoveProgressState | null>(null);
   const [cancelDialogOpen, setCancelDialogOpen] = useState(false);
@@ -661,7 +665,16 @@ function DeliverabilityPageInner() {
   // don't re-run (and re-discover) on every render from a fresh Array.from(...).
   const selectedDomainsList = useMemo(() => Array.from(selectedDomains), [selectedDomains]);
   const [bulkTagMode, setBulkTagMode] = useState<"add" | "remove" | null>(null);
-  const [showBulkDelete, setShowBulkDelete] = useState(false);
+  // Bulk-delete request — carries which domains + which instance(s) the picker
+  // should offer/pre-check. Used both by the bulk-bar Delete button (all
+  // instances the domains occupy) and the post-move "remove from previous
+  // instance" follow-up (scoped to just the source instance).
+  interface DeleteRequest {
+    domains: { domain: string; inbox_count: number }[];
+    availableInstances: BisonInstanceSlug[];
+    defaultInstances: BisonInstanceSlug[];
+  }
+  const [deleteRequest, setDeleteRequest] = useState<DeleteRequest | null>(null);
   const [showAttachCampaigns, setShowAttachCampaigns] = useState(false);
   const [showRemoveFromCampaigns, setShowRemoveFromCampaigns] = useState(false);
 
@@ -1266,6 +1279,7 @@ function DeliverabilityPageInner() {
     const counts = { done: 0, uploading: 0, skipped: 0, failed: 0 };
     const failures: { domain: string; stage?: string; error: string }[] = [];
     const uploading: string[] = [];
+    const movedBySource: Record<string, string[]> = {};
     const moveId = runIdRef.current++;
     const base = {
       id: moveId,
@@ -1273,7 +1287,7 @@ function DeliverabilityPageInner() {
       connectionName: job.connectionName,
       total: job.domains.length,
     };
-    setMoveProgress({ ...base, done: 0, counts: { ...counts }, failures: [], uploading: [], running: false, queued: true });
+    setMoveProgress({ ...base, done: 0, counts: { ...counts }, failures: [], uploading: [], running: false, queued: true, movedBySource: {} });
     await enqueueBisonRun(async () => {
     if (dismissedRunsRef.current.has(moveId)) return; // cancelled while queued
     setMoveProgress((prev) => (prev ? { ...prev, queued: false, running: true } : prev));
@@ -1293,7 +1307,7 @@ function DeliverabilityPageInner() {
           });
           // JSON-safe parse — a serverless timeout returns an HTML page.
           const text = await res.text();
-          let d: { error?: string; results?: { domain: string; status: string; stage?: string; error?: string }[] } | null = null;
+          let d: { error?: string; results?: { domain: string; status: string; stage?: string; error?: string; sourceInstance?: string }[] } | null = null;
           try { d = text ? JSON.parse(text) : null; } catch { /* non-JSON */ }
           if (!d || !res.ok || d.error) {
             const why = !d
@@ -1302,7 +1316,10 @@ function DeliverabilityPageInner() {
             for (const dom of batch) { counts.failed++; failures.push({ domain: dom, error: why }); }
           } else {
             for (const r of d.results || []) {
-              if (r.status === "done") counts.done++;
+              if (r.status === "done") {
+                counts.done++;
+                if (r.sourceInstance) (movedBySource[r.sourceInstance] ||= []).push(r.domain);
+              }
               else if (r.status === "uploading") { counts.uploading++; uploading.push(r.domain); }
               else if (r.status === "skipped") { counts.skipped++; }
               else { counts.failed++; failures.push({ domain: r.domain, stage: r.stage, error: r.error || "failed" }); }
@@ -1320,6 +1337,7 @@ function DeliverabilityPageInner() {
           uploading: [...uploading],
           running: true,
           queued: false,
+          movedBySource: { ...movedBySource },
         });
       }
     } finally {
@@ -1330,6 +1348,34 @@ function DeliverabilityPageInner() {
     }
     });
   };
+
+  // Open the Delete dialog for a set of domain NAMES.
+  //   forcedInstances set → scope the picker to exactly those (post-move
+  //     "remove from previous instance": source only).
+  //   otherwise → offer every instance the domains occupy, all pre-checked.
+  const openDeleteForDomains = useCallback((names: string[], forcedInstances?: BisonInstanceSlug[]) => {
+    const nameSet = new Set(names);
+    // inbox_count is display-only; the route recomputes actual inboxes. Prefer
+    // the loaded row's count when present.
+    const domainInfos = names.map((domain) => {
+      const row = domains.find((d) => d.domain === domain);
+      return { domain, inbox_count: row?.inbox_count ?? 0 };
+    });
+    let available: BisonInstanceSlug[];
+    if (forcedInstances && forcedInstances.length > 0) {
+      available = [...new Set(forcedInstances)];
+    } else {
+      const set = new Set<BisonInstanceSlug>();
+      for (const d of domains) {
+        if (!nameSet.has(d.domain)) continue;
+        const insts = domainInstancesMap[d.domain] as BisonInstanceSlug[] | undefined;
+        if (insts && insts.length) insts.forEach((s) => set.add(s));
+        else set.add(d.instance);
+      }
+      available = [...set];
+    }
+    setDeleteRequest({ domains: domainInfos, availableInstances: available, defaultInstances: available });
+  }, [domains, domainInstancesMap]);
 
   // Cancel-at-provider workflow (Inboxing / MilkBox). Batched through the
   // shared queue; ends with the Slack summary (successfully canceled domains
@@ -2363,8 +2409,30 @@ function DeliverabilityPageInner() {
           </div>
           {moveProgress.uploading.length > 0 && (
             <div className="rounded-md border border-amber-500/30 bg-amber-950/10 px-3 py-1.5 text-[11px] text-amber-400">
-              Still uploading at Inboxing (nothing deleted from the source — re-run Move for these later to finish):{" "}
+              Still uploading at Inboxing (re-run Move for these later to finish):{" "}
               <span className="text-amber-300">{moveProgress.uploading.join(", ")}</span>
+            </div>
+          )}
+          {/* Follow-up: the source copy is left in place — offer to remove it
+              per source instance via the Delete Domains flow (confirmed). */}
+          {!moveProgress.running && !moveProgress.queued && Object.keys(moveProgress.movedBySource).length > 0 && (
+            <div className="rounded-md border border-border bg-background/40 px-3 py-2 space-y-1.5">
+              <div className="text-[11px] text-muted-foreground">
+                Moved domains are now on <span className="text-foreground">{moveProgress.targetLabel}</span> and still on their source instance.
+                Remove them from the source?
+              </div>
+              <div className="flex flex-wrap gap-1.5">
+                {Object.entries(moveProgress.movedBySource).map(([source, doms]) => (
+                  <button
+                    key={source}
+                    onClick={() => openDeleteForDomains(doms, [source as BisonInstanceSlug])}
+                    className="inline-flex items-center gap-1 rounded-md border border-destructive/40 text-destructive px-2 py-1 text-[11px] hover:bg-destructive/10"
+                  >
+                    <Trash2 className="h-3 w-3" />
+                    Remove {doms.length} from {INSTANCE_SHORT_LABELS[source as BisonInstanceSlug] ?? source}
+                  </button>
+                ))}
+              </div>
             </div>
           )}
           {moveProgress.failures.length > 0 && (
@@ -3660,7 +3728,7 @@ function DeliverabilityPageInner() {
                       size="sm"
                       variant="destructive"
                       className="h-7 text-xs gap-1.5"
-                      onClick={() => setShowBulkDelete(true)}
+                      onClick={() => openDeleteForDomains(Array.from(selectedDomains))}
                     >
                       Delete
                     </Button>
@@ -4299,7 +4367,7 @@ function DeliverabilityPageInner() {
                 <Button size="sm" variant="outline" className="h-7 text-xs gap-1.5 text-destructive hover:text-destructive" onClick={() => setBulkTagMode("remove")}>
                   − Remove Tags
                 </Button>
-                <Button size="sm" variant="destructive" className="h-7 text-xs gap-1.5" onClick={() => setShowBulkDelete(true)}>
+                <Button size="sm" variant="destructive" className="h-7 text-xs gap-1.5" onClick={() => openDeleteForDomains(Array.from(selectedDomains))}>
                   Delete
                 </Button>
                 <Button size="sm" variant="ghost" className="h-7 text-xs" onClick={() => setSelectedDomains(new Set())}>
@@ -4480,14 +4548,14 @@ function DeliverabilityPageInner() {
         />
       )}
 
-      {/* Bulk Delete Dialog */}
+      {/* Bulk Delete Dialog — driven by deleteRequest (bulk-bar Delete or the
+          post-move "remove from previous instance" follow-up) */}
       <BulkDeleteDialog
-        open={showBulkDelete}
-        onOpenChange={setShowBulkDelete}
-        selectedDomains={domains
-          .filter((d) => selectedDomains.has(d.domain))
-          .map((d) => ({ domain: d.domain, inbox_count: d.inbox_count }))}
-        instancesQuery={instancesQuery}
+        open={!!deleteRequest}
+        onOpenChange={(v) => { if (!v) setDeleteRequest(null); }}
+        selectedDomains={deleteRequest?.domains ?? []}
+        availableInstances={deleteRequest?.availableInstances ?? []}
+        defaultInstances={deleteRequest?.defaultInstances ?? []}
         onSuccess={() => {
           loadDomains();
           loadStats();
