@@ -46,6 +46,7 @@ interface PlanRow {
   skipReason?: string;
   sourceInstances?: BisonInstanceSlug[];
   inboxCount?: number;
+  perInstance?: { instance: BisonInstanceSlug; inboxCount: number }[];
   tags?: string[];
 }
 
@@ -138,11 +139,31 @@ export function MoveDomainsDialog({ open, onOpenChange, selectedDomains, onStart
   };
 
   const movable = useMemo(() => (plan?.plan || []).filter((p) => p.action === "move"), [plan]);
-  // Domains already sitting only on the chosen target are pointless to move.
+  // Once a target is chosen, exclude rows the server would skip anyway:
+  // - single-instance domains already ON the target (pointless), and
+  // - 2-instance domains where NEITHER copy is on the target (the mover only
+  //   handles "move the other copy onto the target" for dual-presence rows).
   const movableForTarget = useMemo(
-    () => movable.filter((p) => !(target && p.sourceInstances?.length === 1 && p.sourceInstances[0] === target)),
+    () => movable.filter((p) => {
+      if (!target) return true;
+      const src = p.sourceInstances || [];
+      if (src.length === 1) return src[0] !== target;
+      if (src.length === 2) return src.includes(target);
+      return true;
+    }),
     [movable, target],
   );
+  // What actually moves for a row given the chosen target (for dual-presence
+  // rows only the non-target copy moves — the summed count is misleading).
+  const moveDetail = (p: PlanRow): string => {
+    const src = p.sourceInstances || [];
+    if (target && src.length === 2 && src.includes(target)) {
+      const other = src.find((s) => s !== target)!;
+      const count = p.perInstance?.find((x) => x.instance === other)?.inboxCount ?? "?";
+      return `move ${count} inboxes from ${INSTANCE_SHORT_LABELS[other] ?? other} → ${INSTANCE_SHORT_LABELS[target]}`;
+    }
+    return `move ${p.inboxCount ?? "?"} inboxes${target ? ` → ${INSTANCE_SHORT_LABELS[target]}` : ""}`;
+  };
   const selectedConnection = plan?.connections.find((c) => c.id === connectionId) ?? null;
   const canStart = Boolean(target && connectionId && movableForTarget.length > 0);
 
@@ -250,12 +271,14 @@ export function MoveDomainsDialog({ open, onOpenChange, selectedDomains, onStart
                 </thead>
                 <tbody className="divide-y">
                   {(plan.plan || []).map((r) => {
-                    const pointless = r.action === "move" && target && r.sourceInstances?.length === 1 && r.sourceInstances[0] === target;
+                    const src = r.sourceInstances || [];
+                    const pointless = r.action === "move" && target && src.length === 1 && src[0] === target;
+                    const unreachable = r.action === "move" && target && src.length === 2 && !src.includes(target);
                     return (
-                      <tr key={r.domain} className={r.action === "skip" || pointless ? "bg-amber-950/10" : ""}>
+                      <tr key={r.domain} className={r.action === "skip" || pointless || unreachable ? "bg-amber-950/10" : ""}>
                         <td className="px-2 py-1 truncate max-w-[220px]">{r.domain}</td>
                         <td className="px-2 py-1 text-muted-foreground">
-                          {(r.sourceInstances || []).map((s) => INSTANCE_SHORT_LABELS[s] ?? s).join(", ") || "—"}
+                          {src.map((s) => INSTANCE_SHORT_LABELS[s] ?? s).join(", ") || "—"}
                         </td>
                         <td className="px-2 py-1">
                           {r.action === "skip" ? (
@@ -268,10 +291,13 @@ export function MoveDomainsDialog({ open, onOpenChange, selectedDomains, onStart
                               <AlertTriangle className="h-3 w-3" />
                               Skip — already on target
                             </span>
-                          ) : (
-                            <span className="text-muted-foreground">
-                              move {r.inboxCount ?? "?"} inboxes{target ? ` → ${INSTANCE_SHORT_LABELS[target]}` : ""}
+                          ) : unreachable ? (
+                            <span className="text-amber-400 inline-flex items-center gap-1">
+                              <AlertTriangle className="h-3 w-3" />
+                              Skip — exists on {src.map((s) => INSTANCE_SHORT_LABELS[s] ?? s).join(" + ")}; pick one of them as the target
                             </span>
+                          ) : (
+                            <span className="text-muted-foreground">{moveDetail(r)}</span>
                           )}
                         </td>
                       </tr>

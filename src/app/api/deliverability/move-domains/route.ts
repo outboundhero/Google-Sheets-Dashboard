@@ -181,16 +181,29 @@ async function cleanupSource(source: BisonInstanceSlug, domain: string): Promise
   const ids = ((inboxes || []) as { id: number }[]).map((r) => r.id);
   const deletedIds: number[] = [];
   let failed = 0;
-  for (let i = 0; i < ids.length; i += 20) {
-    const batch = ids.slice(i, i + 20);
-    const results = await Promise.all(batch.map(async (id) => {
+  // Patient per-delete retry — a mass delete without backoff collapses the
+  // moment Bison's per-minute limit trips (the old bulk-delete lesson).
+  const deleteOne = async (id: number): Promise<boolean> => {
+    for (let attempt = 0; attempt < 5; attempt++) {
       try {
         const res = await bisonFetch(source, `/sender-emails/${id}`, { method: "DELETE", headers: { "Content-Type": "application/json" } });
-        return { id, ok: res.ok || res.status === 404 };
+        if (res.ok || res.status === 404) return true;
+        if (res.status === 429 || res.status >= 500) {
+          const ra = parseInt(res.headers.get("retry-after") || "", 10);
+          const wait = Number.isFinite(ra) && ra > 0 ? ra * 1000 : Math.min(15_000, 600 * 2 ** attempt);
+          await sleep(wait + Math.floor(Math.random() * 300));
+          continue;
+        }
+        return false;
       } catch {
-        return { id, ok: false };
+        await sleep(Math.min(15_000, 600 * 2 ** attempt));
       }
-    }));
+    }
+    return false;
+  };
+  for (let i = 0; i < ids.length; i += 10) {
+    const batch = ids.slice(i, i + 10);
+    const results = await Promise.all(batch.map(async (id) => ({ id, ok: await deleteOne(id) })));
     for (const r of results) {
       if (r.ok) deletedIds.push(r.id);
       else failed++;
@@ -250,6 +263,10 @@ export async function POST(request: Request) {
           action: "move" as const,
           sourceInstances: rows.map((r) => r.instance),
           inboxCount: rows.reduce((s, r) => s + (r.inbox_count || 0), 0),
+          // Per-instance counts so the dialog can show exactly how many
+          // inboxes move once a target is chosen (for 2-instance rows only
+          // the non-target copy moves — the summed count is misleading).
+          perInstance: rows.map((r) => ({ instance: r.instance, inboxCount: r.inbox_count || 0 })),
           inboxingId: inboxingIds.get(domain) ?? null, // null → resolved by name at apply
           tags: anyRow.tags || [],
         };
