@@ -27,6 +27,7 @@ import {
   Plus,
   ShieldAlert,
   ArrowRightLeft,
+  Ban,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -39,6 +40,7 @@ import { RemoveFromCampaignsDialog } from "@/components/deliverability/remove-fr
 import { ConformTagsDialog } from "@/components/deliverability/conform-tags-dialog";
 import { ChangeRedirectDialog } from "@/components/deliverability/change-redirect-dialog";
 import { MoveDomainsDialog, type MoveJob } from "@/components/deliverability/move-domains-dialog";
+import { CancelDomainsDialog, type CancelJob } from "@/components/deliverability/cancel-domains-dialog";
 import { SendToSheetDialog } from "@/components/deliverability/send-to-sheet-dialog";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -637,6 +639,22 @@ function DeliverabilityPageInner() {
     queued: boolean;
   }
   const [moveProgress, setMoveProgress] = useState<MoveProgressState | null>(null);
+  const [cancelDialogOpen, setCancelDialogOpen] = useState(false);
+  // Live progress for the cancel-at-provider workflow (Inboxing/MilkBox) —
+  // stacked top panel, never-stuck, ends with Slack summary + a live
+  // provider-status re-check.
+  interface CancelProgressState {
+    id: number;
+    done: number;
+    total: number;
+    counts: { canceled: number; alreadyGone: number; skipped: number; failed: number };
+    failures: { domain: string; provider: string | null; error: string }[];
+    slackNote: string | null;
+    verifying: boolean;
+    running: boolean;
+    queued: boolean;
+  }
+  const [cancelProgress, setCancelProgress] = useState<CancelProgressState | null>(null);
   const [clientTags, setClientTags] = useState<Set<string>>(new Set());
   const [selectedDomains, setSelectedDomains] = useState<Set<string>>(new Set());
   // Stable array of the selected domains — passed to dialogs so their effects
@@ -1311,6 +1329,105 @@ function DeliverabilityPageInner() {
       await Promise.all([loadDomains(), mutateDomainInstances()]);
     }
     });
+  };
+
+  // Cancel-at-provider workflow (Inboxing / MilkBox). Batched through the
+  // shared queue; ends with the Slack summary (successfully canceled domains
+  // only) and a live Check Provider Status pass so the Provider column shows
+  // the provider-confirmed state.
+  const runCancelDomains = async (job: CancelJob) => {
+    const BATCH = 10;
+    const cancelId = runIdRef.current++;
+    const counts = { canceled: 0, alreadyGone: 0, skipped: 0, failed: 0 };
+    const failures: { domain: string; provider: string | null; error: string }[] = [];
+    const canceledList: { domain: string; provider: string }[] = [];
+    setCancelProgress({
+      id: cancelId, done: 0, total: job.domains.length,
+      counts: { ...counts }, failures: [], slackNote: null, verifying: false,
+      running: false, queued: true,
+    });
+    setSelectedDomains(new Set());
+
+    await enqueueBisonRun(async () => {
+      if (dismissedRunsRef.current.has(cancelId)) return; // cancelled while queued
+      setCancelProgress((prev) => (prev ? { ...prev, queued: false, running: true } : prev));
+      try {
+        for (let i = 0; i < job.domains.length; i += BATCH) {
+          const batch = job.domains.slice(i, i + BATCH);
+          try {
+            const res = await fetch("/api/deliverability/cancel-domains", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ dryRun: false, domains: batch }),
+            });
+            // JSON-safe parse — a serverless timeout returns an HTML page.
+            const text = await res.text();
+            let d: { error?: string; results?: { domain: string; provider: string | null; status: string; error?: string }[] } | null = null;
+            try { d = text ? JSON.parse(text) : null; } catch { /* non-JSON */ }
+            if (!d || !res.ok || d.error) {
+              const why = !d
+                ? (res.status >= 500 ? "server timed out or crashed" : `non-JSON response (HTTP ${res.status})`)
+                : (d.error || `HTTP ${res.status}`);
+              for (const dom of batch) { counts.failed++; failures.push({ domain: dom, provider: null, error: why }); }
+            } else {
+              for (const r of d.results || []) {
+                if (r.status === "canceled") { counts.canceled++; canceledList.push({ domain: r.domain, provider: r.provider || "unknown" }); }
+                else if (r.status === "alreadyGone") counts.alreadyGone++;
+                else if (r.status === "skipped") counts.skipped++;
+                else { counts.failed++; failures.push({ domain: r.domain, provider: r.provider, error: r.error || "failed" }); }
+              }
+            }
+          } catch (e) {
+            const why = e instanceof Error ? e.message : "network error";
+            for (const dom of batch) { counts.failed++; failures.push({ domain: dom, provider: null, error: why }); }
+          }
+          setCancelProgress((prev) => prev ? {
+            ...prev,
+            done: Math.min(i + BATCH, job.domains.length),
+            counts: { ...counts },
+            failures: [...failures],
+          } : prev);
+        }
+
+        // Slack summary — ONLY the successfully canceled domains are listed.
+        if (canceledList.length > 0) {
+          setCancelProgress((prev) => (prev ? { ...prev, slackNote: "Sending Slack summary…" } : prev));
+          try {
+            const res = await fetch("/api/deliverability/cancel-domains", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ action: "notify", canceled: canceledList, failed: counts.failed, skipped: counts.skipped }),
+            });
+            const d = await res.json().catch(() => null);
+            setCancelProgress((prev) => prev ? {
+              ...prev,
+              slackNote: d?.sent
+                ? `Slack summary sent (${canceledList.length} domains) ✓`
+                : `Slack summary NOT sent — ${d?.reason || `HTTP ${res.status}`}`,
+            } : prev);
+          } catch (e) {
+            setCancelProgress((prev) => (prev ? { ...prev, slackNote: `Slack summary NOT sent — ${e instanceof Error ? e.message : "error"}` } : prev));
+          }
+        } else {
+          setCancelProgress((prev) => (prev ? { ...prev, slackNote: "Nothing canceled — no Slack message sent" } : prev));
+        }
+      } finally {
+        // Never leave the panel stuck on "running".
+        setCancelProgress((prev) => (prev ? { ...prev, running: false } : prev));
+      }
+    });
+
+    // Re-verify statuses LIVE from the providers (same as the header button)
+    // — its own three-row panel appears and the Provider column reflects the
+    // provider-confirmed answer, not just our optimistic write.
+    if (!dismissedRunsRef.current.has(cancelId)) {
+      setCancelProgress((prev) => (prev ? { ...prev, verifying: true } : prev));
+      try {
+        await handleProviderCheck();
+      } finally {
+        setCancelProgress((prev) => (prev ? { ...prev, verifying: false } : prev));
+      }
+    }
   };
 
   const handleSync = async (slugs: BisonInstanceSlug[] = [...ALL_INSTANCE_SLUGS]) => {
@@ -2265,6 +2382,75 @@ function DeliverabilityPageInner() {
                 ))}
                 {moveProgress.failures.length > 30 && (
                   <div className="px-3 py-1 text-[11px] text-muted-foreground">…and {moveProgress.failures.length - 30} more</div>
+                )}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Cancel-at-provider progress — Inboxing/MilkBox cancellations */}
+      {cancelProgress && (
+        <div className="rounded-lg border bg-muted/30 px-4 py-3 space-y-2">
+          <div className="flex items-center justify-between text-xs">
+            <span className="flex items-center gap-2">
+              {cancelProgress.queued
+                ? <Clock className="h-3.5 w-3.5 text-amber-500" />
+                : cancelProgress.running || cancelProgress.verifying
+                ? <Loader2 className="h-3.5 w-3.5 animate-spin text-primary" />
+                : <CheckCircle2 className="h-3.5 w-3.5 text-emerald-500" />}
+              <span className="font-medium">
+                {cancelProgress.queued
+                  ? `Queued — waiting for the previous process… (${cancelProgress.total} domains to cancel)`
+                  : cancelProgress.running
+                  ? `Canceling ${cancelProgress.done}/${cancelProgress.total} domains at the provider`
+                  : cancelProgress.verifying
+                  ? `Cancel finished — verifying statuses with the providers…`
+                  : `Cancel finished — ${cancelProgress.done}/${cancelProgress.total} domains processed`}
+              </span>
+              <span className="text-muted-foreground">Inboxing + MilkBox · domains stay in LeadSync</span>
+            </span>
+            {!cancelProgress.running && !cancelProgress.verifying && (
+              <button
+                onClick={() => {
+                  dismissedRunsRef.current.add(cancelProgress.id); // cancels if still queued
+                  setCancelProgress(null);
+                }}
+                className="shrink-0 opacity-60 hover:opacity-100"
+                title={cancelProgress.queued ? "Cancel" : "Dismiss"}
+              >✕</button>
+            )}
+          </div>
+          <div className="h-1.5 rounded-full bg-muted overflow-hidden">
+            <div className="h-full bg-destructive/80 transition-all" style={{ width: `${cancelProgress.total ? (cancelProgress.done / cancelProgress.total) * 100 : 0}%` }} />
+          </div>
+          <div className="text-[11px] text-muted-foreground">
+            <span className={cancelProgress.counts.canceled ? "text-emerald-500" : ""}>{cancelProgress.counts.canceled} canceled</span>
+            {" · "}
+            <span>{cancelProgress.counts.alreadyGone} already gone at provider</span>
+            {" · "}
+            <span className={cancelProgress.counts.skipped ? "text-amber-500" : ""}>{cancelProgress.counts.skipped} skipped</span>
+            {" · "}
+            <span className={cancelProgress.counts.failed ? "text-destructive" : ""}>{cancelProgress.counts.failed} failed</span>
+            {cancelProgress.slackNote && (
+              <span className={cancelProgress.slackNote.includes("NOT sent") ? "text-amber-500" : "text-muted-foreground"}> · {cancelProgress.slackNote}</span>
+            )}
+          </div>
+          {cancelProgress.failures.length > 0 && (
+            <div className="rounded-md border border-destructive/30 bg-destructive/5">
+              <div className="px-3 py-1.5 text-[11px] text-destructive font-medium">
+                {cancelProgress.failures.length} domain{cancelProgress.failures.length === 1 ? "" : "s"} failed to cancel — they were NOT included in the Slack summary; re-run Cancel Domains to retry
+              </div>
+              <div className="max-h-32 overflow-y-auto divide-y divide-destructive/10 border-t border-destructive/20">
+                {cancelProgress.failures.slice(0, 30).map((f, i) => (
+                  <div key={i} className="flex items-center gap-2 px-3 py-1 text-[11px]">
+                    <span className="font-medium shrink-0">{f.domain}</span>
+                    {f.provider && <span className="text-muted-foreground shrink-0">[{f.provider}]</span>}
+                    <span className="text-destructive/80 truncate">{f.error}</span>
+                  </div>
+                ))}
+                {cancelProgress.failures.length > 30 && (
+                  <div className="px-3 py-1 text-[11px] text-muted-foreground">…and {cancelProgress.failures.length - 30} more</div>
                 )}
               </div>
             </div>
@@ -3481,6 +3667,17 @@ function DeliverabilityPageInner() {
                     <Button
                       size="sm"
                       variant="outline"
+                      className="h-7 text-xs gap-1.5 text-destructive hover:text-destructive"
+                      onClick={() => setCancelDialogOpen(true)}
+                      disabled={cancelProgress?.running || cancelProgress?.queued || cancelProgress?.verifying}
+                      title="Cancel the selected domains at their provider (Inboxing / MilkBox) — domains stay in LeadSync"
+                    >
+                      <Ban className="h-3 w-3" />
+                      Cancel Domains
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="outline"
                       className="h-7 text-xs gap-1.5"
                       onClick={() => startSyncSelected(Array.from(selectedDomains))}
                     >
@@ -4339,6 +4536,15 @@ function DeliverabilityPageInner() {
         onOpenChange={setMoveDialogOpen}
         selectedDomains={Array.from(selectedDomains)}
         onStart={runMoveDomains}
+      />
+
+      {/* Cancel Domains — cancels at the provider (Inboxing / MilkBox);
+          rows stay in LeadSync. Slack summary + provider re-check follow. */}
+      <CancelDomainsDialog
+        open={cancelDialogOpen}
+        onOpenChange={setCancelDialogOpen}
+        selectedDomains={Array.from(selectedDomains)}
+        onStart={runCancelDomains}
       />
 
       {/* Send to Sheet Dialog */}
