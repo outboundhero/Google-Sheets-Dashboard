@@ -58,12 +58,17 @@ export async function GET() {
       console.error("[cron/sync] Supabase sheets sync failed:", err)
     );
 
+    // Surface which sheets failed this cycle (name + reason) — meta.errors
+    // accumulates across the cycle and resets at cursor 0.
+    const finalMeta = await getSyncMetadata();
+
     return NextResponse.json({
       totalSynced,
       totalErrors,
       totalSheets,
       nextCursor: offset,
       wrappedFullCycle: wrapped,
+      failedSheets: finalMeta.errors ?? [],
       durationMs: Date.now() - startTime,
     });
   } catch (error) {
