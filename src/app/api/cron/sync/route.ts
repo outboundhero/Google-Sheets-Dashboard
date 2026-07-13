@@ -39,16 +39,32 @@ export async function GET() {
       });
     };
 
+    // Google Sheets allows 300 reads/min per user (the service account), SHARED
+    // with the deliverability/campaign/tracker reads. Bursting all ~111 sheets
+    // in one run blew that quota and cascaded via retries. So cap each run to a
+    // paced batch and let the hourly cursor cover the rest — every sheet still
+    // refreshes within a few hours, with big quota headroom for other consumers.
+    const MAX_SHEETS_PER_RUN = 40;
+    const CHUNK_DELAY_MS = 2500;
+    const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
     const startTime = Date.now();
-    while (totalSheets > 0 && Date.now() - startTime < 240_000) {
+    let sheetsThisRun = 0;
+    while (
+      totalSheets > 0 &&
+      sheetsThisRun < MAX_SHEETS_PER_RUN &&
+      Date.now() - startTime < 240_000
+    ) {
+      if (sheetsThisRun > 0) await delay(CHUNK_DELAY_MS); // pace to respect quota
       const result = await syncChunk(offset);
       totalSynced += result.sheetsSuccess;
       totalErrors += result.sheetsError;
+      sheetsThisRun += result.sheetsProcessed;
       if (result.complete) {
-        offset = 0;      // wrap to the top for the next run
+        offset = 0;      // wrap to the top
         wrapped = true;
         await persistCursor(0, true);
-        break;           // one full pass reached the end — stop for this run
+        break;
       }
       offset = result.nextOffset;
       await persistCursor(offset, false);
