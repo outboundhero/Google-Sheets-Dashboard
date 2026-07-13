@@ -4,7 +4,7 @@ import { getConfig } from "@/lib/sheets-config";
 import { syncSheetsToSupabase } from "@/lib/supabase-sheets-sync";
 import { getSyncMetadata, storeSyncMetadata } from "@/lib/leads-store";
 
-export const maxDuration = 60;
+export const maxDuration = 300;
 
 // Leads + tracked-sheets mirror. Runs HOURLY (see vercel.json) and RESUMES
 // from a persisted round-robin cursor instead of restarting at sheet #0 every
@@ -26,27 +26,33 @@ export async function GET() {
     let totalErrors = 0;
     let wrapped = false;
 
+    // Persist the resume cursor after EACH chunk so a mid-run function timeout
+    // can never strand the cursor — the next run always resumes from real
+    // progress. Budget leaves headroom under maxDuration for a slow chunk
+    // (per-sheet fetch can take up to 30s) plus the Supabase mirror below.
+    const persistCursor = async (nextCursor: number, didWrap: boolean) => {
+      const m = await getSyncMetadata();
+      await storeSyncMetadata({
+        ...m,
+        cursor: nextCursor,
+        lastFullCycleAt: didWrap ? new Date().toISOString() : (m.lastFullCycleAt ?? null),
+      });
+    };
+
     const startTime = Date.now();
-    while (totalSheets > 0 && Date.now() - startTime < 55_000) {
+    while (totalSheets > 0 && Date.now() - startTime < 240_000) {
       const result = await syncChunk(offset);
       totalSynced += result.sheetsSuccess;
       totalErrors += result.sheetsError;
-      // syncChunk returns nextOffset (0 when it just finished the last chunk).
       if (result.complete) {
         offset = 0;      // wrap to the top for the next run
         wrapped = true;
+        await persistCursor(0, true);
         break;           // one full pass reached the end — stop for this run
       }
       offset = result.nextOffset;
+      await persistCursor(offset, false);
     }
-
-    // Persist the resume point (+ stamp a full-cycle completion when we wrapped).
-    const metaAfter = await getSyncMetadata();
-    await storeSyncMetadata({
-      ...metaAfter,
-      cursor: offset,
-      lastFullCycleAt: wrapped ? new Date().toISOString() : (metaAfter.lastFullCycleAt ?? null),
-    });
 
     await syncSheetsToSupabase().catch((err) =>
       console.error("[cron/sync] Supabase sheets sync failed:", err)
