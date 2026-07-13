@@ -17,6 +17,13 @@ export interface SyncMetadata {
   sheetsError: number;
   sheetKeys: string[]; // Redis keys for all stored sheets
   errors?: { sheetId: string; name: string; error: string }[];
+  // Round-robin cursor: the next sheet offset the sync should resume from.
+  // The cron persists this across runs so it never restarts at 0 and strands
+  // the back half of the sheet list.
+  cursor?: number;
+  // When the cursor last wrapped past the end — i.e. every sheet has been
+  // refreshed at least once since this timestamp.
+  lastFullCycleAt?: string | null;
 }
 
 export interface StoredSheetData {
@@ -40,6 +47,8 @@ const DEFAULT_META: SyncMetadata = {
   sheetsSuccess: 0,
   sheetsError: 0,
   sheetKeys: [],
+  cursor: 0,
+  lastFullCycleAt: null,
 };
 
 // --- Redis client (same pattern as sheets-config.ts) ---
@@ -123,6 +132,51 @@ export async function getStoredLeads(): Promise<Lead[]> {
     allLeads.push(...data.leads);
   }
   return allLeads;
+}
+
+/**
+ * Like getStoredLeads, but also returns per-client data freshness — the
+ * OLDEST syncedAt across the sheets that make up each client tag (a client
+ * with several sheets is only as fresh as its stalest one). Lets analytics
+ * mark stale clients instead of silently trusting frozen snapshots.
+ */
+export async function getStoredLeadsWithFreshness(): Promise<{
+  leads: Lead[];
+  syncedAtByClient: Record<string, string>;
+}> {
+  const syncedAtByClient: Record<string, string> = {};
+  const note = (data: StoredSheetData) => {
+    const tag = (data.clientTag || "").trim();
+    if (!tag || !data.syncedAt) return;
+    const prev = syncedAtByClient[tag];
+    // Keep the OLDEST (stalest) syncedAt for the tag.
+    if (!prev || data.syncedAt < prev) syncedAtByClient[tag] = data.syncedAt;
+  };
+
+  const redis = getRedis();
+  if (redis) {
+    const meta = await redis.get<SyncMetadata>(META_KEY);
+    if (!meta || meta.sheetKeys.length === 0) return { leads: [], syncedAtByClient };
+    const pipeline = redis.pipeline();
+    for (const key of meta.sheetKeys) pipeline.get(key);
+    const results = await pipeline.exec<(StoredSheetData | null)[]>();
+    const allLeads: Lead[] = [];
+    for (const data of results) {
+      if (data && data.leads) {
+        allLeads.push(...data.leads);
+        note(data);
+      }
+    }
+    return { leads: allLeads, syncedAtByClient };
+  }
+
+  const store = getLocalStore();
+  const allLeads: Lead[] = [];
+  for (const data of Object.values(store.sheets)) {
+    allLeads.push(...data.leads);
+    note(data);
+  }
+  return { leads: allLeads, syncedAtByClient };
 }
 
 export async function getStoredSheetLeads(sheetId: string): Promise<Lead[]> {

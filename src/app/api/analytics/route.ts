@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { getStoredLeads } from "@/lib/leads-store";
+import { getStoredLeadsWithFreshness, getSyncMetadata } from "@/lib/leads-store";
 import { computeAnalytics } from "@/lib/analytics";
 import { getClientTrackerData } from "@/lib/google-sheets";
 
@@ -8,9 +8,10 @@ export async function GET(request: Request) {
     const { searchParams } = new URL(request.url);
     const client = searchParams.get("client") || undefined;
 
-    const [leads, trackerData] = await Promise.all([
-      getStoredLeads(),
+    const [{ leads, syncedAtByClient }, trackerData, syncMeta] = await Promise.all([
+      getStoredLeadsWithFreshness(),
       getClientTrackerData().catch(() => []),
+      getSyncMetadata().catch(() => null),
     ]);
 
     // Exclude clients whose churn date has already passed
@@ -36,8 +37,12 @@ export async function GET(request: Request) {
       }
     }
 
-    const analytics = computeAnalytics(leads, client, churnedClients, billingStartDate);
-    return NextResponse.json(analytics);
+    const analytics = computeAnalytics(leads, client, churnedClients, billingStartDate, syncedAtByClient);
+    return NextResponse.json({
+      ...analytics,
+      leadsLastFullCycleAt: syncMeta?.lastFullCycleAt ?? null,
+      leadsLastSyncAt: syncMeta?.lastSyncAt ?? null,
+    });
   } catch (error) {
     const message =
       error instanceof Error ? error.message : "Failed to compute analytics";

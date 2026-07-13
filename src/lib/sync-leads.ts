@@ -5,6 +5,7 @@ import {
   storeSyncMetadata,
   storeMultipleSheetLeads,
   storeSheetLeads,
+  getStoredSheetLeads,
   trimLeadForStorage,
   type SyncMetadata,
   type StoredSheetData,
@@ -114,6 +115,20 @@ export async function syncChunk(offset: number = 0): Promise<SyncResult> {
 
       if (result.status === "fulfilled") {
         const trimmedLeads = result.value.map(trimLeadForStorage);
+        // Empty-overwrite guard: a "successful" read that returns 0 rows while
+        // the sheet previously had leads is almost always a transient blank
+        // (Sheets hiccup) — writing it would erase the client from every panel.
+        // Keep the old snapshot and flag it instead of wiping to empty.
+        if (trimmedLeads.length === 0) {
+          const prev = await getStoredSheetLeads(sheetInfo.id).catch(() => [] as never[]);
+          if (prev.length > 0) {
+            console.warn(`[syncChunk] "${sheetInfo.name}" returned 0 rows but had ${prev.length} — keeping previous snapshot`);
+            newSheetKeys.push(`leads-store:sheet:${sheetInfo.id}`);
+            totalLeads += prev.length;
+            sheetsSuccess++;
+            continue;
+          }
+        }
         toStore.push({
           sheetId: sheetInfo.id,
           data: {
@@ -152,6 +167,18 @@ export async function syncChunk(offset: number = 0): Promise<SyncResult> {
               sheetInfo.name
             );
             const trimmedLeads = leads.map(trimLeadForStorage);
+            // Same empty-overwrite guard as the first-attempt path.
+            if (trimmedLeads.length === 0) {
+              const prev = await getStoredSheetLeads(sheetInfo.id).catch(() => [] as never[]);
+              if (prev.length > 0) {
+                console.warn(`[syncChunk] retry "${sheetInfo.name}" returned 0 rows but had ${prev.length} — keeping previous snapshot`);
+                newSheetKeys.push(`leads-store:sheet:${sheetInfo.id}`);
+                totalLeads += prev.length;
+                sheetsSuccess++;
+                succeeded = true;
+                break;
+              }
+            }
             await storeMultipleSheetLeads([{
               sheetId: sheetInfo.id,
               data: {
@@ -195,6 +222,9 @@ export async function syncChunk(offset: number = 0): Promise<SyncResult> {
     sheetsError: (currentMeta.sheetsError || 0) + sheetsError,
     sheetKeys: mergedSheetKeys,
     errors: [...(currentMeta.errors || []), ...errors].slice(0, 20),
+    // Preserve cursor bookkeeping — the cron owns/advances these fields.
+    cursor: currentMeta.cursor ?? 0,
+    lastFullCycleAt: currentMeta.lastFullCycleAt ?? null,
   };
 
   // On first chunk, reset counters (don't accumulate from previous full sync)

@@ -11,7 +11,7 @@ export interface DashboardAnalytics {
   meetingReadyLast24h: number;
   meetingReadyWithoutStatus: number;
   meetingReadyWithoutStatusTotal: number;
-  clientsWithoutRecentMeetingReady: { client: string; lastMeetingReadyDate: string | null }[];
+  clientsWithoutRecentMeetingReady: { client: string; lastMeetingReadyDate: string | null; dataSyncedAt: string | null; stale: boolean }[];
   leadsByClient: { client: string; count: number }[];
   leadsByStatus: { status: string; count: number }[];
   leadsByCategory: { category: string; count: number }[];
@@ -23,4 +23,7 @@ export interface DashboardAnalytics {
     totalLeads: number;
     percentage: number;
   }[];
+  // Lead-data freshness (set by the analytics route, not computeAnalytics).
+  leadsLastFullCycleAt?: string | null;
+  leadsLastSyncAt?: string | null;
 }

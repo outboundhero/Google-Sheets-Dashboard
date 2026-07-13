@@ -344,13 +344,31 @@ export default function DashboardPage() {
                 <p className="text-sm text-amber-700 dark:text-amber-400 mt-0.5">
                   {analytics.clientsWithoutRecentMeetingReady.length} client{analytics.clientsWithoutRecentMeetingReady.length !== 1 ? "s" : ""} need attention — click the dot to set status, name to view leads
                 </p>
+                {(() => {
+                  const fmt = (iso?: string | null) => {
+                    if (!iso) return null;
+                    const h = Math.floor((Date.now() - new Date(iso).getTime()) / 3600_000);
+                    return h < 1 ? "under 1h ago" : h < 48 ? `${h}h ago` : `${Math.floor(h / 24)}d ago`;
+                  };
+                  const cycle = fmt(analytics.leadsLastFullCycleAt);
+                  const last = fmt(analytics.leadsLastSyncAt);
+                  return (
+                    <p className="text-[11px] text-amber-600/80 dark:text-amber-500/70 mt-0.5">
+                      Lead data {cycle ? <>fully refreshed <b>{cycle}</b></> : <>refresh time unknown</>}
+                      {last ? <> · last sync {last}</> : null}
+                    </p>
+                  );
+                })()}
               </div>
               <div className="flex flex-wrap gap-2">
-                {analytics.clientsWithoutRecentMeetingReady.map(({ client, lastMeetingReadyDate }) => {
+                {analytics.clientsWithoutRecentMeetingReady.map(({ client, lastMeetingReadyDate, dataSyncedAt, stale }) => {
                   const status = (triageStatuses[client]?.status || "unreviewed") as TriageStatus;
                   const meta = TRIAGE_META[status];
                   const updatedBy = triageStatuses[client]?.updated_by;
                   const needs = triageStatuses[client]?.needs || [];
+                  const syncedAgo = dataSyncedAt
+                    ? (() => { const h = Math.floor((Date.now() - new Date(dataSyncedAt).getTime()) / 3600_000); return h < 1 ? "just synced" : h < 48 ? `synced ${h}h ago` : `synced ${Math.floor(h / 24)}d ago`; })()
+                    : "sync time unknown";
                   return (
                     <div
                       key={client}
@@ -374,6 +392,21 @@ export default function DashboardPage() {
                       <span className="text-xs font-normal opacity-70 bg-black/5 dark:bg-white/10 rounded px-1.5 py-0.5">
                         {lastMeetingReadyDate ? `last: ${new Date(lastMeetingReadyDate).toLocaleDateString()}` : "no data"}
                       </span>
+                      {stale ? (
+                        <span
+                          className="text-[10px] font-medium rounded bg-red-500/15 text-red-700 dark:text-red-300 px-1.5 py-0.5"
+                          title={`This client's lead data may be outdated (${syncedAgo}). Treat this flag with caution until the next sync.`}
+                        >
+                          ⚠ stale · {syncedAgo}
+                        </span>
+                      ) : (
+                        <span
+                          className="text-[10px] font-normal rounded bg-black/5 dark:bg-white/10 px-1.5 py-0.5 opacity-70"
+                          title={`Lead data ${syncedAgo}`}
+                        >
+                          {syncedAgo}
+                        </span>
+                      )}
                       {needs[0] && (
                         <span className="text-xs font-normal rounded bg-black/10 dark:bg-white/15 px-1.5 py-0.5">
                           {needs[0]}

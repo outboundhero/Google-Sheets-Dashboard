@@ -152,7 +152,11 @@ export function computeAnalytics(
   leads: Lead[],
   filterClientTag?: string,
   excludeClientTags?: string[],
-  goLiveDate?: Date | null
+  goLiveDate?: Date | null,
+  // Per-client data freshness (oldest sheet syncedAt). Lets the stale-clients
+  // panel mark clients whose lead data hasn't refreshed recently, so frozen
+  // snapshots are never silently presented as current.
+  syncedAtByClient?: Record<string, string>
 ): DashboardAnalytics {
   const baseLeads = excludeClientTags?.length
     ? leads.filter((l) => !excludeClientTags.includes(l.sheetClientTag))
@@ -282,7 +286,10 @@ export function computeAnalytics(
 
   // Clients without meeting-ready leads for 4+ days (PST)
   const fourDaysAgoPst = new Date(nowPst.getTime() - 4 * 24 * 60 * 60 * 1000);
-  const clientsWithoutRecentMeetingReady: { client: string; lastMeetingReadyDate: string | null }[] = [];
+  // A client's data is "stale" if its sheet hasn't re-synced within this many
+  // hours — such rows are shown but badged, never trusted as fresh.
+  const STALE_HOURS = 30;
+  const clientsWithoutRecentMeetingReady: { client: string; lastMeetingReadyDate: string | null; dataSyncedAt: string | null; stale: boolean }[] = [];
 
   for (const [client, clientLeads] of Object.entries(byClient)) {
     // Skip invalid client tags
@@ -313,9 +320,15 @@ export function computeAnalytics(
     }
 
     if (!hasRecentMeetingReady) {
+      const dataSyncedAt = syncedAtByClient?.[client] ?? null;
+      const stale = dataSyncedAt
+        ? (Date.now() - new Date(dataSyncedAt).getTime()) > STALE_HOURS * 3600_000
+        : true; // no freshness info → treat as stale (don't over-trust)
       clientsWithoutRecentMeetingReady.push({
         client,
         lastMeetingReadyDate: lastMeetingReadyDate ? lastMeetingReadyDate.toISOString() : null,
+        dataSyncedAt,
+        stale,
       });
     }
   }
