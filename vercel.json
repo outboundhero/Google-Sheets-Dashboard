@@ -2,8 +2,6 @@
   "crons": [
     { "path": "/api/cron/sync",                  "schedule": "0 * * * *" },
     { "path": "/api/cron/redirect-check",        "schedule": "0 * * * *" },
-    { "path": "/api/cron/blacklist-check",       "schedule": "0 14 * * *" },
-    { "path": "/api/cron/spamhaus-check",        "schedule": "10 14 * * *" },
     { "path": "/api/cron/inbox-orders-poll",     "schedule": "0 */6 * * *" },
     { "path": "/api/cron/client-tag-allocations","schedule": "0 8 * * *" },
 
