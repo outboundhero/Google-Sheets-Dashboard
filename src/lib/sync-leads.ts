@@ -1,4 +1,4 @@
-import { getConfig } from "@/lib/sheets-config";
+import { getConfig, resolveSpreadsheetId } from "@/lib/sheets-config";
 import { getLeadsFromSheet } from "@/lib/google-sheets";
 import {
   getSyncMetadata,
@@ -99,7 +99,8 @@ export async function syncChunk(offset: number = 0): Promise<SyncResult> {
     const results = await Promise.allSettled(
       batch.map((s) =>
         withTimeout(
-          getLeadsFromSheet(s.id, s.sheetName || "Leads", s.clientTag),
+          // Fetch from the raw spreadsheet id + tab; store by s.id (composite).
+          getLeadsFromSheet(resolveSpreadsheetId(s), s.sheetName || "Leads", s.clientTag),
           SHEET_TIMEOUT_MS,
           s.name
         )
@@ -162,7 +163,7 @@ export async function syncChunk(offset: number = 0): Promise<SyncResult> {
           await delay(BATCH_DELAY_MS * attempt); // Increasing backoff: 2s, 4s
           try {
             const leads = await withTimeout(
-              getLeadsFromSheet(sheetInfo.id, sheetInfo.sheetName || "Leads", sheetInfo.clientTag),
+              getLeadsFromSheet(resolveSpreadsheetId(sheetInfo), sheetInfo.sheetName || "Leads", sheetInfo.clientTag),
               SHEET_TIMEOUT_MS,
               sheetInfo.name
             );
@@ -251,25 +252,28 @@ export async function syncChunk(offset: number = 0): Promise<SyncResult> {
 }
 
 export async function syncSingleSheet(
-  sheetId: string,
+  // Store key = the tracked-sheet's (composite) id; fetch id = the raw
+  // Google spreadsheet id. They differ for multi-tab sheets.
+  storeId: string,
+  spreadsheetId: string,
   sheetName: string,
   clientTag: string
 ): Promise<void> {
   try {
-    const leads = await getLeadsFromSheet(sheetId, sheetName, clientTag);
+    const leads = await getLeadsFromSheet(spreadsheetId, sheetName, clientTag);
     const trimmedLeads = leads.map(trimLeadForStorage);
     const storedData: StoredSheetData = {
-      sheetId,
+      sheetId: storeId,
       clientTag,
       sheetName,
       syncedAt: new Date().toISOString(),
       leads: trimmedLeads,
     };
-    await storeSheetLeads(sheetId, storedData);
+    await storeSheetLeads(storeId, storedData);
 
     // Add this sheet's key to metadata
     const meta = await getSyncMetadata();
-    const sheetKey = `leads-store:sheet:${sheetId}`;
+    const sheetKey = `leads-store:sheet:${storeId}`;
     if (!meta.sheetKeys.includes(sheetKey)) {
       meta.sheetKeys.push(sheetKey);
       meta.totalLeads += trimmedLeads.length;
@@ -277,6 +281,6 @@ export async function syncSingleSheet(
       await storeSyncMetadata(meta);
     }
   } catch (error) {
-    console.error(`[syncSingleSheet] Failed for ${sheetId}:`, error);
+    console.error(`[syncSingleSheet] Failed for ${storeId}:`, error);
   }
 }

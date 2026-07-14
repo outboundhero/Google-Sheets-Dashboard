@@ -60,18 +60,22 @@ export async function POST(request: Request) {
       );
     }
 
+    // Composite identity so two tabs of one spreadsheet track separately.
+    const compositeId = `${sheetId}::${sheetName}`;
     const sheet = {
-      id: sheetId,
+      id: compositeId,
       name: metadata.title,
       clientTag,
       sheetName,
+      spreadsheetId: sheetId,
       addedAt: new Date().toISOString(),
     };
 
     await addSheet(sheet);
 
-    // Fire-and-forget: sync this sheet's leads into Redis + update Supabase
-    syncSingleSheet(sheetId, sheetName, clientTag).catch((err) =>
+    // Fire-and-forget: sync this sheet's leads into Redis + update Supabase.
+    // Store under the composite id; fetch from the raw spreadsheet id + tab.
+    syncSingleSheet(compositeId, sheetId, sheetName, clientTag).catch((err) =>
       console.error("[sheets/POST] Background sync failed:", err)
     );
     syncSheetsToSupabase().catch((err) =>

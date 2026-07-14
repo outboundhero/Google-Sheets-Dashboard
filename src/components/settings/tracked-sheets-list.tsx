@@ -83,7 +83,7 @@ export function TrackedSheetsList({ sheets, onRemoved }: Props) {
               <div className="flex items-center gap-2">
                 <span className="text-sm font-medium truncate">{sheet.name}</span>
                 <a
-                  href={`https://docs.google.com/spreadsheets/d/${sheet.id}`}
+                  href={`https://docs.google.com/spreadsheets/d/${sheet.spreadsheetId ?? sheet.id.split("::")[0]}`}
                   target="_blank"
                   rel="noopener noreferrer"
                   className="text-muted-foreground hover:text-foreground shrink-0"
@@ -96,6 +96,11 @@ export function TrackedSheetsList({ sheets, onRemoved }: Props) {
                 {sheet.clientTag && (
                   <span className="text-[10px] bg-muted px-1.5 py-0.5 rounded font-medium">
                     {sheet.clientTag}
+                  </span>
+                )}
+                {sheet.sheetName && (
+                  <span className="text-[10px] text-muted-foreground bg-muted/60 px-1.5 py-0.5 rounded" title="Sheet tab">
+                    tab: {sheet.sheetName}
                   </span>
                 )}
                 <span className="text-[10px] text-muted-foreground">

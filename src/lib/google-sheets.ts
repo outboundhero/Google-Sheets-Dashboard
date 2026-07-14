@@ -254,7 +254,7 @@ export async function getLeadsFromSheet(
 }
 
 export async function getAllLeads(
-  sheets: { id: string; name: string; sheetName?: string; clientTag: string }[]
+  sheets: { id: string; name: string; sheetName?: string; clientTag: string; spreadsheetId?: string }[]
 ): Promise<Lead[]> {
   const cacheKey = "all-leads";
   const cached = cache.get<Lead[]>(cacheKey);
@@ -268,7 +268,8 @@ export async function getAllLeads(
   for (let i = 0; i < sheets.length; i += batchSize) {
     const batch = sheets.slice(i, i + batchSize);
     const results = await Promise.allSettled(
-      batch.map((s) => getLeadsFromSheet(s.id, s.sheetName || "Leads", s.clientTag))
+      // Fetch from the raw spreadsheet id (strip any ::tab composite suffix).
+      batch.map((s) => getLeadsFromSheet(s.spreadsheetId ?? s.id.split("::")[0], s.sheetName || "Leads", s.clientTag))
     );
     for (let j = 0; j < results.length; j++) {
       const result = results[j];

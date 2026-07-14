@@ -34,13 +34,26 @@ function saveConfigToFile(config: SheetConfig): void {
 
 // --- Public async API ---
 
+/**
+ * Raw Google spreadsheet id for a tracked sheet. New records carry it
+ * explicitly; legacy records (bare-id) derive it by stripping the optional
+ * `::tab` suffix — which for a bare id returns the id unchanged.
+ */
+export function resolveSpreadsheetId(s: Pick<TrackedSheet, "id" | "spreadsheetId">): string {
+  return s.spreadsheetId ?? s.id.split("::")[0];
+}
+
 export async function getConfig(): Promise<SheetConfig> {
   const redis = getRedis();
-  if (redis) {
-    const data = await redis.get<SheetConfig>(REDIS_KEY);
-    return data || { sheets: [] };
-  }
-  return getConfigFromFile();
+  const raw = redis
+    ? (await redis.get<SheetConfig>(REDIS_KEY)) || { sheets: [] }
+    : getConfigFromFile();
+  // Backfill spreadsheetId in-memory so every caller has the raw id (does not
+  // rewrite storage — legacy bare-id records stay exactly as saved).
+  return {
+    ...raw,
+    sheets: (raw.sheets || []).map((s) => ({ ...s, spreadsheetId: resolveSpreadsheetId(s) })),
+  };
 }
 
 export async function saveConfig(config: SheetConfig): Promise<void> {
@@ -54,8 +67,15 @@ export async function saveConfig(config: SheetConfig): Promise<void> {
 
 export async function addSheet(sheet: TrackedSheet): Promise<SheetConfig> {
   const config = await getConfig();
-  if (config.sheets.some((s) => s.id === sheet.id)) {
-    throw new Error("Sheet already tracked");
+  // Identity is (spreadsheet + tab), not the spreadsheet alone — so two tabs
+  // of one spreadsheet can be tracked separately. Only the exact same tab is
+  // a duplicate.
+  const tabOf = (s: TrackedSheet) => (s.sheetName || "Leads");
+  const already = config.sheets.some(
+    (s) => resolveSpreadsheetId(s) === resolveSpreadsheetId(sheet) && tabOf(s) === tabOf(sheet),
+  );
+  if (already) {
+    throw new Error("This tab of the spreadsheet is already tracked");
   }
   config.sheets.push(sheet);
   await saveConfig(config);

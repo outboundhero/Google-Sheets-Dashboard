@@ -1,4 +1,4 @@
-import { getConfig } from "@/lib/sheets-config";
+import { getConfig, resolveSpreadsheetId } from "@/lib/sheets-config";
 import { getSupabaseAdmin } from "@/lib/supabase";
 
 /**
@@ -9,12 +9,16 @@ export async function syncSheetsToSupabase(): Promise<{ synced: number; removed:
   const config = await getConfig();
   const supabase = getSupabaseAdmin();
 
-  // Upsert all current sheets
+  // Upsert all current sheets. `id` is the composite (spreadsheet::tab) so two
+  // tabs of one spreadsheet coexist; `spreadsheet_id` carries the raw id for
+  // external consumers. (Requires the spreadsheet_id column — the whole mirror
+  // is best-effort; callers .catch it, so a missing column can't break app UX.)
   const rows = config.sheets.map((s) => ({
     id: s.id,
     name: s.name,
     client_tag: s.clientTag,
     sheet_name: s.sheetName || "Leads",
+    spreadsheet_id: resolveSpreadsheetId(s),
     added_at: s.addedAt,
     synced_at: new Date().toISOString(),
   }));
