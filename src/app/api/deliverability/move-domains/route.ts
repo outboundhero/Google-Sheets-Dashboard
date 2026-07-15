@@ -173,6 +173,70 @@ async function registerOnTarget(target: BisonInstanceSlug, domain: string, sende
   }
 }
 
+/**
+ * Preserve the domain's lifetime metrics + warmup progress across the move.
+ * The source's stored totals are ALREADY combined (they include any prior
+ * carryover), so SETting them onto the target's carryover captures the full
+ * lineage and is idempotent on re-runs. Also re-keys the source's trailing-
+ * rate snapshot history to the target so Reply/Bounce 10/15/30d stay
+ * continuous immediately. Best-effort: a failure here never fails the move
+ * (the mailboxes have already landed on the target).
+ */
+async function captureCarryover(source: BisonInstanceSlug, target: BisonInstanceSlug, domain: string): Promise<void> {
+  const supabase = getSupabaseAdmin();
+  try {
+    // Source's displayed (combined) totals + warmup start.
+    const { data: src } = await supabase
+      .from("deliverability_domains")
+      .select("total_sent, total_replied, total_bounced, domain_created_at, warmup_status")
+      .eq("instance", source)
+      .eq("domain", domain)
+      .maybeSingle();
+    if (!src) return; // nothing to carry (source already gone)
+
+    // Earliest warmup start across source + any existing target row.
+    const { data: tgt } = await supabase
+      .from("deliverability_domains")
+      .select("domain_created_at")
+      .eq("instance", target)
+      .eq("domain", domain)
+      .maybeSingle();
+    const starts = [src.domain_created_at, tgt?.domain_created_at].filter(Boolean) as string[];
+    const warmupStart = starts.length ? starts.reduce((a, b) => (a < b ? a : b)) : null;
+
+    await supabase.from("deliverability_domain_carryover").upsert(
+      [{
+        instance: target,
+        domain,
+        carried_sent: src.total_sent || 0,
+        carried_replied: src.total_replied || 0,
+        carried_bounced: src.total_bounced || 0,
+        warmup_started_at: warmupStart,
+        warmup_status_carried: src.warmup_status || null,
+        updated_at: new Date().toISOString(),
+      }],
+      { onConflict: "instance,domain" },
+    );
+
+    // Re-key the source's snapshot history to the target instance (trailing).
+    const { data: snaps } = await supabase
+      .from("deliverability_domain_snapshots")
+      .select("snapshot_date, total_sent, total_replied, total_bounced")
+      .eq("instance", source)
+      .eq("domain", domain);
+    if (snaps && snaps.length > 0) {
+      const copied = snaps.map((s) => ({ ...s, instance: target, domain }));
+      for (let i = 0; i < copied.length; i += 500) {
+        await supabase
+          .from("deliverability_domain_snapshots")
+          .upsert(copied.slice(i, i + 500), { onConflict: "instance,domain,snapshot_date" });
+      }
+    }
+  } catch (e) {
+    console.error(`[move/carryover] ${domain} ${source}->${target}:`, e instanceof Error ? e.message : e);
+  }
+}
+
 export async function POST(request: Request) {
   try {
     const body = await request.json();
@@ -336,6 +400,8 @@ export async function POST(request: Request) {
     for (const f of arrived) {
       try {
         await registerOnTarget(target, f.domain, f.senders!);
+        // Preserve lifetime metrics + warmup + trailing history onto the target.
+        await captureCarryover(f.source, target, f.domain);
         await supabase.from("inbox_orders").update({ instance: target }).eq("provider", "inboxing").eq("domain", f.domain);
         results.push({
           domain: f.domain,

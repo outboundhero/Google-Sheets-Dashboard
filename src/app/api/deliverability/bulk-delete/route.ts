@@ -80,6 +80,9 @@ async function reconcileDomain(instance: BisonInstanceSlug, domain: string): Pro
 
   if (count === 0) {
     await supabase.from("deliverability_domains").delete().eq("instance", instance).eq("domain", domain);
+    // This instance's carryover baseline is meaningless once the domain is
+    // gone from it (the TARGET's carryover, a different key, is untouched).
+    await supabase.from("deliverability_domain_carryover").delete().eq("instance", instance).eq("domain", domain);
     return true; // domain row removed
   }
 
@@ -147,6 +150,7 @@ export async function POST(request: Request) {
           .eq("instance", instance)
           .in("domain", domains);
         await supabase.from("deliverability_domains").delete().eq("instance", instance).in("domain", domains);
+        await supabase.from("deliverability_domain_carryover").delete().eq("instance", instance).in("domain", domains);
         inboxRows += count ?? 0;
         domainRows += dCount ?? 0;
       }
@@ -179,6 +183,7 @@ export async function POST(request: Request) {
           .eq("instance", instance)
           .in("domain", domains);
         await supabase.from("deliverability_domains").delete().eq("instance", instance).in("domain", domains);
+        await supabase.from("deliverability_domain_carryover").delete().eq("instance", instance).in("domain", domains);
         domainsDeleted += count ?? 0;
       }
       return NextResponse.json({ success: true, inboxesDeleted: 0, notFound: 0, failed: 0, failures: [], domainsDeleted, instances });
