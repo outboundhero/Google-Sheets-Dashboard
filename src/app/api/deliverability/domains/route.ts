@@ -43,35 +43,40 @@ export async function GET(request: Request) {
       ? tagsParam.split(",").map((t) => t.trim()).filter(Boolean)
       : [];
 
+    // No `count: "exact"` — it added ~1s to page 1 for nothing. Instead we
+    // fetch pages in parallel batches (speculative) and keep going while the
+    // last page in a batch is full, so we never miss rows even as the table
+    // grows. For ~3,800 rows this is one parallel round (~0.5s) vs ~1.9s.
     const buildQuery = () => {
       let q = supabase
         .from("deliverability_domains")
-        .select(COLUMNS, { count: "exact" })
+        .select(COLUMNS)
         .in("instance", instances)
         .order("domain_created_at", { ascending: false, nullsFirst: false });
       if (tagNames.length > 0) q = q.overlaps("tags", tagNames);
       return q;
     };
 
-    // First page also returns the total count
-    const firstRes = await buildQuery().range(0, PAGE - 1);
-    if (firstRes.error) throw firstRes.error;
-    const total = firstRes.count || firstRes.data?.length || 0;
-    const allDomains: Record<string, unknown>[] = [
-      ...((firstRes.data || []) as unknown as Record<string, unknown>[]),
-    ];
-
-    // Fetch remaining pages in parallel
-    if (total > PAGE) {
-      const remainingPages = Math.ceil(total / PAGE) - 1;
-      const pagePromises = [];
-      for (let i = 1; i <= remainingPages; i++) {
-        pagePromises.push(buildQuery().range(i * PAGE, (i + 1) * PAGE - 1));
+    const BATCH_PAGES = 5; // 5,000-row capacity per parallel round
+    const allDomains: Record<string, unknown>[] = [];
+    let startPage = 0;
+    while (true) {
+      const results = await Promise.all(
+        Array.from({ length: BATCH_PAGES }, (_, k) => {
+          const p = startPage + k;
+          return buildQuery().range(p * PAGE, (p + 1) * PAGE - 1);
+        }),
+      );
+      let lastLen = 0;
+      for (const res of results) {
+        if (res.error) throw res.error;
+        const rows = (res.data || []) as unknown as Record<string, unknown>[];
+        allDomains.push(...rows);
+        lastLen = rows.length;
       }
-      const pageResults = await Promise.all(pagePromises);
-      for (const res of pageResults) {
-        if (res.data) allDomains.push(...(res.data as unknown as Record<string, unknown>[]));
-      }
+      // If the final page of the batch was full there may be more rows.
+      if (lastLen < PAGE) break;
+      startPage += BATCH_PAGES;
     }
 
     return NextResponse.json(allDomains);

@@ -13,23 +13,17 @@ export async function GET(request: Request) {
     const instances = resolveInstances(searchParams);
     const today = pstDateString(new Date());
 
-    // PostgREST caps RPC results at db-max-rows (default 1000), so paginate —
-    // outboundhero alone has ~4k domains and would otherwise be truncated.
-    const PAGE = 1000;
-    const rates: unknown[] = [];
-    let offset = 0;
-    while (true) {
-      const { data, error } = await supabase
-        .rpc("trailing_domain_rates", { p_instances: instances, p_today: today })
-        .order("instance", { ascending: true })
-        .order("domain", { ascending: true })
-        .range(offset, offset + PAGE - 1);
-      if (error) throw new Error(error.message);
-      if (!data || data.length === 0) break;
-      rates.push(...data);
-      if (data.length < PAGE) break;
-      offset += PAGE;
-    }
+    // Single call via a JSON-aggregating wrapper. The old code paginated with
+    // `.rpc().range()`, but PostgREST RE-EXECUTES the whole function for each
+    // range request — so with >1000 domains the 2s snapshot scan ran ~4×
+    // (~8s). `trailing_domain_rates_json` runs the scan ONCE and returns every
+    // domain's rates as one JSON array (no PostgREST 1000-row cap).
+    const { data, error } = await supabase.rpc("trailing_domain_rates_json", {
+      p_instances: instances,
+      p_today: today,
+    });
+    if (error) throw new Error(error.message);
+    const rates: unknown[] = Array.isArray(data) ? data : [];
 
     // Earliest snapshot we hold for these instances → warm-up day count.
     const { data: minRow } = await supabase
