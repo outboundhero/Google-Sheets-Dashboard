@@ -928,32 +928,34 @@ function DeliverabilityPageInner() {
     // here used to blank the whole table to skeletons on every reload and
     // instance switch, then re-mount ~4,800 rows from scratch.
     try {
-      // Domains + trailing rates in parallel; trailing is best-effort.
-      const [res, trailingRes] = await Promise.all([
-        fetch(`/api/deliverability/domains?${instancesQuery}`, { cache: "no-store" }),
-        fetch(`/api/deliverability/trailing?${instancesQuery}`, { cache: "no-store" }).catch(() => null),
-      ]);
-      const data = await res.json();
+      // Render the table as soon as DOMAINS arrive (~1s); the trailing rates
+      // (a heavier ~2-3s snapshot scan) merge in a moment later instead of
+      // blocking first paint. Both fetched in parallel; trailing best-effort.
+      const domainsP = fetch(`/api/deliverability/domains?${instancesQuery}`, { cache: "no-store" }).then((r) => r.json());
+      const trailingP = fetch(`/api/deliverability/trailing?${instancesQuery}`, { cache: "no-store" })
+        .then((r) => (r.ok ? r.json() : null))
+        .catch(() => null);
+
+      const data = await domainsP;
       if (seq !== domainsSeqRef.current) return;
+      const domainRows: DomainRow[] = Array.isArray(data) ? data : [];
+      setDomains(domainRows);
+      setLoading(false); // table is interactive now
 
-      // Build a domain → trailing-rates map (keyed by domain; domains are unique per view).
-      const trailingByDomain = new Map<string, { reply_10: number | null; reply_15: number | null; reply_30: number | null; bounce_10: number | null; bounce_15: number | null; bounce_30: number | null }>();
-      if (trailingRes && trailingRes.ok) {
-        try {
-          const t = await trailingRes.json();
-          for (const r of (t?.rates || []) as { domain: string; reply_10: number | null; reply_15: number | null; reply_30: number | null; bounce_10: number | null; bounce_15: number | null; bounce_30: number | null }[]) {
-            trailingByDomain.set(r.domain, { reply_10: r.reply_10, reply_15: r.reply_15, reply_30: r.reply_30 ?? null, bounce_10: r.bounce_10, bounce_15: r.bounce_15, bounce_30: r.bounce_30 ?? null });
-          }
-          setTrailingDaysCollected(typeof t?.daysCollected === "number" ? t.daysCollected : 0);
-        } catch { /* ignore trailing parse errors */ }
-      }
-
-      const merged: DomainRow[] = (Array.isArray(data) ? data : []).map((d: DomainRow) => {
-        const t = trailingByDomain.get(d.domain);
-        return t ? { ...d, ...t } : d;
-      });
-      setDomains(merged);
-    } catch { /* ignore */ } finally {
+      // Fold trailing rates in when they land (does not block the table).
+      trailingP.then((t) => {
+        if (seq !== domainsSeqRef.current || !t) return;
+        const byDomain = new Map<string, { reply_10: number | null; reply_15: number | null; reply_30: number | null; bounce_10: number | null; bounce_15: number | null; bounce_30: number | null }>();
+        for (const r of (t?.rates || []) as { domain: string; reply_10: number | null; reply_15: number | null; reply_30: number | null; bounce_10: number | null; bounce_15: number | null; bounce_30: number | null }[]) {
+          byDomain.set(r.domain, { reply_10: r.reply_10, reply_15: r.reply_15, reply_30: r.reply_30 ?? null, bounce_10: r.bounce_10, bounce_15: r.bounce_15, bounce_30: r.bounce_30 ?? null });
+        }
+        setTrailingDaysCollected(typeof t?.daysCollected === "number" ? t.daysCollected : 0);
+        setDomains((prev) => prev.map((d) => {
+          const tr = byDomain.get(d.domain);
+          return tr ? { ...d, ...tr } : d;
+        }));
+      }).catch(() => { /* trailing best-effort */ });
+    } catch {
       if (seq === domainsSeqRef.current) setLoading(false);
     }
   }, [instancesQuery]);
