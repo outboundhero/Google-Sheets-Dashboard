@@ -8,10 +8,15 @@ import { ALL_INSTANCE_SLUGS } from "@/lib/bison-instances";
 
 export const DUP_GRACE_DAYS = 4;
 
-export interface DupInstance { instance: string; inboxes: number }
+export interface DupInstance {
+  instance: string;
+  inboxes: number;
+  tags: string[];
+  createdAt: string | null; // domain_created_at ISO, or null
+}
 export interface DuplicateDomain { domain: string; instances: DupInstance[] }
 
-/** Domains present in 2+ instances, with per-instance inbox counts. */
+/** Domains present in 2+ instances, with per-instance inbox counts, tags, and created date. */
 export async function getDuplicateDomains(): Promise<DuplicateDomain[]> {
   const supabase = getSupabaseAdmin();
   const map = new Map<string, DupInstance[]>();
@@ -19,13 +24,18 @@ export async function getDuplicateDomains(): Promise<DuplicateDomain[]> {
   while (true) {
     const { data } = await supabase
       .from("deliverability_domains")
-      .select("instance,domain,inbox_count")
+      .select("instance,domain,inbox_count,tags,domain_created_at")
       .in("instance", ALL_INSTANCE_SLUGS)
       .range(off, off + 999);
     if (!data || data.length === 0) break;
     for (const r of data) {
       const arr = map.get(r.domain) || [];
-      arr.push({ instance: r.instance, inboxes: r.inbox_count || 0 });
+      arr.push({
+        instance: r.instance,
+        inboxes: r.inbox_count || 0,
+        tags: Array.isArray(r.tags) ? r.tags : [],
+        createdAt: r.domain_created_at ?? null,
+      });
       map.set(r.domain, arr);
     }
     if (data.length < 1000) break;

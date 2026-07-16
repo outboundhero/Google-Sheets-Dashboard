@@ -7,15 +7,32 @@
 // after a 4-day grace (a cron fires the actual delete). Drag-select chips.
 // Collapsible. Admin-only.
 import { useState, useEffect, useRef, useCallback } from "react";
-import { ChevronDown, ChevronRight, RefreshCw, Loader2, Copy, Trash2, Clock } from "lucide-react";
+import { ChevronDown, ChevronRight, RefreshCw, Loader2, Copy, Trash2, Clock, Check, Inbox, CalendarDays, Tag } from "lucide-react";
 
-interface DupInstance { instance: string; inboxes: number }
+interface DupInstance { instance: string; inboxes: number; tags: string[]; createdAt: string | null }
 interface DuplicateDomain { domain: string; instances: DupInstance[] }
 interface PendingDeletion { instance: string; domain: string; scheduledAt: string; status: string }
 
 import { INSTANCE_SHORT_LABELS } from "@/lib/bison-instances";
 
 const short: Record<string, string> = INSTANCE_SHORT_LABELS;
+
+// Per-instance accent (badge) so each instance card is visually distinct at a glance.
+const instanceAccent: Record<string, string> = {
+  outboundhero: "bg-violet-500/15 text-violet-500 border-violet-500/30",
+  cleaningoutbound: "bg-sky-500/15 text-sky-500 border-sky-500/30",
+  facilityreach: "bg-emerald-500/15 text-emerald-500 border-emerald-500/30",
+  outboundclean: "bg-amber-500/15 text-amber-500 border-amber-500/30",
+};
+
+const TAG_CAP = 5;
+
+function fmtDate(iso: string | null): string {
+  if (!iso) return "—";
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return "—";
+  return d.toLocaleDateString(undefined, { day: "numeric", month: "short", year: "numeric" });
+}
 
 export function DuplicateDomainsCard() {
   const [open, setOpen] = useState(false);
@@ -124,7 +141,7 @@ export function DuplicateDomainsCard() {
         <div className="px-5 pb-5 space-y-3">
           <div className="flex items-center justify-between gap-2">
             <p className="text-[11px] text-muted-foreground">
-              Same domain in 2+ instances. Click the instance(s) to <b>remove</b> from (drag to multi-select) — leaves it in the others. Removes its senders from that instance&apos;s campaigns, then schedules deletion after 4 days.
+              Same domain in 2+ instances — each card shows that instance&apos;s inboxes, tags, and created date. Click an instance to <b>remove</b> the domain from it (drag to multi-select) — leaves it in the others. Removes its senders from that instance&apos;s campaigns, then schedules deletion after 4 days.
             </p>
             <button onClick={refresh} disabled={loading || working} className="flex items-center gap-1.5 text-xs rounded-md border px-2.5 py-1.5 hover:bg-muted/50 disabled:opacity-50 shrink-0">
               <RefreshCw className={`h-3.5 w-3.5 ${loading ? "animate-spin" : ""}`} /> Refresh
@@ -161,24 +178,60 @@ export function DuplicateDomainsCard() {
                 </button>
               </div>
 
-              <div className="rounded-lg border divide-y max-h-[360px] overflow-y-auto select-none">
+              <div className="rounded-lg border divide-y max-h-[440px] overflow-y-auto select-none">
                 {dups.map((d) => (
-                  <div key={d.domain} className="flex items-center gap-3 px-3 py-2">
-                    <span className="text-xs font-medium truncate flex-1">{d.domain}</span>
-                    <div className="flex items-center gap-1.5 shrink-0">
+                  <div key={d.domain} className="px-3 py-2.5 space-y-2">
+                    <div className="flex items-center gap-2">
+                      <span className="text-xs font-semibold truncate">{d.domain}</span>
+                      <span className="text-[10px] text-muted-foreground shrink-0">on {d.instances.length} instances</span>
+                    </div>
+                    <div className="flex flex-wrap gap-2">
                       {d.instances.map((inst) => {
                         const k = `${inst.instance}:${d.domain}`;
                         const sel = selected.has(k);
+                        const shownTags = inst.tags.slice(0, TAG_CAP);
+                        const extra = inst.tags.length - shownTags.length;
                         return (
-                          <button
+                          <div
                             key={inst.instance}
                             onMouseDown={() => startDrag(k)}
                             onMouseEnter={() => { if (dragging.current) applyDrag(k); }}
-                            className={`text-[10px] rounded px-1.5 py-0.5 border transition-colors ${sel ? "bg-destructive/80 text-destructive-foreground border-destructive" : "border-muted-foreground/30 hover:bg-muted/50"}`}
-                            title={sel ? "Will remove from this instance" : "Click to remove from this instance"}
+                            title={sel ? "Will remove from this instance" : "Click to remove the domain from this instance"}
+                            className={`group relative w-[210px] cursor-pointer rounded-lg border p-2.5 transition-colors ${sel ? "border-destructive bg-destructive/10 ring-1 ring-destructive/40" : "border-border hover:border-muted-foreground/40 hover:bg-muted/40"}`}
                           >
-                            {short[inst.instance] ?? inst.instance} · {inst.inboxes}
-                          </button>
+                            <div className="flex items-center justify-between gap-2">
+                              <span className={`text-[10px] font-medium rounded-md border px-1.5 py-0.5 ${instanceAccent[inst.instance] ?? "bg-muted text-muted-foreground border-border"}`}>
+                                {short[inst.instance] ?? inst.instance}
+                              </span>
+                              <span className={`flex h-4 w-4 items-center justify-center rounded-full transition-colors ${sel ? "bg-destructive text-destructive-foreground" : "text-muted-foreground/40 group-hover:text-muted-foreground"}`}>
+                                {sel ? <Check className="h-3 w-3" /> : <Trash2 className="h-3 w-3" />}
+                              </span>
+                            </div>
+                            <div className="mt-2 flex items-center gap-1.5 text-[11px] text-foreground/80">
+                              <Inbox className="h-3 w-3 text-muted-foreground shrink-0" />
+                              <span className="font-medium">{inst.inboxes}</span>
+                              <span className="text-muted-foreground">inbox{inst.inboxes === 1 ? "" : "es"}</span>
+                            </div>
+                            <div className="mt-1 flex items-center gap-1.5 text-[10px] text-muted-foreground">
+                              <CalendarDays className="h-3 w-3 shrink-0" />
+                              <span>created {fmtDate(inst.createdAt)}</span>
+                            </div>
+                            <div className="mt-1.5 flex items-start gap-1.5">
+                              <Tag className="h-3 w-3 mt-0.5 text-muted-foreground shrink-0" />
+                              {inst.tags.length === 0 ? (
+                                <span className="text-[10px] text-muted-foreground/60 italic">no tags</span>
+                              ) : (
+                                <div className="flex flex-wrap gap-1">
+                                  {shownTags.map((t) => (
+                                    <span key={t} className="text-[9px] rounded bg-muted px-1.5 py-0.5 text-muted-foreground max-w-[90px] truncate" title={t}>{t}</span>
+                                  ))}
+                                  {extra > 0 && (
+                                    <span className="text-[9px] rounded bg-muted px-1.5 py-0.5 text-muted-foreground" title={inst.tags.slice(TAG_CAP).join(", ")}>+{extra}</span>
+                                  )}
+                                </div>
+                              )}
+                            </div>
+                          </div>
                         );
                       })}
                     </div>
