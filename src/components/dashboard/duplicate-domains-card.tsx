@@ -182,7 +182,7 @@ export function DuplicateDomainsCard() {
                 {dups.map((d) => (
                   <div key={d.domain} className="px-3 py-2">
                     <div className="flex items-baseline gap-2 mb-1">
-                      <span className="text-xs font-semibold truncate">{d.domain}</span>
+                      <span className="text-xs font-semibold truncate select-text cursor-text">{d.domain}</span>
                       <span className="text-[10px] text-muted-foreground shrink-0">· {d.instances.length} instances</span>
                     </div>
                     <div className="space-y-0.5">
