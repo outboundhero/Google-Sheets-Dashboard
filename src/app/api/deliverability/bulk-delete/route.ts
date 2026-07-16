@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { getSupabaseAdmin } from "@/lib/supabase";
 import { resolveInstances } from "@/lib/bison";
 import { deleteDomainFromInstance, type DeleteFailure } from "@/lib/deliverability/delete-domain";
+import { scheduleDeletions } from "@/lib/replacement/duplicate-domains";
 
 export const maxDuration = 300;
 
@@ -29,13 +30,25 @@ export async function POST(request: Request) {
   try {
     const { searchParams } = new URL(request.url);
     const instances = resolveInstances(searchParams);
-    const body = (await request.json()) as { domains?: string[]; action?: string };
+    const body = (await request.json()) as { domains?: string[]; action?: string; days?: number };
     const domains = body.domains || [];
     if (!domains.length) {
       return NextResponse.json({ error: "domains required" }, { status: 400 });
     }
 
     const supabase = getSupabaseAdmin();
+
+    // ── Schedule: record a delayed delete (fired later by the
+    //    fire-scheduled-deletions cron) instead of deleting now ───────────────
+    if (body.action === "schedule") {
+      const days = Math.min(60, Math.max(1, Number(body.days) || 5));
+      const entries: { instance: string; domain: string }[] = [];
+      for (const instance of instances) {
+        for (const domain of domains) entries.push({ instance, domain: domain.toLowerCase() });
+      }
+      await scheduleDeletions(entries, { graceDays: days, source: "manual" });
+      return NextResponse.json({ success: true, scheduled: entries.length, domains: domains.length, days, instances });
+    }
 
     // ── Purge: remove from LeadSync only, Bison untouched ─────────────────
     if (body.action === "purge") {

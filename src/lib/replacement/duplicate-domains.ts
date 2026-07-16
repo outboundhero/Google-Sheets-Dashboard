@@ -52,12 +52,21 @@ export async function getDuplicateDomains(): Promise<DuplicateDomain[]> {
 // ── Scheduled deletions (post-removal 4-day grace) ───────────────────────────
 export interface PendingDeletion { instance: string; domain: string; scheduledAt: string; status: string }
 
-export async function scheduleDeletions(entries: { instance: string; domain: string }[], graceDays = DUP_GRACE_DAYS): Promise<void> {
+export async function scheduleDeletions(
+  entries: { instance: string; domain: string }[],
+  opts: { graceDays?: number; source?: string } = {},
+): Promise<void> {
   if (entries.length === 0) return;
   const supabase = getSupabaseAdmin();
+  const graceDays = opts.graceDays ?? DUP_GRACE_DAYS;
+  // `source` tags where the schedule came from: "duplicate" (this card) or
+  // "manual" (the deliverability Delete button's "delete in 5 days"). The
+  // fire-scheduled-deletions cron fires ALL pending rows regardless of source;
+  // this only keeps the two flows' pending lists from bleeding into each other.
+  const source = opts.source ?? "duplicate";
   const at = new Date(Date.now() + graceDays * 86400000).toISOString();
   const { error } = await supabase.from("duplicate_domain_deletions").upsert(
-    entries.map((e) => ({ instance: e.instance, domain: e.domain, scheduled_at: at, status: "pending" })),
+    entries.map((e) => ({ instance: e.instance, domain: e.domain, scheduled_at: at, status: "pending", source })),
     { onConflict: "instance,domain" },
   );
   if (error) throw new Error(error.message);
@@ -69,6 +78,7 @@ export async function getPendingDeletions(): Promise<PendingDeletion[]> {
     .from("duplicate_domain_deletions")
     .select("instance,domain,scheduled_at,status")
     .eq("status", "pending")
+    .eq("source", "duplicate")
     .order("scheduled_at");
   return (data || []).map((r) => ({ instance: r.instance, domain: r.domain, scheduledAt: r.scheduled_at, status: r.status }));
 }
