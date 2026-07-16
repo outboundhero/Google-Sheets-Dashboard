@@ -529,6 +529,34 @@ function TagFilterDropdown({
 }
 // ------------------------------------------------
 
+// Progress panels persist across page refreshes (localStorage) and are removed
+// only by an explicit Dismiss / Dismiss all — never automatically. On reload we
+// re-hydrate the saved state but force everything to a FINISHED look (no live
+// spinners), because the async loops that drove them died with the old page;
+// any unfinished work is re-runnable via each panel's Retry button.
+const PANEL_LS_PREFIX = "delv:panels:";
+function readPanelLS<T>(key: string): T | null {
+  if (typeof window === "undefined") return null;
+  try {
+    const raw = window.localStorage.getItem(PANEL_LS_PREFIX + key);
+    return raw ? (JSON.parse(raw) as T) : null;
+  } catch {
+    return null;
+  }
+}
+function writePanelLS(key: string, val: unknown): void {
+  if (typeof window === "undefined") return;
+  try {
+    if (val == null || (Array.isArray(val) && val.length === 0)) {
+      window.localStorage.removeItem(PANEL_LS_PREFIX + key);
+    } else {
+      window.localStorage.setItem(PANEL_LS_PREFIX + key, JSON.stringify(val));
+    }
+  } catch {
+    /* quota / serialization — non-fatal */
+  }
+}
+
 export default function DeliverabilityPage() {
   return (
     <Suspense>
@@ -622,7 +650,14 @@ function DeliverabilityPageInner() {
     error?: string;
   }
   const [providerChecking, setProviderChecking] = useState(false);
-  const [providerCheckRows, setProviderCheckRows] = useState<ProviderCheckRow[] | null>(null);
+  // Hydrate FINISHED panels from localStorage; a panel that was mid-run is
+  // dropped here and its job is auto-restarted on mount (see the resume effect),
+  // so refreshing keeps the panel AND continues the work.
+  const [providerCheckRows, setProviderCheckRows] = useState<ProviderCheckRow[] | null>(() => {
+    const rows = readPanelLS<ProviderCheckRow[]>("providerCheckRows");
+    if (!rows) return null;
+    return rows.some((r) => r.state === "running") ? null : rows;
+  });
   const [changeRedirectOpen, setChangeRedirectOpen] = useState(false);
   const [moveDialogOpen, setMoveDialogOpen] = useState(false);
   // Live progress for the move-to-instance workflow — rendered in the panel
@@ -641,8 +676,16 @@ function DeliverabilityPageInner() {
     // Successfully moved domains grouped by the instance they were moved FROM,
     // so the finished panel can offer "remove from previous instance".
     movedBySource: Record<string, string[]>;
+    // Skipped + failed domain names + the original job, so the finished panel's
+    // "Retry" button can re-run ONLY those without re-selecting anything.
+    retryJob?: MoveJob;
+    retryDomains?: string[];
   }
-  const [moveProgress, setMoveProgress] = useState<MoveProgressState | null>(null);
+  const [moveProgress, setMoveProgress] = useState<MoveProgressState | null>(() => {
+    const m = readPanelLS<MoveProgressState>("moveProgress");
+    if (!m) return null;
+    return (m.running || m.queued) ? null : m; // in-flight → auto-resumed on mount
+  });
   const [cancelDialogOpen, setCancelDialogOpen] = useState(false);
   // Live progress for the cancel-at-provider workflow (Inboxing/MilkBox) —
   // stacked top panel, never-stuck, ends with Slack summary + a live
@@ -657,8 +700,17 @@ function DeliverabilityPageInner() {
     verifying: boolean;
     running: boolean;
     queued: boolean;
+    // Skipped + failed domains, so the finished panel's "Retry" button can
+    // re-cancel ONLY those.
+    retryDomains?: string[];
+    // Full original job, persisted so a refresh mid-run can auto-resume it.
+    resumeJob?: CancelJob;
   }
-  const [cancelProgress, setCancelProgress] = useState<CancelProgressState | null>(null);
+  const [cancelProgress, setCancelProgress] = useState<CancelProgressState | null>(() => {
+    const c = readPanelLS<CancelProgressState>("cancelProgress");
+    if (!c) return null;
+    return (c.running || c.queued || c.verifying) ? null : c; // in-flight → auto-resumed on mount
+  });
   const [clientTags, setClientTags] = useState<Set<string>>(new Set());
   const [selectedDomains, setSelectedDomains] = useState<Set<string>>(new Set());
   // Stable array of the selected domains — passed to dialogs so their effects
@@ -695,8 +747,23 @@ function DeliverabilityPageInner() {
     running: boolean;
     queued: boolean;
   }
-  const [attachRuns, setAttachRuns] = useState<AttachRun[]>([]);
-  const runIdRef = useRef(1); // shared id sequence for every stacked-panel kind
+  const [attachRuns, setAttachRuns] = useState<AttachRun[]>(() => {
+    const runs = readPanelLS<AttachRun[]>("attachRuns");
+    // Keep finished runs; in-flight ones are auto-resumed on mount.
+    return runs ? runs.filter((r) => !r.running && !r.queued) : [];
+  });
+  // Shared id sequence for every stacked-panel kind. Seeded past any restored
+  // panel's id so a resumed/new run never collides with a persisted one.
+  const runIdRef = useRef<number>((() => {
+    let max = 0;
+    const scan = (arr: { id: number }[] | null) => { if (arr) for (const x of arr) if (x.id > max) max = x.id; };
+    scan(readPanelLS<{ id: number }[]>("attachRuns"));
+    scan(readPanelLS<{ id: number }[]>("tagCampaignRuns"));
+    scan(readPanelLS<{ id: number }[]>("sheetAppendJobs"));
+    const m = readPanelLS<{ id: number }>("moveProgress"); if (m && m.id > max) max = m.id;
+    const c = readPanelLS<{ id: number }>("cancelProgress"); if (c && c.id > max) max = c.id;
+    return max + 1;
+  })());
   const [showSkippedAttach, setShowSkippedAttach] = useState<string | null>(null); // "runId:jobIndex"
 
   // One-at-a-time execution for Bison-heavy background runs (attach / tag /
@@ -711,6 +778,55 @@ function DeliverabilityPageInner() {
     bisonRunQueueRef.current = run.then(() => undefined, () => undefined);
     return run;
   }, []);
+
+  // Shared request helper: auto-retries the SAME request up to `attempts` times
+  // with growing delays, but ONLY on transport-level failure — a network throw,
+  // a 429/5xx, or a non-JSON body (serverless timeout → HTML). A clean 2xx with
+  // JSON is returned as-is even if it carries per-item skips/failures, because
+  // those are real outcomes the workflow must surface (and a manual Retry, not
+  // a blind re-POST, is the right tool for them). Every progress-panel workflow
+  // routes its requests through this so a transient blip self-heals.
+  async function fetchJsonWithRetry<T = unknown>(
+    url: string,
+    body: unknown,
+    attempts = 3,
+  ): Promise<{ ok: boolean; data: T | null; status: number; error?: string }> {
+    const WAITS = [2000, 5000, 10000];
+    let lastStatus = 0;
+    let lastError = "";
+    for (let attempt = 0; attempt < attempts; attempt++) {
+      try {
+        const res = await fetch(url, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        });
+        lastStatus = res.status;
+        const text = await res.text();
+        let data: T | null = null;
+        try { data = text ? (JSON.parse(text) as T) : null; } catch { /* non-JSON (timeout HTML) */ }
+        if (res.ok && data !== null) return { ok: true, data, status: res.status };
+        const errField = data && typeof data === "object" && "error" in data ? (data as { error?: unknown }).error : undefined;
+        lastError = typeof errField === "string" ? errField : (text.slice(0, 150) || `HTTP ${res.status}`);
+        const retryable = res.status === 429 || res.status >= 500 || data === null;
+        if (retryable && attempt < attempts - 1) {
+          const ra = parseInt(res.headers.get("retry-after") || "", 10);
+          const wait = Number.isFinite(ra) && ra > 0 ? ra * 1000 : WAITS[Math.min(attempt, WAITS.length - 1)];
+          await new Promise((r) => setTimeout(r, wait + Math.floor(Math.random() * 300)));
+          continue;
+        }
+        return { ok: false, data, status: res.status, error: lastError };
+      } catch (e) {
+        lastStatus = 0;
+        lastError = e instanceof Error ? e.message : "network error";
+        if (attempt < attempts - 1) {
+          await new Promise((r) => setTimeout(r, WAITS[Math.min(attempt, WAITS.length - 1)]));
+          continue;
+        }
+      }
+    }
+    return { ok: false, data: null, status: lastStatus, error: lastError || "failed" };
+  }
 
   // Background tag + campaign combo state — same stacked-run model.
   interface TagCampaignRun {
@@ -733,7 +849,16 @@ function DeliverabilityPageInner() {
     retry: { attempt: number; total: number; countdown: number } | null;
     queued: boolean;
   }
-  const [tagCampaignRuns, setTagCampaignRuns] = useState<TagCampaignRun[]>([]);
+  const [tagCampaignRuns, setTagCampaignRuns] = useState<TagCampaignRun[]>(() => {
+    const runs = readPanelLS<TagCampaignRun[]>("tagCampaignRuns");
+    if (!runs) return [];
+    // Keep finished runs; in-flight ones are auto-resumed on mount.
+    return runs.filter((r) => !(
+      r.queued || r.retry != null || r.tagStatus === "running" ||
+      r.campaignJobs.some((j) => j.status === "running" || j.status === "pending") ||
+      r.sheetStatus === "running"
+    ));
+  });
   // Per-run retry token: cancels a pending auto-retry countdown for THAT run
   // when the user hits "Retry now" or Dismiss on it.
   const tagRetryTokensRef = useRef<Map<number, number>>(new Map());
@@ -745,8 +870,12 @@ function DeliverabilityPageInner() {
   const [showSendToSheet, setShowSendToSheet] = useState(false);
 
   // Standalone sheet append (Whitelist button) — stacked runs too.
-  interface SheetAppendJob { id: number; status: "running" | "done" | "error"; label: string; added?: number; duplicates?: number; error?: string; whitelist?: string }
-  const [sheetAppendJobs, setSheetAppendJobs] = useState<SheetAppendJob[]>([]);
+  interface SheetAppendJob { id: number; status: "running" | "done" | "error"; label: string; added?: number; duplicates?: number; error?: string; whitelist?: string; retryDoms?: string[]; retryClientTag?: string }
+  const [sheetAppendJobs, setSheetAppendJobs] = useState<SheetAppendJob[]>(() => {
+    const jobs = readPanelLS<SheetAppendJob[]>("sheetAppendJobs");
+    // Keep finished jobs; in-flight ones are auto-resumed on mount.
+    return jobs ? jobs.filter((j) => j.status !== "running") : [];
+  });
 
   // Bulk limit update state
   const [limitDialog, setLimitDialog] = useState<{ type: "daily" | "warmup"; domains: string[] } | null>(null);
@@ -895,7 +1024,13 @@ function DeliverabilityPageInner() {
       try {
         for (let i = 0; i < run.campaigns.length; i++) {
           if (dismissedRunsRef.current.has(run.id)) return;
-          if ((run.jobs[i]?.rateLimited ?? 0) > 0) await runAttachForCampaign(run.id, run.campaigns[i], i, run.domains);
+          const j = run.jobs[i];
+          // Retry any campaign that didn't cleanly land: rate-limited skips,
+          // an errored request, or per-inbox failures. Already-attached inboxes
+          // are filtered server-side, so this only re-attempts what's missing.
+          if ((j?.rateLimited ?? 0) > 0 || j?.status === "error" || (j?.failed ?? 0) > 0) {
+            await runAttachForCampaign(run.id, run.campaigns[i], i, run.domains);
+          }
         }
       } finally {
         patchAttachRun(run.id, (r) => ({ ...r, running: false }));
@@ -1171,16 +1306,16 @@ function DeliverabilityPageInner() {
     const patchJob = (patch: Partial<SheetAppendJob>) =>
       setSheetAppendJobs((prev) => prev.map((j) => (j.id === jobId ? { ...j, ...patch } : j)));
     // Stacked: appended below existing panels, dismissed only manually.
-    setSheetAppendJobs((prev) => [...prev, { id: jobId, status: "running", label: `Whitelisting ${doms.length} domains for ${clientTag}...` }]);
+    setSheetAppendJobs((prev) => [...prev, { id: jobId, status: "running", label: `Whitelisting ${doms.length} domains for ${clientTag}...`, retryDoms: doms, retryClientTag: clientTag }]);
     setSelectedDomains(new Set());
     try {
-      const res = await fetch("/api/deliverability/send-to-sheet", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ domains: doms, clientTag }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || "Failed");
+      // Auto-retries the append 3× (delays) on transport failure.
+      const rr = await fetchJsonWithRetry<{ error?: string; sheetName?: string; added?: number; duplicates?: number }>(
+        "/api/deliverability/send-to-sheet",
+        { domains: doms, clientTag },
+      );
+      const data = rr.data;
+      if (!rr.ok || !data) throw new Error(data?.error || rr.error || "Failed");
       // Queue these domains for the daily 6:30am PST whitelist email — this is
       // the "Whitelist" button. Deferred (not sent now) so a day's worth of
       // domains go out in one batch. Surface the result; a queue failure
@@ -1214,6 +1349,8 @@ function DeliverabilityPageInner() {
         status: "error",
         label: "Whitelist failed",
         error: err instanceof Error ? err.message : "Failed",
+        retryDoms: doms,
+        retryClientTag: clientTag,
       });
     }
   }, []);
@@ -1223,6 +1360,91 @@ function DeliverabilityPageInner() {
     loadStats();
     loadTags();
   }, [loadDomains, loadStats, loadTags]);
+
+  // ── Progress-panel persistence + auto-resume ──────────────────────────────
+  // Snapshot the RAW saved panels ONCE during the first render — before the
+  // persist effects below overwrite localStorage with the finished-only
+  // hydrated state — so the resume effect can restart in-flight jobs.
+  const resumedRef = useRef(false);
+  const resumeSnapshotRef = useRef<{
+    move: MoveProgressState | null;
+    cancel: CancelProgressState | null;
+    attach: AttachRun[] | null;
+    tag: TagCampaignRun[] | null;
+    sheet: SheetAppendJob[] | null;
+    provider: ProviderCheckRow[] | null;
+  } | null>(null);
+  if (resumeSnapshotRef.current === null) {
+    resumeSnapshotRef.current = {
+      move: readPanelLS<MoveProgressState>("moveProgress"),
+      cancel: readPanelLS<CancelProgressState>("cancelProgress"),
+      attach: readPanelLS<AttachRun[]>("attachRuns"),
+      tag: readPanelLS<TagCampaignRun[]>("tagCampaignRuns"),
+      sheet: readPanelLS<SheetAppendJob[]>("sheetAppendJobs"),
+      provider: readPanelLS<ProviderCheckRow[]>("providerCheckRows"),
+    };
+  }
+
+  // Persist each panel on change (key removed when the panel is empty/null).
+  useEffect(() => { writePanelLS("providerCheckRows", providerCheckRows); }, [providerCheckRows]);
+  useEffect(() => { writePanelLS("moveProgress", moveProgress); }, [moveProgress]);
+  useEffect(() => { writePanelLS("cancelProgress", cancelProgress); }, [cancelProgress]);
+  useEffect(() => { writePanelLS("attachRuns", attachRuns); }, [attachRuns]);
+  useEffect(() => { writePanelLS("tagCampaignRuns", tagCampaignRuns); }, [tagCampaignRuns]);
+  useEffect(() => { writePanelLS("sheetAppendJobs", sheetAppendJobs); }, [sheetAppendJobs]);
+
+  // On mount: auto-resume any job that was mid-run when the page was refreshed.
+  // Every op is idempotent (move → skip existing, cancel → already-gone,
+  // tag/attach → dedup), so re-running from the top safely finishes the work.
+  useEffect(() => {
+    if (resumedRef.current) return;
+    resumedRef.current = true;
+    const snap = resumeSnapshotRef.current;
+    if (!snap) return;
+    if (snap.move && (snap.move.running || snap.move.queued) && snap.move.retryJob) {
+      runMoveDomains(snap.move.retryJob);
+    }
+    if (snap.cancel && (snap.cancel.running || snap.cancel.queued || snap.cancel.verifying) && snap.cancel.resumeJob) {
+      runCancelDomains(snap.cancel.resumeJob);
+    }
+    for (const run of snap.attach || []) {
+      if (run.running || run.queued) startBackgroundAttach(run.campaigns, run.domains);
+    }
+    for (const run of snap.tag || []) {
+      const inFlight = run.queued || run.retry != null || run.tagStatus === "running"
+        || run.campaignJobs.some((j) => j.status === "running" || j.status === "pending")
+        || run.sheetStatus === "running";
+      if (inFlight && run.info) startBackgroundTagCampaign(run.info);
+    }
+    for (const job of snap.sheet || []) {
+      if (job.status === "running" && job.retryDoms && job.retryDoms.length) {
+        startBackgroundSheetAppend(job.retryDoms, job.retryClientTag || "");
+      }
+    }
+    if (snap.provider && snap.provider.some((r) => r.state === "running")) {
+      handleProviderCheck();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Remove every open progress panel at once (queued runs are cancelled).
+  const dismissAllPanels = useCallback(() => {
+    setAttachRuns((prev) => { prev.forEach((r) => dismissedRunsRef.current.add(r.id)); return []; });
+    setTagCampaignRuns((prev) => {
+      prev.forEach((r) => { dismissedRunsRef.current.add(r.id); tagRetryTokensRef.current.set(r.id, (tagRetryTokensRef.current.get(r.id) ?? 0) + 1); });
+      return [];
+    });
+    setMoveProgress((prev) => { if (prev) dismissedRunsRef.current.add(prev.id); return null; });
+    setCancelProgress((prev) => { if (prev) dismissedRunsRef.current.add(prev.id); return null; });
+    setSheetAppendJobs([]);
+    setProviderCheckRows(null);
+    setSyncProgresses(null);
+    setSyncSelectedJob(null);
+    setRedirectCheckJob(null);
+    setBlacklistCheckJob(null);
+    setSpamhausCheckJob(null);
+    setLimitJob(null);
+  }, []);
 
   // Fires the same check the daily cron runs — every domain tagged
   // Inboxing/MilkBox/ScaledMail gets its live status pulled from the
@@ -1281,6 +1503,7 @@ function DeliverabilityPageInner() {
     const counts = { done: 0, uploading: 0, skipped: 0, failed: 0 };
     const failures: { domain: string; stage?: string; error: string }[] = [];
     const uploading: string[] = [];
+    const skippedDomains: string[] = [];
     const movedBySource: Record<string, string[]> = {};
     const moveId = runIdRef.current++;
     const base = {
@@ -1288,6 +1511,7 @@ function DeliverabilityPageInner() {
       targetLabel: INSTANCE_SHORT_LABELS[job.targetInstance],
       connectionName: job.connectionName,
       total: job.domains.length,
+      retryJob: job, // persisted so a refresh mid-run can auto-resume this job
     };
     setMoveProgress({ ...base, done: 0, counts: { ...counts }, failures: [], uploading: [], running: false, queued: true, movedBySource: {} });
     await enqueueBisonRun(async () => {
@@ -1296,40 +1520,26 @@ function DeliverabilityPageInner() {
     try {
       for (let i = 0; i < job.domains.length; i += BATCH) {
         const batch = job.domains.slice(i, i + BATCH);
-        try {
-          const res = await fetch("/api/deliverability/move-domains", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              dryRun: false,
-              domains: batch,
-              targetInstance: job.targetInstance,
-              platformConnectionId: job.platformConnectionId,
-            }),
-          });
-          // JSON-safe parse — a serverless timeout returns an HTML page.
-          const text = await res.text();
-          let d: { error?: string; results?: { domain: string; status: string; stage?: string; error?: string; sourceInstance?: string }[] } | null = null;
-          try { d = text ? JSON.parse(text) : null; } catch { /* non-JSON */ }
-          if (!d || !res.ok || d.error) {
-            const why = !d
-              ? (res.status >= 500 ? "server timed out or crashed" : `non-JSON response (HTTP ${res.status})`)
-              : (d.error || `HTTP ${res.status}`);
-            for (const dom of batch) { counts.failed++; failures.push({ domain: dom, error: why }); }
-          } else {
-            for (const r of d.results || []) {
-              if (r.status === "done") {
-                counts.done++;
-                if (r.sourceInstance) (movedBySource[r.sourceInstance] ||= []).push(r.domain);
-              }
-              else if (r.status === "uploading") { counts.uploading++; uploading.push(r.domain); }
-              else if (r.status === "skipped") { counts.skipped++; }
-              else { counts.failed++; failures.push({ domain: r.domain, stage: r.stage, error: r.error || "failed" }); }
-            }
-          }
-        } catch (e) {
-          const why = e instanceof Error ? e.message : "network error";
+        // Auto-retries the request 3× (delays) on transport failure before we
+        // count the batch as failed.
+        const rr = await fetchJsonWithRetry<{ error?: string; results?: { domain: string; status: string; stage?: string; error?: string; sourceInstance?: string }[] }>(
+          "/api/deliverability/move-domains",
+          { dryRun: false, domains: batch, targetInstance: job.targetInstance, platformConnectionId: job.platformConnectionId },
+        );
+        const d = rr.data;
+        if (!rr.ok || !d || d.error) {
+          const why = d?.error || rr.error || (rr.status >= 500 ? "server timed out or crashed" : `HTTP ${rr.status}`);
           for (const dom of batch) { counts.failed++; failures.push({ domain: dom, error: why }); }
+        } else {
+          for (const r of d.results || []) {
+            if (r.status === "done") {
+              counts.done++;
+              if (r.sourceInstance) (movedBySource[r.sourceInstance] ||= []).push(r.domain);
+            }
+            else if (r.status === "uploading") { counts.uploading++; uploading.push(r.domain); }
+            else if (r.status === "skipped") { counts.skipped++; skippedDomains.push(r.domain); }
+            else { counts.failed++; failures.push({ domain: r.domain, stage: r.stage, error: r.error || "failed" }); }
+          }
         }
         setMoveProgress({
           ...base,
@@ -1343,8 +1553,10 @@ function DeliverabilityPageInner() {
         });
       }
     } finally {
-      // Never leave the panel stuck on "running".
-      setMoveProgress((prev) => (prev ? { ...prev, running: false } : prev));
+      // Never leave the panel stuck on "running". Stash the skipped + failed
+      // domains so the panel can offer a one-click Retry of just those.
+      const retryDomains = [...new Set([...failures.map((f) => f.domain), ...skippedDomains])];
+      setMoveProgress((prev) => (prev ? { ...prev, running: false, retryJob: job, retryDomains } : prev));
       setSelectedDomains(new Set());
       await Promise.all([loadDomains(), mutateDomainInstances()]);
     }
@@ -1389,10 +1601,11 @@ function DeliverabilityPageInner() {
     const counts = { canceled: 0, alreadyGone: 0, skipped: 0, failed: 0 };
     const failures: { domain: string; provider: string | null; error: string }[] = [];
     const canceledList: { domain: string; provider: string }[] = [];
+    const skippedDomains: string[] = [];
     setCancelProgress({
       id: cancelId, done: 0, total: job.domains.length,
       counts: { ...counts }, failures: [], slackNote: null, verifying: false,
-      running: false, queued: true,
+      running: false, queued: true, resumeJob: job,
     });
     setSelectedDomains(new Set());
 
@@ -1402,32 +1615,23 @@ function DeliverabilityPageInner() {
       try {
         for (let i = 0; i < job.domains.length; i += BATCH) {
           const batch = job.domains.slice(i, i + BATCH);
-          try {
-            const res = await fetch("/api/deliverability/cancel-domains", {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ dryRun: false, domains: batch }),
-            });
-            // JSON-safe parse — a serverless timeout returns an HTML page.
-            const text = await res.text();
-            let d: { error?: string; results?: { domain: string; provider: string | null; status: string; error?: string }[] } | null = null;
-            try { d = text ? JSON.parse(text) : null; } catch { /* non-JSON */ }
-            if (!d || !res.ok || d.error) {
-              const why = !d
-                ? (res.status >= 500 ? "server timed out or crashed" : `non-JSON response (HTTP ${res.status})`)
-                : (d.error || `HTTP ${res.status}`);
-              for (const dom of batch) { counts.failed++; failures.push({ domain: dom, provider: null, error: why }); }
-            } else {
-              for (const r of d.results || []) {
-                if (r.status === "canceled") { counts.canceled++; canceledList.push({ domain: r.domain, provider: r.provider || "unknown" }); }
-                else if (r.status === "alreadyGone") counts.alreadyGone++;
-                else if (r.status === "skipped") counts.skipped++;
-                else { counts.failed++; failures.push({ domain: r.domain, provider: r.provider, error: r.error || "failed" }); }
-              }
-            }
-          } catch (e) {
-            const why = e instanceof Error ? e.message : "network error";
+          // Auto-retries the request 3× (delays) on transport failure before we
+          // count the batch as failed.
+          const rr = await fetchJsonWithRetry<{ error?: string; results?: { domain: string; provider: string | null; status: string; error?: string }[] }>(
+            "/api/deliverability/cancel-domains",
+            { dryRun: false, domains: batch },
+          );
+          const d = rr.data;
+          if (!rr.ok || !d || d.error) {
+            const why = d?.error || rr.error || (rr.status >= 500 ? "server timed out or crashed" : `HTTP ${rr.status}`);
             for (const dom of batch) { counts.failed++; failures.push({ domain: dom, provider: null, error: why }); }
+          } else {
+            for (const r of d.results || []) {
+              if (r.status === "canceled") { counts.canceled++; canceledList.push({ domain: r.domain, provider: r.provider || "unknown" }); }
+              else if (r.status === "alreadyGone") counts.alreadyGone++;
+              else if (r.status === "skipped") { counts.skipped++; skippedDomains.push(r.domain); }
+              else { counts.failed++; failures.push({ domain: r.domain, provider: r.provider, error: r.error || "failed" }); }
+            }
           }
           setCancelProgress((prev) => prev ? {
             ...prev,
@@ -1460,8 +1664,10 @@ function DeliverabilityPageInner() {
           setCancelProgress((prev) => (prev ? { ...prev, slackNote: "Nothing canceled — no Slack message sent" } : prev));
         }
       } finally {
-        // Never leave the panel stuck on "running".
-        setCancelProgress((prev) => (prev ? { ...prev, running: false } : prev));
+        // Never leave the panel stuck on "running". Stash skipped + failed
+        // domains for the panel's one-click Retry.
+        const retryDomains = [...new Set([...failures.map((f) => f.domain), ...skippedDomains])];
+        setCancelProgress((prev) => (prev ? { ...prev, running: false, retryDomains } : prev));
       }
     });
 
@@ -2337,6 +2543,28 @@ function DeliverabilityPageInner() {
         </div>
       </PageHeader>
 
+      {/* Dismiss-all — appears once 2+ progress panels are open */}
+      {(() => {
+        const totalPanels =
+          (providerCheckRows ? 1 : 0) + (moveProgress ? 1 : 0) + (cancelProgress ? 1 : 0) +
+          (syncProgresses ? 1 : 0) + attachRuns.length + tagCampaignRuns.length + sheetAppendJobs.length +
+          (syncSelectedJob ? 1 : 0) + (redirectCheckJob ? 1 : 0) + (blacklistCheckJob ? 1 : 0) +
+          (spamhausCheckJob ? 1 : 0) + (limitJob ? 1 : 0);
+        if (totalPanels < 2) return null;
+        return (
+          <div className="flex items-center justify-end gap-2">
+            <span className="text-[11px] text-muted-foreground">{totalPanels} progress panels open</span>
+            <button
+              onClick={dismissAllPanels}
+              className="inline-flex items-center gap-1 rounded-md border px-2.5 py-1 text-xs text-muted-foreground hover:bg-muted/50 hover:text-foreground"
+              title="Dismiss every open progress panel"
+            >
+              ✕ Dismiss all
+            </button>
+          </div>
+        );
+      })()}
+
       {/* Provider status check — one row per provider, all 3 in parallel */}
       {providerCheckRows && (
         <div className="rounded-lg border bg-muted/30 px-4 py-3 space-y-2">
@@ -2386,16 +2614,27 @@ function DeliverabilityPageInner() {
               </span>
               <span className="text-muted-foreground">via Inboxing “{moveProgress.connectionName}”</span>
             </span>
-            {!moveProgress.running && (
-              <button
-                onClick={() => {
-                  dismissedRunsRef.current.add(moveProgress.id); // cancels if still queued
-                  setMoveProgress(null);
-                }}
-                className="shrink-0 opacity-60 hover:opacity-100"
-                title={moveProgress.queued ? "Cancel" : "Dismiss"}
-              >✕</button>
-            )}
+            <span className="flex items-center gap-2 shrink-0">
+              {!moveProgress.running && !moveProgress.queued && moveProgress.retryJob && (moveProgress.retryDomains?.length ?? 0) > 0 && (
+                <button
+                  onClick={() => runMoveDomains({ ...moveProgress.retryJob!, domains: moveProgress.retryDomains! })}
+                  className="inline-flex items-center gap-1 rounded-md border border-primary/40 text-primary px-2 py-0.5 text-[11px] hover:bg-primary/10"
+                  title="Re-run the move for just the skipped + failed domains"
+                >
+                  <RefreshCw className="h-3 w-3" /> Retry {moveProgress.retryDomains!.length}
+                </button>
+              )}
+              {!moveProgress.running && (
+                <button
+                  onClick={() => {
+                    dismissedRunsRef.current.add(moveProgress.id); // cancels if still queued
+                    setMoveProgress(null);
+                  }}
+                  className="opacity-60 hover:opacity-100"
+                  title={moveProgress.queued ? "Cancel" : "Dismiss"}
+                >✕</button>
+              )}
+            </span>
           </div>
           <div className="h-1.5 rounded-full bg-muted overflow-hidden">
             <div className="h-full bg-primary transition-all" style={{ width: `${moveProgress.total ? (moveProgress.done / moveProgress.total) * 100 : 0}%` }} />
@@ -2440,7 +2679,7 @@ function DeliverabilityPageInner() {
           {moveProgress.failures.length > 0 && (
             <div className="rounded-md border border-destructive/30 bg-destructive/5">
               <div className="px-3 py-1.5 text-[11px] text-destructive font-medium">
-                {moveProgress.failures.length} domain{moveProgress.failures.length === 1 ? "" : "s"} failed — they stay in place, re-run Move to retry
+                {moveProgress.failures.length} domain{moveProgress.failures.length === 1 ? "" : "s"} failed — they stay in place; hit Retry above to re-run just these
               </div>
               <div className="max-h-32 overflow-y-auto divide-y divide-destructive/10 border-t border-destructive/20">
                 {moveProgress.failures.slice(0, 30).map((f, i) => (
@@ -2480,16 +2719,27 @@ function DeliverabilityPageInner() {
               </span>
               <span className="text-muted-foreground">Inboxing + MilkBox · domains stay in LeadSync</span>
             </span>
-            {!cancelProgress.running && !cancelProgress.verifying && (
-              <button
-                onClick={() => {
-                  dismissedRunsRef.current.add(cancelProgress.id); // cancels if still queued
-                  setCancelProgress(null);
-                }}
-                className="shrink-0 opacity-60 hover:opacity-100"
-                title={cancelProgress.queued ? "Cancel" : "Dismiss"}
-              >✕</button>
-            )}
+            <span className="flex items-center gap-2 shrink-0">
+              {!cancelProgress.running && !cancelProgress.verifying && (cancelProgress.retryDomains?.length ?? 0) > 0 && (
+                <button
+                  onClick={() => runCancelDomains({ domains: cancelProgress.retryDomains! })}
+                  className="inline-flex items-center gap-1 rounded-md border border-primary/40 text-primary px-2 py-0.5 text-[11px] hover:bg-primary/10"
+                  title="Re-run cancellation for just the skipped + failed domains"
+                >
+                  <RefreshCw className="h-3 w-3" /> Retry {cancelProgress.retryDomains!.length}
+                </button>
+              )}
+              {!cancelProgress.running && !cancelProgress.verifying && (
+                <button
+                  onClick={() => {
+                    dismissedRunsRef.current.add(cancelProgress.id); // cancels if still queued
+                    setCancelProgress(null);
+                  }}
+                  className="opacity-60 hover:opacity-100"
+                  title={cancelProgress.queued ? "Cancel" : "Dismiss"}
+                >✕</button>
+              )}
+            </span>
           </div>
           <div className="h-1.5 rounded-full bg-muted overflow-hidden">
             <div className="h-full bg-destructive/80 transition-all" style={{ width: `${cancelProgress.total ? (cancelProgress.done / cancelProgress.total) * 100 : 0}%` }} />
@@ -2509,7 +2759,7 @@ function DeliverabilityPageInner() {
           {cancelProgress.failures.length > 0 && (
             <div className="rounded-md border border-destructive/30 bg-destructive/5">
               <div className="px-3 py-1.5 text-[11px] text-destructive font-medium">
-                {cancelProgress.failures.length} domain{cancelProgress.failures.length === 1 ? "" : "s"} failed to cancel — they were NOT included in the Slack summary; re-run Cancel Domains to retry
+                {cancelProgress.failures.length} domain{cancelProgress.failures.length === 1 ? "" : "s"} failed to cancel — they were NOT included in the Slack summary; hit Retry above to re-run just these
               </div>
               <div className="max-h-32 overflow-y-auto divide-y divide-destructive/10 border-t border-destructive/20">
                 {cancelProgress.failures.slice(0, 30).map((f, i) => (
@@ -2632,7 +2882,9 @@ function DeliverabilityPageInner() {
       {/* Attach-to-campaigns runs — one stacked panel per run, newest at the
           bottom, each dismissed only manually and never replaced by a new run */}
       {attachRuns.map((run) => {
-        const totalRetryable = run.jobs.reduce((s, j) => s + (j.rateLimited ?? 0), 0);
+        // Anything that didn't cleanly land is retryable: rate-limited skips,
+        // per-inbox failures, or an errored campaign request.
+        const totalRetryable = run.jobs.reduce((s, j) => s + (j.rateLimited ?? 0) + (j.failed ?? 0) + (j.status === "error" ? 1 : 0), 0);
         return (
         <div key={run.id} className="rounded-lg border bg-muted/30 px-4 py-3">
           <div className="flex items-center justify-between mb-2">
@@ -2653,7 +2905,7 @@ function DeliverabilityPageInner() {
                   onClick={() => retrySkippedAttach(run)}
                   className="flex items-center gap-1 text-xs text-primary hover:underline"
                 >
-                  <RefreshCw className="h-3 w-3" /> Retry {totalRetryable} skipped (rate-limited)
+                  <RefreshCw className="h-3 w-3" /> Retry {totalRetryable} skipped / failed
                 </button>
               )}
               {!run.running && (
@@ -2721,6 +2973,10 @@ function DeliverabilityPageInner() {
         const hasError = run.tagStatus === "error"
           || run.campaignJobs.some((j) => j.status === "error")
           || run.sheetStatus === "error";
+        // Skipped inboxes / per-campaign failures on an otherwise-"done" run —
+        // also retryable (re-run is server-deduped, so only the missing ones
+        // are re-attempted; removing an already-removed tag is a no-op).
+        const hasSkipped = (run.tagFailed ?? 0) > 0 || run.campaignJobs.some((j) => (j.failed ?? 0) > 0);
         const retryNow = () => retryTagCampaignRun(run.id, run.info);
         const dismiss = () => {
           tagRetryTokensRef.current.set(run.id, (tagRetryTokensRef.current.get(run.id) ?? 0) + 1);
@@ -2755,8 +3011,8 @@ function DeliverabilityPageInner() {
               <div className="flex items-center gap-3">
                 {run.retry ? (
                   <button onClick={retryNow} className="text-xs text-primary hover:underline">Retry now</button>
-                ) : hasError ? (
-                  <button onClick={retryNow} className="text-xs font-medium text-primary hover:underline">Retry</button>
+                ) : (hasError || hasSkipped) ? (
+                  <button onClick={retryNow} className="flex items-center gap-1 text-xs font-medium text-primary hover:underline" title="Re-run for just the skipped / failed inboxes (already-done ones are skipped server-side)"><RefreshCw className="h-3 w-3" /> Retry</button>
                 ) : null}
                 {allDone && !run.retry && (
                   <button
@@ -2887,9 +3143,20 @@ function DeliverabilityPageInner() {
                 <span className="text-xs text-destructive ml-2">{job.error}</span>
               )}
             </div>
-            {job.status !== "running" && (
-              <button onClick={() => setSheetAppendJobs((prev) => prev.filter((j) => j.id !== job.id))} className="text-xs text-muted-foreground hover:text-foreground">Dismiss</button>
-            )}
+            <div className="flex items-center gap-3">
+              {job.status === "error" && job.retryDoms && job.retryDoms.length > 0 && (
+                <button
+                  onClick={() => { setSheetAppendJobs((prev) => prev.filter((j) => j.id !== job.id)); startBackgroundSheetAppend(job.retryDoms!, job.retryClientTag || ""); }}
+                  className="flex items-center gap-1 text-xs text-primary hover:underline"
+                  title="Re-run the whitelist append for these domains"
+                >
+                  <RefreshCw className="h-3 w-3" /> Retry {job.retryDoms.length}
+                </button>
+              )}
+              {job.status !== "running" && (
+                <button onClick={() => setSheetAppendJobs((prev) => prev.filter((j) => j.id !== job.id))} className="text-xs text-muted-foreground hover:text-foreground">Dismiss</button>
+              )}
+            </div>
           </div>
         </div>
       ))}
