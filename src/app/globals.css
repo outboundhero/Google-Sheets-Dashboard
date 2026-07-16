@@ -124,3 +124,15 @@
     @apply bg-background text-foreground;
   }
 }
+
+/* Hide the scrollbar on progress-panel bodies while keeping wheel/trackpad
+   scroll. Prevents the overlay scrollbar from flickering on the right edge as
+   each queued panel's content updates while the serial run-queue processes
+   them one by one. */
+.scrollbar-hide {
+  scrollbar-width: none; /* Firefox */
+  -ms-overflow-style: none; /* IE/Edge */
+}
+.scrollbar-hide::-webkit-scrollbar {
+  display: none; /* Chrome/Safari */
+}

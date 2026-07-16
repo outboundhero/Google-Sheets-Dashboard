@@ -2681,7 +2681,7 @@ function DeliverabilityPageInner() {
               <div className="px-3 py-1.5 text-[11px] text-destructive font-medium">
                 {moveProgress.failures.length} domain{moveProgress.failures.length === 1 ? "" : "s"} failed — they stay in place; hit Retry above to re-run just these
               </div>
-              <div className="max-h-32 overflow-y-auto divide-y divide-destructive/10 border-t border-destructive/20">
+              <div className="max-h-32 overflow-y-auto scrollbar-hide divide-y divide-destructive/10 border-t border-destructive/20">
                 {moveProgress.failures.slice(0, 30).map((f, i) => (
                   <div key={i} className="flex items-center gap-2 px-3 py-1 text-[11px]">
                     <span className="font-medium shrink-0">{f.domain}</span>
@@ -2761,7 +2761,7 @@ function DeliverabilityPageInner() {
               <div className="px-3 py-1.5 text-[11px] text-destructive font-medium">
                 {cancelProgress.failures.length} domain{cancelProgress.failures.length === 1 ? "" : "s"} failed to cancel — they were NOT included in the Slack summary; hit Retry above to re-run just these
               </div>
-              <div className="max-h-32 overflow-y-auto divide-y divide-destructive/10 border-t border-destructive/20">
+              <div className="max-h-32 overflow-y-auto scrollbar-hide divide-y divide-destructive/10 border-t border-destructive/20">
                 {cancelProgress.failures.slice(0, 30).map((f, i) => (
                   <div key={i} className="flex items-center gap-2 px-3 py-1 text-[11px]">
                     <span className="font-medium shrink-0">{f.domain}</span>
@@ -2921,7 +2921,7 @@ function DeliverabilityPageInner() {
               )}
             </div>
           </div>
-          <div className="space-y-1 max-h-60 overflow-y-auto">
+          <div className="space-y-1 max-h-60 overflow-y-auto scrollbar-hide">
             {run.jobs.map((job, i) => (
               <div key={i}>
                 <div className="flex items-center gap-2 text-xs">
@@ -2950,7 +2950,7 @@ function DeliverabilityPageInner() {
                 </div>
                 {/* Per-campaign skip reasons — explains WHY each inbox was skipped */}
                 {showSkippedAttach === `${run.id}:${i}` && (job.failedInboxes?.length ?? 0) > 0 && (
-                  <div className="mt-1 mb-2 ml-5 rounded-lg border border-amber-500/30 bg-amber-500/5 max-h-48 overflow-y-auto divide-y divide-amber-500/10">
+                  <div className="mt-1 mb-2 ml-5 rounded-lg border border-amber-500/30 bg-amber-500/5 max-h-48 overflow-y-auto scrollbar-hide divide-y divide-amber-500/10">
                     {job.failedInboxes!.map((f, k) => (
                       <div key={`${f.email}-${k}`} className="px-3 py-1.5 flex items-center justify-between gap-2">
                         <span className="text-[11px] font-mono text-foreground/80 truncate">{f.email}</span>
@@ -3030,7 +3030,7 @@ function DeliverabilityPageInner() {
               </div>
             )}
           </div>
-          <div className="space-y-1 max-h-40 overflow-y-auto">
+          <div className="space-y-1 max-h-40 overflow-y-auto scrollbar-hide">
             {/* Tag status line */}
             <div className="flex items-center gap-2 text-xs">
               {run.tagStatus === "running" && <Loader2 className="h-3 w-3 animate-spin text-primary shrink-0" />}
@@ -3105,7 +3105,7 @@ function DeliverabilityPageInner() {
                   {skippedCopied === run.id ? "Copied!" : "Copy emails"}
                 </button>
               </div>
-              <div className="max-h-56 overflow-y-auto divide-y divide-amber-500/10">
+              <div className="max-h-56 overflow-y-auto scrollbar-hide divide-y divide-amber-500/10">
                 {run.tagFailedInboxes!.map((f, i) => (
                   <div key={`${f.email}-${i}`} className="px-3 py-1.5">
                     <div className="text-[11px] font-mono text-foreground/80 truncate">{f.email}</div>
