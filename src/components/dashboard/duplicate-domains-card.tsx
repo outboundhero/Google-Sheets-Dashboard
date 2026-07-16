@@ -7,7 +7,7 @@
 // after a 4-day grace (a cron fires the actual delete). Drag-select chips.
 // Collapsible. Admin-only.
 import { useState, useEffect, useRef, useCallback } from "react";
-import { ChevronDown, ChevronRight, RefreshCw, Loader2, Copy, Trash2, Clock, Check, Inbox, CalendarDays, Tag } from "lucide-react";
+import { ChevronDown, ChevronRight, RefreshCw, Loader2, Copy, Trash2, Clock, Check } from "lucide-react";
 
 interface DupInstance { instance: string; inboxes: number; tags: string[]; createdAt: string | null }
 interface DuplicateDomain { domain: string; instances: DupInstance[] }
@@ -180,12 +180,12 @@ export function DuplicateDomainsCard() {
 
               <div className="rounded-lg border divide-y max-h-[440px] overflow-y-auto select-none">
                 {dups.map((d) => (
-                  <div key={d.domain} className="px-3 py-2.5 space-y-2">
-                    <div className="flex items-center gap-2">
+                  <div key={d.domain} className="px-3 py-2">
+                    <div className="flex items-baseline gap-2 mb-1">
                       <span className="text-xs font-semibold truncate">{d.domain}</span>
-                      <span className="text-[10px] text-muted-foreground shrink-0">on {d.instances.length} instances</span>
+                      <span className="text-[10px] text-muted-foreground shrink-0">· {d.instances.length} instances</span>
                     </div>
-                    <div className="flex flex-wrap gap-2">
+                    <div className="space-y-0.5">
                       {d.instances.map((inst) => {
                         const k = `${inst.instance}:${d.domain}`;
                         const sel = selected.has(k);
@@ -197,40 +197,32 @@ export function DuplicateDomainsCard() {
                             onMouseDown={() => startDrag(k)}
                             onMouseEnter={() => { if (dragging.current) applyDrag(k); }}
                             title={sel ? "Will remove from this instance" : "Click to remove the domain from this instance"}
-                            className={`group relative w-[210px] cursor-pointer rounded-lg border p-2.5 transition-colors ${sel ? "border-destructive bg-destructive/10 ring-1 ring-destructive/40" : "border-border hover:border-muted-foreground/40 hover:bg-muted/40"}`}
+                            className={`group grid grid-cols-[92px_78px_150px_1fr_16px] items-center gap-3 rounded-md px-2 py-1.5 cursor-pointer transition-colors ${sel ? "bg-destructive/10 ring-1 ring-inset ring-destructive/40" : "hover:bg-muted/50"}`}
                           >
-                            <div className="flex items-center justify-between gap-2">
-                              <span className={`text-[10px] font-medium rounded-md border px-1.5 py-0.5 ${instanceAccent[inst.instance] ?? "bg-muted text-muted-foreground border-border"}`}>
-                                {short[inst.instance] ?? inst.instance}
-                              </span>
-                              <span className={`flex h-4 w-4 items-center justify-center rounded-full transition-colors ${sel ? "bg-destructive text-destructive-foreground" : "text-muted-foreground/40 group-hover:text-muted-foreground"}`}>
-                                {sel ? <Check className="h-3 w-3" /> : <Trash2 className="h-3 w-3" />}
-                              </span>
-                            </div>
-                            <div className="mt-2 flex items-center gap-1.5 text-[11px] text-foreground/80">
-                              <Inbox className="h-3 w-3 text-muted-foreground shrink-0" />
-                              <span className="font-medium">{inst.inboxes}</span>
-                              <span className="text-muted-foreground">inbox{inst.inboxes === 1 ? "" : "es"}</span>
-                            </div>
-                            <div className="mt-1 flex items-center gap-1.5 text-[10px] text-muted-foreground">
-                              <CalendarDays className="h-3 w-3 shrink-0" />
-                              <span>created {fmtDate(inst.createdAt)}</span>
-                            </div>
-                            <div className="mt-1.5 flex items-start gap-1.5">
-                              <Tag className="h-3 w-3 mt-0.5 text-muted-foreground shrink-0" />
+                            <span className={`justify-self-start text-[10px] font-medium rounded border px-1.5 py-0.5 ${instanceAccent[inst.instance] ?? "bg-muted text-muted-foreground border-border"}`}>
+                              {short[inst.instance] ?? inst.instance}
+                            </span>
+                            <span className="text-[11px] text-foreground/80">
+                              <span className="font-medium">{inst.inboxes}</span> <span className="text-muted-foreground">inbox{inst.inboxes === 1 ? "" : "es"}</span>
+                            </span>
+                            <span className="text-[10px] text-muted-foreground whitespace-nowrap">created {fmtDate(inst.createdAt)}</span>
+                            <div className="flex items-center gap-1 overflow-hidden">
                               {inst.tags.length === 0 ? (
-                                <span className="text-[10px] text-muted-foreground/60 italic">no tags</span>
+                                <span className="text-[10px] text-muted-foreground/50 italic">no tags</span>
                               ) : (
-                                <div className="flex flex-wrap gap-1">
+                                <>
                                   {shownTags.map((t) => (
-                                    <span key={t} className="text-[9px] rounded bg-muted px-1.5 py-0.5 text-muted-foreground max-w-[90px] truncate" title={t}>{t}</span>
+                                    <span key={t} className="shrink-0 text-[9px] rounded bg-muted px-1.5 py-0.5 text-muted-foreground max-w-[110px] truncate" title={t}>{t}</span>
                                   ))}
                                   {extra > 0 && (
-                                    <span className="text-[9px] rounded bg-muted px-1.5 py-0.5 text-muted-foreground" title={inst.tags.slice(TAG_CAP).join(", ")}>+{extra}</span>
+                                    <span className="shrink-0 text-[9px] rounded bg-muted px-1.5 py-0.5 text-muted-foreground" title={inst.tags.slice(TAG_CAP).join(", ")}>+{extra}</span>
                                   )}
-                                </div>
+                                </>
                               )}
                             </div>
+                            <span className={`justify-self-end transition-colors ${sel ? "text-destructive" : "text-muted-foreground/30 group-hover:text-muted-foreground"}`}>
+                              {sel ? <Check className="h-3.5 w-3.5" /> : <Trash2 className="h-3.5 w-3.5" />}
+                            </span>
                           </div>
                         );
                       })}
