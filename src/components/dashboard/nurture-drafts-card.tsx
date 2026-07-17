@@ -66,16 +66,17 @@ export function NurtureDraftsCard() {
   const dragAdd = useRef(true);
   const loadedRef = useRef(false);
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (fresh = false) => {
     try {
-      const res = await fetch("/api/campaigns/nurture-drafts", { cache: "no-store" });
+      const res = await fetch(`/api/campaigns/nurture-drafts${fresh ? "?fresh=1" : ""}`, { cache: "no-store" });
       const d = await res.json();
       if (res.ok) { setCampaigns(d.campaigns || []); setLoadErrors(d.errors || []); setError(null); }
       else setError(d.error || "Failed");
     } catch { setError("Failed to load"); }
   }, []);
 
-  const refresh = useCallback(async () => { setLoading(true); await load(); setLoading(false); }, [load]);
+  // Refresh forces a live re-crawl (bypasses the ~10-min server cache).
+  const refresh = useCallback(async () => { setLoading(true); await load(true); setLoading(false); }, [load]);
 
   // Lazy load: the 4-instance live crawl only runs the first time the section
   // is expanded (and on manual Refresh) — never on every dashboard visit.
@@ -117,7 +118,7 @@ export function NurtureDraftsCard() {
     setFailures(failed);
     setSelected(new Set(failed.map((f) => f.key))); // keep only failures selected → re-click Activate = retry
     setWorking(false); setProgress(null);
-    await load(); // activated drafts drop off the list
+    await load(true); // fresh re-crawl so just-activated drafts drop off (bypass cache)
   };
 
   return (
