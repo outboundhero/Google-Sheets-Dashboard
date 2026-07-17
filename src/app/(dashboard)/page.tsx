@@ -30,6 +30,7 @@ import { RedirectIssuesCard } from "@/components/dashboard/redirect-issues-card"
 import { TagAlignmentCard } from "@/components/dashboard/tag-alignment-card";
 import { CrossTagAuditCard } from "@/components/dashboard/cross-tag-audit-card";
 import { DuplicateDomainsCard } from "@/components/dashboard/duplicate-domains-card";
+import { NurtureDraftsCard } from "@/components/dashboard/nurture-drafts-card";
 import { AttachFailuresCard } from "@/components/dashboard/attach-failures-card";
 import { PendingOffboardingsCard } from "@/components/dashboard/pending-offboardings-card";
 import { OffboardingProgressCard, type OffboardingPlan } from "@/components/dashboard/offboarding-progress-card";
@@ -435,6 +436,9 @@ export default function DashboardPage() {
 
       {/* Duplicate domains across instances — admin only. */}
       {isAdmin && <DuplicateDomainsCard />}
+
+      {/* Nurture campaigns ready to activate — admin only. */}
+      {isAdmin && <NurtureDraftsCard />}
 
       <ResolveTriageDialog
         clientTag={resolvingClient}
