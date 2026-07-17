@@ -145,7 +145,12 @@ export function ExpiringDomainsSection({ onAutoRenew, onCancel }: Props) {
           ) : (
             <>
               <div className="flex items-center justify-between text-xs gap-2">
-                <span className="text-muted-foreground shrink-0">{selected.size} selected</span>
+                <div className="flex items-center gap-2 shrink-0">
+                  <span className="text-muted-foreground">{selected.size} selected</span>
+                  {selected.size > 0 && (
+                    <button onClick={() => setSelected(new Set())} className="text-[11px] text-muted-foreground hover:text-foreground underline">Clear</button>
+                  )}
+                </div>
                 <div className="flex items-center gap-2 flex-wrap justify-end">
                   <button onClick={() => doAutoRenew(true)} disabled={selectedItems.length === 0} className="flex items-center gap-1.5 rounded-md border border-emerald-500/40 text-emerald-500 px-2.5 py-1.5 hover:bg-emerald-500/10 disabled:opacity-40">
                     <RotateCw className="h-3.5 w-3.5" /> Auto-renew On
