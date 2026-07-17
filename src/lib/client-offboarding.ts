@@ -2,11 +2,9 @@ import { getSupabaseAdmin } from "@/lib/supabase";
 import { bisonFetch } from "@/lib/bison";
 import {
   ALL_INSTANCE_SLUGS,
-  instancesInGroup,
   isInstanceSlug,
   type BisonInstanceSlug,
 } from "@/lib/bison-instances";
-import { getGroupForClientTag } from "@/lib/client-tag-allocations";
 
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const DETAG_BATCH = 50;
@@ -93,10 +91,12 @@ function normalize(tag: string): string {
   return tag.trim().toUpperCase();
 }
 
-async function resolveTargetInstances(clientTag: string): Promise<BisonInstanceSlug[]> {
-  const group = await getGroupForClientTag(clientTag);
-  if (group == null) return [...ALL_INSTANCE_SLUGS];
-  return instancesInGroup(group).map((i) => i.slug);
+// Offboarding ALWAYS scans all 4 instances — never group-scoped. Clients can
+// move between groups, and stale campaigns / tagged inboxes can linger in the
+// other group's instances after a move; scanning everything guarantees they're
+// caught. An instance where this client has nothing is a cheap no-op.
+function resolveTargetInstances(): BisonInstanceSlug[] {
+  return [...ALL_INSTANCE_SLUGS];
 }
 
 // Bison campaign statuses that are ACTIVELY sending or about to send — the
@@ -171,7 +171,7 @@ async function fetchTagIdByName(
 
 export async function previewClientOffboarding(rawTag: string): Promise<OffboardingPreview> {
   const clientTag = normalize(rawTag);
-  const instances = await resolveTargetInstances(clientTag);
+  const instances = resolveTargetInstances();
   let activeCampaigns = 0;
   let inboxesWithTag = 0;
   const allDomains = new Set<string>();
@@ -195,7 +195,7 @@ export async function previewClientOffboarding(rawTag: string): Promise<Offboard
 
 export async function planClientOffboarding(rawTag: string): Promise<OffboardingPlan> {
   const clientTag = normalize(rawTag);
-  const instances = await resolveTargetInstances(clientTag);
+  const instances = resolveTargetInstances();
   const steps: PlanStep[] = [];
   const perInstance: OffboardingPlan["perInstance"] = [];
   let stepCounter = 0;
