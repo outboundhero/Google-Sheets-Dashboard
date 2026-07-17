@@ -42,6 +42,7 @@ import { ConformTagsDialog } from "@/components/deliverability/conform-tags-dial
 import { ChangeRedirectDialog } from "@/components/deliverability/change-redirect-dialog";
 import { MoveDomainsDialog, type MoveJob } from "@/components/deliverability/move-domains-dialog";
 import { CancelDomainsDialog, type CancelJob } from "@/components/deliverability/cancel-domains-dialog";
+import { ExpiringDomainsSection } from "@/components/deliverability/expiring-domains-section";
 import { SendToSheetDialog } from "@/components/deliverability/send-to-sheet-dialog";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -711,6 +712,27 @@ function DeliverabilityPageInner() {
     if (!c) return null;
     return (c.running || c.queued || c.verifying) ? null : c; // in-flight → auto-resumed on mount
   });
+  // Porkbun auto-renew on/off workflow (from the Domains section) — persistent
+  // stacked panel like cancel/move.
+  interface AutoRenewItem { account: string; domain: string }
+  interface AutoRenewJob { items: AutoRenewItem[]; enabled: boolean }
+  interface AutoRenewProgressState {
+    id: number;
+    enabled: boolean;
+    done: number;
+    total: number;
+    counts: { done: number; failed: number };
+    failures: { domain: string; error: string }[];
+    running: boolean;
+    queued: boolean;
+    resumeJob?: AutoRenewJob;      // full job, persisted so a refresh mid-run auto-resumes
+    retryItems?: AutoRenewItem[];  // failed items → the panel's Retry re-runs only these
+  }
+  const [autoRenewProgress, setAutoRenewProgress] = useState<AutoRenewProgressState | null>(() => {
+    const a = readPanelLS<AutoRenewProgressState>("autoRenewProgress");
+    if (!a) return null;
+    return (a.running || a.queued) ? null : a; // in-flight → auto-resumed on mount
+  });
   const [clientTags, setClientTags] = useState<Set<string>>(new Set());
   const [selectedDomains, setSelectedDomains] = useState<Set<string>>(new Set());
   // Stable array of the selected domains — passed to dialogs so their effects
@@ -1373,6 +1395,7 @@ function DeliverabilityPageInner() {
     tag: TagCampaignRun[] | null;
     sheet: SheetAppendJob[] | null;
     provider: ProviderCheckRow[] | null;
+    autoRenew: AutoRenewProgressState | null;
   } | null>(null);
   if (resumeSnapshotRef.current === null) {
     resumeSnapshotRef.current = {
@@ -1382,6 +1405,7 @@ function DeliverabilityPageInner() {
       tag: readPanelLS<TagCampaignRun[]>("tagCampaignRuns"),
       sheet: readPanelLS<SheetAppendJob[]>("sheetAppendJobs"),
       provider: readPanelLS<ProviderCheckRow[]>("providerCheckRows"),
+      autoRenew: readPanelLS<AutoRenewProgressState>("autoRenewProgress"),
     };
   }
 
@@ -1392,6 +1416,7 @@ function DeliverabilityPageInner() {
   useEffect(() => { writePanelLS("attachRuns", attachRuns); }, [attachRuns]);
   useEffect(() => { writePanelLS("tagCampaignRuns", tagCampaignRuns); }, [tagCampaignRuns]);
   useEffect(() => { writePanelLS("sheetAppendJobs", sheetAppendJobs); }, [sheetAppendJobs]);
+  useEffect(() => { writePanelLS("autoRenewProgress", autoRenewProgress); }, [autoRenewProgress]);
 
   // On mount: auto-resume any job that was mid-run when the page was refreshed.
   // Every op is idempotent (move → skip existing, cancel → already-gone,
@@ -1424,6 +1449,9 @@ function DeliverabilityPageInner() {
     if (snap.provider && snap.provider.some((r) => r.state === "running")) {
       handleProviderCheck();
     }
+    if (snap.autoRenew && (snap.autoRenew.running || snap.autoRenew.queued) && snap.autoRenew.resumeJob) {
+      runAutoRenew(snap.autoRenew.resumeJob);
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -1436,6 +1464,7 @@ function DeliverabilityPageInner() {
     });
     setMoveProgress((prev) => { if (prev) dismissedRunsRef.current.add(prev.id); return null; });
     setCancelProgress((prev) => { if (prev) dismissedRunsRef.current.add(prev.id); return null; });
+    setAutoRenewProgress((prev) => { if (prev) dismissedRunsRef.current.add(prev.id); return null; });
     setSheetAppendJobs([]);
     setProviderCheckRows(null);
     setSyncProgresses(null);
@@ -1590,6 +1619,52 @@ function DeliverabilityPageInner() {
     }
     setDeleteRequest({ domains: domainInfos, availableInstances: available, defaultInstances: available });
   }, [domains, domainInstancesMap]);
+
+  // Porkbun auto-renew on/off workflow (from the Domains section). Batched
+  // through the shared queue; persistent panel with per-item failures + Retry.
+  const runAutoRenew = async (job: AutoRenewJob) => {
+    const BATCH = 6;
+    const arId = runIdRef.current++;
+    const counts = { done: 0, failed: 0 };
+    const failures: { domain: string; error: string }[] = [];
+    const failedItems: AutoRenewItem[] = [];
+    setAutoRenewProgress({
+      id: arId, enabled: job.enabled, done: 0, total: job.items.length,
+      counts: { ...counts }, failures: [], running: false, queued: true, resumeJob: job,
+    });
+    await enqueueBisonRun(async () => {
+      if (dismissedRunsRef.current.has(arId)) return; // cancelled while queued
+      setAutoRenewProgress((p) => (p ? { ...p, queued: false, running: true } : p));
+      try {
+        for (let i = 0; i < job.items.length; i += BATCH) {
+          const batch = job.items.slice(i, i + BATCH);
+          // Auto-retries the request 3× on transport failure.
+          const rr = await fetchJsonWithRetry<{ error?: string; results?: { domain: string; status: string; error?: string }[] }>(
+            "/api/deliverability/domains-auto-renew",
+            { items: batch, enabled: job.enabled },
+          );
+          const d = rr.data;
+          if (!rr.ok || !d || d.error) {
+            const why = d?.error || rr.error || "failed";
+            for (const it of batch) { counts.failed++; failures.push({ domain: it.domain, error: why }); failedItems.push(it); }
+          } else {
+            for (const r of d.results || []) {
+              if (r.status === "ok") counts.done++;
+              else {
+                counts.failed++;
+                failures.push({ domain: r.domain, error: r.error || "failed" });
+                const it = batch.find((b) => b.domain === r.domain);
+                if (it) failedItems.push(it);
+              }
+            }
+          }
+          setAutoRenewProgress((p) => (p ? { ...p, done: Math.min(i + BATCH, job.items.length), counts: { ...counts }, failures: [...failures] } : p));
+        }
+      } finally {
+        setAutoRenewProgress((p) => (p ? { ...p, running: false, retryItems: [...failedItems] } : p));
+      }
+    });
+  };
 
   // Cancel-at-provider workflow (Inboxing / MilkBox). Batched through the
   // shared queue; ends with the Slack summary (successfully canceled domains
@@ -2543,10 +2618,19 @@ function DeliverabilityPageInner() {
         </div>
       </PageHeader>
 
+      {/* Domains — Porkbun expiring ≤10 days (admin only), collapsed by default */}
+      {isAdmin && (
+        <ExpiringDomainsSection
+          onAutoRenew={(items, enabled) => runAutoRenew({ items, enabled })}
+          onCancel={(doms) => runCancelDomains({ domains: doms })}
+        />
+      )}
+
       {/* Dismiss-all — appears once 2+ progress panels are open */}
       {(() => {
         const totalPanels =
           (providerCheckRows ? 1 : 0) + (moveProgress ? 1 : 0) + (cancelProgress ? 1 : 0) +
+          (autoRenewProgress ? 1 : 0) +
           (syncProgresses ? 1 : 0) + attachRuns.length + tagCampaignRuns.length + sheetAppendJobs.length +
           (syncSelectedJob ? 1 : 0) + (redirectCheckJob ? 1 : 0) + (blacklistCheckJob ? 1 : 0) +
           (spamhausCheckJob ? 1 : 0) + (limitJob ? 1 : 0);
@@ -2771,6 +2855,71 @@ function DeliverabilityPageInner() {
                 ))}
                 {cancelProgress.failures.length > 30 && (
                   <div className="px-3 py-1 text-[11px] text-muted-foreground">…and {cancelProgress.failures.length - 30} more</div>
+                )}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Auto-renew progress — Porkbun on/off from the Domains section */}
+      {autoRenewProgress && (
+        <div className="rounded-lg border bg-muted/30 px-4 py-3 space-y-2">
+          <div className="flex items-center justify-between text-xs">
+            <span className="flex items-center gap-2">
+              {autoRenewProgress.queued
+                ? <Clock className="h-3.5 w-3.5 text-amber-500" />
+                : autoRenewProgress.running
+                ? <Loader2 className="h-3.5 w-3.5 animate-spin text-primary" />
+                : <CheckCircle2 className="h-3.5 w-3.5 text-emerald-500" />}
+              <span className="font-medium">
+                {autoRenewProgress.queued
+                  ? `Queued — auto-renew ${autoRenewProgress.enabled ? "on" : "off"} (${autoRenewProgress.total} domains)`
+                  : `${autoRenewProgress.running ? "Setting" : "Set"} auto-renew ${autoRenewProgress.enabled ? "ON" : "OFF"} — ${autoRenewProgress.done}/${autoRenewProgress.total} domains`}
+              </span>
+              <span className="text-muted-foreground">Porkbun</span>
+            </span>
+            <span className="flex items-center gap-2 shrink-0">
+              {!autoRenewProgress.running && !autoRenewProgress.queued && (autoRenewProgress.retryItems?.length ?? 0) > 0 && (
+                <button
+                  onClick={() => runAutoRenew({ items: autoRenewProgress.retryItems!, enabled: autoRenewProgress.enabled })}
+                  className="inline-flex items-center gap-1 rounded-md border border-primary/40 text-primary px-2 py-0.5 text-[11px] hover:bg-primary/10"
+                  title="Retry just the failed domains"
+                >
+                  <RefreshCw className="h-3 w-3" /> Retry {autoRenewProgress.retryItems!.length}
+                </button>
+              )}
+              {!autoRenewProgress.running && (
+                <button
+                  onClick={() => { dismissedRunsRef.current.add(autoRenewProgress.id); setAutoRenewProgress(null); }}
+                  className="opacity-60 hover:opacity-100"
+                  title={autoRenewProgress.queued ? "Cancel" : "Dismiss"}
+                >✕</button>
+              )}
+            </span>
+          </div>
+          <div className="h-1.5 rounded-full bg-muted overflow-hidden">
+            <div className="h-full bg-primary transition-all" style={{ width: `${autoRenewProgress.total ? (autoRenewProgress.done / autoRenewProgress.total) * 100 : 0}%` }} />
+          </div>
+          <div className="text-[11px] text-muted-foreground">
+            <span className={autoRenewProgress.counts.done ? "text-emerald-500" : ""}>{autoRenewProgress.counts.done} updated</span>
+            {" · "}
+            <span className={autoRenewProgress.counts.failed ? "text-destructive" : ""}>{autoRenewProgress.counts.failed} failed</span>
+          </div>
+          {autoRenewProgress.failures.length > 0 && (
+            <div className="rounded-md border border-destructive/30 bg-destructive/5">
+              <div className="px-3 py-1.5 text-[11px] text-destructive font-medium">
+                {autoRenewProgress.failures.length} domain{autoRenewProgress.failures.length === 1 ? "" : "s"} failed — hit Retry above to re-run just these
+              </div>
+              <div className="max-h-32 overflow-y-auto scrollbar-hide divide-y divide-destructive/10 border-t border-destructive/20">
+                {autoRenewProgress.failures.slice(0, 30).map((f, i) => (
+                  <div key={i} className="flex items-center gap-2 px-3 py-1 text-[11px]">
+                    <span className="font-medium shrink-0">{f.domain}</span>
+                    <span className="text-destructive/80 truncate">{f.error}</span>
+                  </div>
+                ))}
+                {autoRenewProgress.failures.length > 30 && (
+                  <div className="px-3 py-1 text-[11px] text-muted-foreground">…and {autoRenewProgress.failures.length - 30} more</div>
                 )}
               </div>
             </div>
