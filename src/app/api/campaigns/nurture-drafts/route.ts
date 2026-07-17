@@ -15,18 +15,17 @@ import { ALL_INSTANCE_SLUGS, type BisonInstanceSlug } from "@/lib/bison-instance
 //  - The campaign LIST is server-side filtered with `search=Nurture`, so each
 //    instance returns only nurture campaigns (a handful) instead of hundreds.
 //  - The 4 instances are crawled concurrently (Promise.allSettled in crawl()).
-//  - List pages use offset per_page=100 fetched concurrently (the searched set
-//    is tiny, so this is ~1 page anyway; offset degrades gracefully if a Bison
-//    instance ignores `search`).
+//  - The list uses CURSOR pagination (Bison fixes page size at 15 and does NOT
+//    honor per_page; cursor also has no 1000-page cap). The searched set is
+//    tiny, so it's ~1-2 pages per instance.
 //  - The per-candidate sender count uses cursor pagination (fetchCampaign-
 //    SenderEmails), and results are cached in Redis ~10 min (?fresh=1 bypasses).
 export const maxDuration = 120;
 
 const MIN_LEADS = 100;
 const MIN_SENDERS = 10;
-const SEARCH_QS = `search=${encodeURIComponent("Nurture")}`; // narrows the list server-side
+const SEARCH_QS = `search=${encodeURIComponent("Nurture")}`; // narrows the list server-side (superset of "[Nurture]")
 const SENDER_CONCURRENCY = 8; // per-instance candidate sender-count batches
-const PAGE_CONCURRENCY = 10;  // concurrent campaign-list pages per instance
 const CACHE_KEY = "nurture-drafts:v1";
 const CACHE_TTL_S = 600;
 
@@ -40,30 +39,29 @@ function getRedis(): Redis | null {
   return new Redis({ url, token });
 }
 
-function unwrap(json: unknown): { data?: RawCampaign[]; meta?: { last_page?: number } } {
+function unwrap(json: unknown): { data?: RawCampaign[]; meta?: { next_cursor?: string | null } } {
   // Some Bison endpoints wrap the payload in a single-element array.
   return (Array.isArray(json) ? json[0] : json) ?? {};
 }
 
-// Fast offset walk of the `search=Nurture`-filtered list: page 1 → last_page,
-// then remaining pages concurrently (usually just page 1 given the search).
+// Walk the `search=Nurture`-filtered list via cursor pagination (per_page fixed
+// at 15; follow meta.next_cursor until null). Tiny set thanks to the search.
 async function listCampaigns(instance: BisonInstanceSlug): Promise<RawCampaign[]> {
-  const firstRes = await bisonGetWithRetry(instance, `/campaigns?page=1&per_page=100&${SEARCH_QS}`);
-  const first = unwrap(await firstRes.json());
-  const lastPage = first.meta?.last_page || 1;
-  const all: RawCampaign[] = [...(first.data || [])];
-  if (lastPage > 1) {
-    const pages = Array.from({ length: lastPage - 1 }, (_, i) => i + 2);
-    for (let i = 0; i < pages.length; i += PAGE_CONCURRENCY) {
-      const batch = pages.slice(i, i + PAGE_CONCURRENCY);
-      const results = await Promise.all(
-        batch.map(async (p) => {
-          const r = await bisonGetWithRetry(instance, `/campaigns?page=${p}&per_page=100&${SEARCH_QS}`);
-          return unwrap(await r.json()).data || [];
-        }),
-      );
-      for (const r of results) all.push(...r);
-    }
+  const all: RawCampaign[] = [];
+  let cursor: string | null = null;
+  let guard = 0;
+  while (true) {
+    if (guard++ > 2000) throw new Error(`campaigns cursor runaway (${instance})`);
+    const qs = cursor
+      ? `${SEARCH_QS}&pagination_type=cursor&cursor=${encodeURIComponent(cursor)}`
+      : `${SEARCH_QS}&pagination_type=cursor`;
+    const res = await bisonGetWithRetry(instance, `/campaigns?${qs}`);
+    const payload = unwrap(await res.json());
+    const data = payload.data || [];
+    all.push(...data);
+    const next: string | null = payload.meta?.next_cursor ?? null;
+    if (!next || data.length === 0) break;
+    cursor = next;
   }
   return all;
 }
