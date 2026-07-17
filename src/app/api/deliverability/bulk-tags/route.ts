@@ -176,12 +176,17 @@ export async function POST(request: Request) {
       tagNames?: string[];
       domains: string[];
     };
+    // Surgical retry: operate on exactly these (instance, id) inboxes, skipping
+    // the domain→inbox resolution. Used to re-tag ONLY the inboxes that failed.
+    const explicitInboxes = Array.isArray((body as { inboxes?: { instance: string; id: number }[] }).inboxes)
+      ? (body as { inboxes: { instance: string; id: number }[] }).inboxes
+      : null;
 
     const nameBased = Array.isArray(tagNames) && tagNames.length > 0;
 
-    if (!domains?.length || (!nameBased && !tagIds?.length)) {
+    if ((!domains?.length && !explicitInboxes?.length) || (!nameBased && !tagIds?.length)) {
       return NextResponse.json(
-        { error: "domains and (tagNames or tagIds) are required" },
+        { error: "domains or inboxes, and (tagNames or tagIds), are required" },
         { status: 400 }
       );
     }
@@ -216,7 +221,31 @@ export async function POST(request: Request) {
       }
     };
 
-    if (nameBased) {
+    if (explicitInboxes?.length) {
+      // Surgical: fetch exactly the specified (instance, id) inbox rows.
+      const idsByInstance = new Map<BisonInstanceSlug, number[]>();
+      for (const it of explicitInboxes) {
+        if (!isInstanceSlug(it.instance) || typeof it.id !== "number") continue;
+        const arr = idsByInstance.get(it.instance) ?? [];
+        arr.push(it.id);
+        idsByInstance.set(it.instance, arr);
+      }
+      for (const [inst, ids] of idsByInstance) {
+        for (let i = 0; i < ids.length; i += 500) {
+          const { data, error: inboxError } = await supabase
+            .from("deliverability_inboxes")
+            .select("id, domain, email, tags, instance")
+            .eq("instance", inst)
+            .in("id", ids.slice(i, i + 500));
+          if (inboxError) throw new Error(inboxError.message);
+          for (const row of (data ?? []) as InboxRow[]) {
+            const list = byInstance.get(inst) ?? [];
+            list.push(row);
+            byInstance.set(inst, list);
+          }
+        }
+      }
+    } else if (nameBased) {
       // All instances those domains live in.
       await collect(null);
     } else {
@@ -236,7 +265,8 @@ export async function POST(request: Request) {
 
     let totalUpdated = 0;
     // Global failure map keyed by `${instance}:${id}` (inbox IDs collide across instances).
-    const failed: { email: string; domain: string; reason: string }[] = [];
+    // id + instance let the client retry ONLY these inboxes.
+    const failed: { id: number; instance: string; email: string; domain: string; reason: string }[] = [];
     // (instance, domain) pairs we touched → re-aggregate their domain tags afterwards.
     const affectedByInstance = new Map<BisonInstanceSlug, Set<string>>();
 
@@ -290,6 +320,8 @@ export async function POST(request: Request) {
       for (const [id, reason] of failReasons) {
         const inbox = inboxById.get(id);
         failed.push({
+          id,
+          instance,
           email: inbox?.email || `inbox #${id}`,
           domain: inbox?.domain || "",
           reason,

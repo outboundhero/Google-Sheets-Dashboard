@@ -759,7 +759,7 @@ function DeliverabilityPageInner() {
   // the running loop via shared refs). Now every run gets its own id + panel
   // stacked under existing ones, updated only by its own loop, and removed
   // only by its own Dismiss button — never automatically.
-  interface SkippedInbox { email: string; domain: string; reason: string; retryable?: boolean }
+  interface SkippedInbox { id?: number; email: string; domain: string; reason: string; retryable?: boolean }
   interface AttachJob { campaign: string; status: "pending" | "running" | "done" | "error"; newly: number; existing: number; failed?: number; rateLimited?: number; failedInboxes?: SkippedInbox[]; error?: string }
   interface AttachRun {
     id: number;
@@ -858,7 +858,7 @@ function DeliverabilityPageInner() {
     tagLabel: string;
     tagAffected?: number;
     tagFailed?: number;
-    tagFailedInboxes?: { email: string; domain: string; reason: string }[];
+    tagFailedInboxes?: { id?: number; instance?: string; email: string; domain: string; reason: string }[];
     tagError?: string;
     campaignJobs: AttachJob[];
     campaignsDone: boolean;
@@ -884,6 +884,10 @@ function DeliverabilityPageInner() {
   // Per-run retry token: cancels a pending auto-retry countdown for THAT run
   // when the user hits "Retry now" or Dismiss on it.
   const tagRetryTokensRef = useRef<Map<number, number>>(new Map());
+  // Mirror of tagCampaignRuns so a retry can read the LATEST failed-inbox data
+  // (which inboxes/campaigns to re-attempt) without threading it through args.
+  const tagCampaignRunsRef = useRef<TagCampaignRun[]>([]);
+  useEffect(() => { tagCampaignRunsRef.current = tagCampaignRuns; }, [tagCampaignRuns]);
   const [domainsCopied, setDomainsCopied] = useState<number | null>(null);      // runId
   const [showSkippedList, setShowSkippedList] = useState<number | null>(null);  // runId
   const [skippedCopied, setSkippedCopied] = useState<number | null>(null);      // runId
@@ -971,6 +975,9 @@ function DeliverabilityPageInner() {
     campaign: { id: number; name: string; instance: BisonInstanceSlug },
     jobIndex: number,
     domains: string[],
+    // Surgical retry: attach ONLY these failed inbox IDs instead of re-walking
+    // all the domains. Falls back to `domains` when absent.
+    senderIds?: number[],
   ) => {
     const patchJob = (patch: Partial<AttachJob>) =>
       patchAttachRun(runId, (r) => ({ ...r, jobs: r.jobs.map((j, idx) => (idx === jobIndex ? { ...j, ...patch } : j)) }));
@@ -982,7 +989,9 @@ function DeliverabilityPageInner() {
         const res = await fetch(`/api/deliverability/attach-domains-to-campaign?instance=${campaign.instance}`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ campaign_id: campaign.id, domains }),
+          body: JSON.stringify(senderIds && senderIds.length > 0
+            ? { campaign_id: campaign.id, sender_email_ids: senderIds }
+            : { campaign_id: campaign.id, domains }),
         });
         const data = await res.json();
         if (res.ok) {
@@ -1048,10 +1057,12 @@ function DeliverabilityPageInner() {
           if (dismissedRunsRef.current.has(run.id)) return;
           const j = run.jobs[i];
           // Retry any campaign that didn't cleanly land: rate-limited skips,
-          // an errored request, or per-inbox failures. Already-attached inboxes
-          // are filtered server-side, so this only re-attempts what's missing.
+          // an errored request, or per-inbox failures. Surgical — send ONLY the
+          // failed inbox IDs; fall back to full domains only if the campaign
+          // errored wholesale with nothing captured.
           if ((j?.rateLimited ?? 0) > 0 || j?.status === "error" || (j?.failed ?? 0) > 0) {
-            await runAttachForCampaign(run.id, run.campaigns[i], i, run.domains);
+            const failedIds = (j?.failedInboxes || []).filter((f) => typeof f.id === "number").map((f) => f.id as number);
+            await runAttachForCampaign(run.id, run.campaigns[i], i, run.domains, failedIds.length > 0 ? failedIds : undefined);
           }
         }
       } finally {
@@ -1206,7 +1217,9 @@ function DeliverabilityPageInner() {
           if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
           patchRun((r) => ({
             ...r,
-            campaignJobs: r.campaignJobs.map((j, idx) => idx === i ? { ...j, status: "done", newly: data.newly_attached || 0, existing: data.already_attached || 0, failed: data.failed || 0 } : j),
+            // Keep the failed inbox IDs + rateLimited so Retry can re-attempt
+            // ONLY these on ONLY this campaign (surgical retry).
+            campaignJobs: r.campaignJobs.map((j, idx) => idx === i ? { ...j, status: "done", newly: data.newly_attached || 0, existing: data.already_attached || 0, failed: data.failed || 0, rateLimited: data.rateLimited || 0, failedInboxes: data.failedInboxes || [] } : j),
           }));
         } catch (err) {
           campaignsOk = false;
@@ -1262,6 +1275,104 @@ function DeliverabilityPageInner() {
     return tagOk && campaignsOk && sheetOk;
   }, [loadDomains, loadTags]);
 
+  // SURGICAL retry — re-attempt ONLY the skipped/failed inboxes on ONLY the
+  // steps/campaigns that had failures. Never re-touches successful inboxes, so
+  // it's tiny and the queue drains fast. Returns true when nothing still fails.
+  const retryTagCampaignSurgical = useCallback(async (runId: number): Promise<boolean> => {
+    const run = tagCampaignRunsRef.current.find((r) => r.id === runId);
+    if (!run) return true;
+    const info = run.info;
+    const patchRun = (patch: (r: TagCampaignRun) => TagCampaignRun) =>
+      setTagCampaignRuns((prev) => prev.map((r) => (r.id === runId ? patch(r) : r)));
+    let ok = true;
+
+    // ── Tag step ──
+    const tagFails = run.tagFailedInboxes || [];
+    const tagInboxes = tagFails
+      .filter((f) => typeof f.id === "number" && f.instance)
+      .map((f) => ({ instance: f.instance as string, id: f.id as number }));
+    if (run.tagStatus === "error") {
+      // Wholesale failure with no per-inbox data → re-run the tag step in full.
+      patchRun((r) => ({ ...r, tagStatus: "running", tagError: undefined }));
+      try {
+        const res = await fetch("/api/deliverability/bulk-tags", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action: info.mode, tagNames: info.tagNames, domains: info.domains }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || "Failed");
+        const nf = data.failedInboxes || [];
+        patchRun((r) => ({ ...r, tagStatus: "done", tagAffected: data.inboxesAffected || 0, tagFailed: nf.length, tagFailedInboxes: nf }));
+        if (nf.length > 0) ok = false;
+      } catch (e) { ok = false; patchRun((r) => ({ ...r, tagStatus: "error", tagError: e instanceof Error ? e.message : "Failed" })); }
+    } else if (tagInboxes.length > 0) {
+      patchRun((r) => ({ ...r, tagStatus: "running" }));
+      try {
+        const res = await fetch("/api/deliverability/bulk-tags", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action: info.mode, tagNames: info.tagNames, inboxes: tagInboxes }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || "Failed");
+        const nf = data.failedInboxes || [];
+        patchRun((r) => ({ ...r, tagStatus: "done", tagAffected: (r.tagAffected || 0) + (data.inboxesAffected || 0), tagFailed: nf.length, tagFailedInboxes: nf }));
+        if (nf.length > 0) ok = false;
+      } catch (e) { ok = false; patchRun((r) => ({ ...r, tagStatus: "error", tagError: e instanceof Error ? e.message : "Failed" })); }
+    }
+
+    // ── Campaign step: only campaigns that had failures ──
+    for (let i = 0; i < info.campaigns.length; i++) {
+      const campaign = info.campaigns[i];
+      const job = run.campaignJobs[i];
+      if (!job) continue;
+      const failedIds = (job.failedInboxes || []).filter((f) => typeof f.id === "number").map((f) => f.id as number);
+      const needsRetry = job.status === "error" || (job.failed ?? 0) > 0;
+      if (!needsRetry) continue;
+      patchRun((r) => ({ ...r, campaignJobs: r.campaignJobs.map((j, idx) => idx === i ? { ...j, status: "running" } : j) }));
+      try {
+        // Surgical when we have the failed IDs; fall back to full domains only
+        // if the campaign errored wholesale with nothing captured.
+        const body = failedIds.length > 0
+          ? { campaign_id: campaign.id, sender_email_ids: failedIds }
+          : { campaign_id: campaign.id, domains: info.domains };
+        const res = await fetch(`/api/deliverability/attach-domains-to-campaign?instance=${campaign.instance}`, {
+          method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+        const nf = data.failedInboxes || [];
+        patchRun((r) => ({ ...r, campaignJobs: r.campaignJobs.map((j, idx) => idx === i ? {
+          ...j, status: "done",
+          newly: (j.newly || 0) + (data.newly_attached || 0),
+          existing: data.already_attached ?? j.existing,
+          failed: nf.length, rateLimited: data.rateLimited || 0, failedInboxes: nf, error: undefined,
+        } : j) }));
+        if (nf.length > 0) ok = false;
+      } catch (e) {
+        ok = false;
+        patchRun((r) => ({ ...r, campaignJobs: r.campaignJobs.map((j, idx) => idx === i ? { ...j, status: "error", error: e instanceof Error ? e.message : "Failed" } : j) }));
+      }
+    }
+
+    // ── Sheet step: only if it errored ──
+    if (run.sheetStatus === "error") {
+      patchRun((r) => ({ ...r, sheetStatus: "running" }));
+      try {
+        const res = await fetch("/api/deliverability/send-to-sheet", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ domains: info.domains, clientTag: info.sheetAppend?.clientTag }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || "Failed");
+        patchRun((r) => ({ ...r, sheetStatus: "done", sheetAdded: data.added, sheetDuplicates: data.duplicates }));
+      } catch (e) { ok = false; patchRun((r) => ({ ...r, sheetStatus: "error", sheetError: e instanceof Error ? e.message : "Failed" })); }
+    }
+
+    loadDomains();
+    loadTags();
+    return ok;
+  }, [loadDomains, loadTags]);
+
   // After a failed run, auto-retry up to 3 times, 30s apart. Tokens are
   // per-run: "Retry now" / Dismiss on a run bumps ITS token, so a stale
   // countdown or scheduling no-ops without touching other stacked runs.
@@ -1276,12 +1387,12 @@ function DeliverabilityPageInner() {
     if (token !== tagRetryTokensRef.current.get(runId)) return;
     patchRetry({ attempt, total: 3, countdown: 0 });
     // Through the shared queue — a retry must not run alongside another
-    // Bison-heavy process either.
-    const ok = await enqueueBisonRun(() => runTagCampaignOnce(info, runId));
+    // Bison-heavy process either. Surgical: only the still-failing inboxes.
+    const ok = await enqueueBisonRun(() => retryTagCampaignSurgical(runId));
     if (token !== tagRetryTokensRef.current.get(runId)) return;
     patchRetry(null);
     if (!ok && attempt < 3) scheduleTagAutoRetry(info, attempt + 1, token, runId);
-  }, [runTagCampaignOnce, enqueueBisonRun]);
+  }, [retryTagCampaignSurgical, enqueueBisonRun]);
 
   // Re-run one stacked run in place (manual "Retry" on its panel).
   const retryTagCampaignRun = useCallback(async (runId: number, info: TagApplyInfo) => {
@@ -1291,11 +1402,11 @@ function DeliverabilityPageInner() {
     const ok = await enqueueBisonRun(async () => {
       if (dismissedRunsRef.current.has(runId)) return true;
       setTagCampaignRuns((prev) => prev.map((r) => (r.id === runId ? { ...r, queued: false } : r)));
-      return runTagCampaignOnce(info, runId);
+      return retryTagCampaignSurgical(runId);
     });
     if (token !== tagRetryTokensRef.current.get(runId)) return;
     if (!ok) scheduleTagAutoRetry(info, 1, token, runId);
-  }, [runTagCampaignOnce, scheduleTagAutoRetry, enqueueBisonRun]);
+  }, [retryTagCampaignSurgical, scheduleTagAutoRetry, enqueueBisonRun]);
 
   const startBackgroundTagCampaign = useCallback(async (info: TagApplyInfo) => {
     const runId = runIdRef.current++;

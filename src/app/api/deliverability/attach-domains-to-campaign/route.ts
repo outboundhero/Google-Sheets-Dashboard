@@ -88,38 +88,52 @@ export async function POST(request: Request) {
   try {
     const { searchParams } = new URL(request.url);
     const instance = resolveInstance(searchParams.get("instance"));
-    const { campaign_id, domains } = (await request.json()) as {
+    const body = (await request.json()) as {
       campaign_id: number;
-      domains: string[];
+      domains?: string[];
+      // Surgical retry: attach exactly these sender-email IDs (skips the
+      // domain→inbox resolution entirely). Used to re-attempt only the inboxes
+      // that failed on a prior run instead of re-walking every domain.
+      sender_email_ids?: number[];
     };
+    const campaign_id = body.campaign_id;
+    const domains = body.domains || [];
+    const explicitIds = Array.isArray(body.sender_email_ids)
+      ? body.sender_email_ids.filter((n) => Number.isFinite(n))
+      : null;
 
-    if (!campaign_id || !domains?.length) {
-      return NextResponse.json({ error: "campaign_id and domains required" }, { status: 400 });
+    if (!campaign_id || (!explicitIds?.length && !domains.length)) {
+      return NextResponse.json({ error: "campaign_id and (domains or sender_email_ids) required" }, { status: 400 });
     }
 
     const supabase = getSupabaseAdmin();
 
-    // 1. Get all inbox IDs for the selected domains (paginate past 1000-row limit, scoped to this instance).
-    // Also keep email/domain per id so skipped inboxes can be named in the result.
+    // 1. Inbox IDs to consider: explicit list (surgical retry) OR resolved from
+    // the selected domains (paginate past the 1000-row limit, scoped to this
+    // instance). Keep email/domain per id so skipped inboxes can be named.
     const allInboxIds: number[] = [];
     const inboxMeta = new Map<number, { email: string; domain: string }>();
-    for (let i = 0; i < domains.length; i += 20) {
-      const batch = domains.slice(i, i + 20);
-      let offset = 0;
-      while (true) {
-        const { data } = await supabase
-          .from("deliverability_inboxes")
-          .select("id, email, domain")
-          .eq("instance", instance)
-          .in("domain", batch)
-          .range(offset, offset + 999);
-        if (!data || data.length === 0) break;
-        for (const d of data) {
-          allInboxIds.push(d.id);
-          inboxMeta.set(d.id, { email: d.email ?? "", domain: d.domain ?? "" });
+    if (explicitIds?.length) {
+      allInboxIds.push(...explicitIds);
+    } else {
+      for (let i = 0; i < domains.length; i += 20) {
+        const batch = domains.slice(i, i + 20);
+        let offset = 0;
+        while (true) {
+          const { data } = await supabase
+            .from("deliverability_inboxes")
+            .select("id, email, domain")
+            .eq("instance", instance)
+            .in("domain", batch)
+            .range(offset, offset + 999);
+          if (!data || data.length === 0) break;
+          for (const d of data) {
+            allInboxIds.push(d.id);
+            inboxMeta.set(d.id, { email: d.email ?? "", domain: d.domain ?? "" });
+          }
+          if (data.length < 1000) break;
+          offset += 1000;
         }
-        if (data.length < 1000) break;
-        offset += 1000;
       }
     }
 
@@ -164,6 +178,7 @@ export async function POST(request: Request) {
     }
 
     const failedInboxes = fails.map((f) => ({
+      id: f.id, // sender-email ID — lets the client retry ONLY these
       email: inboxMeta.get(f.id)?.email || String(f.id),
       domain: inboxMeta.get(f.id)?.domain || "",
       reason: f.reason,
