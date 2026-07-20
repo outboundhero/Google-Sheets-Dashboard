@@ -1,17 +1,16 @@
 import { NextResponse } from "next/server";
 import { getSupabaseAdmin } from "@/lib/supabase";
 
-const PRICE_CAP_USD = 4;
-
 export async function GET() {
   try {
     const supabase = getSupabaseAdmin();
+    // No price cap — every available, unregistered discovery is listed with its
+    // real Porkbun price so the user can decide.
     const { data, error } = await supabase
       .from("porkbun_domains")
       .select("domain, price_usd, regular_price_usd, niche, discovered_at, registered, registered_at, auto_renew_disabled, appended_to_sheet")
       .eq("registered", false)
       .eq("available", true)
-      .lte("price_usd", PRICE_CAP_USD)
       .order("price_usd", { ascending: true })
       .order("discovered_at", { ascending: false });
 

@@ -27,6 +27,8 @@
 
     { "path": "/api/cron/fire-scheduled-deletions",        "schedule": "0 9 * * *" },
 
+    { "path": "/api/cron/buy-domain-queue",                "schedule": "10 */2 * * *" },
+
     { "path": "/api/cron/mrl-pace-check",                  "schedule": "0 16 * * *" },
 
     { "path": "/api/cron/daily-account-status-report",     "schedule": "55 7 * * *" },

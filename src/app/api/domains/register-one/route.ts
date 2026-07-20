@@ -2,8 +2,6 @@ import { NextResponse } from "next/server";
 import { createDomain, setAutoRenew } from "@/lib/porkbun";
 import { getSupabaseAdmin } from "@/lib/supabase";
 
-const PRICE_CAP_USD = 4;
-
 export async function POST(request: Request) {
   try {
     const body = await request.json().catch(() => ({}));
@@ -31,9 +29,6 @@ export async function POST(request: Request) {
     const priceUsd = typeof row.price_usd === "number" ? row.price_usd : parseFloat(row.price_usd || "0");
     if (!Number.isFinite(priceUsd) || priceUsd <= 0) {
       return NextResponse.json({ error: "Invalid stored price" }, { status: 400 });
-    }
-    if (priceUsd > PRICE_CAP_USD) {
-      return NextResponse.json({ error: `Price $${priceUsd} above $${PRICE_CAP_USD} cap` }, { status: 400 });
     }
 
     // Step 1: register

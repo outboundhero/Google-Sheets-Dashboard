@@ -7,7 +7,8 @@ const BASE = "https://api.porkbun.com/api/json/v3";
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 export interface PorkbunAccount {
-  label: string;
+  key: string;   // stable identifier: "outboundhero" | "spencersellstech" | "account1" | "account2"
+  label: string; // human label shown in the UI
   apikey: string;
   secretapikey: string;
 }
@@ -20,15 +21,25 @@ export interface PorkbunDomainRow {
   autoRenew: number;  // 0 | 1
 }
 
-/** Configured Porkbun accounts (skips any whose keys are absent). */
+/**
+ * Configured Porkbun accounts, preferring the explicitly-named env vars
+ * (`PORKBUN_OUTBOUNDHERO_*`, `PORKBUN_SPENCERSELLSTECH_*`) so identity is
+ * unambiguous. The legacy `PORKBUN_API_KEY[_2]` slots are still honored as a
+ * fallback (labeled generically) — but deduped by key value so the same
+ * account is never listed twice when a legacy var mirrors a named one.
+ */
 export function porkbunAccounts(): PorkbunAccount[] {
   const accts: PorkbunAccount[] = [];
-  if (process.env.PORKBUN_API_KEY && process.env.PORKBUN_SECRET_API_KEY) {
-    accts.push({ label: "Porkbun 1", apikey: process.env.PORKBUN_API_KEY, secretapikey: process.env.PORKBUN_SECRET_API_KEY });
-  }
-  if (process.env.PORKBUN_API_KEY_2 && process.env.PORKBUN_SECRET_API_KEY_2) {
-    accts.push({ label: "Porkbun 2", apikey: process.env.PORKBUN_API_KEY_2, secretapikey: process.env.PORKBUN_SECRET_API_KEY_2 });
-  }
+  const seen = new Set<string>();
+  const add = (key: string, label: string, apikey?: string, secretapikey?: string) => {
+    if (!apikey || !secretapikey || seen.has(apikey)) return;
+    seen.add(apikey);
+    accts.push({ key, label, apikey, secretapikey });
+  };
+  add("outboundhero", "outboundhero", process.env.PORKBUN_OUTBOUNDHERO_API_KEY, process.env.PORKBUN_OUTBOUNDHERO_SECRET_API_KEY);
+  add("spencersellstech", "spencersellstech", process.env.PORKBUN_SPENCERSELLSTECH_API_KEY, process.env.PORKBUN_SPENCERSELLSTECH_SECRET_API_KEY);
+  add("account1", "Porkbun 1", process.env.PORKBUN_API_KEY, process.env.PORKBUN_SECRET_API_KEY);
+  add("account2", "Porkbun 2", process.env.PORKBUN_API_KEY_2, process.env.PORKBUN_SECRET_API_KEY_2);
   return accts;
 }
 
@@ -60,6 +71,49 @@ export async function listExpiringDomains(acct: PorkbunAccount, withinDays = 10)
     start += 1000;
   }
   return all;
+}
+
+/**
+ * Every domain on `acct` (full inventory, no expiry filter). Paginated at 1000
+ * per page with a 10s gap between pages to respect Porkbun's 1-request/10s
+ * limit. Used by the "All Domains" inventory sync.
+ */
+export async function listAllDomains(acct: PorkbunAccount): Promise<PorkbunDomainRow[]> {
+  const all: PorkbunDomainRow[] = [];
+  let start = 0;
+  for (let guard = 0; guard < 100; guard++) {
+    if (guard > 0) await delay(10_000); // pace pages: 1 req / 10s per account
+    const res = await post("/domain/listAll", {
+      apikey: acct.apikey,
+      secretapikey: acct.secretapikey,
+      start,
+    });
+    if (!res.ok) throw new Error(`Porkbun listAll (${acct.label}): HTTP ${res.status}`);
+    const json = await res.json();
+    if (json.status !== "SUCCESS") throw new Error(`Porkbun listAll (${acct.label}): ${json.message || "error"}`);
+    const chunk: PorkbunDomainRow[] = json.domains || [];
+    all.push(...chunk);
+    if (chunk.length < 1000) break; // last chunk
+    start += 1000;
+  }
+  return all;
+}
+
+/**
+ * A single page (up to 1000) of an account's domains, for the account-check
+ * probe. Returns just the domain strings.
+ */
+export async function listAllDomainNamesPage(
+  apikey: string,
+  secretapikey: string,
+  start = 0
+): Promise<string[]> {
+  const res = await post("/domain/listAll", { apikey, secretapikey, start });
+  if (!res.ok) throw new Error(`Porkbun listAll: HTTP ${res.status}`);
+  const json = await res.json();
+  if (json.status !== "SUCCESS") throw new Error(`Porkbun listAll: ${json.message || "error"}`);
+  const chunk: PorkbunDomainRow[] = json.domains || [];
+  return chunk.map((d) => d.domain);
 }
 
 /** TLD → yearly renewal price (USD). No auth required. */

@@ -1,10 +1,22 @@
 const BASE = "https://api.porkbun.com/api/json/v3";
 
+/**
+ * The ONLY Porkbun account the buy pipeline may ever touch — the outboundhero
+ * account. Reads the explicitly-named `PORKBUN_OUTBOUNDHERO_*` pair and
+ * **fails closed** (throws) if it is absent. There is deliberately NO fallback
+ * to the legacy `PORKBUN_API_KEY`: that key's account identity is not
+ * guaranteed to be outboundhero, and buying on the wrong (spencersellstech)
+ * account is unrecoverable. Every check/create/auto-renew call below resolves
+ * this, so no caller can target another account.
+ */
 function creds() {
-  const apikey = process.env.PORKBUN_API_KEY;
-  const secretapikey = process.env.PORKBUN_SECRET_API_KEY;
+  const apikey = process.env.PORKBUN_OUTBOUNDHERO_API_KEY;
+  const secretapikey = process.env.PORKBUN_OUTBOUNDHERO_SECRET_API_KEY;
   if (!apikey || !secretapikey) {
-    throw new Error("Porkbun API keys missing (PORKBUN_API_KEY / PORKBUN_SECRET_API_KEY)");
+    throw new Error(
+      "outboundhero Porkbun keys missing (PORKBUN_OUTBOUNDHERO_API_KEY / PORKBUN_OUTBOUNDHERO_SECRET_API_KEY). " +
+        "The buyer refuses to run without them so it can never buy on the wrong account."
+    );
   }
   return { apikey, secretapikey };
 }
