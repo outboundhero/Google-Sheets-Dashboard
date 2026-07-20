@@ -10,7 +10,7 @@
  *   to stay under provider rate limits.
  * - Each row's status is rendered live: pending → running → created / failed.
  */
-import { useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import {
   Dialog,
   DialogContent,
@@ -32,12 +32,14 @@ import {
 import {
   AlertTriangle,
   CheckCircle2,
+  ChevronDown,
+  ChevronRight,
   Loader2,
   Upload,
   XCircle,
 } from "lucide-react";
 import { BISON_INSTANCES, type BisonInstanceSlug } from "@/lib/bison-instances";
-import type { InboxOrderProvider } from "@/types/inbox-order";
+import type { InboxOrderProvider, InboxOrderAlias } from "@/types/inbox-order";
 
 const PROVIDER_MAILBOXES: Record<InboxOrderProvider, number> = {
   scaledmail: 25,
@@ -99,8 +101,11 @@ export function BulkCreateInboxOrdersDialog({
   // Sender names: auto female (default) or from the name1/name2 CSV columns.
   const [autoNames, setAutoNames] = useState(true);
   const [personaCount, setPersonaCount] = useState<1 | 2>(1);
-  // Previewed (and editable) names per domain — populated by "Preview names".
+  // Previewed (and editable) names + full per-mailbox aliases per domain,
+  // populated by "Preview names". `expanded` = which domain's mailbox list is open.
   const [rowNames, setRowNames] = useState<Record<string, { name1: string; name2: string }>>({});
+  const [rowAliases, setRowAliases] = useState<Record<string, InboxOrderAlias[]>>({});
+  const [expanded, setExpanded] = useState<string | null>(null);
   const [previewingNames, setPreviewingNames] = useState(false);
   const [csvText, setCsvText] = useState("");
   const [submitting, setSubmitting] = useState(false);
@@ -119,9 +124,9 @@ export function BulkCreateInboxOrdersDialog({
     if (defaultInstance) setBisonInstance(defaultInstance);
   }, [open, defaultInstance]);
 
-  // Previewed names are tied to the current settings/rows — clear them when
-  // any of those change so a stale preview can't be submitted.
-  useEffect(() => { setRowNames({}); }, [provider, autoNames, personaCount, csvText]);
+  // Previewed names/aliases are tied to the current settings/rows — clear them
+  // when any of those change so a stale preview can't be submitted.
+  useEffect(() => { setRowNames({}); setRowAliases({}); setExpanded(null); }, [provider, autoNames, personaCount, csvText]);
 
   // Parse CSV/TSV. First row is treated as header iff it contains the literal
   // word "domain" (case-insensitive). All other lines are data rows.
@@ -174,33 +179,42 @@ export function BulkCreateInboxOrdersDialog({
   const previewNames = async () => {
     if (validRows.length === 0) return;
     setPreviewingNames(true);
-    const next: Record<string, { name1: string; name2: string }> = {};
+    const nextNames: Record<string, { name1: string; name2: string }> = {};
+    const nextAliases: Record<string, InboxOrderAlias[]> = {};
     const rows = [...validRows];
     let i = 0;
     const worker = async () => {
       while (i < rows.length) {
         const r = rows[i++];
-        if (!autoNames) { next[r.domain] = { name1: r.name1, name2: r.name2 }; continue; }
+        const names = autoNames
+          ? undefined
+          : [r.name1, ...(personaCount === 2 ? [r.name2] : [])].map(splitName).filter(Boolean);
         try {
           const res = await fetch("/api/inbox-orders/preview-names", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ provider, nameMode: "auto", personaCount }),
+            body: JSON.stringify({ provider, nameMode: autoNames ? "auto" : "manual", personaCount, names }),
           });
           const json = await res.json();
-          const p = json?.personas;
-          if (res.ok && Array.isArray(p) && p.length) {
-            next[r.domain] = {
-              name1: `${p[0].first_name} ${p[0].last_name}`.trim(),
+          if (res.ok && Array.isArray(json.aliases)) {
+            nextAliases[r.domain] = json.aliases as InboxOrderAlias[];
+            const p = json.personas || [];
+            nextNames[r.domain] = {
+              name1: p[0] ? `${p[0].first_name} ${p[0].last_name}`.trim() : "",
               name2: p[1] ? `${p[1].first_name} ${p[1].last_name}`.trim() : "",
             };
           }
-        } catch { /* leave this row on auto */ }
+        } catch { /* leave this row unpreviewed */ }
       }
     };
-    await Promise.all(Array.from({ length: 4 }, worker));
-    setRowNames(next);
+    await Promise.all(Array.from({ length: 3 }, worker));
+    setRowNames(nextNames);
+    setRowAliases(nextAliases);
     setPreviewingNames(false);
+  };
+
+  const editRowAlias = (domain: string, idx: number, field: keyof InboxOrderAlias, value: string) => {
+    setRowAliases((p) => ({ ...p, [domain]: (p[domain] || []).map((a, i) => (i === idx ? { ...a, [field]: value } : a)) }));
   };
 
   const submit = async () => {
@@ -231,14 +245,10 @@ export function BulkCreateInboxOrdersDialog({
         );
 
         try {
-          // If the row was previewed (auto or manual), send those exact names;
-          // otherwise send auto (generated server-side) or the CSV columns.
-          const previewed = rowNames[row.domain];
-          const source = previewed
-            ? [previewed.name1, ...(personaCount === 2 ? [previewed.name2] : [])]
-            : [row.name1, ...(personaCount === 2 ? [row.name2] : [])];
-          const manualNames = source.map(splitName).filter(Boolean);
-          const sendManual = !autoNames || !!previewed;
+          // If previewed, send the EXACT (edited) per-mailbox aliases; otherwise
+          // auto (generated server-side) or the CSV name columns.
+          const previewedAliases = rowAliases[row.domain];
+          const manualNames = [row.name1, ...(personaCount === 2 ? [row.name2] : [])].map(splitName).filter(Boolean);
           const res = await fetch("/api/inbox-orders", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -250,10 +260,11 @@ export function BulkCreateInboxOrdersDialog({
               clientTag: row.clientTag || undefined,
               tag: globalTag.trim() || undefined,
               redirectUrl: redirectUrl.trim() || undefined,
-              // Names: previewed/edited names, CSV columns, or auto female.
-              ...(sendManual
-                ? { nameMode: "manual", personaCount, names: manualNames }
-                : { nameMode: "auto", personaCount }),
+              ...(previewedAliases && previewedAliases.length
+                ? { aliases: previewedAliases }
+                : autoNames
+                  ? { nameMode: "auto", personaCount }
+                  : { nameMode: "manual", personaCount, names: manualNames }),
             }),
           });
           const data = await res.json();
@@ -441,7 +452,7 @@ export function BulkCreateInboxOrdersDialog({
 
           {/* Preview (only when not yet submitted) */}
           {parsed.length > 0 && results.length === 0 && (
-            <div className="rounded-md border max-h-[180px] overflow-y-auto">
+            <div className="rounded-md border max-h-[340px] overflow-y-auto">
               <table className="w-full text-xs">
                 <thead className="text-left bg-muted/50 sticky top-0">
                   <tr>
@@ -453,44 +464,72 @@ export function BulkCreateInboxOrdersDialog({
                   </tr>
                 </thead>
                 <tbody className="divide-y">
-                  {parsed.map((r) => (
-                    <tr key={r.rowNo} className={r.errors.length ? "bg-red-950/10" : ""}>
-                      <td className="px-2 py-1 truncate max-w-[200px]">{r.domain || <em className="text-muted-foreground">—</em>}</td>
-                      <td className="px-2 py-1 truncate max-w-[180px]">{r.companyName || <em className="text-muted-foreground">—</em>}</td>
-                      <td className="px-2 py-1 truncate max-w-[120px]">{r.clientTag || <em className="text-muted-foreground">—</em>}</td>
-                      <td className="px-2 py-1 max-w-[190px]">
-                        {rowNames[r.domain] ? (
-                          <div className="flex flex-col gap-1">
-                            <Input
-                              className="h-6 text-[11px]"
-                              value={rowNames[r.domain].name1}
-                              onChange={(e) => setRowNames((p) => ({ ...p, [r.domain]: { ...p[r.domain], name1: e.target.value } }))}
-                            />
-                            {personaCount === 2 && (
-                              <Input
-                                className="h-6 text-[11px]"
-                                value={rowNames[r.domain].name2}
-                                onChange={(e) => setRowNames((p) => ({ ...p, [r.domain]: { ...p[r.domain], name2: e.target.value } }))}
-                              />
+                  {parsed.map((r) => {
+                    const aliases = rowAliases[r.domain];
+                    const summary = rowNames[r.domain]
+                      ? [rowNames[r.domain].name1, rowNames[r.domain].name2].filter(Boolean).join(" / ")
+                      : "";
+                    const isOpen = expanded === r.domain;
+                    return (
+                      <Fragment key={r.rowNo}>
+                        <tr className={r.errors.length ? "bg-red-950/10" : ""}>
+                          <td className="px-2 py-1 truncate max-w-[200px]">{r.domain || <em className="text-muted-foreground">—</em>}</td>
+                          <td className="px-2 py-1 truncate max-w-[180px]">{r.companyName || <em className="text-muted-foreground">—</em>}</td>
+                          <td className="px-2 py-1 truncate max-w-[120px]">{r.clientTag || <em className="text-muted-foreground">—</em>}</td>
+                          <td className="px-2 py-1 max-w-[220px]">
+                            {aliases && aliases.length ? (
+                              <button
+                                type="button"
+                                onClick={() => setExpanded(isOpen ? null : r.domain)}
+                                className="flex items-center gap-1 text-left hover:text-foreground"
+                                title="Show / edit every mailbox's name + email"
+                              >
+                                {isOpen ? <ChevronDown className="h-3 w-3 shrink-0" /> : <ChevronRight className="h-3 w-3 shrink-0" />}
+                                <span className="truncate">{summary || "names"}</span>
+                                <span className="text-[10px] text-muted-foreground shrink-0">· {aliases.length} mailboxes</span>
+                              </button>
+                            ) : (
+                              <span className="text-muted-foreground truncate block">
+                                {autoNames
+                                  ? <em>(auto — click Preview names)</em>
+                                  : ([r.name1, personaCount === 2 ? r.name2 : ""].filter(Boolean).join(" / ") || <em>—</em>)}
+                              </span>
                             )}
-                          </div>
-                        ) : (
-                          <span className="text-muted-foreground truncate block">
-                            {autoNames
-                              ? <em>(auto)</em>
-                              : ([r.name1, personaCount === 2 ? r.name2 : ""].filter(Boolean).join(" / ") || <em>—</em>)}
-                          </span>
+                          </td>
+                          <td className="px-2 py-1">
+                            {r.errors.length === 0 ? (
+                              <Badge variant="outline" className="text-[10px] px-1.5 py-0">ready</Badge>
+                            ) : (
+                              <span className="text-red-400 text-[10px]">{r.errors.join("; ")}</span>
+                            )}
+                          </td>
+                        </tr>
+                        {isOpen && aliases && (
+                          <tr>
+                            <td colSpan={5} className="px-2 pb-2 bg-muted/20">
+                              <div className="max-h-56 overflow-y-auto rounded border divide-y">
+                                {aliases.map((a, idx) => (
+                                  <div key={idx} className="grid grid-cols-[1fr_1fr_1.7fr] gap-1 px-2 py-1 items-center">
+                                    <Input className="h-6 text-[11px]" value={a.first_name} onChange={(e) => editRowAlias(r.domain, idx, "first_name", e.target.value)} />
+                                    <Input className="h-6 text-[11px]" value={a.last_name} onChange={(e) => editRowAlias(r.domain, idx, "last_name", e.target.value)} />
+                                    <div className="flex items-center gap-1 min-w-0">
+                                      <Input className="h-6 text-[11px]" value={a.alias} onChange={(e) => editRowAlias(r.domain, idx, "alias", e.target.value)} />
+                                      <span className="text-[10px] text-muted-foreground truncate">@{r.domain}</span>
+                                    </div>
+                                  </div>
+                                ))}
+                              </div>
+                              {provider === "milkbox" && (
+                                <p className="mt-1 text-[10px] text-muted-foreground">
+                                  MilkBox generates the actual addresses from the names — the email column is informational here.
+                                </p>
+                              )}
+                            </td>
+                          </tr>
                         )}
-                      </td>
-                      <td className="px-2 py-1">
-                        {r.errors.length === 0 ? (
-                          <Badge variant="outline" className="text-[10px] px-1.5 py-0">ready</Badge>
-                        ) : (
-                          <span className="text-red-400 text-[10px]">{r.errors.join("; ")}</span>
-                        )}
-                      </td>
-                    </tr>
-                  ))}
+                      </Fragment>
+                    );
+                  })}
                 </tbody>
               </table>
             </div>
