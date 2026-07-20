@@ -1,7 +1,7 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import { Globe, Search, X, RefreshCw, Loader2, ArrowUpDown } from "lucide-react";
+import { Globe, Search, X, RefreshCw, Loader2, ArrowUpDown, Signal } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useAuth } from "@/lib/auth-context";
 import { useDomainInventory, type InventoryRow } from "@/lib/hooks/use-domain-inventory";
@@ -33,7 +33,7 @@ export function AllDomainsTable() {
   const isAdmin = role === "admin";
   const { rows, counts, generatedAt, isLoading, mutate } = useDomainInventory();
   // Sync + MX-resolve live above the tabs (persist across tab switches).
-  const { syncing, syncMsg, mxRemaining, refreshPorkbun } = useInventory();
+  const { syncing, syncMsg, mxRemaining, mxRunning, refreshPorkbun, resolveProviders } = useInventory();
 
   const [search, setSearch] = useState("");
   const [sourceFilter, setSourceFilter] = useState("all");
@@ -102,6 +102,12 @@ export function AllDomainsTable() {
 
           <div className="ml-auto flex items-center gap-2">
             {isAdmin && <ImportDomainsDialog onImported={mutate} />}
+            {isAdmin && mxRemaining != null && mxRemaining > 0 && (
+              <Button variant="outline" size="sm" className="h-8 text-xs gap-1.5" onClick={resolveProviders} disabled={mxRunning}>
+                {mxRunning ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Signal className="h-3.5 w-3.5" />}
+                {mxRunning ? "Resolving…" : `Resolve ${mxRemaining} providers`}
+              </Button>
+            )}
             {isAdmin && (
               <Button variant="outline" size="sm" className="h-8 text-xs gap-1.5" onClick={refreshPorkbun} disabled={syncing}>
                 {syncing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
@@ -118,7 +124,11 @@ export function AllDomainsTable() {
           <Chip>{counts?.notInUse ?? 0} not in use</Chip>
           {sources.map((s) => <Chip key={s}>{s.replace("porkbun_", "")}: {counts?.bySource[s] ?? 0}</Chip>)}
           {mxRemaining != null && mxRemaining > 0 && (
-            <span className="flex items-center gap-1 text-muted-foreground"><Loader2 className="h-3 w-3 animate-spin" /> resolving {mxRemaining} providers…</span>
+            mxRunning ? (
+              <span className="flex items-center gap-1 text-muted-foreground"><Loader2 className="h-3 w-3 animate-spin" /> resolving {mxRemaining} providers…</span>
+            ) : (
+              <span className="text-muted-foreground">{mxRemaining} providers unresolved</span>
+            )
           )}
           {generatedAt && <span className="text-muted-foreground ml-auto">updated {new Date(generatedAt).toLocaleTimeString()}</span>}
         </div>

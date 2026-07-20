@@ -22,6 +22,7 @@ interface InventoryContextValue {
   mxRemaining: number | null;
   mxRunning: boolean;
   refreshPorkbun: () => Promise<void>;
+  resolveProviders: () => void;
 }
 
 const InventoryContext = createContext<InventoryContextValue | null>(null);
@@ -95,7 +96,7 @@ export function InventoryProvider({ children }: { children: React.ReactNode }) {
   }, [runMxLoop]);
 
   return (
-    <InventoryContext.Provider value={{ syncing, syncMsg, mxRemaining, mxRunning, refreshPorkbun }}>
+    <InventoryContext.Provider value={{ syncing, syncMsg, mxRemaining, mxRunning, refreshPorkbun, resolveProviders: runMxLoop }}>
       {children}
     </InventoryContext.Provider>
   );
