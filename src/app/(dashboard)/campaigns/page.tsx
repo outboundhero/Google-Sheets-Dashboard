@@ -64,6 +64,23 @@ interface BulkJob {
 }
 
 // What `status` becomes after a successful action (used for optimistic row update).
+// A tracker abbreviation cell can hold several combined markets, e.g.
+// "JPDFW & JPK" or "JPCIN / JPCHI". A campaign's client_tag is a SINGLE tag
+// ("JPK"), so we register each split part — otherwise "JPK" never matches the
+// combined churned/paused cell and wrongly stays in the active bucket.
+function abbrTags(cell: string | null | undefined): string[] {
+  const out = new Set<string>();
+  const whole = (cell || "").trim().toUpperCase();
+  if (whole) out.add(whole);
+  for (const slash of (cell || "").split("/")) {
+    for (const amp of slash.split(" & ")) {
+      const v = amp.trim().toUpperCase();
+      if (v) out.add(v);
+    }
+  }
+  return [...out];
+}
+
 const NEW_STATUS_FOR: Record<BulkAction, string> = {
   pause: "paused",
   resume: "active",
@@ -410,8 +427,7 @@ export default function CampaignsPage() {
       if ((c.status || "").trim().toLowerCase() !== "churned") continue;
       const d = new Date(c.churnDate);
       if (isNaN(d.getTime()) || d > now) continue;
-      const tag = (c.clientAbbr || "").trim().toUpperCase();
-      if (tag) set.add(tag);
+      for (const t of abbrTags(c.clientAbbr)) set.add(t);
     }
     return set;
   }, [trackerClients]);
@@ -429,8 +445,7 @@ export default function CampaignsPage() {
     for (const c of trackerClients) {
       const status = (c.status || "").trim().toLowerCase();
       if (status !== "paused" && status !== "limited operations") continue;
-      const tag = (c.clientAbbr || "").trim().toUpperCase();
-      if (tag) set.add(tag);
+      for (const t of abbrTags(c.clientAbbr)) set.add(t);
     }
     return set;
   }, [trackerClients]);
