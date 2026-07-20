@@ -7,9 +7,9 @@ import { useInventory } from "./inventory-context";
 // provider resolution — rendered above the tabs so it stays on screen (and the
 // work keeps running) regardless of the active tab.
 export function InventoryProgressBanner() {
-  const { syncing, mxRemaining, mxRunning } = useInventory();
+  const { syncing, mxRemaining, mxRunning, mxResolved, mxFailed } = useInventory();
 
-  const resolving = mxRunning && mxRemaining != null && mxRemaining > 0;
+  const resolving = mxRunning && mxRemaining != null;
   if (!syncing && !resolving) return null;
 
   return (
@@ -23,7 +23,7 @@ export function InventoryProgressBanner() {
           <div className="text-[11px] text-muted-foreground">
             {syncing
               ? "Pulling every domain from both Porkbun accounts (paced ~10s/page)…"
-              : `Looking up MX records · ${mxRemaining} domains left`}
+              : `MX lookups · ${mxResolved} resolved${mxFailed > 0 ? ` · ${mxFailed} failed` : ""} · ${mxRemaining} left`}
           </div>
         </div>
       </div>

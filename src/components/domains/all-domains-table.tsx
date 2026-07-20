@@ -33,7 +33,7 @@ export function AllDomainsTable() {
   const isAdmin = role === "admin";
   const { rows, counts, generatedAt, isLoading, mutate } = useDomainInventory();
   // Sync + MX-resolve live above the tabs (persist across tab switches).
-  const { syncing, syncMsg, mxRemaining, mxRunning, refreshPorkbun, resolveProviders } = useInventory();
+  const { syncing, syncMsg, mxRemaining, mxRunning, mxResolved, mxFailed, mxNote, refreshPorkbun, resolveProviders } = useInventory();
 
   const [search, setSearch] = useState("");
   const [sourceFilter, setSourceFilter] = useState("all");
@@ -125,14 +125,19 @@ export function AllDomainsTable() {
           {sources.map((s) => <Chip key={s}>{s.replace("porkbun_", "")}: {counts?.bySource[s] ?? 0}</Chip>)}
           {mxRemaining != null && mxRemaining > 0 && (
             mxRunning ? (
-              <span className="flex items-center gap-1 text-muted-foreground"><Loader2 className="h-3 w-3 animate-spin" /> resolving {mxRemaining} providers…</span>
+              <span className="flex items-center gap-1 text-muted-foreground">
+                <Loader2 className="h-3 w-3 animate-spin" /> resolving · {mxResolved} done{mxFailed > 0 ? ` · ${mxFailed} failed` : ""} · {mxRemaining} left
+              </span>
             ) : (
-              <span className="text-muted-foreground">{mxRemaining} providers unresolved</span>
+              <span className={mxFailed > 0 ? "text-amber-500" : "text-muted-foreground"}>
+                {mxRemaining} providers unresolved{mxResolved > 0 || mxFailed > 0 ? ` (${mxResolved} done, ${mxFailed} failed last run)` : ""}
+              </span>
             )
           )}
           {generatedAt && <span className="text-muted-foreground ml-auto">updated {new Date(generatedAt).toLocaleTimeString()}</span>}
         </div>
 
+        {mxNote && <div className="text-xs text-amber-500 border-t pt-2">{mxNote}</div>}
         {syncMsg && <div className="text-xs text-muted-foreground border-t pt-2">{syncMsg}</div>}
       </div>
 

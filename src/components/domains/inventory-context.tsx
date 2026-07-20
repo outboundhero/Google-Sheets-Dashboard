@@ -21,6 +21,9 @@ interface InventoryContextValue {
   syncMsg: string | null;
   mxRemaining: number | null;
   mxRunning: boolean;
+  mxResolved: number;
+  mxFailed: number;
+  mxNote: string | null;
   refreshPorkbun: () => Promise<void>;
   resolveProviders: () => void;
 }
@@ -41,28 +44,48 @@ export function InventoryProvider({ children }: { children: React.ReactNode }) {
   const [syncMsg, setSyncMsg] = useState<string | null>(null);
   const [mxRemaining, setMxRemaining] = useState<number | null>(null);
   const [mxRunning, setMxRunning] = useState(false);
+  const [mxResolved, setMxResolved] = useState(0);
+  const [mxFailed, setMxFailed] = useState(0);
+  const [mxNote, setMxNote] = useState<string | null>(null);
   const mxRunningRef = useRef(false);
 
   const runMxLoop = useCallback(async () => {
     if (mxRunningRef.current) return;
     mxRunningRef.current = true;
     setMxRunning(true);
+    setMxResolved(0);
+    setMxFailed(0);
+    setMxNote(null);
+    let totalResolved = 0;
+    let totalFailed = 0;
     try {
       for (let i = 0; i < 200; i++) {
         const res = await fetch("/api/domains/inventory/resolve-mx", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ limit: 500 }),
+          body: JSON.stringify({ limit: 300 }),
         });
-        if (!res.ok) break;
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({}));
+          setMxNote(`Stopped: ${err?.error || `HTTP ${res.status}`}`);
+          break;
+        }
         const data = await res.json();
+        totalResolved += data.resolved ?? 0;
+        totalFailed += data.failed ?? 0;
+        setMxResolved(totalResolved);
+        setMxFailed(totalFailed);
         setMxRemaining(data.remaining ?? 0);
-        // Stop if nothing left, nothing processed, or a batch made no progress
-        // (all lookups failed) — prevents an infinite re-fetch of the same rows.
-        if ((data.processed ?? 0) === 0 || (data.remaining ?? 0) === 0 || (data.resolved ?? 0) === 0) break;
         await globalMutate("/api/domains/inventory/list");
+        if ((data.processed ?? 0) === 0 || (data.remaining ?? 0) === 0) break;
+        // A whole batch resolved nothing → the lookups are failing; stop and
+        // surface why (a sample error) instead of spinning on the same rows.
+        if ((data.resolved ?? 0) === 0) {
+          const sampleErr = Array.isArray(data.sample) ? data.sample.find((s: { error?: string }) => s?.error)?.error : null;
+          setMxNote(`Lookups failing — ${data.failed ?? 0} failed this batch${sampleErr ? ` · e.g. ${sampleErr}` : ""}`);
+          break;
+        }
       }
-      await globalMutate("/api/domains/inventory/list");
     } finally {
       mxRunningRef.current = false;
       setMxRunning(false);
@@ -96,7 +119,7 @@ export function InventoryProvider({ children }: { children: React.ReactNode }) {
   }, [runMxLoop]);
 
   return (
-    <InventoryContext.Provider value={{ syncing, syncMsg, mxRemaining, mxRunning, refreshPorkbun, resolveProviders: runMxLoop }}>
+    <InventoryContext.Provider value={{ syncing, syncMsg, mxRemaining, mxRunning, mxResolved, mxFailed, mxNote, refreshPorkbun, resolveProviders: runMxLoop }}>
       {children}
     </InventoryContext.Provider>
   );
