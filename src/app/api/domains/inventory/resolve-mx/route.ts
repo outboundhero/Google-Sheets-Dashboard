@@ -31,12 +31,15 @@ export async function POST(request: Request) {
     const supabase = getSupabaseAdmin();
     const { data: rows, error } = await supabase
       .from("domain_inventory")
-      .select("domain")
+      .select("domain, source")
       .is("mx_checked_at", null)
       .order("first_seen_at", { ascending: true })
       .limit(limit);
     if (error) throw new Error(error.message);
     const domains = (rows || []).map((r) => r.domain as string);
+    // `source` is NOT NULL, so an upsert must carry it (the INSERT path is
+    // validated even on conflict). Keep each domain's existing source.
+    const sourceByDomain = new Map<string, string>((rows || []).map((r) => [r.domain as string, r.source as string]));
 
     let resolved = 0;
     let failed = 0;
@@ -53,10 +56,17 @@ export async function POST(request: Request) {
         if (sample.length < 5) sample.push({ domain: r.domain, provider: r.provider, error: r.error });
         if (r.provider === null) failed++;
       }
-      // Batch the writes: one upsert per wave instead of 500 sequential updates.
+      // Batch the writes: one upsert per wave. `source` is included because it
+      // is NOT NULL and the upsert's insert path is validated even on conflict.
       const updates = definite
         .filter((r) => r.provider !== null)
-        .map((r) => ({ domain: r.domain, mx_provider: r.provider, mx_hosts: r.hosts, mx_checked_at: nowIso }));
+        .map((r) => ({
+          domain: r.domain,
+          source: sourceByDomain.get(r.domain) || "manual",
+          mx_provider: r.provider,
+          mx_hosts: r.hosts,
+          mx_checked_at: nowIso,
+        }));
       if (updates.length > 0) {
         const { error: upErr } = await supabase
           .from("domain_inventory")
