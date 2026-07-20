@@ -99,6 +99,9 @@ export function BulkCreateInboxOrdersDialog({
   // Sender names: auto female (default) or from the name1/name2 CSV columns.
   const [autoNames, setAutoNames] = useState(true);
   const [personaCount, setPersonaCount] = useState<1 | 2>(1);
+  // Previewed (and editable) names per domain — populated by "Preview names".
+  const [rowNames, setRowNames] = useState<Record<string, { name1: string; name2: string }>>({});
+  const [previewingNames, setPreviewingNames] = useState(false);
   const [csvText, setCsvText] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [results, setResults] = useState<RowResult[]>([]);
@@ -115,6 +118,10 @@ export function BulkCreateInboxOrdersDialog({
     }
     if (defaultInstance) setBisonInstance(defaultInstance);
   }, [open, defaultInstance]);
+
+  // Previewed names are tied to the current settings/rows — clear them when
+  // any of those change so a stale preview can't be submitted.
+  useEffect(() => { setRowNames({}); }, [provider, autoNames, personaCount, csvText]);
 
   // Parse CSV/TSV. First row is treated as header iff it contains the literal
   // word "domain" (case-insensitive). All other lines are data rows.
@@ -161,6 +168,41 @@ export function BulkCreateInboxOrdersDialog({
     setCsvText(text);
   };
 
+  // Generate (auto) or gather (manual) the sender name(s) for each valid row so
+  // they can be reviewed + edited before submitting. Names become editable
+  // inline; on submit the exact names shown are used.
+  const previewNames = async () => {
+    if (validRows.length === 0) return;
+    setPreviewingNames(true);
+    const next: Record<string, { name1: string; name2: string }> = {};
+    const rows = [...validRows];
+    let i = 0;
+    const worker = async () => {
+      while (i < rows.length) {
+        const r = rows[i++];
+        if (!autoNames) { next[r.domain] = { name1: r.name1, name2: r.name2 }; continue; }
+        try {
+          const res = await fetch("/api/inbox-orders/preview-names", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ provider, nameMode: "auto", personaCount }),
+          });
+          const json = await res.json();
+          const p = json?.personas;
+          if (res.ok && Array.isArray(p) && p.length) {
+            next[r.domain] = {
+              name1: `${p[0].first_name} ${p[0].last_name}`.trim(),
+              name2: p[1] ? `${p[1].first_name} ${p[1].last_name}`.trim() : "",
+            };
+          }
+        } catch { /* leave this row on auto */ }
+      }
+    };
+    await Promise.all(Array.from({ length: 4 }, worker));
+    setRowNames(next);
+    setPreviewingNames(false);
+  };
+
   const submit = async () => {
     if (validRows.length === 0) return;
     setSubmitting(true);
@@ -189,9 +231,14 @@ export function BulkCreateInboxOrdersDialog({
         );
 
         try {
-          const manualNames = [row.name1, ...(personaCount === 2 ? [row.name2] : [])]
-            .map(splitName)
-            .filter(Boolean);
+          // If the row was previewed (auto or manual), send those exact names;
+          // otherwise send auto (generated server-side) or the CSV columns.
+          const previewed = rowNames[row.domain];
+          const source = previewed
+            ? [previewed.name1, ...(personaCount === 2 ? [previewed.name2] : [])]
+            : [row.name1, ...(personaCount === 2 ? [row.name2] : [])];
+          const manualNames = source.map(splitName).filter(Boolean);
+          const sendManual = !autoNames || !!previewed;
           const res = await fetch("/api/inbox-orders", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -203,10 +250,10 @@ export function BulkCreateInboxOrdersDialog({
               clientTag: row.clientTag || undefined,
               tag: globalTag.trim() || undefined,
               redirectUrl: redirectUrl.trim() || undefined,
-              // Names: auto female, or built from this row's name1/name2 columns.
-              ...(autoNames
-                ? { nameMode: "auto", personaCount }
-                : { nameMode: "manual", personaCount, names: manualNames }),
+              // Names: previewed/edited names, CSV columns, or auto female.
+              ...(sendManual
+                ? { nameMode: "manual", personaCount, names: manualNames }
+                : { nameMode: "auto", personaCount }),
             }),
           });
           const data = await res.json();
@@ -342,6 +389,17 @@ export function BulkCreateInboxOrdersDialog({
             </label>
             <div className="flex items-center gap-2">
               <Button
+                variant="outline"
+                size="sm"
+                disabled={submitting || previewingNames || validRows.length === 0}
+                onClick={previewNames}
+                className="h-7 text-xs gap-1"
+                title="Generate/collect the sender name(s) for each domain so you can review + edit them"
+              >
+                {previewingNames ? <Loader2 className="h-3 w-3 animate-spin" /> : null}
+                Preview names
+              </Button>
+              <Button
                 variant="ghost"
                 size="sm"
                 disabled={submitting}
@@ -400,10 +458,29 @@ export function BulkCreateInboxOrdersDialog({
                       <td className="px-2 py-1 truncate max-w-[200px]">{r.domain || <em className="text-muted-foreground">—</em>}</td>
                       <td className="px-2 py-1 truncate max-w-[180px]">{r.companyName || <em className="text-muted-foreground">—</em>}</td>
                       <td className="px-2 py-1 truncate max-w-[120px]">{r.clientTag || <em className="text-muted-foreground">—</em>}</td>
-                      <td className="px-2 py-1 truncate max-w-[160px] text-muted-foreground">
-                        {autoNames
-                          ? <em>(auto)</em>
-                          : ([r.name1, personaCount === 2 ? r.name2 : ""].filter(Boolean).join(" / ") || <em className="text-muted-foreground">—</em>)}
+                      <td className="px-2 py-1 max-w-[190px]">
+                        {rowNames[r.domain] ? (
+                          <div className="flex flex-col gap-1">
+                            <Input
+                              className="h-6 text-[11px]"
+                              value={rowNames[r.domain].name1}
+                              onChange={(e) => setRowNames((p) => ({ ...p, [r.domain]: { ...p[r.domain], name1: e.target.value } }))}
+                            />
+                            {personaCount === 2 && (
+                              <Input
+                                className="h-6 text-[11px]"
+                                value={rowNames[r.domain].name2}
+                                onChange={(e) => setRowNames((p) => ({ ...p, [r.domain]: { ...p[r.domain], name2: e.target.value } }))}
+                              />
+                            )}
+                          </div>
+                        ) : (
+                          <span className="text-muted-foreground truncate block">
+                            {autoNames
+                              ? <em>(auto)</em>
+                              : ([r.name1, personaCount === 2 ? r.name2 : ""].filter(Boolean).join(" / ") || <em>—</em>)}
+                          </span>
+                        )}
                       </td>
                       <td className="px-2 py-1">
                         {r.errors.length === 0 ? (
