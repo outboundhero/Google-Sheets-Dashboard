@@ -56,7 +56,9 @@ export function InventoryProvider({ children }: { children: React.ReactNode }) {
         if (!res.ok) break;
         const data = await res.json();
         setMxRemaining(data.remaining ?? 0);
-        if ((data.processed ?? 0) === 0 || (data.remaining ?? 0) === 0) break;
+        // Stop if nothing left, nothing processed, or a batch made no progress
+        // (all lookups failed) — prevents an infinite re-fetch of the same rows.
+        if ((data.processed ?? 0) === 0 || (data.remaining ?? 0) === 0 || (data.resolved ?? 0) === 0) break;
         await globalMutate("/api/domains/inventory/list");
       }
       await globalMutate("/api/domains/inventory/list");
