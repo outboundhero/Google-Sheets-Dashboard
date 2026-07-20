@@ -17,8 +17,10 @@ const PROVIDER_BADGE: Record<string, string> = {
   outlook: "bg-sky-500/10 text-sky-600 border-sky-500/20",
   mixed: "bg-violet-500/10 text-violet-600 border-violet-500/20",
   zoho: "bg-orange-500/10 text-orange-600 border-orange-500/20",
+  porkbun: "bg-rose-500/10 text-rose-600 border-rose-500/20",
   other: "bg-muted text-muted-foreground border-border",
   parked: "bg-muted text-muted-foreground border-border",
+  "no-dns": "bg-muted text-muted-foreground border-border",
   unknown: "bg-muted text-muted-foreground border-border",
 };
 

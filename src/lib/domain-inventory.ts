@@ -11,7 +11,7 @@ export const SOURCE_LABEL: Record<string, string> = {
   manual: "Manual",
 };
 
-export type InventoryProvider = "google" | "outlook" | "mixed" | "zoho" | "other" | "parked" | "unknown";
+export type InventoryProvider = "google" | "outlook" | "mixed" | "zoho" | "porkbun" | "other" | "parked" | "no-dns" | "unknown";
 
 export interface InventoryRow {
   domain: string;

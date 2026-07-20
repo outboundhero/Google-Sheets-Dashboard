@@ -8,7 +8,10 @@
 const DOH_URL = "https://dns.google/resolve";
 const TOTAL_BUDGET_MS = 5000;
 
-export type MxProvider = "google" | "outlook" | "zoho" | "other" | "parked";
+// "parked" = has DNS but no MX (no mailbox). "no-dns" = domain delegated but its
+// authoritative nameservers don't serve a zone (DoH SERVFAIL/REFUSED/NXDOMAIN) —
+// verified against authoritative NS, so there is genuinely no provider to find.
+export type MxProvider = "google" | "outlook" | "zoho" | "porkbun" | "other" | "parked" | "no-dns";
 
 export interface MxResult {
   domain: string;
@@ -23,6 +26,7 @@ function classify(hosts: string[]): MxProvider {
   if (/(^|\.)aspmx\.l\.google\.com|\.google\.com|googlemail\.com/.test(h)) return "google";
   if (/\.mail\.protection\.outlook\.com|\.olc\.protection\.outlook\.com|(^|\.)outlook\.com/.test(h)) return "outlook";
   if (/zoho/.test(h)) return "zoho";
+  if (/(^|\.)porkbun\.com/.test(h)) return "porkbun"; // Porkbun email forwarding (fwd*.porkbun.com)
   return "other";
 }
 
@@ -41,9 +45,15 @@ export async function resolveMxProvider(rawDomain: string): Promise<MxResult> {
       Answer?: { type?: number; data?: string }[];
     };
 
-    // Status: 0 = NOERROR, 3 = NXDOMAIN (domain has no records at all).
-    if (json.Status === 3) return { domain, provider: "parked", hosts: [], error: null };
-    if (json.Status !== 0) return { domain, provider: null, hosts: [], error: `DoH status ${json.Status}` };
+    // Status 0 = NOERROR → read MX (parked if none). Any OTHER definitive DoH
+    // status — SERVFAIL (2), NXDOMAIN (3), REFUSED (5), … — means the domain's
+    // authoritative nameservers don't serve a working zone, so there is no mail
+    // and no provider to detect (verified against the authoritative NS). Cache
+    // it as "no-dns" so it isn't re-checked forever. Only network/timeout errors
+    // (caught below) stay inconclusive and get retried.
+    if (json.Status !== 0) {
+      return { domain, provider: "no-dns", hosts: [], error: `DoH status ${json.Status}` };
+    }
 
     const answers = Array.isArray(json.Answer) ? json.Answer : [];
     const hosts = answers
