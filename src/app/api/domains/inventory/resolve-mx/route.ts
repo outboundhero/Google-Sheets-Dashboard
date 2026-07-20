@@ -7,9 +7,13 @@ import { resolveMxProvider } from "@/lib/mx-resolver";
 // Resolves + caches the MX provider for domain_inventory rows not yet checked.
 // Body: { limit?: number }. Returns { processed, resolved, remaining } so the
 // client can loop until remaining === 0.
+//
+// GET is a no-write DIAGNOSTIC: resolves a few sample domains + does one test
+// write, returning the raw results + any write error. Open it in the browser
+// (admin) to see whether DoH / the DB write works on the server.
 export const maxDuration = 60;
 
-const CONCURRENT = 100;
+const CONCURRENT = 50;
 const CACHE_KEY = "domain-inventory:v1";
 
 function getRedis(): Redis | null {
@@ -22,7 +26,7 @@ function getRedis(): Redis | null {
 export async function POST(request: Request) {
   try {
     const body = await request.json().catch(() => ({}));
-    const limit = Number.isFinite(body?.limit) ? Math.max(1, Math.min(1000, Math.floor(body.limit))) : 500;
+    const limit = Number.isFinite(body?.limit) ? Math.max(1, Math.min(1000, Math.floor(body.limit))) : 300;
 
     const supabase = getSupabaseAdmin();
     const { data: rows, error } = await supabase
@@ -35,26 +39,30 @@ export async function POST(request: Request) {
     const domains = (rows || []).map((r) => r.domain as string);
 
     let resolved = 0;
+    let failed = 0;
     const nowIso = new Date().toISOString();
+    const sample: { domain: string; provider: string | null; error: string | null }[] = [];
+
     for (let i = 0; i < domains.length; i += CONCURRENT) {
       const batch = domains.slice(i, i + CONCURRENT);
       const settled = await Promise.allSettled(batch.map((d) => resolveMxProvider(d)));
-      const updates = settled
+      const definite = settled
         .map((s) => (s.status === "fulfilled" ? s.value : null))
-        .filter((r): r is NonNullable<typeof r> => r !== null && r.provider !== null)
-        .map((r) => ({
-          domain: r.domain,
-          mx_provider: r.provider,
-          mx_hosts: r.hosts,
-          mx_checked_at: nowIso,
-        }));
-      // Upsert requires the row to exist (it does — we selected it). Update each.
-      for (const u of updates) {
+        .filter((r): r is NonNullable<typeof r> => r !== null);
+      for (const r of definite) {
+        if (sample.length < 5) sample.push({ domain: r.domain, provider: r.provider, error: r.error });
+        if (r.provider === null) failed++;
+      }
+      // Batch the writes: one upsert per wave instead of 500 sequential updates.
+      const updates = definite
+        .filter((r) => r.provider !== null)
+        .map((r) => ({ domain: r.domain, mx_provider: r.provider, mx_hosts: r.hosts, mx_checked_at: nowIso }));
+      if (updates.length > 0) {
         const { error: upErr } = await supabase
           .from("domain_inventory")
-          .update({ mx_provider: u.mx_provider, mx_hosts: u.mx_hosts, mx_checked_at: u.mx_checked_at })
-          .eq("domain", u.domain);
-        if (!upErr) resolved++;
+          .upsert(updates, { onConflict: "domain" });
+        if (!upErr) resolved += updates.length;
+        else if (sample.length < 6) sample.push({ domain: "(upsert error)", provider: null, error: upErr.message });
       }
     }
 
@@ -66,7 +74,33 @@ export async function POST(request: Request) {
     const redis = getRedis();
     if (redis && resolved > 0) await redis.del(CACHE_KEY);
 
-    return NextResponse.json({ processed: domains.length, resolved, remaining: remaining ?? 0 });
+    return NextResponse.json({ processed: domains.length, resolved, failed, remaining: remaining ?? 0, sample });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Failed";
+    return NextResponse.json({ error: message }, { status: 500 });
+  }
+}
+
+// Diagnostic — no writes except one test update. Open in the browser (admin).
+export async function GET() {
+  try {
+    const samples = ["acebuildingclean.com", "24commercialcleaning.info", "google.com", "accessjanitorial.info"];
+    const results = await Promise.all(samples.map((d) => resolveMxProvider(d)));
+
+    const supabase = getSupabaseAdmin();
+    let writeError: string | null = null;
+    let wroteDomain: string | null = null;
+    const first = results.find((r) => r.provider !== null);
+    if (first) {
+      const { error } = await supabase
+        .from("domain_inventory")
+        .update({ mx_provider: first.provider, mx_hosts: first.hosts, mx_checked_at: new Date().toISOString() })
+        .eq("domain", first.domain);
+      writeError = error ? error.message : null;
+      wroteDomain = first.domain;
+    }
+
+    return NextResponse.json({ dohWorks: results.some((r) => r.provider !== null), results, wroteDomain, writeError });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Failed";
     return NextResponse.json({ error: message }, { status: 500 });
