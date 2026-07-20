@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import {
   Globe,
   Sparkles,
@@ -23,19 +23,7 @@ import { Button } from "@/components/ui/button";
 import { useAuth } from "@/lib/auth-context";
 import { useDomains, type DiscoveredDomain } from "@/lib/hooks/use-domains";
 import { useBuyQueue, type BuyQueueRow } from "@/lib/hooks/use-buy-queue";
-
-const TICK_MS = 10_500;
-const TLDS = [".info", ".com", ".co", ".net", ".org"] as const;
-type Tld = (typeof TLDS)[number];
-
-type DiscoveryStatus = "idle" | "running" | "paused" | "complete" | "error";
-
-interface RecentResult {
-  domain: string;
-  outcome: "available" | "taken" | "error";
-  price?: number;
-  error?: string;
-}
+import { useDiscovery, TLDS, type Tld } from "./discovery-context";
 
 function formatRelative(iso: string): string {
   const d = new Date(iso);
@@ -62,26 +50,16 @@ export function BuyDomainsPanel() {
   const { role } = useAuth();
   const isAdmin = role === "admin";
 
-  // Generation controls
-  const [mode, setMode] = useState<"niche" | "lookalike">("niche");
-  const [niche, setNiche] = useState("commercial cleaning");
-  const [seedDomain, setSeedDomain] = useState("");
-  const [selectedTlds, setSelectedTlds] = useState<Set<Tld>>(new Set([".info"]));
-  const [count, setCount] = useState(80);
-
-  // Discovery state
-  const [candidates, setCandidates] = useState<string[]>([]);
-  const [cursor, setCursor] = useState(0);
-  const [discoveryStatus, setDiscoveryStatus] = useState<DiscoveryStatus>("idle");
-  const [discoveryError, setDiscoveryError] = useState<string | null>(null);
-  const [skippedAlreadyChecked, setSkippedAlreadyChecked] = useState(0);
-  const [recentResults, setRecentResults] = useState<RecentResult[]>([]);
-  const [counts, setCounts] = useState({ available: 0, taken: 0, errors: 0 });
-  const [generating, setGenerating] = useState(false);
-  const tickAbortRef = useRef<{ cancelled: boolean }>({ cancelled: false });
+  // Discovery engine (lives above the tabs so it survives tab switches).
+  const {
+    mode, setMode, niche, setNiche, seedDomain, setSeedDomain, selectedTlds, toggleTld, count, setCount,
+    candidates, cursor, status, error: discoveryError, recentResults, counts, skippedAlreadyChecked, generating,
+    total, checkedSoFar, progressPct, remainingMin,
+    startDiscovery, pauseDiscovery, resumeDiscovery,
+  } = useDiscovery();
 
   // Available list + selection
-  const isDiscoveryActive = discoveryStatus === "running";
+  const isDiscoveryActive = status === "running";
   const { domains, mutate: mutateDomains } = useDomains(isDiscoveryActive ? 8000 : 0);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [search, setSearch] = useState("");
@@ -92,120 +70,6 @@ export function BuyDomainsPanel() {
   const [enqueueMsg, setEnqueueMsg] = useState<string | null>(null);
   const [deleting, setDeleting] = useState(false);
 
-  const toggleTld = (t: Tld) => {
-    setSelectedTlds((prev) => {
-      const next = new Set(prev);
-      if (next.has(t)) next.delete(t);
-      else next.add(t);
-      if (next.size === 0) next.add(".info");
-      return next;
-    });
-  };
-
-  // ─── Discovery loop ───────────────────────────────────────────────────────
-  useEffect(() => {
-    if (discoveryStatus !== "running") return;
-    if (cursor >= candidates.length) {
-      setDiscoveryStatus("complete");
-      mutateDomains();
-      return;
-    }
-
-    const abortRef = tickAbortRef.current;
-    abortRef.cancelled = false;
-    let timer: ReturnType<typeof setTimeout> | null = null;
-
-    const runOne = async () => {
-      const domain = candidates[cursor];
-      const t0 = Date.now();
-      let outcome: RecentResult["outcome"] = "error";
-      let price: number | undefined;
-      let err: string | undefined;
-      try {
-        const res = await fetch("/api/domains/check", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ domain, niche: mode === "lookalike" ? `look-a-like: ${seedDomain}` : niche }),
-        });
-        const data = await res.json();
-        if (abortRef.cancelled) return;
-        if (!res.ok) {
-          err = data?.error || `HTTP ${res.status}`;
-          outcome = "error";
-        } else if (!data.available) {
-          outcome = "taken";
-        } else {
-          outcome = "available";
-          price = data.price;
-        }
-      } catch (e) {
-        if (abortRef.cancelled) return;
-        err = e instanceof Error ? e.message : "Network error";
-        outcome = "error";
-      }
-
-      setRecentResults((prev) => [{ domain, outcome, price, error: err }, ...prev].slice(0, 12));
-      setCounts((c) => ({
-        available: c.available + (outcome === "available" ? 1 : 0),
-        taken: c.taken + (outcome === "taken" ? 1 : 0),
-        errors: c.errors + (outcome === "error" ? 1 : 0),
-      }));
-      if (outcome === "available") mutateDomains();
-
-      if (abortRef.cancelled) return;
-      const elapsed = Date.now() - t0;
-      const wait = Math.max(0, TICK_MS - elapsed);
-      timer = setTimeout(() => {
-        if (!abortRef.cancelled) setCursor((c) => c + 1);
-      }, wait);
-    };
-
-    runOne();
-    return () => {
-      abortRef.cancelled = true;
-      if (timer) clearTimeout(timer);
-    };
-  }, [discoveryStatus, cursor, candidates, mutateDomains, mode, niche, seedDomain]);
-
-  const startDiscovery = useCallback(async () => {
-    setDiscoveryError(null);
-    setGenerating(true);
-    try {
-      const res = await fetch("/api/domains/generate", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          mode,
-          tlds: Array.from(selectedTlds),
-          niche,
-          seedDomain,
-          count,
-        }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data?.error || `HTTP ${res.status}`);
-      const fresh: string[] = Array.isArray(data.candidates) ? data.candidates : [];
-      setCandidates(fresh);
-      setCursor(0);
-      setRecentResults([]);
-      setCounts({ available: 0, taken: 0, errors: 0 });
-      setSkippedAlreadyChecked(typeof data.skippedAlreadyChecked === "number" ? data.skippedAlreadyChecked : 0);
-      setDiscoveryStatus(fresh.length === 0 ? "complete" : "running");
-    } catch (e) {
-      setDiscoveryError(e instanceof Error ? e.message : "Failed to generate candidates");
-      setDiscoveryStatus("error");
-    } finally {
-      setGenerating(false);
-    }
-  }, [mode, selectedTlds, niche, seedDomain, count]);
-
-  const pauseDiscovery = useCallback(() => {
-    tickAbortRef.current.cancelled = true;
-    setDiscoveryStatus("paused");
-  }, []);
-  const resumeDiscovery = useCallback(() => setDiscoveryStatus("running"), []);
-
-  // ─── Available list ────────────────────────────────────────────────────────
   const filtered = useMemo(() => {
     if (!search.trim()) return domains;
     const q = search.trim().toLowerCase();
@@ -226,7 +90,6 @@ export function BuyDomainsPanel() {
     });
   };
 
-  // ─── Enqueue to buy queue ────────────────────────────────────────────────
   const enqueueSelected = useCallback(async () => {
     const list = Array.from(selected);
     if (list.length === 0) return;
@@ -278,11 +141,6 @@ export function BuyDomainsPanel() {
     }
   }, [selected, mutateDomains]);
 
-  const total = candidates.length;
-  const checkedSoFar = cursor;
-  const progressPct = total > 0 ? Math.min(100, (checkedSoFar / total) * 100) : 0;
-  const remainingMin = Math.ceil(((total - checkedSoFar) * TICK_MS) / 60000);
-
   const queued = queueCounts.queued ?? 0;
   const buying = queueCounts.buying ?? 0;
   const registered = queueCounts.registered ?? 0;
@@ -307,18 +165,18 @@ export function BuyDomainsPanel() {
             </div>
           </div>
           <div className="flex items-center gap-2">
-            {discoveryStatus === "running" && (
+            {status === "running" && (
               <Button variant="outline" size="sm" onClick={pauseDiscovery} className="gap-1.5">
                 <Pause className="h-3.5 w-3.5" /> Pause
               </Button>
             )}
-            {discoveryStatus === "paused" && (
+            {status === "paused" && (
               <Button variant="outline" size="sm" onClick={resumeDiscovery} className="gap-1.5">
                 <Play className="h-3.5 w-3.5" /> Resume
               </Button>
             )}
             {isAdmin && (
-              <Button size="sm" onClick={startDiscovery} disabled={generating || discoveryStatus === "running"} className="gap-1.5">
+              <Button size="sm" onClick={startDiscovery} disabled={generating || status === "running"} className="gap-1.5">
                 {generating ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
                 {total > 0 ? "Find more" : "Find domains"}
               </Button>
@@ -328,7 +186,6 @@ export function BuyDomainsPanel() {
 
         {isAdmin && (
           <div className="space-y-3 border-t pt-4">
-            {/* Mode toggle */}
             <div className="flex flex-wrap items-center gap-2">
               <span className="text-[11px] uppercase tracking-wide text-muted-foreground w-16">Mode</span>
               <ToggleBtn active={mode === "niche"} onClick={() => setMode("niche")}>Commercial cleaning</ToggleBtn>
@@ -357,15 +214,13 @@ export function BuyDomainsPanel() {
               </div>
             )}
 
-            {/* TLD multi-select */}
             <div className="flex flex-wrap items-center gap-2">
               <span className="text-[11px] uppercase tracking-wide text-muted-foreground w-16">Endings</span>
-              {TLDS.map((t) => (
+              {TLDS.map((t: Tld) => (
                 <ToggleBtn key={t} active={selectedTlds.has(t)} onClick={() => toggleTld(t)}>{t}</ToggleBtn>
               ))}
             </div>
 
-            {/* Count */}
             <div className="flex flex-wrap items-center gap-2">
               <span className="text-[11px] uppercase tracking-wide text-muted-foreground w-16">Generate</span>
               <input
@@ -387,7 +242,7 @@ export function BuyDomainsPanel() {
           </div>
         )}
 
-        {(discoveryStatus !== "idle" || total > 0) && (
+        {(status !== "idle" || total > 0) && (
           <>
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs">
               <Stat label="Checked" value={`${checkedSoFar} / ${total}`} />
@@ -399,10 +254,10 @@ export function BuyDomainsPanel() {
             <div className="space-y-1.5">
               <div className="flex items-center justify-between text-[11px] text-muted-foreground">
                 <span>
-                  {discoveryStatus === "running" && `Checking · ~${remainingMin} min remaining`}
-                  {discoveryStatus === "paused" && "Paused"}
-                  {discoveryStatus === "complete" && total > 0 && "Run complete"}
-                  {skippedAlreadyChecked > 0 && discoveryStatus !== "idle" && (
+                  {status === "running" && `Checking · ~${remainingMin} min remaining`}
+                  {status === "paused" && "Paused"}
+                  {status === "complete" && total > 0 && "Run complete"}
+                  {skippedAlreadyChecked > 0 && status !== "idle" && (
                     <span className="ml-2">· {skippedAlreadyChecked} already checked previously</span>
                   )}
                 </span>
@@ -413,7 +268,7 @@ export function BuyDomainsPanel() {
               </div>
             </div>
 
-            {discoveryStatus === "running" && cursor < total && (
+            {status === "running" && cursor < total && (
               <div className="flex items-center gap-2 text-xs text-muted-foreground">
                 <Loader2 className="h-3 w-3 animate-spin text-primary shrink-0" />
                 <span className="truncate">Checking <span className="font-medium text-foreground">{candidates[cursor]}</span></span>
@@ -584,7 +439,7 @@ function Stat({ label, value, accent }: { label: string; value: string | number;
   );
 }
 
-function ResultRow({ result }: { result: RecentResult }) {
+function ResultRow({ result }: { result: { domain: string; outcome: "available" | "taken" | "error"; price?: number; error?: string } }) {
   const { domain, outcome, price, error } = result;
   return (
     <div className="flex items-center gap-2 text-xs px-2 py-1 rounded hover:bg-muted/30">
