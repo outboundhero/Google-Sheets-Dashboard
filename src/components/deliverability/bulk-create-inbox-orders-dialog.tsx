@@ -47,11 +47,20 @@ const PROVIDER_MAILBOXES: Record<InboxOrderProvider, number> = {
 
 const DOMAIN_RE = /^[a-z0-9][a-z0-9.-]+\.[a-z]{2,}$/i;
 
+// "First Last" → {first_name, last_name}; null if it isn't at least two words.
+function splitName(full: string): { first_name: string; last_name: string } | null {
+  const parts = (full || "").trim().split(/\s+/);
+  if (parts.length < 2) return null;
+  return { first_name: parts[0], last_name: parts.slice(1).join(" ") };
+}
+
 interface ParsedRow {
   rowNo: number;
   domain: string;
   companyName: string;
   clientTag: string;
+  name1: string;
+  name2: string;
   errors: string[];
 }
 
@@ -71,9 +80,9 @@ interface Props {
   defaultInstance?: BisonInstanceSlug;
 }
 
-const TEMPLATE_HEADER = "domain,companyName,clientTag";
+const TEMPLATE_HEADER = "domain,companyName,clientTag,name1,name2";
 const TEMPLATE_EXAMPLE =
-  "domain,companyName,clientTag\ncleaninggrid7.com,Acme Building Services,BHS\njanitorcareco.info,Acme Building Services,BHS";
+  "domain,companyName,clientTag,name1,name2\ncleaninggrid7.com,Acme Building Services,BHS,Sarah Jones,Maria Lopez\njanitorcareco.info,Acme Building Services,BHS,Emily Carter,Sofia Ramirez";
 
 export function BulkCreateInboxOrdersDialog({
   open,
@@ -87,6 +96,9 @@ export function BulkCreateInboxOrdersDialog({
   );
   const [globalTag, setGlobalTag] = useState("");
   const [redirectUrl, setRedirectUrl] = useState("");
+  // Sender names: auto female (default) or from the name1/name2 CSV columns.
+  const [autoNames, setAutoNames] = useState(true);
+  const [personaCount, setPersonaCount] = useState<1 | 2>(1);
   const [csvText, setCsvText] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [results, setResults] = useState<RowResult[]>([]);
@@ -119,21 +131,27 @@ export function BulkCreateInboxOrdersDialog({
 
     return dataLines.map((line, i) => {
       const parts = line.split(/[,\t]/).map((p) => p.trim());
-      const [domain = "", companyName = "", clientTag = ""] = parts;
+      const [domain = "", companyName = "", clientTag = "", name1 = "", name2 = ""] = parts;
       const normalized = domain.toLowerCase();
       const errors: string[] = [];
       if (!normalized) errors.push("Missing domain");
       else if (!DOMAIN_RE.test(normalized)) errors.push("Invalid domain format");
       if (provider === "milkbox" && !companyName) errors.push("MilkBox requires companyName");
+      if (!autoNames) {
+        if (!splitName(name1)) errors.push("name1 needs a first + last name");
+        if (personaCount === 2 && !splitName(name2)) errors.push("name2 needs a first + last name");
+      }
       return {
         rowNo: i + 1 + (headerLikely ? 1 : 0),
         domain: normalized,
         companyName,
         clientTag,
+        name1,
+        name2,
         errors,
       };
     });
-  }, [csvText, provider]);
+  }, [csvText, provider, autoNames, personaCount]);
 
   const validRows = useMemo(() => parsed.filter((r) => r.errors.length === 0), [parsed]);
   const invalidCount = parsed.length - validRows.length;
@@ -171,6 +189,9 @@ export function BulkCreateInboxOrdersDialog({
         );
 
         try {
+          const manualNames = [row.name1, ...(personaCount === 2 ? [row.name2] : [])]
+            .map(splitName)
+            .filter(Boolean);
           const res = await fetch("/api/inbox-orders", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -182,6 +203,10 @@ export function BulkCreateInboxOrdersDialog({
               clientTag: row.clientTag || undefined,
               tag: globalTag.trim() || undefined,
               redirectUrl: redirectUrl.trim() || undefined,
+              // Names: auto female, or built from this row's name1/name2 columns.
+              ...(autoNames
+                ? { nameMode: "auto", personaCount }
+                : { nameMode: "manual", personaCount, names: manualNames }),
             }),
           });
           const data = await res.json();
@@ -281,6 +306,33 @@ export function BulkCreateInboxOrdersDialog({
           </div>
         </div>
 
+        {/* Sender names */}
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-2 rounded-md border p-2 text-xs">
+          <label className="flex items-center gap-2 font-medium">
+            <input type="checkbox" checked={autoNames} onChange={(e) => setAutoNames(e.target.checked)} disabled={submitting} />
+            Auto-generate female name{personaCount === 2 ? "s" : ""}
+          </label>
+          <div className="flex items-center gap-2">
+            <span className="text-muted-foreground">Number of names:</span>
+            {[1, 2].map((n) => (
+              <button
+                key={n}
+                type="button"
+                disabled={submitting}
+                onClick={() => setPersonaCount(n as 1 | 2)}
+                className={`rounded border px-2 py-0.5 ${personaCount === n ? "bg-primary text-primary-foreground border-primary" : "border-muted-foreground/30 hover:bg-muted/50"}`}
+              >
+                {n}
+              </button>
+            ))}
+          </div>
+          <span className="text-[11px] text-muted-foreground">
+            {autoNames
+              ? personaCount === 1 ? "one name per domain" : "two names split 50/50 per domain"
+              : personaCount === 2 ? "provide name1 + name2 columns below" : "provide the name1 column below"}
+          </span>
+        </div>
+
         {/* CSV input */}
         <div className="space-y-2 flex-1 overflow-hidden flex flex-col">
           <div className="flex items-center justify-between gap-2">
@@ -338,6 +390,7 @@ export function BulkCreateInboxOrdersDialog({
                     <th className="px-2 py-1.5 font-medium">Domain</th>
                     <th className="px-2 py-1.5 font-medium">Company</th>
                     <th className="px-2 py-1.5 font-medium">Client tag</th>
+                    <th className="px-2 py-1.5 font-medium">Names</th>
                     <th className="px-2 py-1.5 font-medium">Status</th>
                   </tr>
                 </thead>
@@ -347,6 +400,11 @@ export function BulkCreateInboxOrdersDialog({
                       <td className="px-2 py-1 truncate max-w-[200px]">{r.domain || <em className="text-muted-foreground">—</em>}</td>
                       <td className="px-2 py-1 truncate max-w-[180px]">{r.companyName || <em className="text-muted-foreground">—</em>}</td>
                       <td className="px-2 py-1 truncate max-w-[120px]">{r.clientTag || <em className="text-muted-foreground">—</em>}</td>
+                      <td className="px-2 py-1 truncate max-w-[160px] text-muted-foreground">
+                        {autoNames
+                          ? <em>(auto)</em>
+                          : ([r.name1, personaCount === 2 ? r.name2 : ""].filter(Boolean).join(" / ") || <em className="text-muted-foreground">—</em>)}
+                      </td>
                       <td className="px-2 py-1">
                         {r.errors.length === 0 ? (
                           <Badge variant="outline" className="text-[10px] px-1.5 py-0">ready</Badge>

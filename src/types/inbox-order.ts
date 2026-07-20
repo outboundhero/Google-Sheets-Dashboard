@@ -17,6 +17,23 @@ export interface InboxOrderAlias {
   alias: string;
 }
 
+// A sender persona (display name). A domain's mailboxes are built from 1 or 2
+// of these; each mailbox gets a unique `alias` (email prefix) derived from its
+// persona's name.
+export interface Persona {
+  first_name: string;
+  last_name: string;
+}
+
+// How to source the sender name(s) for an order.
+//  - auto:   AI-generate `personaCount` female personas.
+//  - manual: use exactly the supplied `names` (no invented names).
+export interface NameSpec {
+  nameMode: "auto" | "manual";
+  personaCount: 1 | 2;
+  names?: Persona[];
+}
+
 export interface InboxOrder {
   id: string;
   instance: BisonInstanceSlug;

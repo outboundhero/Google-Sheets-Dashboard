@@ -1,12 +1,14 @@
 import { NextResponse } from "next/server";
 import { getSupabaseAdmin } from "@/lib/supabase";
-import { generateAliases } from "@/lib/inbox-order-aliases";
+import { generateAliases, buildAliasesFromNameSpec } from "@/lib/inbox-order-aliases";
 import * as scaledmail from "@/lib/scaledmail";
 import * as milkbox from "@/lib/milkbox";
 import * as inboxing from "@/lib/inboxing";
 import type {
   CreateOrderInput,
   InboxOrderProvider,
+  InboxOrderAlias,
+  NameSpec,
 } from "@/types/inbox-order";
 import { MAILBOX_COUNT_BY_PROVIDER } from "@/types/inbox-order";
 import {
@@ -73,7 +75,29 @@ export async function POST(request: Request) {
     }
 
     const mailboxCount = MAILBOX_COUNT_BY_PROVIDER[provider];
-    const aliases = await generateAliases(provider, mailboxCount);
+    // Aliases come from one of three sources, in priority order:
+    //  1. a finalized (possibly hand-edited) `aliases` array from the preview,
+    //  2. a NameSpec ({nameMode, personaCount, names}) → built server-side,
+    //  3. legacy default (unchanged) when neither is supplied.
+    let aliases: InboxOrderAlias[];
+    if (Array.isArray(body?.aliases) && body.aliases.length > 0) {
+      aliases = (body.aliases as InboxOrderAlias[])
+        .filter((a) => a && typeof a.first_name === "string" && typeof a.last_name === "string" && typeof a.alias === "string" && a.alias.trim())
+        .map((a) => ({ first_name: a.first_name.trim(), last_name: a.last_name.trim(), alias: a.alias.trim().toLowerCase() }))
+        .slice(0, mailboxCount);
+      if (aliases.length === 0) {
+        return NextResponse.json({ error: "aliases invalid" }, { status: 400 });
+      }
+    } else if (body?.nameMode || body?.personaCount || Array.isArray(body?.names)) {
+      const spec: NameSpec = {
+        nameMode: body?.nameMode === "manual" ? "manual" : "auto",
+        personaCount: body?.personaCount === 2 ? 2 : 1,
+        names: Array.isArray(body?.names) ? body.names : undefined,
+      };
+      aliases = (await buildAliasesFromNameSpec(provider, spec)).aliases;
+    } else {
+      aliases = await generateAliases(provider, mailboxCount);
+    }
 
     const orderInput: CreateOrderInput = {
       domain,

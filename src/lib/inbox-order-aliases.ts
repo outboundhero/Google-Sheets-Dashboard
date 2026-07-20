@@ -1,4 +1,4 @@
-import type { InboxOrderAlias, InboxOrderProvider } from "@/types/inbox-order";
+import type { InboxOrderAlias, InboxOrderProvider, Persona, NameSpec } from "@/types/inbox-order";
 import { MAILBOX_COUNT_BY_PROVIDER } from "@/types/inbox-order";
 
 const MODEL = "gpt-4o-mini";
@@ -113,4 +113,126 @@ export async function generateAliases(
     throw new Error(`Aliases generator returned ${aliases.length}/${targetCount} valid rows`);
   }
   return aliases.slice(0, targetCount);
+}
+
+// ── 1–2 persona model ────────────────────────────────────────────────────────
+// A domain's mailboxes are built from 1 or 2 sender personas (display names).
+// 1 name → every mailbox uses that person; 2 names → mailboxes split half/half.
+// Each mailbox's `alias` (email prefix) is a UNIQUE variation of ITS persona's
+// name only (never a different name).
+
+function slug(s: string): string {
+  return (s || "")
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[̀-ͯ]/g, "")
+    .replace(/[^a-z]/g, "");
+}
+
+// Ordered stream of unique alias candidates for one name: clean numberless
+// variations first, then (only once those run out) the same variations with a
+// numeric suffix so we can always reach a large mailbox count from one name.
+function* aliasCandidates(first: string, last: string): Generator<string> {
+  const f = slug(first) || "user";
+  const l = slug(last) || "mail";
+  const fi = f[0];
+  const li = l[0];
+  const bases = [
+    `${f}.${l}`, `${f}${l}`, `${fi}.${l}`, `${f}.${li}`, `${fi}${l}`, `${f}${li}`,
+    `${f}_${l}`, `${l}.${f}`, `${l}${f}`, `${fi}_${l}`, `${l}.${fi}`, `${f}.${fi}.${l}`,
+    `${l}_${f}`, `${f}`, `${l}`, `${fi}.${li}`,
+  ].filter((a, i, arr) => /^[a-z._]+$/.test(a) && a.length >= 2 && arr.indexOf(a) === i);
+  const seen = new Set<string>();
+  for (const b of bases) { if (!seen.has(b)) { seen.add(b); yield b; } }
+  // Clean set exhausted — same name, numeric suffix, to guarantee the count.
+  for (let n = 2; ; n++) {
+    for (const b of bases) {
+      const cand = `${b}${n}`;
+      if (!seen.has(cand)) { seen.add(cand); yield cand; }
+    }
+  }
+}
+
+/** Build `mailboxCount` mailboxes from 1–2 personas (split half/half for 2). */
+export function buildAliases(personas: Persona[], mailboxCount: number): InboxOrderAlias[] {
+  const clean = (personas || [])
+    .filter((p) => p.first_name?.trim() && p.last_name?.trim())
+    .slice(0, 2);
+  if (clean.length === 0) throw new Error("At least one sender name is required");
+  const shares = clean.length === 1
+    ? [mailboxCount]
+    : [Math.ceil(mailboxCount / 2), Math.floor(mailboxCount / 2)];
+
+  const used = new Set<string>();
+  const out: InboxOrderAlias[] = [];
+  clean.forEach((p, idx) => {
+    const gen = aliasCandidates(p.first_name, p.last_name);
+    let got = 0;
+    while (got < shares[idx]) {
+      const next = gen.next().value as string;
+      if (used.has(next)) continue; // globally unique across both personas
+      used.add(next);
+      out.push({ first_name: p.first_name.trim(), last_name: p.last_name.trim(), alias: next });
+      got++;
+    }
+  });
+  return out;
+}
+
+/** AI-generate 1–2 realistic female personas (display names only). */
+export async function generateFemalePersonas(count: number): Promise<Persona[]> {
+  const apiKey = process.env.OPENAI_API_KEY;
+  if (!apiKey) throw new Error("OPENAI_API_KEY missing");
+  const n = Math.max(1, Math.min(2, count));
+  const prompt = `Output exactly ${n} realistic female full name${n === 1 ? "" : "s"}, one per line as "First Last".
+Rules: common United States or Latina women's names, as if born 1990–2005; realistic and common; no celebrities, no unusual spellings, no numbering, no extra text.`;
+
+  const res = await fetch("https://api.openai.com/v1/chat/completions", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
+    body: JSON.stringify({
+      model: MODEL,
+      messages: [
+        { role: "system", content: "You output female full names as plaintext rows. Output rows only." },
+        { role: "user", content: prompt },
+      ],
+      temperature: 0.9,
+    }),
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new Error(`OpenAI request failed (${res.status}): ${text.slice(0, 300)}`);
+  }
+  const data = await res.json();
+  const content: string = data?.choices?.[0]?.message?.content ?? "";
+  const personas: Persona[] = [];
+  for (const line of content.split(/\r?\n/)) {
+    const parts = line.trim().replace(/^\d+[.)]\s*/, "").split(/\s+/);
+    if (parts.length < 2) continue;
+    personas.push({ first_name: parts[0], last_name: parts.slice(1).join(" ") });
+    if (personas.length >= n) break;
+  }
+  if (personas.length < n) throw new Error(`Persona generator returned ${personas.length}/${n}`);
+  return personas;
+}
+
+/** Resolve a NameSpec → the full mailbox alias list for a provider. */
+export async function buildAliasesFromNameSpec(
+  provider: InboxOrderProvider,
+  spec: NameSpec,
+): Promise<{ personas: Persona[]; aliases: InboxOrderAlias[] }> {
+  const mailboxCount = MAILBOX_COUNT_BY_PROVIDER[provider];
+  const personaCount = spec.personaCount === 2 ? 2 : 1;
+  let personas: Persona[];
+  if (spec.nameMode === "manual") {
+    personas = (spec.names || [])
+      .filter((p) => p.first_name?.trim() && p.last_name?.trim())
+      .slice(0, personaCount);
+    if (personas.length < personaCount) {
+      throw new Error(`Provide ${personaCount} name${personaCount === 1 ? "" : "s"} with a first and last name`);
+    }
+  } else {
+    personas = await generateFemalePersonas(personaCount);
+  }
+  return { personas, aliases: buildAliases(personas, mailboxCount) };
 }

@@ -33,7 +33,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { useInboxOrders } from "@/lib/hooks/use-inbox-orders";
-import type { InboxOrder, InboxOrderProvider } from "@/types/inbox-order";
+import type { InboxOrder, InboxOrderProvider, InboxOrderAlias } from "@/types/inbox-order";
 import { useAuth } from "@/lib/auth-context";
 import { useInstance } from "@/lib/instance-context";
 import { BISON_INSTANCES, type BisonInstanceSlug } from "@/lib/bison-instances";
@@ -76,6 +76,16 @@ export default function InboxOrdersPage() {
   const [tag, setTag] = useState("");
   const [companyName, setCompanyName] = useState("");
   const [clientTag, setClientTag] = useState("");
+  // Sender-name controls: auto female name(s) vs manual, 1 or 2 personas, and
+  // an editable preview of the generated names/aliases before placing the order.
+  const [autoNames, setAutoNames] = useState(true);
+  const [personaCount, setPersonaCount] = useState<1 | 2>(1);
+  const [manualNames, setManualNames] = useState<{ first_name: string; last_name: string }[]>([
+    { first_name: "", last_name: "" },
+    { first_name: "", last_name: "" },
+  ]);
+  const [previewAliases, setPreviewAliases] = useState<InboxOrderAlias[] | null>(null);
+  const [previewing, setPreviewing] = useState(false);
 
   const [redirectFor, setRedirectFor] = useState<InboxOrder | null>(null);
   const [redirectInput, setRedirectInput] = useState("");
@@ -99,6 +109,48 @@ export default function InboxOrdersPage() {
     return counts;
   }, [orders]);
 
+  // Names entered/kept for the current settings (used by preview + submit).
+  const manualNameSpec = () => manualNames.slice(0, personaCount).map((n) => ({ first_name: n.first_name.trim(), last_name: n.last_name.trim() }));
+
+  async function previewNames() {
+    setPreviewing(true);
+    setCreateError(null);
+    try {
+      const res = await fetch("/api/inbox-orders/preview-names", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          provider,
+          nameMode: autoNames ? "auto" : "manual",
+          personaCount,
+          names: autoNames ? undefined : manualNameSpec(),
+        }),
+      });
+      const json = await res.json();
+      if (!res.ok) throw new Error(json?.error || "Preview failed");
+      setPreviewAliases(json.aliases as InboxOrderAlias[]);
+    } catch (err) {
+      setCreateError(err instanceof Error ? err.message : "Preview failed");
+    } finally {
+      setPreviewing(false);
+    }
+  }
+
+  function editAlias(i: number, field: keyof InboxOrderAlias, value: string) {
+    setPreviewAliases((prev) => (prev ? prev.map((a, idx) => (idx === i ? { ...a, [field]: value } : a)) : prev));
+  }
+
+  function resetCreateFields() {
+    setDomain("");
+    setTag("");
+    setCompanyName("");
+    setClientTag("");
+    setAutoNames(true);
+    setPersonaCount(1);
+    setManualNames([{ first_name: "", last_name: "" }, { first_name: "", last_name: "" }]);
+    setPreviewAliases(null);
+  }
+
   async function submitCreate() {
     setCreating(true);
     setCreateError(null);
@@ -113,15 +165,16 @@ export default function InboxOrdersPage() {
           tag: tag.trim() || undefined,
           companyName: companyName.trim() || undefined,
           clientTag: clientTag.trim() || undefined,
+          // Finalized (possibly edited) names if previewed, else the settings.
+          ...(previewAliases && previewAliases.length > 0
+            ? { aliases: previewAliases }
+            : { nameMode: autoNames ? "auto" : "manual", personaCount, names: autoNames ? undefined : manualNameSpec() }),
         }),
       });
       const json = await res.json();
       if (!res.ok) throw new Error(json?.error || "Create failed");
       setCreateOpen(false);
-      setDomain("");
-      setTag("");
-      setCompanyName("");
-      setClientTag("");
+      resetCreateFields();
       await mutate();
     } catch (err) {
       setCreateError(err instanceof Error ? err.message : "Create failed");
@@ -274,7 +327,7 @@ export default function InboxOrdersPage() {
             {!isLoading && orders.length === 0 && (
               <tr>
                 <td colSpan={9} className="p-6 text-center text-muted-foreground">
-                  No orders yet. Click "Create Order" to start.
+                  No orders yet. Click &quot;Create Order&quot; to start.
                 </td>
               </tr>
             )}
@@ -406,7 +459,7 @@ export default function InboxOrdersPage() {
           <div className="space-y-4">
             <div>
               <label className="text-xs font-medium">Provider</label>
-              <Select value={provider} onValueChange={(v) => setProvider(v as InboxOrderProvider)}>
+              <Select value={provider} onValueChange={(v) => { setProvider(v as InboxOrderProvider); setPreviewAliases(null); }}>
                 <SelectTrigger><SelectValue /></SelectTrigger>
                 <SelectContent>
                   <SelectItem value="scaledmail">ScaledMail (25 mailboxes)</SelectItem>
@@ -471,6 +524,81 @@ export default function InboxOrdersPage() {
                   placeholder="BHS"
                 />
               </div>
+            </div>
+            {/* Sender names */}
+            <div className="space-y-2 rounded-md border p-3">
+              <label className="flex items-center gap-2 text-xs font-medium">
+                <input
+                  type="checkbox"
+                  checked={autoNames}
+                  onChange={(e) => { setAutoNames(e.target.checked); setPreviewAliases(null); }}
+                />
+                Auto-generate female name{personaCount === 2 ? "s" : ""}
+              </label>
+              <div className="flex items-center gap-2 text-xs">
+                <span className="text-muted-foreground">Number of names:</span>
+                {[1, 2].map((n) => (
+                  <button
+                    key={n}
+                    type="button"
+                    onClick={() => { setPersonaCount(n as 1 | 2); setPreviewAliases(null); }}
+                    className={`rounded border px-2 py-0.5 ${personaCount === n ? "bg-primary text-primary-foreground border-primary" : "border-muted-foreground/30 hover:bg-muted/50"}`}
+                  >
+                    {n}
+                  </button>
+                ))}
+                <span className="text-[11px] text-muted-foreground">
+                  {personaCount === 1 ? "all mailboxes use one name" : "mailboxes split 50/50 across two names"}
+                </span>
+              </div>
+              {!autoNames && (
+                <div className="space-y-2">
+                  {Array.from({ length: personaCount }).map((_, i) => (
+                    <div key={i} className="grid grid-cols-2 gap-2">
+                      <Input
+                        className="h-8"
+                        placeholder={`First name ${personaCount === 2 ? i + 1 : ""}`.trim()}
+                        value={manualNames[i]?.first_name || ""}
+                        onChange={(e) => { setManualNames((p) => { const n = [...p]; n[i] = { ...(n[i] || { first_name: "", last_name: "" }), first_name: e.target.value }; return n; }); setPreviewAliases(null); }}
+                      />
+                      <Input
+                        className="h-8"
+                        placeholder={`Last name ${personaCount === 2 ? i + 1 : ""}`.trim()}
+                        value={manualNames[i]?.last_name || ""}
+                        onChange={(e) => { setManualNames((p) => { const n = [...p]; n[i] = { ...(n[i] || { first_name: "", last_name: "" }), last_name: e.target.value }; return n; }); setPreviewAliases(null); }}
+                      />
+                    </div>
+                  ))}
+                </div>
+              )}
+              <div className="flex items-center gap-2">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={previewNames}
+                  disabled={previewing || (!autoNames && manualNames.slice(0, personaCount).some((n) => !n.first_name.trim() || !n.last_name.trim()))}
+                >
+                  {previewing ? <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" /> : null}
+                  {previewAliases ? "Regenerate" : "Preview names"}
+                </Button>
+                {previewAliases && (
+                  <span className="text-[11px] text-muted-foreground">{previewAliases.length} mailboxes — edit below</span>
+                )}
+              </div>
+              {previewAliases && (
+                <div className="max-h-52 overflow-y-auto rounded border divide-y">
+                  {previewAliases.map((a, i) => (
+                    <div key={i} className="grid grid-cols-[1fr_1fr_1.6fr] gap-1 px-2 py-1 items-center">
+                      <Input className="h-7 text-xs" value={a.first_name} onChange={(e) => editAlias(i, "first_name", e.target.value)} />
+                      <Input className="h-7 text-xs" value={a.last_name} onChange={(e) => editAlias(i, "last_name", e.target.value)} />
+                      <div className="flex items-center gap-1 min-w-0">
+                        <Input className="h-7 text-xs" value={a.alias} onChange={(e) => editAlias(i, "alias", e.target.value)} />
+                        <span className="text-[10px] text-muted-foreground truncate">@{domain.trim() || "domain"}</span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
             {createError && (
               <p className="text-xs text-destructive">{createError}</p>
