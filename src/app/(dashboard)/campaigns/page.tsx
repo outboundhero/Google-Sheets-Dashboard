@@ -503,11 +503,14 @@ export default function CampaignsPage() {
     });
   }, [campaigns, statusFilter, clientFilters, clientStatusFilter, isChurnedCampaign, isPausedCampaign, search, sortField, sortDir]);
 
-  // Clients with <1500 remaining leads (active only)
+  // Clients with <1500 remaining leads. "Active only" means active CLIENTS —
+  // exclude churned/paused clients (not just non-active campaigns), so a churned
+  // client with a still-running campaign (e.g. JPK) doesn't get flagged here.
   const lowLeadsClients = useMemo(() => {
     const map = new Map<string, { remaining: number; campaigns: Campaign[] }>();
     for (const c of campaigns) {
       if (normStatus(c.status) !== "active" || !c.client_tag) continue;
+      if (isChurnedCampaign(c) || isPausedCampaign(c)) continue;
       if (!map.has(c.client_tag)) map.set(c.client_tag, { remaining: 0, campaigns: [] });
       const entry = map.get(c.client_tag)!;
       entry.remaining += c.remaining_leads;
@@ -517,7 +520,7 @@ export default function CampaignsPage() {
       .map(([client, d]) => ({ client, ...d }))
       .filter((d) => d.remaining < 1500 && d.remaining >= 0)
       .sort((a, b) => a.remaining - b.remaining);
-  }, [campaigns]);
+  }, [campaigns, isChurnedCampaign, isPausedCampaign]);
 
   const stats = useMemo(() => ({
     total: campaigns.length,
