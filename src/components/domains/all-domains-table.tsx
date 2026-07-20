@@ -1,11 +1,12 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useMemo, useState } from "react";
 import { Globe, Search, X, RefreshCw, Loader2, ArrowUpDown } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useAuth } from "@/lib/auth-context";
 import { useDomainInventory, type InventoryRow } from "@/lib/hooks/use-domain-inventory";
 import { ImportDomainsDialog } from "./import-domains-dialog";
+import { useInventory } from "./inventory-context";
 
 const PAGE_SIZE = 100;
 
@@ -31,6 +32,8 @@ export function AllDomainsTable() {
   const { role } = useAuth();
   const isAdmin = role === "admin";
   const { rows, counts, generatedAt, isLoading, mutate } = useDomainInventory();
+  // Sync + MX-resolve live above the tabs (persist across tab switches).
+  const { syncing, syncMsg, mxRemaining, refreshPorkbun } = useInventory();
 
   const [search, setSearch] = useState("");
   const [sourceFilter, setSourceFilter] = useState("all");
@@ -39,59 +42,6 @@ export function AllDomainsTable() {
   const [sortKey, setSortKey] = useState<SortKey>("domain");
   const [sortDir, setSortDir] = useState<"asc" | "desc">("asc");
   const [page, setPage] = useState(0);
-
-  const [syncing, setSyncing] = useState(false);
-  const [syncMsg, setSyncMsg] = useState<string | null>(null);
-  const [mxRemaining, setMxRemaining] = useState<number | null>(null);
-  const mxRunningRef = useRef(false);
-
-  // Background MX-resolve loop (admin only) — resolve providers for domains not
-  // yet checked, then refresh the list.
-  const runMxLoop = useCallback(async () => {
-    if (mxRunningRef.current) return;
-    mxRunningRef.current = true;
-    try {
-      for (let i = 0; i < 200; i++) {
-        const res = await fetch("/api/domains/inventory/resolve-mx", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ limit: 500 }),
-        });
-        if (!res.ok) break;
-        const data = await res.json();
-        setMxRemaining(data.remaining ?? 0);
-        if ((data.processed ?? 0) === 0 || (data.remaining ?? 0) === 0) break;
-      }
-      await mutate();
-    } finally {
-      mxRunningRef.current = false;
-    }
-  }, [mutate]);
-
-  useEffect(() => {
-    if (isAdmin) runMxLoop();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isAdmin]);
-
-  const refreshPorkbun = async () => {
-    setSyncing(true);
-    setSyncMsg(null);
-    try {
-      const res = await fetch("/api/domains/inventory/sync", { method: "POST" });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data?.error || `HTTP ${res.status}`);
-      const parts = (data.accounts || []).map((a: { account: string; ok: boolean; count?: number; error?: string }) =>
-        a.ok ? `${a.account}: ${a.count}` : `${a.account}: failed`
-      );
-      setSyncMsg(`Synced ${data.upserted} · pruned ${data.pruned} · ${parts.join(" · ")}`);
-      await mutate();
-      runMxLoop();
-    } catch (e) {
-      setSyncMsg(e instanceof Error ? e.message : "Sync failed");
-    } finally {
-      setSyncing(false);
-    }
-  };
 
   const sources = useMemo(() => Object.keys(counts?.bySource || {}).sort(), [counts]);
   const providers = useMemo(() => Object.keys(counts?.byProvider || {}).sort(), [counts]);
@@ -118,15 +68,17 @@ export function AllDomainsTable() {
     return out;
   }, [rows, search, sourceFilter, inUseFilter, providerFilter, sortKey, sortDir]);
 
-  useEffect(() => setPage(0), [search, sourceFilter, inUseFilter, providerFilter, sortKey, sortDir]);
-
   const pageCount = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
-  const pageRows = filtered.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
+  const safePage = Math.min(page, pageCount - 1);
+  const pageRows = filtered.slice(safePage * PAGE_SIZE, (safePage + 1) * PAGE_SIZE);
 
   const toggleSort = (key: SortKey) => {
     if (sortKey === key) setSortDir((d) => (d === "asc" ? "desc" : "asc"));
     else { setSortKey(key); setSortDir("asc"); }
+    setPage(0);
   };
+  // Reset to the first page whenever a filter/search changes.
+  const withReset = <T,>(setter: (v: T) => void) => (v: T) => { setter(v); setPage(0); };
 
   return (
     <div className="space-y-4">
@@ -137,16 +89,16 @@ export function AllDomainsTable() {
             <Search className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
             <input
               value={search}
-              onChange={(e) => setSearch(e.target.value)}
+              onChange={(e) => { setSearch(e.target.value); setPage(0); }}
               placeholder="Search domains…"
               className="flex-1 text-xs bg-transparent outline-none placeholder:text-muted-foreground"
             />
-            {search && <button onClick={() => setSearch("")}><X className="h-3 w-3 text-muted-foreground hover:text-foreground" /></button>}
+            {search && <button onClick={() => { setSearch(""); setPage(0); }}><X className="h-3 w-3 text-muted-foreground hover:text-foreground" /></button>}
           </div>
 
-          <FilterSelect value={sourceFilter} onChange={setSourceFilter} label="Source" options={[["all", "All sources"], ...sources.map((s) => [s, s] as [string, string])]} />
-          <FilterSelect value={inUseFilter} onChange={setInUseFilter} label="In use" options={[["all", "All"], ["in", "In use"], ["out", "Not in use"]]} />
-          <FilterSelect value={providerFilter} onChange={setProviderFilter} label="Provider" options={[["all", "All providers"], ...providers.map((p) => [p, p] as [string, string])]} />
+          <FilterSelect value={sourceFilter} onChange={withReset(setSourceFilter)} label="Source" options={[["all", "All sources"], ...sources.map((s) => [s, s] as [string, string])]} />
+          <FilterSelect value={inUseFilter} onChange={withReset(setInUseFilter)} label="In use" options={[["all", "All"], ["in", "In use"], ["out", "Not in use"]]} />
+          <FilterSelect value={providerFilter} onChange={withReset(setProviderFilter)} label="Provider" options={[["all", "All providers"], ...providers.map((p) => [p, p] as [string, string])]} />
 
           <div className="ml-auto flex items-center gap-2">
             {isAdmin && <ImportDomainsDialog onImported={mutate} />}
@@ -204,11 +156,11 @@ export function AllDomainsTable() {
 
         {filtered.length > PAGE_SIZE && (
           <div className="flex items-center justify-between px-4 py-2.5 border-t text-xs text-muted-foreground">
-            <span>{page * PAGE_SIZE + 1}–{Math.min((page + 1) * PAGE_SIZE, filtered.length)} of {filtered.length}</span>
+            <span>{safePage * PAGE_SIZE + 1}–{Math.min((safePage + 1) * PAGE_SIZE, filtered.length)} of {filtered.length}</span>
             <div className="flex items-center gap-2">
-              <Button variant="outline" size="sm" className="h-7 text-xs" disabled={page === 0} onClick={() => setPage((p) => p - 1)}>Prev</Button>
-              <span className="tabular-nums">{page + 1} / {pageCount}</span>
-              <Button variant="outline" size="sm" className="h-7 text-xs" disabled={page >= pageCount - 1} onClick={() => setPage((p) => p + 1)}>Next</Button>
+              <Button variant="outline" size="sm" className="h-7 text-xs" disabled={safePage === 0} onClick={() => setPage(safePage - 1)}>Prev</Button>
+              <span className="tabular-nums">{safePage + 1} / {pageCount}</span>
+              <Button variant="outline" size="sm" className="h-7 text-xs" disabled={safePage >= pageCount - 1} onClick={() => setPage(safePage + 1)}>Next</Button>
             </div>
           </div>
         )}

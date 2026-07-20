@@ -6,19 +6,23 @@ import { BuyDomainsPanel } from "@/components/domains/buy-domains-panel";
 import { AllDomainsTable } from "@/components/domains/all-domains-table";
 import { DiscoveryProvider } from "@/components/domains/discovery-context";
 import { DiscoveryProgressBanner } from "@/components/domains/discovery-progress-banner";
+import { InventoryProvider } from "@/components/domains/inventory-context";
+import { InventoryProgressBanner } from "@/components/domains/inventory-progress-banner";
 
 export default function DomainsPage() {
   return (
     <DiscoveryProvider>
+      <InventoryProvider>
       <div className="space-y-6">
         <PageHeader
           title="Domains"
           description="Discover + buy domains on the outboundhero Porkbun account, and browse your full domain inventory across both accounts."
         />
 
-        {/* Always-visible discovery progress — stays on screen (and the loop keeps
-            running) even when the All Domains tab is active. */}
+        {/* Always-visible progress — both the discovery loop and the Porkbun
+            refresh keep running (and show here) regardless of the active tab. */}
         <DiscoveryProgressBanner />
+        <InventoryProgressBanner />
 
         <Tabs defaultValue="buy" className="space-y-6">
           <TabsList>
@@ -35,6 +39,7 @@ export default function DomainsPage() {
           </TabsContent>
         </Tabs>
       </div>
+      </InventoryProvider>
     </DiscoveryProvider>
   );
 }
