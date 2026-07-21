@@ -43,6 +43,9 @@ export function DuplicateDomainsCard() {
   const [working, setWorking] = useState(false);
   const [progress, setProgress] = useState<{ done: number; total: number; current: string | null } | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [firing, setFiring] = useState(false);
+  const [fireMsg, setFireMsg] = useState<string | null>(null);
+  const [fireStuck, setFireStuck] = useState<{ domain: string; instance: string; remainingInBison: number; failed: number }[]>([]);
 
   const dragging = useRef(false);
   const dragAdd = useRef(true);
@@ -116,6 +119,35 @@ export function DuplicateDomainsCard() {
     }
     setWorking(false); setProgress(null); setSelected(new Set());
     await load();
+  };
+
+  // Fire due scheduled deletions on demand (same executor as the cron), looping
+  // small batches until the backlog is drained — or until a batch makes no
+  // progress, which means some domains are genuinely stuck (surfaced below).
+  const runDeletionsNow = async () => {
+    setFiring(true); setFireMsg("Starting…"); setFireStuck([]);
+    let totalFired = 0;
+    try {
+      for (let i = 0; i < 60; i++) {
+        const res = await fetch("/api/replacement/duplicate-domains/run", { method: "POST" });
+        const d = await res.json();
+        if (!res.ok) { setFireMsg(d.error || `HTTP ${res.status}`); break; }
+        totalFired += d.completed || 0;
+        const stuck = (d.results || [])
+          .filter((r: { done: boolean }) => !r.done)
+          .map((r: { domain: string; instance: string; remainingInBison: number; failed: number }) => ({ domain: r.domain, instance: r.instance, remainingInBison: r.remainingInBison, failed: r.failed }));
+        setFireStuck(stuck);
+        setFireMsg(`Fired ${totalFired} · ${d.dueRemaining ?? 0} still due`);
+        await load();
+        if ((d.due ?? 0) === 0) { setFireMsg(`Done — fired ${totalFired}, nothing left due.`); break; }
+        // No progress this batch → the remaining ones are stuck; stop looping.
+        if ((d.completed ?? 0) === 0) { setFireMsg(`Fired ${totalFired}. ${d.dueRemaining ?? 0} stuck — see below.`); break; }
+      }
+    } catch (e) {
+      setFireMsg(e instanceof Error ? e.message : "Run failed");
+    } finally {
+      setFiring(false);
+    }
   };
 
   const cancelPending = async (p: PendingDeletion) => {
@@ -235,7 +267,29 @@ export function DuplicateDomainsCard() {
 
           {pending.length > 0 && (
             <div className="space-y-1.5">
-              <div className="flex items-center gap-1.5 text-[11px] text-amber-500"><Clock className="h-3 w-3" /> Pending deletion (after 4-day grace)</div>
+              <div className="flex items-center justify-between gap-2">
+                <div className="flex items-center gap-1.5 text-[11px] text-amber-500"><Clock className="h-3 w-3" /> Pending deletion (after 4-day grace)</div>
+                <button
+                  onClick={runDeletionsNow}
+                  disabled={firing}
+                  title="Fire all deletions whose 4-day grace has already passed, now"
+                  className="flex items-center gap-1.5 text-[11px] rounded-md border px-2 py-1 hover:bg-muted/50 disabled:opacity-50"
+                >
+                  {firing ? <Loader2 className="h-3 w-3 animate-spin" /> : <Trash2 className="h-3 w-3" />}
+                  Run due deletions now
+                </button>
+              </div>
+              {fireMsg && <div className="text-[11px] text-muted-foreground">{fireMsg}</div>}
+              {fireStuck.length > 0 && (
+                <div className="rounded-md border border-destructive/30 bg-destructive/5 px-2 py-1.5 space-y-0.5 max-h-32 overflow-y-auto">
+                  <div className="text-[10px] font-medium text-destructive">Stuck ({fireStuck.length}) — Bison still reports senders / delete failing:</div>
+                  {fireStuck.map((s) => (
+                    <div key={`${s.instance}:${s.domain}`} className="text-[10px] text-muted-foreground">
+                      {s.domain} <span className="opacity-70">{short[s.instance] ?? s.instance}</span> · {s.remainingInBison < 0 ? "errored" : `${s.remainingInBison} left in Bison`}{s.failed > 0 ? `, ${s.failed} failed` : ""}
+                    </div>
+                  ))}
+                </div>
+              )}
               <div className="rounded-lg border border-amber-500/30 divide-y divide-amber-500/10 max-h-40 overflow-y-auto">
                 {pending.map((p) => (
                   <div key={`${p.instance}:${p.domain}`} className="flex items-center justify-between px-3 py-1.5 text-xs">

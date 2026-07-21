@@ -25,7 +25,7 @@
 
     { "path": "/api/cron/provider-domain-status-check",    "schedule": "0 8 * * *" },
 
-    { "path": "/api/cron/fire-scheduled-deletions",        "schedule": "0 9 * * *" },
+    { "path": "/api/cron/fire-scheduled-deletions",        "schedule": "0 */3 * * *" },
 
     { "path": "/api/cron/buy-domain-queue",                "schedule": "10 */2 * * *" },
 

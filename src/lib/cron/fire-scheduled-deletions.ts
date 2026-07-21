@@ -15,9 +15,9 @@ import { deleteDomainFromInstance } from "@/lib/deliverability/delete-domain";
 // is marked 'done'; if anything is still stuck it stays 'pending' and the next
 // daily run retries it (the delete is idempotent).
 
-const MAX_PER_RUN = 25; // stay comfortably inside maxDuration; overflow waits for the next daily run
+const MAX_PER_RUN = 15; // stay comfortably inside maxDuration; overflow waits for the next run
 
-export async function runScheduledDeletions(): Promise<NextResponse> {
+export async function runScheduledDeletions(limit = MAX_PER_RUN): Promise<NextResponse> {
   const supabase = getSupabaseAdmin();
   const nowIso = new Date().toISOString();
 
@@ -27,7 +27,7 @@ export async function runScheduledDeletions(): Promise<NextResponse> {
     .eq("status", "pending")
     .lte("scheduled_at", nowIso)
     .order("scheduled_at", { ascending: true })
-    .limit(MAX_PER_RUN);
+    .limit(limit);
   if (error) {
     return NextResponse.json({ error: error.message }, { status: 500 });
   }
@@ -56,6 +56,15 @@ export async function runScheduledDeletions(): Promise<NextResponse> {
   }
 
   const fired = results.filter((r) => r.done).length;
-  console.log(`[cron/fire-scheduled-deletions] due=${rows.length} completed=${fired} retryNext=${rows.length - fired}`);
-  return NextResponse.json({ due: rows.length, completed: fired, retryNext: rows.length - fired, results });
+
+  // How many pending rows are still due (past their grace) after this batch —
+  // lets a manual runner loop until the backlog is drained.
+  const { count: dueRemaining } = await supabase
+    .from("duplicate_domain_deletions")
+    .select("instance", { count: "exact", head: true })
+    .eq("status", "pending")
+    .lte("scheduled_at", new Date().toISOString());
+
+  console.log(`[cron/fire-scheduled-deletions] due=${rows.length} completed=${fired} retryNext=${rows.length - fired} dueRemaining=${dueRemaining ?? 0}`);
+  return NextResponse.json({ due: rows.length, completed: fired, retryNext: rows.length - fired, dueRemaining: dueRemaining ?? 0, results });
 }
