@@ -70,6 +70,17 @@ async function call<T>(
   return (parsed ?? {}) as T;
 }
 
+/** Raw GET (no throw) — for discovering domain-provider / sequencer accounts. */
+export async function milkboxRawGet(path: string): Promise<{ status: number; body: unknown }> {
+  const key = process.env.MILKBOX_API_KEY;
+  if (!key) throw new Error("MILKBOX_API_KEY missing");
+  const res = await fetch(`${BASE}${path}`, { headers: { Accept: "application/json", Authorization: `Bearer ${key}` } });
+  const text = await res.text();
+  let body: unknown = null;
+  try { body = text ? JSON.parse(text) : null; } catch { body = text.slice(0, 500); }
+  return { status: res.status, body };
+}
+
 export interface MilkboxOrderEnvelope<T> {
   data: T;
   request_id?: string;
