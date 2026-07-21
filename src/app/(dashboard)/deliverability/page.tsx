@@ -281,7 +281,7 @@ const TABLE_COLUMNS: { field: ColField; label: string; align: string; width: str
   { field: "spamhaus_dbl", label: "Spamhaus DBL", align: "text-center", width: "110px", toggleable: true },
   { field: "redirect_url", label: "Redirect URL", align: "text-left", width: "180px", toggleable: true },
   { field: "provider_status", label: "Provider", align: "text-center", width: "100px", toggleable: true },
-  { field: "instances", label: "Instances · Created", align: "text-center", width: "160px", toggleable: true },
+  { field: "instances", label: "Instances", align: "text-center", width: "160px", toggleable: true },
   { field: "inbox_count", label: "Inboxes", align: "text-center", width: "90px", toggleable: true },
   { field: "total_sent", label: "Sent", align: "text-center", width: "70px", toggleable: true },
   { field: "total_replied", label: "Replied", align: "text-center", width: "70px", toggleable: true },
