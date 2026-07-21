@@ -177,6 +177,20 @@ export async function getDomainStatus(domainId: string): Promise<ProviderStatusR
   return deriveStatus(result);
 }
 
+/** Raw Inboxing status incl. the latest upload job — for move diagnostics. */
+export async function getDomainStatusRaw(
+  domainId: string,
+): Promise<{ status: string; setupStage: string | null; failureReason: string | null; latestJobStatus: string | null; csvAvailable: boolean | null }> {
+  const r = await call<InboxingStatus>("GET", `/domains/${encodeURIComponent(domainId)}/status`);
+  return {
+    status: (r?.status || "").toLowerCase(),
+    setupStage: r?.setup_stage || null,
+    failureReason: r?.failure_reason || null,
+    latestJobStatus: r?.latest_job?.status || null,
+    csvAvailable: typeof r?.csv_available === "boolean" ? r.csv_available : null,
+  };
+}
+
 export async function updateRedirect(domainId: string, redirectUrl: string | null): Promise<void> {
   const body = redirectUrl
     ? { redirect_type: "REGULAR" as const, redirect_url: redirectUrl }
