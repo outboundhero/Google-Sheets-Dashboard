@@ -35,18 +35,17 @@ function fmtDate(iso: string | null): string {
 }
 
 // Default selection: for each duplicate domain, select the copy/copies with the
-// OLDER created date (keep the newest), skipping any already pending deletion.
-// The user can freely edit this before scheduling.
-function autoSelectOlder(dups: DuplicateDomain[], pending: PendingDeletion[]): Set<string> {
-  const pendingKeys = new Set(pending.map((p) => `${p.instance}:${p.domain}`));
+// OLDER created date (keep the newest). The user can freely edit this before
+// scheduling; already-pending copies are skipped at schedule time, not here, so
+// the older copies are always visibly pre-selected.
+function autoSelectOlder(dups: DuplicateDomain[]): Set<string> {
   const sel = new Set<string>();
   for (const d of dups) {
     if (d.instances.length < 2) continue;
     const withTime = d.instances.map((i) => ({ instance: i.instance, t: i.createdAt ? new Date(i.createdAt).getTime() : -Infinity }));
     const newest = Math.max(...withTime.map((x) => x.t));
     for (const { instance, t } of withTime) {
-      const key = `${instance}:${d.domain}`;
-      if (t < newest && !pendingKeys.has(key)) sel.add(key); // older copy → select for removal
+      if (t < newest) sel.add(`${instance}:${d.domain}`); // older copy → select for removal
     }
   }
   return sel;
@@ -73,7 +72,7 @@ export function DuplicateDomainsCard() {
     const pd = d.pending || [];
     setDups(dp);
     setPending(pd);
-    setSelected(autoSelectOlder(dp, pd)); // default: older copies selected (editable)
+    setSelected(autoSelectOlder(dp)); // default: older copies selected (editable)
   }, []);
   const load = useCallback(async () => {
     try {
@@ -107,8 +106,13 @@ export function DuplicateDomainsCard() {
   const startDrag = (k: string) => { dragging.current = true; dragAdd.current = !selected.has(k); applyDrag(k); };
 
   const cleanSelected = async () => {
-    const targets = [...selected].map((k) => { const [instance, ...d] = k.split(":"); return { instance, domain: d.join(":") }; });
-    if (targets.length === 0) return;
+    // Skip any (instance, domain) that's already scheduled — avoids re-running
+    // campaign removal + re-scheduling for copies already pending deletion.
+    const pendingKeys = new Set(pending.map((p) => `${p.instance}:${p.domain}`));
+    const targets = [...selected]
+      .filter((k) => !pendingKeys.has(k))
+      .map((k) => { const [instance, ...d] = k.split(":"); return { instance, domain: d.join(":") }; });
+    if (targets.length === 0) { setError("All selected copies are already pending deletion."); return; }
     setWorking(true); setError(null);
     setProgress({ done: 0, total: targets.length, current: targets[0]?.domain ?? null });
     const scheduled: { instance: string; domain: string }[] = [];
