@@ -146,6 +146,22 @@ export async function runBuyQueue(): Promise<NextResponse> {
         { domain: row.domain, registered: true, registered_at: nowIso, available: true, price_usd: price },
         { onConflict: "domain" }
       );
+      // Surface it in All Domains / Purchased immediately (renewal ≈ +1yr,
+      // corrected exactly on the next Porkbun refresh).
+      const renewIso = new Date(Date.now() + 365 * 24 * 60 * 60 * 1000).toISOString();
+      await supabase.from("domain_inventory").upsert(
+        {
+          domain: row.domain,
+          source: "porkbun_outboundhero",
+          manual: false,
+          tld: `.${row.domain.split(".").pop()}`,
+          porkbun_status: "ACTIVE",
+          expire_date: renewIso,
+          auto_renew: false,
+          last_synced_at: nowIso,
+        },
+        { onConflict: "domain" }
+      );
 
       // Auto-renew OFF (non-fatal).
       try {
