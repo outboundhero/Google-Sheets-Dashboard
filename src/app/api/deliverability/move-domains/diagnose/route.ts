@@ -2,31 +2,24 @@ import { NextResponse } from "next/server";
 import { getSupabaseAdmin } from "@/lib/supabase";
 import { bisonFetch } from "@/lib/bison";
 import { isInstanceSlug, type BisonInstanceSlug } from "@/lib/bison-instances";
-import { findDomainByName, getDomainStatusRaw } from "@/lib/inboxing";
+import { getDomainStatusRaw } from "@/lib/inboxing";
 
 // GET /api/deliverability/move-domains/diagnose?domains=a.com,b.com&target=facilityreach
 // (admin-only). For each domain reports where it lives in LeadSync, its Inboxing
-// upload status, and how many senders Bison actually reports on the SOURCE vs
-// TARGET instance — so we can tell "upload not landing" from "poll not finding".
-export const maxDuration = 120;
+// upload status, and how many senders Bison reports on the SOURCE vs TARGET
+// instance — so we can tell "upload not landing" from "poll not finding".
+// Fast: reads the search's meta.total in ONE call (no full paging).
+export const maxDuration = 60;
 
-async function countSenders(instance: BisonInstanceSlug, domain: string): Promise<number> {
-  const found = new Set<number>();
-  let page = 1;
-  while (page <= 20) {
-    const res = await bisonFetch(instance, `/sender-emails?search=${encodeURIComponent(domain)}&page=${page}&per_page=15`);
-    if (!res.ok) break;
-    const json = await res.json().catch(() => null);
-    const payload = Array.isArray(json) ? json[0] : json;
-    const data: { id: number; email: string }[] = payload?.data || [];
-    for (const s of data) {
-      if (s.email?.split("@")[1]?.toLowerCase() === domain.toLowerCase()) found.add(s.id);
-    }
-    const lastPage = payload?.meta?.last_page || 1;
-    if (page >= lastPage) break;
-    page++;
-  }
-  return found.size;
+async function senderSearch(instance: BisonInstanceSlug, domain: string): Promise<{ total: number; exactOnPage1: number }> {
+  const res = await bisonFetch(instance, `/sender-emails?search=${encodeURIComponent(domain)}&page=1&per_page=15`);
+  if (!res.ok) return { total: -1, exactOnPage1: -1 };
+  const json = await res.json().catch(() => null);
+  const payload = Array.isArray(json) ? json[0] : json;
+  const data: { id: number; email: string }[] = payload?.data || [];
+  const exact = data.filter((s) => s.email?.split("@")[1]?.toLowerCase() === domain.toLowerCase()).length;
+  const total = typeof payload?.meta?.total === "number" ? payload.meta.total : data.length;
+  return { total, exactOnPage1: exact };
 }
 
 export async function GET(request: Request) {
@@ -59,27 +52,28 @@ export async function GET(request: Request) {
       const instances = dRows.map((r) => ({ instance: r.instance as string, inbox_count: (r.inbox_count as number) ?? 0, tags: (r.tags as string[]) || [] }));
       const source = instances.find((i) => i.instance !== target)?.instance as BisonInstanceSlug | undefined;
 
-      // Inboxing id + upload status.
-      let inboxingId = orderIdByDomain.get(domain) || null;
+      // Inboxing upload status — only via the CACHED order id (findDomainByName
+      // pages the whole account and is too slow for a live diagnostic).
+      const inboxingId = orderIdByDomain.get(domain) || null;
       let inboxing: unknown = null;
       let inboxingError: string | null = null;
-      try {
-        if (!inboxingId) {
-          const hit = await findDomainByName(domain);
-          inboxingId = hit?.id || null;
-        }
-        if (inboxingId) inboxing = await getDomainStatusRaw(inboxingId);
-        else inboxingError = "not found on Inboxing account";
-      } catch (e) {
-        inboxingError = e instanceof Error ? e.message : "inboxing lookup failed";
+      if (inboxingId) {
+        try { inboxing = await getDomainStatusRaw(inboxingId); }
+        catch (e) { inboxingError = e instanceof Error ? e.message : "inboxing status failed"; }
+      } else {
+        inboxingError = "no cached Inboxing order id (resolved by name at move-time)";
       }
 
-      // Live sender counts on target + source.
-      let targetSenders = -1, sourceSenders = -1;
-      try { targetSenders = await countSenders(target, domain); } catch { /* leave -1 */ }
-      try { if (source) sourceSenders = await countSenders(source, domain); } catch { /* leave -1 */ }
+      // Live sender counts on target + source (search meta.total, one call each).
+      const tgt = await senderSearch(target, domain).catch(() => ({ total: -1, exactOnPage1: -1 }));
+      const src = source ? await senderSearch(source, domain).catch(() => ({ total: -1, exactOnPage1: -1 })) : { total: -1, exactOnPage1: -1 };
 
-      out.push({ domain, instances, inboxingId, inboxing, inboxingError, source: source ?? null, target, targetSenders, sourceSenders });
+      out.push({
+        domain, instances, inboxingId, inboxing, inboxingError,
+        source: source ?? null, target,
+        targetSenders: tgt.total, targetExactPage1: tgt.exactOnPage1,
+        sourceSenders: src.total, sourceExactPage1: src.exactOnPage1,
+      });
     }
 
     return NextResponse.json({ target, results: out });
