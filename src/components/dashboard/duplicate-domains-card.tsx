@@ -68,8 +68,11 @@ export function DuplicateDomainsCard() {
   const dragAdd = useRef(true);
 
   const applyData = useCallback((d: { duplicates?: DuplicateDomain[]; pending?: PendingDeletion[] }) => {
-    const dp = d.duplicates || [];
     const pd = d.pending || [];
+    // A domain that already has a copy scheduled for deletion is being resolved
+    // — show it ONLY in the Pending section below, not as an actionable card.
+    const pendingDomains = new Set(pd.map((p) => p.domain));
+    const dp = (d.duplicates || []).filter((x) => !pendingDomains.has(x.domain));
     setDups(dp);
     setPending(pd);
     setSelected(autoSelectOlder(dp)); // default: older copies selected (editable)
