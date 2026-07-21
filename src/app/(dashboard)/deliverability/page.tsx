@@ -1646,7 +1646,8 @@ function DeliverabilityPageInner() {
     const failures: { domain: string; stage?: string; error: string }[] = [];
     const skippedDomains: string[] = [];
     const movedBySource: Record<string, string[]> = {};
-    let inflight: { domain: string; sourceInstance: string; expected: number }[] = [];
+    let inflight: { domain: string; sourceInstance: string; expected: number; landed?: number }[] = [];
+    const fmtUploading = () => inflight.map((f) => (typeof f.landed === "number" && f.expected ? `${f.domain} (${f.landed}/${f.expected})` : f.domain));
     const moveId = runIdRef.current++;
     const base = {
       id: moveId,
@@ -1662,7 +1663,7 @@ function DeliverabilityPageInner() {
         done: running ? resolved() : job.domains.length,
         counts: { ...counts },
         failures: [...failures],
-        uploading: inflight.map((f) => f.domain),
+        uploading: fmtUploading(),
         running,
         queued: false,
         movedBySource: { ...movedBySource },
@@ -1696,7 +1697,7 @@ function DeliverabilityPageInner() {
         while (inflight.length > 0 && Date.now() < deadline && !dismissedRunsRef.current.has(moveId)) {
           await new Promise((r) => setTimeout(r, 12_000));
           if (dismissedRunsRef.current.has(moveId)) break;
-          const pr = await fetchJsonWithRetry<{ error?: string; results?: { domain: string; status: string; sourceInstance?: string }[] }>(
+          const pr = await fetchJsonWithRetry<{ error?: string; results?: { domain: string; status: string; sourceInstance?: string; landed?: number }[] }>(
             "/api/deliverability/move-domains",
             { mode: "poll", dryRun: false, inflight, targetInstance: job.targetInstance },
           );
@@ -1708,7 +1709,7 @@ function DeliverabilityPageInner() {
                 if (r.sourceInstance) (movedBySource[r.sourceInstance] ||= []).push(r.domain);
               } else {
                 const f = inflight.find((x) => x.domain === r.domain);
-                if (f) still.push(f);
+                if (f) { if (typeof r.landed === "number") f.landed = r.landed; still.push(f); }
               }
             }
             inflight = still;
@@ -1725,7 +1726,7 @@ function DeliverabilityPageInner() {
           done: job.domains.length,
           counts: { ...counts },
           failures: [...failures],
-          uploading: inflight.map((f) => f.domain),
+          uploading: fmtUploading(),
           running: false,
           queued: false,
           movedBySource: { ...movedBySource },

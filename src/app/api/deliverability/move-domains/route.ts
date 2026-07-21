@@ -120,22 +120,50 @@ async function loadInboxingIds(domains: string[]): Promise<Map<string, string>> 
   return map;
 }
 
-/** All senders on `instance` whose email domain is exactly `domain`
- *  (import-domain's search pattern). */
+// Some instances' /sender-emails?search= is slow (FacilityReach ~12s vs
+// outboundhero ~0.5s). Guard every search with a hard abort timeout so a slow
+// instance can never hang the request; the caller retries next poll cycle.
+const SEARCH_TIMEOUT_MS = 11_000;
+async function bisonFetchT(instance: BisonInstanceSlug, path: string): Promise<Response | null> {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), SEARCH_TIMEOUT_MS);
+  try {
+    return await bisonFetch(instance, path, { signal: ctrl.signal });
+  } catch {
+    return null; // aborted / network — treat as "couldn't check this cycle"
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** Fast readiness probe: how many senders the instance reports for `domain`
+ *  (search meta.total, ONE call). -1 = the search timed out / errored. */
+async function targetSenderCount(instance: BisonInstanceSlug, domain: string): Promise<number> {
+  const res = await bisonFetchT(instance, `/sender-emails?search=${encodeURIComponent(domain)}&page=1&per_page=15`);
+  if (!res || !res.ok) return -1;
+  const json = await res.json().catch(() => null);
+  const payload = Array.isArray(json) ? json[0] : json;
+  if (typeof payload?.meta?.total === "number") return payload.meta.total;
+  return Array.isArray(payload?.data) ? payload.data.length : -1;
+}
+
+/** All senders on `instance` whose email domain is exactly `domain`. Only run
+ *  once the readiness probe says they've arrived — per_page=100 keeps it to a
+ *  page or two even for 49 mailboxes, each guarded by the abort timeout. */
 async function fetchSendersOnInstance(instance: BisonInstanceSlug, domain: string): Promise<SenderEmail[]> {
   const found = new Map<number, SenderEmail>();
   let page = 1;
-  while (true) {
-    const res = await bisonFetch(instance, `/sender-emails?search=${encodeURIComponent(domain)}&page=${page}&per_page=15`);
-    if (!res.ok) break;
-    const json = await res.json();
+  while (page <= 5) {
+    const res = await bisonFetchT(instance, `/sender-emails?search=${encodeURIComponent(domain)}&page=${page}&per_page=100`);
+    if (!res || !res.ok) break;
+    const json = await res.json().catch(() => null);
     const payload = Array.isArray(json) ? json[0] : json;
-    const data: SenderEmail[] = payload.data || [];
+    const data: SenderEmail[] = payload?.data || [];
     for (const inbox of data) {
       if (inbox.email.split("@")[1]?.toLowerCase() === domain.toLowerCase()) found.set(inbox.id, inbox);
     }
-    const lastPage = payload.meta?.last_page || 1;
-    if (page >= lastPage || page >= 20) break;
+    const lastPage = payload?.meta?.last_page || 1;
+    if (page >= lastPage) break;
     page++;
   }
   return [...found.values()];
@@ -330,27 +358,40 @@ export async function POST(request: Request) {
     const results: MoveResult[] = [];
 
     // ── POLL: check arrival for the FE-supplied in-flight set + finalize. ──
+    // Readiness is a single fast meta.total probe per domain (parallel, timeout-
+    // guarded) — NEVER the slow full paging every cycle. Only when the count has
+    // reached `expected` do we do the (bounded) full fetch to register.
     if (mode === "poll") {
       if (!target) return NextResponse.json({ error: "targetInstance required" }, { status: 400 });
       const inflight = (Array.isArray(body?.inflight) ? body.inflight : []) as { domain: string; sourceInstance: string; expected: number }[];
+      const counts = await Promise.all(
+        inflight.map((f) => targetSenderCount(target, String(f.domain || "").toLowerCase())),
+      );
       let anyArrived = false;
-      for (const f of inflight) {
+      for (let i = 0; i < inflight.length; i++) {
+        const f = inflight[i];
         const dom = String(f.domain || "").toLowerCase();
         if (!dom || !isInstanceSlug(f.sourceInstance)) { results.push({ domain: dom, status: "failed", error: "bad in-flight entry" }); continue; }
         const expected = Number(f.expected) > 0 ? Number(f.expected) : 1;
-        try {
-          const senders = await fetchSendersOnInstance(target, dom);
-          if (senders.length >= expected && senders.length > 0) {
-            await registerOnTarget(target, dom, senders);
-            await captureCarryover(f.sourceInstance as BisonInstanceSlug, target, dom);
-            await supabase.from("inbox_orders").update({ instance: target }).eq("provider", "inboxing").eq("domain", dom);
-            results.push({ domain: dom, status: "done", sourceInstance: f.sourceInstance as BisonInstanceSlug, landed: senders.length, detail: `${senders.length} inboxes now on ${target}` });
-            anyArrived = true;
-          } else {
-            results.push({ domain: dom, status: "uploading", landed: senders.length, expected, detail: "still landing" });
+        const cnt = counts[i];
+        if (cnt >= expected && cnt > 0) {
+          try {
+            const senders = await fetchSendersOnInstance(target, dom);
+            if (senders.length >= expected && senders.length > 0) {
+              await registerOnTarget(target, dom, senders);
+              await captureCarryover(f.sourceInstance as BisonInstanceSlug, target, dom);
+              await supabase.from("inbox_orders").update({ instance: target }).eq("provider", "inboxing").eq("domain", dom);
+              results.push({ domain: dom, status: "done", sourceInstance: f.sourceInstance as BisonInstanceSlug, landed: senders.length, detail: `${senders.length} inboxes now on ${target}` });
+              anyArrived = true;
+            } else {
+              results.push({ domain: dom, status: "uploading", landed: senders.length, expected, detail: "finalizing" });
+            }
+          } catch (e) {
+            results.push({ domain: dom, status: "uploading", expected, error: e instanceof Error ? e.message : "finalize failed" });
           }
-        } catch (e) {
-          results.push({ domain: dom, status: "uploading", error: e instanceof Error ? e.message : "poll failed" });
+        } else {
+          // cnt < 0 = the target search was too slow this cycle → retry next.
+          results.push({ domain: dom, status: "uploading", landed: cnt < 0 ? undefined : cnt, expected, detail: cnt < 0 ? "target search slow — retrying" : "landing" });
         }
       }
       if (anyArrived) { try { await supabase.rpc("rebuild_domain_stats"); } catch { /* best-effort */ } }
