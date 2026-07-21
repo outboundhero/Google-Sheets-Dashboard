@@ -34,6 +34,24 @@ function fmtDate(iso: string | null): string {
   return d.toLocaleDateString(undefined, { day: "numeric", month: "short", year: "numeric" });
 }
 
+// Default selection: for each duplicate domain, select the copy/copies with the
+// OLDER created date (keep the newest), skipping any already pending deletion.
+// The user can freely edit this before scheduling.
+function autoSelectOlder(dups: DuplicateDomain[], pending: PendingDeletion[]): Set<string> {
+  const pendingKeys = new Set(pending.map((p) => `${p.instance}:${p.domain}`));
+  const sel = new Set<string>();
+  for (const d of dups) {
+    if (d.instances.length < 2) continue;
+    const withTime = d.instances.map((i) => ({ instance: i.instance, t: i.createdAt ? new Date(i.createdAt).getTime() : -Infinity }));
+    const newest = Math.max(...withTime.map((x) => x.t));
+    for (const { instance, t } of withTime) {
+      const key = `${instance}:${d.domain}`;
+      if (t < newest && !pendingKeys.has(key)) sel.add(key); // older copy → select for removal
+    }
+  }
+  return sel;
+}
+
 export function DuplicateDomainsCard() {
   const [open, setOpen] = useState(false);
   const [dups, setDups] = useState<DuplicateDomain[]>([]);
@@ -50,23 +68,30 @@ export function DuplicateDomainsCard() {
   const dragging = useRef(false);
   const dragAdd = useRef(true);
 
+  const applyData = useCallback((d: { duplicates?: DuplicateDomain[]; pending?: PendingDeletion[] }) => {
+    const dp = d.duplicates || [];
+    const pd = d.pending || [];
+    setDups(dp);
+    setPending(pd);
+    setSelected(autoSelectOlder(dp, pd)); // default: older copies selected (editable)
+  }, []);
   const load = useCallback(async () => {
     try {
       const res = await fetch("/api/replacement/duplicate-domains", { cache: "no-store" });
       const d = await res.json();
-      if (res.ok) { setDups(d.duplicates || []); setPending(d.pending || []); setError(null); }
+      if (res.ok) { applyData(d); setError(null); }
       else setError(d.error || "Failed");
     } catch { setError("Failed to load"); }
-  }, []);
+  }, [applyData]);
   const refresh = useCallback(async () => { setLoading(true); await load(); setLoading(false); }, [load]);
   useEffect(() => {
     let alive = true;
     fetch("/api/replacement/duplicate-domains", { cache: "no-store" })
       .then((r) => r.json())
-      .then((d) => { if (alive && !d.error) { setDups(d.duplicates || []); setPending(d.pending || []); } })
+      .then((d) => { if (alive && !d.error) applyData(d); })
       .catch(() => {});
     return () => { alive = false; };
-  }, []);
+  }, [applyData]);
 
   useEffect(() => {
     const up = () => { dragging.current = false; };
@@ -173,7 +198,7 @@ export function DuplicateDomainsCard() {
         <div className="px-5 pb-5 space-y-3">
           <div className="flex items-center justify-between gap-2">
             <p className="text-[11px] text-muted-foreground">
-              Same domain in 2+ instances — each card shows that instance&apos;s inboxes, tags, and created date. Click an instance to <b>remove</b> the domain from it (drag to multi-select) — leaves it in the others. Removes its senders from that instance&apos;s campaigns, then schedules deletion after 4 days.
+              Same domain in 2+ instances — each card shows that instance&apos;s inboxes, tags, and created date. The <b>older-created copy is pre-selected</b> for removal (edit as needed). Click an instance to <b>remove</b> the domain from it (drag to multi-select) — leaves it in the others. Removes its senders from that instance&apos;s campaigns, then schedules deletion after 3 days.
             </p>
             <button onClick={refresh} disabled={loading || working} className="flex items-center gap-1.5 text-xs rounded-md border px-2.5 py-1.5 hover:bg-muted/50 disabled:opacity-50 shrink-0">
               <RefreshCw className={`h-3.5 w-3.5 ${loading ? "animate-spin" : ""}`} /> Refresh
@@ -268,7 +293,7 @@ export function DuplicateDomainsCard() {
           {pending.length > 0 && (
             <div className="space-y-1.5">
               <div className="flex items-center justify-between gap-2">
-                <div className="flex items-center gap-1.5 text-[11px] text-amber-500"><Clock className="h-3 w-3" /> Pending deletion (after 4-day grace)</div>
+                <div className="flex items-center gap-1.5 text-[11px] text-amber-500"><Clock className="h-3 w-3" /> Pending deletion (after 3-day grace)</div>
                 <button
                   onClick={runDeletionsNow}
                   disabled={firing}

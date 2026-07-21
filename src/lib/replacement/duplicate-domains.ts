@@ -6,7 +6,7 @@
 import { getSupabaseAdmin } from "@/lib/supabase";
 import { ALL_INSTANCE_SLUGS } from "@/lib/bison-instances";
 
-export const DUP_GRACE_DAYS = 4;
+export const DUP_GRACE_DAYS = 3;
 
 export interface DupInstance {
   instance: string;

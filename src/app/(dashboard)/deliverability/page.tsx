@@ -92,6 +92,14 @@ interface DomainRow {
   bounce_30?: number | null;
 }
 
+// Compact created-date for the Instances column (e.g. "6 Jul 26").
+function fmtInstanceCreated(iso: string | null | undefined): string {
+  if (!iso) return "—";
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return "—";
+  return d.toLocaleDateString(undefined, { day: "numeric", month: "short", year: "2-digit" });
+}
+
 // --- Multi-condition filter (up to 8, combined with AND or OR). Fields are
 // typed by KIND: number (comparison ops), boolean (is Yes/No), enum
 // (is / is not a picked value), text (contains / doesn't contain). -------
@@ -273,7 +281,7 @@ const TABLE_COLUMNS: { field: ColField; label: string; align: string; width: str
   { field: "spamhaus_dbl", label: "Spamhaus DBL", align: "text-center", width: "110px", toggleable: true },
   { field: "redirect_url", label: "Redirect URL", align: "text-left", width: "180px", toggleable: true },
   { field: "provider_status", label: "Provider", align: "text-center", width: "100px", toggleable: true },
-  { field: "instances", label: "Instances", align: "text-center", width: "110px", toggleable: true },
+  { field: "instances", label: "Instances · Created", align: "text-center", width: "160px", toggleable: true },
   { field: "inbox_count", label: "Inboxes", align: "text-center", width: "90px", toggleable: true },
   { field: "total_sent", label: "Sent", align: "text-center", width: "70px", toggleable: true },
   { field: "total_replied", label: "Replied", align: "text-center", width: "70px", toggleable: true },
@@ -575,7 +583,7 @@ function DeliverabilityPageInner() {
   const { statuses: providerStatusMap, mutate: mutateProviderStatus } = useProviderStatus(instancesQuery);
   // Cross-instance presence: which of the 4 Bison instances each domain
   // exists in (all instances, regardless of the sidebar switcher).
-  const { domainInstancesMap, mutate: mutateDomainInstances } = useDomainInstances();
+  const { domainInstancesMap, domainCreatedMap, mutate: mutateDomainInstances } = useDomainInstances();
   const [bisonTags, setBisonTags] = useState<string[]>([]);
   const [domains, setDomains] = useState<DomainRow[]>([]);
   // Days of snapshot history collected (drives the trailing-rate warm-up note)
@@ -4672,20 +4680,27 @@ function DeliverabilityPageInner() {
                         the current sidebar scope) */}
                     {isColVisible("instances") && (
                     <div className="text-center text-xs">
-                      <div className="flex items-center justify-center gap-1 flex-wrap">
-                        {(domainInstancesMap[d.domain] ?? [d.instance]).map((slug) => (
-                          <span
-                            key={slug}
-                            className={`inline-flex items-center px-1.5 py-0.5 rounded-full border text-[10px] ${
-                              slug === d.instance
-                                ? "border-primary/40 bg-primary/10 text-foreground"
-                                : "border-muted-foreground/25 text-muted-foreground"
-                            }`}
-                            title={BISON_INSTANCES[slug as BisonInstanceSlug]?.label ?? slug}
-                          >
-                            {INSTANCE_SHORT_LABELS[slug as BisonInstanceSlug] ?? slug}
-                          </span>
-                        ))}
+                      <div className="flex flex-col items-stretch gap-1">
+                        {(domainInstancesMap[d.domain] ?? [d.instance]).map((slug) => {
+                          const created = domainCreatedMap[d.domain]?.[slug] ?? (slug === d.instance ? d.domain_created_at : null);
+                          return (
+                            <div key={slug} className="flex items-center justify-between gap-1.5">
+                              <span
+                                className={`inline-flex items-center px-1.5 py-0.5 rounded-full border text-[10px] shrink-0 ${
+                                  slug === d.instance
+                                    ? "border-primary/40 bg-primary/10 text-foreground"
+                                    : "border-muted-foreground/25 text-muted-foreground"
+                                }`}
+                                title={BISON_INSTANCES[slug as BisonInstanceSlug]?.label ?? slug}
+                              >
+                                {INSTANCE_SHORT_LABELS[slug as BisonInstanceSlug] ?? slug}
+                              </span>
+                              <span className="text-[10px] text-muted-foreground tabular-nums whitespace-nowrap" title="Created in this instance">
+                                {fmtInstanceCreated(created)}
+                              </span>
+                            </div>
+                          );
+                        })}
                       </div>
                     </div>
                     )}
