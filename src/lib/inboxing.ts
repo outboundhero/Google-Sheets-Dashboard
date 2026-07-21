@@ -306,6 +306,18 @@ export interface InboxingPlatformConnection {
   verificationError: string | null;
 }
 
+/** Raw GET against Inboxing (no throw) — for discovering credential endpoints. */
+export async function inboxingRawGet(path: string): Promise<{ status: number; body: unknown }> {
+  const key = process.env.INBOXING_API_KEY;
+  const base = process.env.INBOXING_BASE_URL || "https://v2.inboxing.com/api/v2";
+  if (!key) throw new Error("INBOXING_API_KEY missing");
+  const res = await fetch(`${base}${path}`, { headers: { Accept: "application/json", "X-API-Key": key } });
+  const text = await res.text();
+  let body: unknown = null;
+  try { body = text ? JSON.parse(text) : null; } catch { body = text.slice(0, 500); }
+  return { status: res.status, body };
+}
+
 /** All configured sequencer connections (GET /platform-connections). */
 export async function listPlatformConnections(): Promise<InboxingPlatformConnection[]> {
   const result = await call<{
