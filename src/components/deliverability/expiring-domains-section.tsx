@@ -19,10 +19,17 @@ interface Props {
   onCancel: (domains: string[]) => void;
 }
 
-const accountShort: Record<string, string> = { "Porkbun 1": "PB1", "Porkbun 2": "PB2" };
+const accountShort: Record<string, string> = {
+  "Porkbun 1": "PB1",
+  "Porkbun 2": "PB2",
+  outboundhero: "OBH",
+  spencersellstech: "SST",
+};
 const accountAccent: Record<string, string> = {
   "Porkbun 1": "bg-violet-500/15 text-violet-500 border-violet-500/30",
   "Porkbun 2": "bg-sky-500/15 text-sky-500 border-sky-500/30",
+  outboundhero: "bg-emerald-500/15 text-emerald-500 border-emerald-500/30",
+  spencersellstech: "bg-amber-500/15 text-amber-500 border-amber-500/30",
 };
 const providerMeta: Record<string, { label: string; cls: string }> = {
   inboxing: { label: "Inboxing", cls: "bg-emerald-500/15 text-emerald-500 border-emerald-500/30" },
