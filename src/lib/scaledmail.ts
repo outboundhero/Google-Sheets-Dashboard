@@ -6,18 +6,24 @@ import type {
 
 const BASE = "https://server.scaledmail.com/api/v1";
 
+// Porkbun hosting login is resolved per-domain (Porkbun account) by the caller;
+// the legacy single SCALEDMAIL_PORKBUN_USERNAME/PASSWORD is the fallback.
 function env() {
   const key = process.env.SCALEDMAIL_API_KEY;
   const orgId = process.env.SCALEDMAIL_ORGANIZATION_ID;
   const priceId = process.env.SCALEDMAIL_OUTLOOK_25_PRICE_ID;
-  const porkbunUsername = process.env.SCALEDMAIL_PORKBUN_USERNAME;
-  const porkbunPassword = process.env.SCALEDMAIL_PORKBUN_PASSWORD;
-  if (!key || !orgId || !priceId || !porkbunUsername || !porkbunPassword) {
+  if (!key || !orgId || !priceId) {
     throw new Error(
-      "ScaledMail env missing (SCALEDMAIL_API_KEY / SCALEDMAIL_ORGANIZATION_ID / SCALEDMAIL_OUTLOOK_25_PRICE_ID / SCALEDMAIL_PORKBUN_USERNAME / SCALEDMAIL_PORKBUN_PASSWORD)"
+      "ScaledMail env missing (SCALEDMAIL_API_KEY / SCALEDMAIL_ORGANIZATION_ID / SCALEDMAIL_OUTLOOK_25_PRICE_ID)"
     );
   }
-  return { key, orgId, priceId, porkbunUsername, porkbunPassword };
+  return {
+    key,
+    orgId,
+    priceId,
+    porkbunUsername: process.env.SCALEDMAIL_PORKBUN_USERNAME || null,
+    porkbunPassword: process.env.SCALEDMAIL_PORKBUN_PASSWORD || null,
+  };
 }
 
 async function call<T>(
@@ -89,8 +95,16 @@ export interface ScaledmailCreateOrderResult {
   raw: unknown;
 }
 
-export async function createOrder(input: CreateOrderInput): Promise<ScaledmailCreateOrderResult> {
+export async function createOrder(
+  input: CreateOrderInput,
+  opts?: { username?: string; password?: string },
+): Promise<ScaledmailCreateOrderResult> {
   const { orgId, priceId, porkbunUsername, porkbunPassword } = env();
+  const username = opts?.username ?? porkbunUsername;
+  const password = opts?.password ?? porkbunPassword;
+  if (!username || !password) {
+    throw new Error("ScaledMail createOrder: no Porkbun login for this domain's account");
+  }
   const body = {
     quantity: 1,
     ...(input.tag ? { tag: input.tag.slice(0, 20) } : {}),
@@ -107,8 +121,8 @@ export async function createOrder(input: CreateOrderInput): Promise<ScaledmailCr
     },
     hosting: {
       provider: "Porkbun",
-      username: porkbunUsername,
-      password: porkbunPassword,
+      username,
+      password,
     },
   };
   const result = await call<{ id?: string; order_id?: string; payment_id?: string }>(

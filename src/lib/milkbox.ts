@@ -5,20 +5,16 @@ import type {
 
 const BASE = "https://api.milkboxmail.com/api/v1";
 
+// sequencer_id + domain_provider_id are UUID STRINGS per the MilkBox API — do
+// NOT parseInt them. domain_provider_id is resolved per-domain (Porkbun account)
+// by the caller; the legacy MILKBOX_DOMAIN_PROVIDER_ID is a single-account fallback.
 function env() {
   const key = process.env.MILKBOX_API_KEY;
   const sequencerId = process.env.MILKBOX_SEQUENCER_ID;
-  const domainProviderId = process.env.MILKBOX_DOMAIN_PROVIDER_ID;
-  if (!key || !sequencerId || !domainProviderId) {
-    throw new Error(
-      "MilkBox env missing (MILKBOX_API_KEY / MILKBOX_SEQUENCER_ID / MILKBOX_DOMAIN_PROVIDER_ID)"
-    );
+  if (!key || !sequencerId) {
+    throw new Error("MilkBox env missing (MILKBOX_API_KEY / MILKBOX_SEQUENCER_ID)");
   }
-  return {
-    key,
-    sequencerId: parseInt(sequencerId, 10),
-    domainProviderId: parseInt(domainProviderId, 10),
-  };
+  return { key, sequencerId, domainProviderId: process.env.MILKBOX_DOMAIN_PROVIDER_ID || null };
 }
 
 async function call<T>(
@@ -91,8 +87,15 @@ export interface MilkboxCreateOrderResult {
   raw: unknown;
 }
 
-export async function createOrder(input: CreateOrderInput): Promise<MilkboxCreateOrderResult> {
-  const { sequencerId, domainProviderId } = env();
+export async function createOrder(
+  input: CreateOrderInput,
+  opts?: { domainProviderId?: string | null },
+): Promise<MilkboxCreateOrderResult> {
+  const { sequencerId, domainProviderId: legacyProvider } = env();
+  const domainProviderId = opts?.domainProviderId ?? legacyProvider;
+  if (!domainProviderId) {
+    throw new Error("MilkBox createOrder: no domain_provider_id for this domain's Porkbun account");
+  }
   if (!input.companyName) {
     throw new Error("MilkBox createOrder: companyName is required");
   }

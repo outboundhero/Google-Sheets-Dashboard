@@ -1,12 +1,17 @@
 import { NextResponse } from "next/server";
-import { resolveDomainRegistrars } from "@/lib/inboxing-registrar";
+import { resolveDomainOrders } from "@/lib/inbox-order-accounts";
+import type { InboxOrderProvider } from "@/types/inbox-order";
 
 // POST /api/inbox-orders/resolve-accounts  (admin-only via middleware)
-// Body: { domains: string[] } → which Porkbun account each domain belongs to
-// (from the All Domains inventory) + whether we have an Inboxing registrar for
-// it. Lets the Create / Bulk Import UIs flag mixed accounts + block unknowns
-// BEFORE an order is placed.
+// Body: { domains: string[], provider?: "inboxing"|"milkbox"|"scaledmail" }
+// → which Porkbun account each domain belongs to + whether the (selected)
+// provider has a credential for it. Lets the Create / Bulk Import UIs flag mixed
+// accounts + block unknowns BEFORE an order is placed.
 export const maxDuration = 30;
+
+function isProvider(v: unknown): v is InboxOrderProvider {
+  return v === "inboxing" || v === "milkbox" || v === "scaledmail";
+}
 
 export async function POST(request: Request) {
   try {
@@ -17,8 +22,9 @@ export async function POST(request: Request) {
       .map((d: string) => d.trim().toLowerCase())
       .filter(Boolean);
     if (domains.length === 0) return NextResponse.json({ error: "domains required" }, { status: 400 });
+    const provider: InboxOrderProvider = isProvider(body?.provider) ? body.provider : "inboxing";
 
-    const map = await resolveDomainRegistrars(domains);
+    const map = await resolveDomainOrders(domains, provider);
     const results = domains.map((d) => {
       const r = map.get(d);
       return {
@@ -30,7 +36,6 @@ export async function POST(request: Request) {
       };
     });
 
-    // Group by account for the "different orders per account" flag.
     const byAccount: Record<string, string[]> = {};
     for (const r of results) {
       const key = r.ok && r.accountLabel ? r.accountLabel : "Unknown";
@@ -38,6 +43,7 @@ export async function POST(request: Request) {
     }
 
     return NextResponse.json({
+      provider,
       results,
       byAccount,
       accounts: Object.keys(byAccount),

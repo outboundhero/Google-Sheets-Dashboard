@@ -175,14 +175,13 @@ export function BulkCreateInboxOrdersDialog({
   // which registrar it'll use + warn on unknowns before submitting.
   const domainsKey = useMemo(() => validRows.map((r) => r.domain).join(","), [validRows]);
   useEffect(() => {
-    if (provider !== "inboxing") { setAccountMap({}); return; }
     const domains = validRows.map((r) => r.domain).filter(Boolean);
     if (domains.length === 0) { setAccountMap({}); return; }
     let alive = true;
     const t = setTimeout(() => {
       fetch("/api/inbox-orders/resolve-accounts", {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ domains }),
+        body: JSON.stringify({ domains, provider }),
       })
         .then((r) => r.json())
         .then((d) => {
@@ -198,7 +197,6 @@ export function BulkCreateInboxOrdersDialog({
   }, [provider, domainsKey]);
 
   const accountSummary = useMemo(() => {
-    if (provider !== "inboxing") return null;
     const groups: Record<string, number> = {};
     let unknown = 0;
     for (const r of validRows) {
@@ -207,7 +205,7 @@ export function BulkCreateInboxOrdersDialog({
       else unknown++;
     }
     return { groups, unknown, mixed: Object.keys(groups).length > 1 };
-  }, [provider, validRows, accountMap]);
+  }, [validRows, accountMap]);
 
   const handleFile = async (file: File) => {
     const text = await file.text();
@@ -493,11 +491,12 @@ export function BulkCreateInboxOrdersDialog({
             className="w-full min-h-[140px] max-h-[200px] resize-y rounded-md border bg-background px-3 py-2 font-mono text-xs leading-5 outline-none focus:border-primary disabled:opacity-50"
           />
 
-          {/* Porkbun account flag (Inboxing only) — the registrar is chosen per
-              domain from its account, so a mixed batch = separate orders. */}
-          {provider === "inboxing" && accountSummary && validRows.length > 0 && (
+          {/* Porkbun account flag — the provider account (registrar / domain
+              provider / hosting login) is chosen per domain from its Porkbun
+              account, so a mixed batch = separate orders per account. */}
+          {accountSummary && validRows.length > 0 && (
             <div className="rounded-md border px-3 py-2 text-[11px] flex flex-wrap items-center gap-2">
-              <span className="text-muted-foreground">Porkbun registrar per domain:</span>
+              <span className="text-muted-foreground">Porkbun account per domain:</span>
               {Object.entries(accountSummary.groups).map(([label, n]) => (
                 <span key={label} className="inline-flex items-center rounded-full border border-emerald-500/30 bg-emerald-500/10 px-2 py-0.5 text-emerald-500">{label}: {n}</span>
               ))}
@@ -537,7 +536,7 @@ export function BulkCreateInboxOrdersDialog({
                         <tr className={r.errors.length ? "bg-red-950/10" : ""}>
                           <td className="px-2 py-1 max-w-[200px]">
                             <div className="truncate">{r.domain || <em className="text-muted-foreground">—</em>}</div>
-                            {provider === "inboxing" && r.domain && accountMap[r.domain] && (
+                            {r.domain && accountMap[r.domain] && (
                               accountMap[r.domain].ok
                                 ? <div className="text-[9px] text-muted-foreground truncate">{accountMap[r.domain].accountLabel}</div>
                                 : <div className="text-[9px] text-amber-500 truncate" title={accountMap[r.domain].reason || ""}>⚠ unknown account</div>

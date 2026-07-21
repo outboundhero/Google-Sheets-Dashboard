@@ -4,7 +4,7 @@ import { generateUniqueIdentities, buildAliasesFromNameSpec } from "@/lib/inbox-
 import * as scaledmail from "@/lib/scaledmail";
 import * as milkbox from "@/lib/milkbox";
 import * as inboxing from "@/lib/inboxing";
-import { resolveDomainRegistrars } from "@/lib/inboxing-registrar";
+import { resolveDomainOrders } from "@/lib/inbox-order-accounts";
 import type {
   CreateOrderInput,
   InboxOrderProvider,
@@ -113,25 +113,24 @@ export async function POST(request: Request) {
     let providerDomainId: string | null = null;
     let providerStatusRaw: string | null = null;
 
+    // Resolve the provider account from the domain's Porkbun account (All
+    // Domains inventory). Wrong account → the provider can't manage the domain's
+    // DNS → order failures. Block up-front with a clear message if unresolved.
+    const resolved = (await resolveDomainOrders([domain], provider)).get(domain);
+    if (!resolved || !resolved.ok) {
+      return NextResponse.json({
+        error: `Can't place this ${provider} order for ${domain}: ${resolved?.reason || "unknown Porkbun account — run Refresh Porkbun"}.`,
+      }, { status: 400 });
+    }
+
     if (provider === "scaledmail") {
-      const r = await scaledmail.createOrder(orderInput);
+      const r = await scaledmail.createOrder(orderInput, resolved.scaledmail);
       providerOrderId = r.orderId;
     } else if (provider === "milkbox") {
-      const r = await milkbox.createOrder(orderInput);
+      const r = await milkbox.createOrder(orderInput, resolved.milkbox);
       providerOrderId = r.orderId;
     } else {
-      // Pick the Inboxing registrar from the domain's Porkbun account (from the
-      // All Domains inventory). Wrong account → "Nameserver update not detected".
-      const reg = (await resolveDomainRegistrars([domain])).get(domain);
-      if (!reg || !reg.ok || !reg.registrarId) {
-        return NextResponse.json({
-          error: `Cannot determine the Porkbun account for ${domain} (${reg?.reason || "not found in All Domains inventory"}). Refresh Porkbun so the correct registrar is used.`,
-        }, { status: 400 });
-      }
-      const r = await inboxing.createDomain(orderInput, {
-        registrarCredentialId: reg.registrarId,
-        cloudflareCredentialId: reg.cloudflareId,
-      });
+      const r = await inboxing.createDomain(orderInput, resolved.inboxing);
       providerDomainId = r.domainId;
       providerStatusRaw = r.raw.status || null;
     }

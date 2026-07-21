@@ -89,14 +89,14 @@ export default function InboxOrdersPage() {
   // Inboxing only: which Porkbun account the domain belongs to (drives registrar).
   const [domainAccount, setDomainAccount] = useState<{ accountLabel: string | null; ok: boolean; reason: string | null } | null>(null);
 
-  // Resolve the entered domain's Porkbun account (Inboxing orders only).
+  // Resolve the entered domain's Porkbun account for the selected provider.
   useEffect(() => {
-    if (provider !== "inboxing" || !domain.trim()) { setDomainAccount(null); return; }
+    if (!domain.trim()) { setDomainAccount(null); return; }
     let alive = true;
     const t = setTimeout(() => {
       fetch("/api/inbox-orders/resolve-accounts", {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ domains: [domain.trim().toLowerCase()] }),
+        body: JSON.stringify({ domains: [domain.trim().toLowerCase()], provider }),
       })
         .then((r) => r.json())
         .then((d) => {
@@ -514,14 +514,14 @@ export default function InboxOrdersPage() {
                 placeholder="cleaninggrid7.com"
                 autoComplete="off"
               />
-              {provider === "inboxing" && domain.trim() && domainAccount ? (
+              {domain.trim() && domainAccount ? (
                 domainAccount.ok ? (
                   <p className="text-[11px] text-emerald-500 mt-1">
-                    Porkbun account: <span className="font-medium">{domainAccount.accountLabel}</span> — the matching registrar will be used.
+                    Porkbun account: <span className="font-medium">{domainAccount.accountLabel}</span> — the matching {provider} account will be used.
                   </p>
                 ) : (
                   <p className="text-[11px] text-amber-500 mt-1">
-                    ⚠ Can&apos;t determine the Porkbun account — {domainAccount.reason || "not in All Domains inventory"}. Run Refresh Porkbun first, or the order will fail.
+                    ⚠ {domainAccount.reason || "can't determine the Porkbun account"}. Fix before ordering, or it will fail.
                   </p>
                 )
               ) : (
