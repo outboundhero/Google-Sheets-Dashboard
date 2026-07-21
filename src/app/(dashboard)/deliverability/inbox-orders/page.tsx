@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useMemo } from "react";
+import { useState, useMemo, useEffect } from "react";
 import {
   RefreshCw,
   Plus,
@@ -86,6 +86,28 @@ export default function InboxOrdersPage() {
   ]);
   const [previewAliases, setPreviewAliases] = useState<InboxOrderAlias[] | null>(null);
   const [previewing, setPreviewing] = useState(false);
+  // Inboxing only: which Porkbun account the domain belongs to (drives registrar).
+  const [domainAccount, setDomainAccount] = useState<{ accountLabel: string | null; ok: boolean; reason: string | null } | null>(null);
+
+  // Resolve the entered domain's Porkbun account (Inboxing orders only).
+  useEffect(() => {
+    if (provider !== "inboxing" || !domain.trim()) { setDomainAccount(null); return; }
+    let alive = true;
+    const t = setTimeout(() => {
+      fetch("/api/inbox-orders/resolve-accounts", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ domains: [domain.trim().toLowerCase()] }),
+      })
+        .then((r) => r.json())
+        .then((d) => {
+          if (!alive || !Array.isArray(d.results) || !d.results[0]) return;
+          const x = d.results[0];
+          setDomainAccount({ accountLabel: x.accountLabel, ok: x.ok, reason: x.reason });
+        })
+        .catch(() => {});
+    }, 400);
+    return () => { alive = false; clearTimeout(t); };
+  }, [provider, domain]);
 
   const [redirectFor, setRedirectFor] = useState<InboxOrder | null>(null);
   const [redirectInput, setRedirectInput] = useState("");
@@ -492,9 +514,21 @@ export default function InboxOrdersPage() {
                 placeholder="cleaninggrid7.com"
                 autoComplete="off"
               />
-              <p className="text-[11px] text-muted-foreground mt-1">
-                Must already be owned in your Porkbun account.
-              </p>
+              {provider === "inboxing" && domain.trim() && domainAccount ? (
+                domainAccount.ok ? (
+                  <p className="text-[11px] text-emerald-500 mt-1">
+                    Porkbun account: <span className="font-medium">{domainAccount.accountLabel}</span> — the matching registrar will be used.
+                  </p>
+                ) : (
+                  <p className="text-[11px] text-amber-500 mt-1">
+                    ⚠ Can&apos;t determine the Porkbun account — {domainAccount.reason || "not in All Domains inventory"}. Run Refresh Porkbun first, or the order will fail.
+                  </p>
+                )
+              ) : (
+                <p className="text-[11px] text-muted-foreground mt-1">
+                  Must already be owned in your Porkbun account.
+                </p>
+              )}
             </div>
             <div className="grid grid-cols-2 gap-3">
               <div>

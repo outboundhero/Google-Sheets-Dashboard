@@ -4,6 +4,7 @@ import { generateUniqueIdentities, buildAliasesFromNameSpec } from "@/lib/inbox-
 import * as scaledmail from "@/lib/scaledmail";
 import * as milkbox from "@/lib/milkbox";
 import * as inboxing from "@/lib/inboxing";
+import { resolveDomainRegistrars } from "@/lib/inboxing-registrar";
 import type {
   CreateOrderInput,
   InboxOrderProvider,
@@ -119,7 +120,18 @@ export async function POST(request: Request) {
       const r = await milkbox.createOrder(orderInput);
       providerOrderId = r.orderId;
     } else {
-      const r = await inboxing.createDomain(orderInput);
+      // Pick the Inboxing registrar from the domain's Porkbun account (from the
+      // All Domains inventory). Wrong account → "Nameserver update not detected".
+      const reg = (await resolveDomainRegistrars([domain])).get(domain);
+      if (!reg || !reg.ok || !reg.registrarId) {
+        return NextResponse.json({
+          error: `Cannot determine the Porkbun account for ${domain} (${reg?.reason || "not found in All Domains inventory"}). Refresh Porkbun so the correct registrar is used.`,
+        }, { status: 400 });
+      }
+      const r = await inboxing.createDomain(orderInput, {
+        registrarCredentialId: reg.registrarId,
+        cloudflareCredentialId: reg.cloudflareId,
+      });
       providerDomainId = r.domainId;
       providerStatusRaw = r.raw.status || null;
     }

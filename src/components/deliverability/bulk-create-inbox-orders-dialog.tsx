@@ -112,6 +112,9 @@ export function BulkCreateInboxOrdersDialog({
   const [results, setResults] = useState<RowResult[]>([]);
   const [done, setDone] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  // Inboxing only: which Porkbun account each domain belongs to (drives the
+  // registrar) — resolved from the All Domains inventory.
+  const [accountMap, setAccountMap] = useState<Record<string, { accountLabel: string | null; ok: boolean; reason: string | null }>>({});
 
   // Reset state on close + on (re-)open.
   useEffect(() => {
@@ -167,6 +170,44 @@ export function BulkCreateInboxOrdersDialog({
 
   const validRows = useMemo(() => parsed.filter((r) => r.errors.length === 0), [parsed]);
   const invalidCount = parsed.length - validRows.length;
+
+  // Resolve each domain's Porkbun account (Inboxing orders only) so we can flag
+  // which registrar it'll use + warn on unknowns before submitting.
+  const domainsKey = useMemo(() => validRows.map((r) => r.domain).join(","), [validRows]);
+  useEffect(() => {
+    if (provider !== "inboxing") { setAccountMap({}); return; }
+    const domains = validRows.map((r) => r.domain).filter(Boolean);
+    if (domains.length === 0) { setAccountMap({}); return; }
+    let alive = true;
+    const t = setTimeout(() => {
+      fetch("/api/inbox-orders/resolve-accounts", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ domains }),
+      })
+        .then((r) => r.json())
+        .then((d) => {
+          if (!alive || d.error || !Array.isArray(d.results)) return;
+          const m: Record<string, { accountLabel: string | null; ok: boolean; reason: string | null }> = {};
+          for (const x of d.results) m[x.domain] = { accountLabel: x.accountLabel, ok: x.ok, reason: x.reason };
+          setAccountMap(m);
+        })
+        .catch(() => {});
+    }, 400);
+    return () => { alive = false; clearTimeout(t); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [provider, domainsKey]);
+
+  const accountSummary = useMemo(() => {
+    if (provider !== "inboxing") return null;
+    const groups: Record<string, number> = {};
+    let unknown = 0;
+    for (const r of validRows) {
+      const a = accountMap[r.domain];
+      if (a && a.ok && a.accountLabel) groups[a.accountLabel] = (groups[a.accountLabel] || 0) + 1;
+      else unknown++;
+    }
+    return { groups, unknown, mixed: Object.keys(groups).length > 1 };
+  }, [provider, validRows, accountMap]);
 
   const handleFile = async (file: File) => {
     const text = await file.text();
@@ -452,6 +493,23 @@ export function BulkCreateInboxOrdersDialog({
             className="w-full min-h-[140px] max-h-[200px] resize-y rounded-md border bg-background px-3 py-2 font-mono text-xs leading-5 outline-none focus:border-primary disabled:opacity-50"
           />
 
+          {/* Porkbun account flag (Inboxing only) — the registrar is chosen per
+              domain from its account, so a mixed batch = separate orders. */}
+          {provider === "inboxing" && accountSummary && validRows.length > 0 && (
+            <div className="rounded-md border px-3 py-2 text-[11px] flex flex-wrap items-center gap-2">
+              <span className="text-muted-foreground">Porkbun registrar per domain:</span>
+              {Object.entries(accountSummary.groups).map(([label, n]) => (
+                <span key={label} className="inline-flex items-center rounded-full border border-emerald-500/30 bg-emerald-500/10 px-2 py-0.5 text-emerald-500">{label}: {n}</span>
+              ))}
+              {accountSummary.unknown > 0 && (
+                <span className="inline-flex items-center rounded-full border border-amber-500/40 bg-amber-500/10 px-2 py-0.5 text-amber-500">
+                  ⚠ {accountSummary.unknown} unknown — not in All Domains inventory; will fail. Run Refresh Porkbun.
+                </span>
+              )}
+              {accountSummary.mixed && <span className="text-muted-foreground">· created as separate orders per account.</span>}
+            </div>
+          )}
+
           {/* Preview (only when not yet submitted) */}
           {parsed.length > 0 && results.length === 0 && (
             <div className="rounded-md border max-h-[340px] overflow-y-auto">
@@ -477,7 +535,14 @@ export function BulkCreateInboxOrdersDialog({
                     return (
                       <Fragment key={r.rowNo}>
                         <tr className={r.errors.length ? "bg-red-950/10" : ""}>
-                          <td className="px-2 py-1 truncate max-w-[200px]">{r.domain || <em className="text-muted-foreground">—</em>}</td>
+                          <td className="px-2 py-1 max-w-[200px]">
+                            <div className="truncate">{r.domain || <em className="text-muted-foreground">—</em>}</div>
+                            {provider === "inboxing" && r.domain && accountMap[r.domain] && (
+                              accountMap[r.domain].ok
+                                ? <div className="text-[9px] text-muted-foreground truncate">{accountMap[r.domain].accountLabel}</div>
+                                : <div className="text-[9px] text-amber-500 truncate" title={accountMap[r.domain].reason || ""}>⚠ unknown account</div>
+                            )}
+                          </td>
                           <td className="px-2 py-1 truncate max-w-[180px]">{r.companyName || <em className="text-muted-foreground">—</em>}</td>
                           <td className="px-2 py-1 truncate max-w-[120px]">{r.clientTag || <em className="text-muted-foreground">—</em>}</td>
                           <td className="px-2 py-1 max-w-[220px]">

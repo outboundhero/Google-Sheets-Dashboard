@@ -18,18 +18,6 @@ function envRead() {
   return { key, base };
 }
 
-function env() {
-  const readEnv = envRead();
-  const registrarId = process.env.INBOXING_REGISTRAR_CREDENTIAL_ID;
-  const cloudflareId = process.env.INBOXING_CLOUDFLARE_CREDENTIAL_ID;
-  if (!registrarId || !cloudflareId) {
-    throw new Error(
-      "Inboxing env missing (INBOXING_REGISTRAR_CREDENTIAL_ID / INBOXING_CLOUDFLARE_CREDENTIAL_ID)"
-    );
-  }
-  return { ...readEnv, registrarId, cloudflareId };
-}
-
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
@@ -106,8 +94,17 @@ export interface InboxingCreateOrderResult {
   raw: InboxingDomain;
 }
 
-export async function createDomain(input: CreateOrderInput): Promise<InboxingCreateOrderResult> {
-  const { registrarId, cloudflareId } = env();
+export async function createDomain(
+  input: CreateOrderInput,
+  credentials?: { registrarCredentialId?: string | null; cloudflareCredentialId?: string | null },
+): Promise<InboxingCreateOrderResult> {
+  // Credentials are resolved per-domain (from the domain's Porkbun account) by
+  // the caller; fall back to the legacy env vars if not supplied.
+  const registrarId = credentials?.registrarCredentialId || process.env.INBOXING_REGISTRAR_CREDENTIAL_ID;
+  const cloudflareId = credentials?.cloudflareCredentialId || process.env.INBOXING_CLOUDFLARE_CREDENTIAL_ID;
+  if (!registrarId || !cloudflareId) {
+    throw new Error("Inboxing createDomain: missing registrar/cloudflare credential for this domain's Porkbun account");
+  }
   const namesMap = new Map<string, { first_name: string; last_name: string; email_prefix?: string }>();
   for (const a of input.aliases) {
     const k = a.alias.toLowerCase();
