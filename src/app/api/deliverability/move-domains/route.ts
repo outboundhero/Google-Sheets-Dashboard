@@ -244,7 +244,9 @@ export async function POST(request: Request) {
     if (domains.length === 0) {
       return NextResponse.json({ error: "domains required" }, { status: 400 });
     }
-    const dryRun = body?.dryRun !== false;
+    // submit/poll are always apply-mode (the FE may omit dryRun:false on them).
+    const isApplyMode = body?.mode === "submit" || body?.mode === "poll";
+    const dryRun = !isApplyMode && body?.dryRun !== false;
     const target: BisonInstanceSlug | null = isInstanceSlug(body?.targetInstance) ? body.targetInstance : null;
 
     const rowsByName = await loadDomainRows(domains);

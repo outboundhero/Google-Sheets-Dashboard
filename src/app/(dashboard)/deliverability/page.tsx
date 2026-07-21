@@ -1676,7 +1676,7 @@ function DeliverabilityPageInner() {
         // 1. SUBMIT — queue every upload on Inboxing (fast, one request).
         const sr = await fetchJsonWithRetry<{ error?: string; results?: { domain: string; status: string; stage?: string; error?: string; sourceInstance?: string; expected?: number }[] }>(
           "/api/deliverability/move-domains",
-          { mode: "submit", domains: job.domains, targetInstance: job.targetInstance, platformConnectionId: job.platformConnectionId },
+          { mode: "submit", dryRun: false, domains: job.domains, targetInstance: job.targetInstance, platformConnectionId: job.platformConnectionId },
         );
         if (!sr.ok || !sr.data || sr.data.error) {
           const why = sr.data?.error || sr.error || (sr.status >= 500 ? "server timed out or crashed" : `HTTP ${sr.status}`);
@@ -1698,7 +1698,7 @@ function DeliverabilityPageInner() {
           if (dismissedRunsRef.current.has(moveId)) break;
           const pr = await fetchJsonWithRetry<{ error?: string; results?: { domain: string; status: string; sourceInstance?: string }[] }>(
             "/api/deliverability/move-domains",
-            { mode: "poll", inflight, targetInstance: job.targetInstance },
+            { mode: "poll", dryRun: false, inflight, targetInstance: job.targetInstance },
           );
           if (pr.ok && pr.data && !pr.data.error && Array.isArray(pr.data.results)) {
             const still: typeof inflight = [];
