@@ -1633,18 +1633,20 @@ function DeliverabilityPageInner() {
     }
   };
 
-  // Drives the batched move-to-instance apply. The dialog only collects the
-  // job; all progress lives in the top panel so it's visible page-wide and
-  // survives the dialog closing. Small batches (4 domains/request) keep each
-  // request far under the serverless timeout even while it polls for sender
-  // arrival on the target.
+  // Drives the move-to-instance apply as SUBMIT → POLL so progress is live and
+  // no single request blocks for minutes. The dialog only collects the job; all
+  // progress lives in the top panel (visible page-wide, survives dialog close).
+  //   1. one fast SUBMIT queues every domain's Inboxing platform-upload,
+  //   2. a light POLL loop checks the target every ~12s and finalizes each
+  //      domain the moment its senders have fully landed — updating the panel
+  //      per-domain — for up to ~12 min (Inboxing provisioning can be slow).
+  // Anything not landed by then stays "uploading" and is one-click re-runnable.
   const runMoveDomains = async (job: MoveJob) => {
-    const BATCH = 4;
     const counts = { done: 0, uploading: 0, skipped: 0, failed: 0 };
     const failures: { domain: string; stage?: string; error: string }[] = [];
-    const uploading: string[] = [];
     const skippedDomains: string[] = [];
     const movedBySource: Record<string, string[]> = {};
+    let inflight: { domain: string; sourceInstance: string; expected: number }[] = [];
     const moveId = runIdRef.current++;
     const base = {
       id: moveId,
@@ -1653,53 +1655,86 @@ function DeliverabilityPageInner() {
       total: job.domains.length,
       retryJob: job, // persisted so a refresh mid-run can auto-resume this job
     };
+    const resolved = () => counts.done + counts.skipped + counts.failed;
+    const paint = (running: boolean) =>
+      setMoveProgress({
+        ...base,
+        done: running ? resolved() : job.domains.length,
+        counts: { ...counts },
+        failures: [...failures],
+        uploading: inflight.map((f) => f.domain),
+        running,
+        queued: false,
+        movedBySource: { ...movedBySource },
+      });
+
     setMoveProgress({ ...base, done: 0, counts: { ...counts }, failures: [], uploading: [], running: false, queued: true, movedBySource: {} });
     await enqueueBisonRun(async () => {
-    if (dismissedRunsRef.current.has(moveId)) return; // cancelled while queued
-    setMoveProgress((prev) => (prev ? { ...prev, queued: false, running: true } : prev));
-    try {
-      for (let i = 0; i < job.domains.length; i += BATCH) {
-        const batch = job.domains.slice(i, i + BATCH);
-        // Auto-retries the request 3× (delays) on transport failure before we
-        // count the batch as failed.
-        const rr = await fetchJsonWithRetry<{ error?: string; results?: { domain: string; status: string; stage?: string; error?: string; sourceInstance?: string }[] }>(
+      if (dismissedRunsRef.current.has(moveId)) return; // cancelled while queued
+      setMoveProgress((prev) => (prev ? { ...prev, queued: false, running: true } : prev));
+      try {
+        // 1. SUBMIT — queue every upload on Inboxing (fast, one request).
+        const sr = await fetchJsonWithRetry<{ error?: string; results?: { domain: string; status: string; stage?: string; error?: string; sourceInstance?: string; expected?: number }[] }>(
           "/api/deliverability/move-domains",
-          { dryRun: false, domains: batch, targetInstance: job.targetInstance, platformConnectionId: job.platformConnectionId },
+          { mode: "submit", domains: job.domains, targetInstance: job.targetInstance, platformConnectionId: job.platformConnectionId },
         );
-        const d = rr.data;
-        if (!rr.ok || !d || d.error) {
-          const why = d?.error || rr.error || (rr.status >= 500 ? "server timed out or crashed" : `HTTP ${rr.status}`);
-          for (const dom of batch) { counts.failed++; failures.push({ domain: dom, error: why }); }
+        if (!sr.ok || !sr.data || sr.data.error) {
+          const why = sr.data?.error || sr.error || (sr.status >= 500 ? "server timed out or crashed" : `HTTP ${sr.status}`);
+          for (const dom of job.domains) { counts.failed++; failures.push({ domain: dom, error: why }); }
         } else {
-          for (const r of d.results || []) {
-            if (r.status === "done") {
-              counts.done++;
-              if (r.sourceInstance) (movedBySource[r.sourceInstance] ||= []).push(r.domain);
-            }
-            else if (r.status === "uploading") { counts.uploading++; uploading.push(r.domain); }
+          for (const r of sr.data.results || []) {
+            if (r.status === "uploading") { counts.uploading++; inflight.push({ domain: r.domain, sourceInstance: r.sourceInstance || "", expected: r.expected ?? 1 }); }
             else if (r.status === "skipped") { counts.skipped++; skippedDomains.push(r.domain); }
+            else if (r.status === "done") { counts.done++; if (r.sourceInstance) (movedBySource[r.sourceInstance] ||= []).push(r.domain); }
             else { counts.failed++; failures.push({ domain: r.domain, stage: r.stage, error: r.error || "failed" }); }
           }
         }
-        setMoveProgress({
-          ...base,
-          done: Math.min(i + BATCH, job.domains.length),
+        paint(true);
+
+        // 2. POLL — finalize each domain as its senders land on the target.
+        const deadline = Date.now() + 12 * 60 * 1000;
+        while (inflight.length > 0 && Date.now() < deadline && !dismissedRunsRef.current.has(moveId)) {
+          await new Promise((r) => setTimeout(r, 12_000));
+          if (dismissedRunsRef.current.has(moveId)) break;
+          const pr = await fetchJsonWithRetry<{ error?: string; results?: { domain: string; status: string; sourceInstance?: string }[] }>(
+            "/api/deliverability/move-domains",
+            { mode: "poll", inflight, targetInstance: job.targetInstance },
+          );
+          if (pr.ok && pr.data && !pr.data.error && Array.isArray(pr.data.results)) {
+            const still: typeof inflight = [];
+            for (const r of pr.data.results) {
+              if (r.status === "done") {
+                counts.done++; counts.uploading = Math.max(0, counts.uploading - 1);
+                if (r.sourceInstance) (movedBySource[r.sourceInstance] ||= []).push(r.domain);
+              } else {
+                const f = inflight.find((x) => x.domain === r.domain);
+                if (f) still.push(f);
+              }
+            }
+            inflight = still;
+          }
+          paint(true);
+        }
+      } finally {
+        // Remaining in-flight stay "uploading" (safe to re-run — upload skips
+        // already-verified). Offer Retry for failed + skipped + still-uploading.
+        counts.uploading = inflight.length;
+        const retryDomains = [...new Set([...failures.map((f) => f.domain), ...skippedDomains, ...inflight.map((f) => f.domain)])];
+        setMoveProgress((prev) => (prev ? {
+          ...prev,
+          done: job.domains.length,
           counts: { ...counts },
           failures: [...failures],
-          uploading: [...uploading],
-          running: true,
+          uploading: inflight.map((f) => f.domain),
+          running: false,
           queued: false,
           movedBySource: { ...movedBySource },
-        });
+          retryJob: job,
+          retryDomains,
+        } : prev));
+        setSelectedDomains(new Set());
+        await Promise.all([loadDomains(), mutateDomainInstances()]);
       }
-    } finally {
-      // Never leave the panel stuck on "running". Stash the skipped + failed
-      // domains so the panel can offer a one-click Retry of just those.
-      const retryDomains = [...new Set([...failures.map((f) => f.domain), ...skippedDomains])];
-      setMoveProgress((prev) => (prev ? { ...prev, running: false, retryJob: job, retryDomains } : prev));
-      setSelectedDomains(new Set());
-      await Promise.all([loadDomains(), mutateDomainInstances()]);
-    }
     });
   };
 

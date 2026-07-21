@@ -303,10 +303,17 @@ export async function POST(request: Request) {
     }
 
     // ── Apply ───────────────────────────────────────────────────────────────
-    const platformConnectionId = String(body?.platformConnectionId || "");
-    if (!target || !platformConnectionId) {
-      return NextResponse.json({ error: "targetInstance and platformConnectionId required" }, { status: 400 });
-    }
+    // Three modes:
+    //   "submit"   — Phase 1 only (tag-sync + upload). Returns each domain as
+    //                "uploading" with {sourceInstance, expected} for the FE to poll.
+    //   "poll"     — given the FE's in-flight set, does ONE arrival check per
+    //                domain and finalizes any that have fully landed. Fast.
+    //   "combined" — legacy: submit + poll + finalize in one long request.
+    // The FE uses submit+poll so progress is live and no single request blocks
+    // for minutes; combined is kept for backward-compat.
+    const mode: "submit" | "poll" | "combined" =
+      body?.mode === "submit" ? "submit" : body?.mode === "poll" ? "poll" : "combined";
+    const supabase = getSupabaseAdmin();
 
     interface MoveResult {
       domain: string;
@@ -315,10 +322,45 @@ export async function POST(request: Request) {
       detail?: string;
       error?: string;
       sourceInstance?: BisonInstanceSlug;
+      expected?: number;
+      landed?: number;
     }
     const results: MoveResult[] = [];
-    const supabase = getSupabaseAdmin();
-    const deadline = Date.now() + 240_000; // leave headroom under maxDuration
+
+    // ── POLL: check arrival for the FE-supplied in-flight set + finalize. ──
+    if (mode === "poll") {
+      if (!target) return NextResponse.json({ error: "targetInstance required" }, { status: 400 });
+      const inflight = (Array.isArray(body?.inflight) ? body.inflight : []) as { domain: string; sourceInstance: string; expected: number }[];
+      let anyArrived = false;
+      for (const f of inflight) {
+        const dom = String(f.domain || "").toLowerCase();
+        if (!dom || !isInstanceSlug(f.sourceInstance)) { results.push({ domain: dom, status: "failed", error: "bad in-flight entry" }); continue; }
+        const expected = Number(f.expected) > 0 ? Number(f.expected) : 1;
+        try {
+          const senders = await fetchSendersOnInstance(target, dom);
+          if (senders.length >= expected && senders.length > 0) {
+            await registerOnTarget(target, dom, senders);
+            await captureCarryover(f.sourceInstance as BisonInstanceSlug, target, dom);
+            await supabase.from("inbox_orders").update({ instance: target }).eq("provider", "inboxing").eq("domain", dom);
+            results.push({ domain: dom, status: "done", sourceInstance: f.sourceInstance as BisonInstanceSlug, landed: senders.length, detail: `${senders.length} inboxes now on ${target}` });
+            anyArrived = true;
+          } else {
+            results.push({ domain: dom, status: "uploading", landed: senders.length, expected, detail: "still landing" });
+          }
+        } catch (e) {
+          results.push({ domain: dom, status: "uploading", error: e instanceof Error ? e.message : "poll failed" });
+        }
+      }
+      if (anyArrived) { try { await supabase.rpc("rebuild_domain_stats"); } catch { /* best-effort */ } }
+      return NextResponse.json({ results, mode: "poll" });
+    }
+
+    // ── SUBMIT / COMBINED: need target + connection. ──
+    const platformConnectionId = String(body?.platformConnectionId || "");
+    if (!target || !platformConnectionId) {
+      return NextResponse.json({ error: "targetInstance and platformConnectionId required" }, { status: 400 });
+    }
+    const deadline = Date.now() + 240_000; // combined-mode polling headroom
 
     // Phase 1 — per domain: validate, tag-sync, upload. Fast calls.
     interface InFlight { domain: string; source: BisonInstanceSlug; expected: number; senders?: SenderEmail[] }
@@ -364,6 +406,16 @@ export async function POST(request: Request) {
       }
     }
 
+    // SUBMIT mode: uploads are queued on Inboxing — hand the in-flight set back
+    // to the FE, which polls (mode:"poll") with live progress. No blocking wait.
+    if (mode === "submit") {
+      for (const f of inFlight) {
+        results.push({ domain: f.domain, status: "uploading", sourceInstance: f.source, expected: f.expected, detail: "upload submitted" });
+      }
+      return NextResponse.json({ results, mode: "submit" });
+    }
+
+    // ── COMBINED (legacy) — Phase 2 poll + Phase 3 finalize in-request. ──
     // Phase 2 — poll the target until each domain's senders are visible.
     const arrived: InFlight[] = [];
     let pending = [...inFlight];
