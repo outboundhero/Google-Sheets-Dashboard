@@ -533,24 +533,28 @@ export default function InboxOrdersPage() {
                   checked={autoNames}
                   onChange={(e) => { setAutoNames(e.target.checked); setPreviewAliases(null); }}
                 />
-                Auto-generate female name{personaCount === 2 ? "s" : ""}
+                Auto-generate female names
               </label>
-              <div className="flex items-center gap-2 text-xs">
-                <span className="text-muted-foreground">Number of names:</span>
-                {[1, 2].map((n) => (
-                  <button
-                    key={n}
-                    type="button"
-                    onClick={() => { setPersonaCount(n as 1 | 2); setPreviewAliases(null); }}
-                    className={`rounded border px-2 py-0.5 ${personaCount === n ? "bg-primary text-primary-foreground border-primary" : "border-muted-foreground/30 hover:bg-muted/50"}`}
-                  >
-                    {n}
-                  </button>
-                ))}
-                <span className="text-[11px] text-muted-foreground">
-                  {personaCount === 1 ? "all mailboxes use one name" : "mailboxes split 50/50 across two names"}
-                </span>
-              </div>
+              {autoNames ? (
+                <p className="text-[11px] text-muted-foreground">Every mailbox gets its own unique name — no two mailboxes share a name.</p>
+              ) : (
+                <div className="flex items-center gap-2 text-xs">
+                  <span className="text-muted-foreground">Number of names:</span>
+                  {[1, 2].map((n) => (
+                    <button
+                      key={n}
+                      type="button"
+                      onClick={() => { setPersonaCount(n as 1 | 2); setPreviewAliases(null); }}
+                      className={`rounded border px-2 py-0.5 ${personaCount === n ? "bg-primary text-primary-foreground border-primary" : "border-muted-foreground/30 hover:bg-muted/50"}`}
+                    >
+                      {n}
+                    </button>
+                  ))}
+                  <span className="text-[11px] text-muted-foreground">
+                    {personaCount === 1 ? "all mailboxes use one name" : "mailboxes split 50/50 across two names"}
+                  </span>
+                </div>
+              )}
               {!autoNames && (
                 <div className="space-y-2">
                   {Array.from({ length: personaCount }).map((_, i) => (

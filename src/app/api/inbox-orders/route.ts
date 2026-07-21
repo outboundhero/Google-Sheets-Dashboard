@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { getSupabaseAdmin } from "@/lib/supabase";
-import { generateAliases, buildAliasesFromNameSpec } from "@/lib/inbox-order-aliases";
+import { generateUniqueIdentities, buildAliasesFromNameSpec } from "@/lib/inbox-order-aliases";
 import * as scaledmail from "@/lib/scaledmail";
 import * as milkbox from "@/lib/milkbox";
 import * as inboxing from "@/lib/inboxing";
@@ -96,7 +96,8 @@ export async function POST(request: Request) {
       };
       aliases = (await buildAliasesFromNameSpec(provider, spec)).aliases;
     } else {
-      aliases = await generateAliases(provider, mailboxCount);
+      // Legacy default = auto: a unique full name per mailbox.
+      aliases = await generateUniqueIdentities(provider, mailboxCount);
     }
 
     const orderInput: CreateOrderInput = {

@@ -72,14 +72,11 @@ function parseRows(text: string, count: number): InboxOrderAlias[] {
   return out;
 }
 
-export async function generateAliases(
-  provider: InboxOrderProvider,
-  count?: number
-): Promise<InboxOrderAlias[]> {
+// One OpenAI call → up to `count` identity rows (name|alias), aliases unique
+// within this call.
+async function fetchIdentityRows(provider: InboxOrderProvider, count: number): Promise<InboxOrderAlias[]> {
   const apiKey = process.env.OPENAI_API_KEY;
   if (!apiKey) throw new Error("OPENAI_API_KEY missing");
-
-  const targetCount = count ?? MAILBOX_COUNT_BY_PROVIDER[provider];
 
   const res = await fetch("https://api.openai.com/v1/chat/completions", {
     method: "POST",
@@ -91,7 +88,7 @@ export async function generateAliases(
       model: MODEL,
       messages: [
         { role: "system", content: SYSTEM_PROMPT },
-        { role: "user", content: buildUserPrompt(provider, targetCount) },
+        { role: "user", content: buildUserPrompt(provider, count) },
       ],
       temperature: 0.9,
     }),
@@ -107,12 +104,58 @@ export async function generateAliases(
   if (!content || typeof content !== "string") {
     throw new Error("OpenAI returned no content");
   }
+  return parseRows(content, count);
+}
 
-  const aliases = parseRows(content, targetCount);
+export async function generateAliases(
+  provider: InboxOrderProvider,
+  count?: number
+): Promise<InboxOrderAlias[]> {
+  const targetCount = count ?? MAILBOX_COUNT_BY_PROVIDER[provider];
+  const aliases = await fetchIdentityRows(provider, targetCount);
   if (aliases.length < targetCount) {
     throw new Error(`Aliases generator returned ${aliases.length}/${targetCount} valid rows`);
   }
   return aliases.slice(0, targetCount);
+}
+
+// Auto mode with UNIQUE identities: every mailbox gets its own distinct full
+// name AND alias (no two mailboxes share a name within an order). Requests a
+// buffer + tops up across a few calls to absorb duplicate names the model
+// returns.
+export async function generateUniqueIdentities(
+  provider: InboxOrderProvider,
+  count: number
+): Promise<InboxOrderAlias[]> {
+  const seenNames = new Set<string>();
+  const seenAliases = new Set<string>();
+  const out: InboxOrderAlias[] = [];
+
+  for (let attempt = 0; attempt < 6 && out.length < count; attempt++) {
+    const need = count - out.length;
+    // Ask for more than we need so name/alias collisions still leave enough.
+    const ask = Math.min(count + 15, need + Math.ceil(need * 0.4) + 5);
+    let rows: InboxOrderAlias[] = [];
+    try {
+      rows = await fetchIdentityRows(provider, ask);
+    } catch (e) {
+      if (attempt === 0) throw e; // first call failing is fatal; later ones we tolerate
+      break;
+    }
+    for (const r of rows) {
+      const nameKey = `${r.first_name} ${r.last_name}`.trim().toLowerCase();
+      if (!nameKey || seenNames.has(nameKey) || seenAliases.has(r.alias)) continue;
+      seenNames.add(nameKey);
+      seenAliases.add(r.alias);
+      out.push(r);
+      if (out.length >= count) break;
+    }
+  }
+
+  if (out.length < count) {
+    throw new Error(`Could only generate ${out.length}/${count} unique sender names — try again`);
+  }
+  return out.slice(0, count);
 }
 
 // ── 1–2 persona model ────────────────────────────────────────────────────────
@@ -222,17 +265,22 @@ export async function buildAliasesFromNameSpec(
   spec: NameSpec,
 ): Promise<{ personas: Persona[]; aliases: InboxOrderAlias[] }> {
   const mailboxCount = MAILBOX_COUNT_BY_PROVIDER[provider];
+
+  // AUTO: every mailbox gets its own unique full name + alias (personaCount is
+  // ignored — it only applies to manual, where the user supplies 1–2 names).
+  if (spec.nameMode !== "manual") {
+    const aliases = await generateUniqueIdentities(provider, mailboxCount);
+    const personas = aliases.map((a) => ({ first_name: a.first_name, last_name: a.last_name }));
+    return { personas, aliases };
+  }
+
+  // MANUAL: use exactly the 1–2 supplied names, shared/split across mailboxes.
   const personaCount = spec.personaCount === 2 ? 2 : 1;
-  let personas: Persona[];
-  if (spec.nameMode === "manual") {
-    personas = (spec.names || [])
-      .filter((p) => p.first_name?.trim() && p.last_name?.trim())
-      .slice(0, personaCount);
-    if (personas.length < personaCount) {
-      throw new Error(`Provide ${personaCount} name${personaCount === 1 ? "" : "s"} with a first and last name`);
-    }
-  } else {
-    personas = await generateFemalePersonas(personaCount);
+  const personas = (spec.names || [])
+    .filter((p) => p.first_name?.trim() && p.last_name?.trim())
+    .slice(0, personaCount);
+  if (personas.length < personaCount) {
+    throw new Error(`Provide ${personaCount} name${personaCount === 1 ? "" : "s"} with a first and last name`);
   }
   return { personas, aliases: buildAliases(personas, mailboxCount) };
 }

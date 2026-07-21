@@ -368,25 +368,27 @@ export function BulkCreateInboxOrdersDialog({
         <div className="flex flex-wrap items-center gap-x-4 gap-y-2 rounded-md border p-2 text-xs">
           <label className="flex items-center gap-2 font-medium">
             <input type="checkbox" checked={autoNames} onChange={(e) => setAutoNames(e.target.checked)} disabled={submitting} />
-            Auto-generate female name{personaCount === 2 ? "s" : ""}
+            Auto-generate female names
           </label>
-          <div className="flex items-center gap-2">
-            <span className="text-muted-foreground">Number of names:</span>
-            {[1, 2].map((n) => (
-              <button
-                key={n}
-                type="button"
-                disabled={submitting}
-                onClick={() => setPersonaCount(n as 1 | 2)}
-                className={`rounded border px-2 py-0.5 ${personaCount === n ? "bg-primary text-primary-foreground border-primary" : "border-muted-foreground/30 hover:bg-muted/50"}`}
-              >
-                {n}
-              </button>
-            ))}
-          </div>
+          {!autoNames && (
+            <div className="flex items-center gap-2">
+              <span className="text-muted-foreground">Number of names:</span>
+              {[1, 2].map((n) => (
+                <button
+                  key={n}
+                  type="button"
+                  disabled={submitting}
+                  onClick={() => setPersonaCount(n as 1 | 2)}
+                  className={`rounded border px-2 py-0.5 ${personaCount === n ? "bg-primary text-primary-foreground border-primary" : "border-muted-foreground/30 hover:bg-muted/50"}`}
+                >
+                  {n}
+                </button>
+              ))}
+            </div>
+          )}
           <span className="text-[11px] text-muted-foreground">
             {autoNames
-              ? personaCount === 1 ? "one name per domain" : "two names split 50/50 per domain"
+              ? "every mailbox gets its own unique name"
               : personaCount === 2 ? "provide name1 + name2 columns below" : "provide the name1 column below"}
           </span>
         </div>
@@ -466,9 +468,11 @@ export function BulkCreateInboxOrdersDialog({
                 <tbody className="divide-y">
                   {parsed.map((r) => {
                     const aliases = rowAliases[r.domain];
-                    const summary = rowNames[r.domain]
-                      ? [rowNames[r.domain].name1, rowNames[r.domain].name2].filter(Boolean).join(" / ")
-                      : "";
+                    const summary = autoNames
+                      ? "unique per mailbox"
+                      : rowNames[r.domain]
+                        ? [rowNames[r.domain].name1, rowNames[r.domain].name2].filter(Boolean).join(" / ")
+                        : "";
                     const isOpen = expanded === r.domain;
                     return (
                       <Fragment key={r.rowNo}>
