@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { getConfig } from "@/lib/sheets-config";
+import { getConfig, resolveSpreadsheetId } from "@/lib/sheets-config";
 import { getSheetMetadata, appendDomainsToSheet } from "@/lib/google-sheets";
 
 interface SheetInfo {
@@ -26,7 +26,7 @@ async function getAvailableSheets(): Promise<SheetInfo[]> {
     const batch = config.sheets.slice(i, i + 5);
     const results = await Promise.allSettled(
       batch.map(async (sheet) => {
-        const meta = await getSheetMetadata(sheet.id);
+        const meta = await getSheetMetadata(resolveSpreadsheetId(sheet));
         if (meta.sheetNames.includes("Domains")) {
           return { clientTag: sheet.clientTag, sheetName: meta.title, sheetId: sheet.id };
         }
@@ -87,7 +87,7 @@ export async function POST(request: Request) {
         { status: 404 }
       );
     }
-    const sheetId = tracked.id;
+    const sheetId = resolveSpreadsheetId(tracked);
     const sheetName = tracked.name;
 
     // Append domains (appendDomainsToSheet reads existing for dedup + writes — 2 API calls total)
