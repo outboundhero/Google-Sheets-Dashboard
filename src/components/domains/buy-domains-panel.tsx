@@ -18,12 +18,15 @@ import {
   ListPlus,
   Clock,
   ShoppingCart,
+  ShieldAlert,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useAuth } from "@/lib/auth-context";
 import { useDomains, type DiscoveredDomain } from "@/lib/hooks/use-domains";
 import { useBuyQueue, type BuyQueueRow } from "@/lib/hooks/use-buy-queue";
 import { useDiscovery, TLDS, type Tld } from "./discovery-context";
+import { useDomainOps } from "./domain-ops-context";
+import { BlacklistBadge } from "./blacklist-badge";
 
 function formatRelative(iso: string): string {
   const d = new Date(iso);
@@ -66,6 +69,7 @@ export function BuyDomainsPanel() {
 
   // Queue
   const { counts: queueCounts, nextEligibleAt, inWindow, recent: queueRecent, mutate: mutateQueue } = useBuyQueue(12000);
+  const { runSurbl, runSpamhaus } = useDomainOps();
   const [enqueuing, setEnqueuing] = useState(false);
   const [enqueueMsg, setEnqueueMsg] = useState<string | null>(null);
   const [deleting, setDeleting] = useState(false);
@@ -347,6 +351,12 @@ export function BuyDomainsPanel() {
             <span className="text-xs font-medium">{selected.size} selected</span>
             <div className="flex items-center gap-2">
               <Button variant="ghost" size="sm" className="h-7 text-xs" onClick={() => setSelected(new Set())}>Clear</Button>
+              <Button variant="outline" size="sm" className="h-7 text-xs gap-1.5" onClick={() => runSurbl(Array.from(selected))}>
+                <ShieldAlert className="h-3 w-3" /> Check SURBL
+              </Button>
+              <Button variant="outline" size="sm" className="h-7 text-xs gap-1.5" onClick={() => runSpamhaus(Array.from(selected))}>
+                <ShieldAlert className="h-3 w-3" /> Check Spamhaus
+              </Button>
               <Button
                 variant="outline"
                 size="sm"
@@ -389,6 +399,8 @@ export function BuyDomainsPanel() {
                   <th className="text-left font-medium px-3 py-2.5">Domain</th>
                   <th className="text-right font-medium px-3 py-2.5 w-[120px]">Price</th>
                   <th className="text-right font-medium px-3 py-2.5 w-[160px]">Renewal</th>
+                  <th className="text-center font-medium px-3 py-2.5 w-[80px]">SURBL</th>
+                  <th className="text-center font-medium px-3 py-2.5 w-[90px]">Spamhaus</th>
                   <th className="text-right font-medium px-3 py-2.5 w-[140px]">Discovered</th>
                 </tr>
               </thead>
@@ -486,6 +498,8 @@ function DomainRow({ d, selected, onToggle, disabled }: {
       <td className="px-3 py-2.5 text-right tabular-nums text-xs text-muted-foreground">
         {d.regular_price_usd != null ? `$${Number(d.regular_price_usd).toFixed(2)}/yr` : "—"}
       </td>
+      <td className="px-3 py-2.5 text-center"><BlacklistBadge listed={d.surbl_listed} checkedAt={d.surbl_checked_at} /></td>
+      <td className="px-3 py-2.5 text-center"><BlacklistBadge listed={d.spamhaus_listed} checkedAt={d.spamhaus_checked_at} /></td>
       <td className="px-3 py-2.5 text-right text-xs text-muted-foreground">
         {formatRelative(d.discovered_at)}
       </td>

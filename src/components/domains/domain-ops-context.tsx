@@ -15,6 +15,8 @@ interface DomainOpsValue {
   panels: BulkPanel[];
   runAutoRenew: (domains: string[], enabled: boolean) => void;
   runHide: (domains: string[], hidden: boolean) => void;
+  runSurbl: (domains: string[]) => void;
+  runSpamhaus: (domains: string[]) => void;
   dismiss: (id: number) => void;
   dismissAll: () => void;
   purchaseNotice: { count: number } | null;
@@ -109,6 +111,7 @@ export function DomainOpsProvider({ children }: { children: React.ReactNode }) {
         patchPanel(id, { running: false, queued: false, retryDomains: Array.from(new Set(retry)) });
         globalMutate("/api/domains/inventory/list");
         globalMutate("/api/domains/purchased");
+        globalMutate("/api/domains/list");
       }
     });
   }, [enqueue, replacePanel, patchPanel]);
@@ -119,6 +122,14 @@ export function DomainOpsProvider({ children }: { children: React.ReactNode }) {
 
   const runHide = useCallback((domains: string[], hidden: boolean) =>
     runBulk({ kind: "hide", title: hidden ? "Hide domains" : "Unhide domains", url: "/api/domains/inventory/hide", body: (b) => ({ domains: b, hidden }), domains, enabled: hidden, batchSize: 200 }),
+  [runBulk]);
+
+  const runSurbl = useCallback((domains: string[]) =>
+    runBulk({ kind: "surbl", title: "SURBL check", url: "/api/domains/blacklist-check", body: (b) => ({ domains: b }), domains, batchSize: 200 }),
+  [runBulk]);
+
+  const runSpamhaus = useCallback((domains: string[]) =>
+    runBulk({ kind: "spamhaus", title: "Spamhaus check", url: "/api/domains/spamhaus-check", body: (b) => ({ domains: b }), domains, batchSize: 200 }),
   [runBulk]);
 
   const dismiss = useCallback((id: number) => {
@@ -146,7 +157,7 @@ export function DomainOpsProvider({ children }: { children: React.ReactNode }) {
   }, [registered]);
 
   return (
-    <Ctx.Provider value={{ panels, runAutoRenew, runHide, dismiss, dismissAll, purchaseNotice, dismissPurchase }}>
+    <Ctx.Provider value={{ panels, runAutoRenew, runHide, runSurbl, runSpamhaus, dismiss, dismissAll, purchaseNotice, dismissPurchase }}>
       {children}
     </Ctx.Provider>
   );

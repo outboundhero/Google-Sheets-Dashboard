@@ -18,7 +18,7 @@ function fmtCountdown(iso: string | null): string {
 }
 
 export function DomainOpsPanels() {
-  const { panels, dismiss, dismissAll, runAutoRenew, runHide, purchaseNotice, dismissPurchase } = useDomainOps();
+  const { panels, dismiss, dismissAll, runAutoRenew, runHide, runSurbl, runSpamhaus, purchaseNotice, dismissPurchase } = useDomainOps();
 
   // Count chips.
   const { domains: available } = useDomains(0);
@@ -29,6 +29,8 @@ export function DomainOpsPanels() {
   const retry = (p: BulkPanel) => {
     if (p.kind === "auto-renew" && p.enabled !== undefined) runAutoRenew(p.retryDomains, p.enabled);
     else if (p.kind === "hide" && p.enabled !== undefined) runHide(p.retryDomains, p.enabled);
+    else if (p.kind === "surbl") runSurbl(p.retryDomains);
+    else if (p.kind === "spamhaus") runSpamhaus(p.retryDomains);
   };
 
   return (

@@ -12,6 +12,10 @@ export interface DiscoveredDomain {
   registered_at: string | null;
   auto_renew_disabled: boolean;
   appended_to_sheet: boolean;
+  surbl_listed: boolean | null;
+  surbl_checked_at: string | null;
+  spamhaus_listed: boolean | null;
+  spamhaus_checked_at: string | null;
 }
 
 const fetcher = (url: string) => fetch(url).then((r) => r.json());

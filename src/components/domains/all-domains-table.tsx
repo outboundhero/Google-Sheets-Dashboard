@@ -1,7 +1,7 @@
 "use client";
 
 import { useMemo, useState, useRef, useEffect, useCallback } from "react";
-import { Globe, Search, X, RefreshCw, Loader2, ArrowUpDown, Signal, Check, RotateCw, EyeOff, Eye, ChevronDown, ChevronRight } from "lucide-react";
+import { Globe, Search, X, RefreshCw, Loader2, ArrowUpDown, Signal, Check, RotateCw, EyeOff, Eye, ChevronDown, ChevronRight, ShieldAlert } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useAuth } from "@/lib/auth-context";
 import { useDomainInventory, type InventoryRow } from "@/lib/hooks/use-domain-inventory";
@@ -9,6 +9,7 @@ import { ImportDomainsDialog } from "./import-domains-dialog";
 import { useInventory } from "./inventory-context";
 import { useDomainOps } from "./domain-ops-context";
 import { DomainFilterBuilder, applyFilters, type FilterField, type FilterCondition, type FilterMode } from "./domain-filter-builder";
+import { BlacklistBadge } from "./blacklist-badge";
 
 const PAGE_SIZE = 100;
 
@@ -51,7 +52,7 @@ export function AllDomainsTable() {
   const [hiddenOpen, setHiddenOpen] = useState(false);
 
   // ── Bulk selection (click + drag) ──────────────────────────────────────
-  const { runAutoRenew, runHide } = useDomainOps();
+  const { runAutoRenew, runHide, runSurbl, runSpamhaus } = useDomainOps();
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const dragging = useRef(false);
   const dragAdd = useRef(true);
@@ -219,6 +220,12 @@ export function AllDomainsTable() {
             <Button variant="outline" size="sm" className="h-7 text-xs gap-1.5" onClick={() => { runHide(selectedList, false); setSelected(new Set()); }}>
               <Eye className="h-3 w-3" /> Unhide
             </Button>
+            <Button variant="outline" size="sm" className="h-7 text-xs gap-1.5" onClick={() => { runSurbl(selectedList); }}>
+              <ShieldAlert className="h-3 w-3" /> Check SURBL
+            </Button>
+            <Button variant="outline" size="sm" className="h-7 text-xs gap-1.5" onClick={() => { runSpamhaus(selectedList); }}>
+              <ShieldAlert className="h-3 w-3" /> Check Spamhaus
+            </Button>
             <Button variant="ghost" size="sm" className="h-7 text-xs" onClick={() => setSelected(new Set())}>Clear</Button>
           </div>
         </div>
@@ -254,6 +261,8 @@ export function AllDomainsTable() {
                   <SortableTh label="Provider" k="provider" sortKey={sortKey} onClick={toggleSort} className="text-left w-[130px]" />
                   <SortableTh label="Expiry" k="expireDate" sortKey={sortKey} onClick={toggleSort} className="text-right w-[130px]" />
                   <th className="text-right font-medium px-3 py-2.5 w-[90px]">Auto-renew</th>
+                  <th className="text-center font-medium px-3 py-2.5 w-[80px]">SURBL</th>
+                  <th className="text-center font-medium px-3 py-2.5 w-[90px]">Spamhaus</th>
                 </tr>
               </thead>
               <tbody className="divide-y">
@@ -307,6 +316,8 @@ export function AllDomainsTable() {
                     <th className="text-left font-medium px-3 py-2.5 w-[130px]">Provider</th>
                     <th className="text-right font-medium px-3 py-2.5 w-[130px]">Expiry</th>
                     <th className="text-right font-medium px-3 py-2.5 w-[90px]">Auto-renew</th>
+                    <th className="text-center font-medium px-3 py-2.5 w-[80px]">SURBL</th>
+                    <th className="text-center font-medium px-3 py-2.5 w-[90px]">Spamhaus</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y">
@@ -373,6 +384,8 @@ function Row({ r, selected, onMouseDown, onMouseEnter }: {
       <td className="px-3 py-2.5 text-right text-xs">
         {r.autoRenew == null ? <span className="text-muted-foreground">—</span> : r.autoRenew ? <span className="text-amber-500">on</span> : <span className="text-muted-foreground">off</span>}
       </td>
+      <td className="px-3 py-2.5 text-center"><BlacklistBadge listed={r.surblListed} checkedAt={r.surblCheckedAt} /></td>
+      <td className="px-3 py-2.5 text-center"><BlacklistBadge listed={r.spamhausListed} checkedAt={r.spamhausCheckedAt} /></td>
     </tr>
   );
 }

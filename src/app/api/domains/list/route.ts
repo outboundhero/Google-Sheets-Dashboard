@@ -8,7 +8,7 @@ export async function GET() {
     // real Porkbun price so the user can decide.
     const { data, error } = await supabase
       .from("porkbun_domains")
-      .select("domain, price_usd, regular_price_usd, niche, discovered_at, registered, registered_at, auto_renew_disabled, appended_to_sheet")
+      .select("domain, price_usd, regular_price_usd, niche, discovered_at, registered, registered_at, auto_renew_disabled, appended_to_sheet, surbl_listed, surbl_checked_at, spamhaus_listed, spamhaus_checked_at")
       .eq("registered", false)
       .eq("available", true)
       .order("price_usd", { ascending: true })

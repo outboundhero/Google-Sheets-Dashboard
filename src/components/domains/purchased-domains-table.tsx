@@ -1,12 +1,13 @@
 "use client";
 
 import { useMemo, useState, useRef, useEffect, useCallback } from "react";
-import { Globe, Search, X, RefreshCw, Loader2, ShoppingBag, Check, RotateCw, EyeOff, Eye, ChevronDown, ChevronRight } from "lucide-react";
+import { Globe, Search, X, RefreshCw, Loader2, ShoppingBag, Check, RotateCw, EyeOff, Eye, ChevronDown, ChevronRight, ShieldAlert } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { usePurchasedDomains, type PurchasedRow } from "@/lib/hooks/use-purchased-domains";
 import { useAuth } from "@/lib/auth-context";
 import { useDomainOps } from "./domain-ops-context";
 import { DomainFilterBuilder, applyFilters, type FilterField, type FilterCondition, type FilterMode } from "./domain-filter-builder";
+import { BlacklistBadge } from "./blacklist-badge";
 
 const PROVIDER_BADGE: Record<string, string> = {
   google: "bg-blue-500/10 text-blue-600 border-blue-500/20",
@@ -30,7 +31,7 @@ export function PurchasedDomainsTable() {
   const { role } = useAuth();
   const isAdmin = role === "admin";
   const { rows, counts, isLoading, mutate } = usePurchasedDomains();
-  const { runAutoRenew, runHide } = useDomainOps();
+  const { runAutoRenew, runHide, runSurbl, runSpamhaus } = useDomainOps();
   const [search, setSearch] = useState("");
   const [refreshing, setRefreshing] = useState(false);
   const [conditions, setConditions] = useState<FilterCondition[]>([]);
@@ -149,6 +150,12 @@ export function PurchasedDomainsTable() {
             <Button variant="outline" size="sm" className="h-7 text-xs gap-1.5" onClick={() => { runHide(selectedList, false); setSelected(new Set()); }}>
               <Eye className="h-3 w-3" /> Unhide
             </Button>
+            <Button variant="outline" size="sm" className="h-7 text-xs gap-1.5" onClick={() => { runSurbl(selectedList); }}>
+              <ShieldAlert className="h-3 w-3" /> Check SURBL
+            </Button>
+            <Button variant="outline" size="sm" className="h-7 text-xs gap-1.5" onClick={() => { runSpamhaus(selectedList); }}>
+              <ShieldAlert className="h-3 w-3" /> Check Spamhaus
+            </Button>
             <Button variant="ghost" size="sm" className="h-7 text-xs" onClick={() => setSelected(new Set())}>Clear</Button>
           </div>
         </div>
@@ -184,6 +191,8 @@ export function PurchasedDomainsTable() {
                   <th className="text-right font-medium px-3 py-2.5 w-[130px]">Renewal</th>
                   <th className="text-left font-medium px-3 py-2.5 w-[100px]">In use</th>
                   <th className="text-left font-medium px-3 py-2.5 w-[130px]">Provider</th>
+                  <th className="text-center font-medium px-3 py-2.5 w-[80px]">SURBL</th>
+                  <th className="text-center font-medium px-3 py-2.5 w-[90px]">Spamhaus</th>
                 </tr>
               </thead>
               <tbody className="divide-y">
@@ -285,6 +294,8 @@ function Row({ r, selected, onMouseDown, onMouseEnter }: {
           {r.provider}
         </span>
       </td>
+      <td className="px-3 py-2.5 text-center"><BlacklistBadge listed={r.surblListed} checkedAt={r.surblCheckedAt} /></td>
+      <td className="px-3 py-2.5 text-center"><BlacklistBadge listed={r.spamhausListed} checkedAt={r.spamhausCheckedAt} /></td>
     </tr>
   );
 }
