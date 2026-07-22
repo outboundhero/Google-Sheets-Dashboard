@@ -1,12 +1,13 @@
 "use client";
 
-import { useMemo, useState } from "react";
-import { Globe, Search, X, RefreshCw, Loader2, ArrowUpDown, Signal } from "lucide-react";
+import { useMemo, useState, useRef, useEffect, useCallback } from "react";
+import { Globe, Search, X, RefreshCw, Loader2, ArrowUpDown, Signal, Check, RotateCw } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useAuth } from "@/lib/auth-context";
 import { useDomainInventory, type InventoryRow } from "@/lib/hooks/use-domain-inventory";
 import { ImportDomainsDialog } from "./import-domains-dialog";
 import { useInventory } from "./inventory-context";
+import { useDomainOps } from "./domain-ops-context";
 
 const PAGE_SIZE = 100;
 
@@ -45,6 +46,27 @@ export function AllDomainsTable() {
   const [sortDir, setSortDir] = useState<"asc" | "desc">("asc");
   const [page, setPage] = useState(0);
 
+  // ── Bulk selection (click + drag) ──────────────────────────────────────
+  const { runAutoRenew } = useDomainOps();
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const dragging = useRef(false);
+  const dragAdd = useRef(true);
+  useEffect(() => {
+    const up = () => { dragging.current = false; };
+    window.addEventListener("mouseup", up);
+    return () => window.removeEventListener("mouseup", up);
+  }, []);
+  const applyDrag = useCallback((d: string) => setSelected((s) => {
+    const n = new Set(s);
+    if (dragAdd.current) n.add(d); else n.delete(d);
+    return n;
+  }), []);
+  const startDrag = useCallback((d: string) => {
+    dragging.current = true;
+    dragAdd.current = !selected.has(d);
+    applyDrag(d);
+  }, [selected, applyDrag]);
+
   const sources = useMemo(() => Object.keys(counts?.bySource || {}).sort(), [counts]);
   const providers = useMemo(() => Object.keys(counts?.byProvider || {}).sort(), [counts]);
 
@@ -81,6 +103,11 @@ export function AllDomainsTable() {
   };
   // Reset to the first page whenever a filter/search changes.
   const withReset = <T,>(setter: (v: T) => void) => (v: T) => { setter(v); setPage(0); };
+
+  // Select-all applies to the whole filtered set (across pages).
+  const allFilteredSelected = filtered.length > 0 && filtered.every((r) => selected.has(r.domain));
+  const toggleAll = () => setSelected(allFilteredSelected ? new Set() : new Set(filtered.map((r) => r.domain)));
+  const selectedList = useMemo(() => Array.from(selected), [selected]);
 
   return (
     <div className="space-y-4">
@@ -143,6 +170,22 @@ export function AllDomainsTable() {
         {syncMsg && <div className="text-xs text-muted-foreground border-t pt-2">{syncMsg}</div>}
       </div>
 
+      {/* Selection action bar */}
+      {isAdmin && selected.size > 0 && (
+        <div className="sticky top-0 z-30 flex flex-wrap items-center justify-between gap-2 rounded-xl border bg-card/95 backdrop-blur px-4 py-2.5 shadow-sm">
+          <span className="text-xs font-medium">{selected.size} selected</span>
+          <div className="flex flex-wrap items-center gap-2">
+            <Button variant="outline" size="sm" className="h-7 text-xs gap-1.5" onClick={() => { runAutoRenew(selectedList, true); setSelected(new Set()); }}>
+              <RotateCw className="h-3 w-3" /> Auto-renew ON
+            </Button>
+            <Button variant="outline" size="sm" className="h-7 text-xs gap-1.5" onClick={() => { runAutoRenew(selectedList, false); setSelected(new Set()); }}>
+              <RotateCw className="h-3 w-3" /> Auto-renew OFF
+            </Button>
+            <Button variant="ghost" size="sm" className="h-7 text-xs" onClick={() => setSelected(new Set())}>Clear</Button>
+          </div>
+        </div>
+      )}
+
       {/* Table */}
       <div className="rounded-xl border bg-card overflow-hidden">
         {isLoading && rows.length === 0 ? (
@@ -152,10 +195,19 @@ export function AllDomainsTable() {
             {rows.length === 0 ? "No domains yet — click Refresh Porkbun or Import domains." : "No domains match your filters."}
           </div>
         ) : (
-          <div className="overflow-x-auto">
+          <div className="overflow-x-auto select-none">
             <table className="w-full text-sm">
               <thead>
                 <tr className="text-[11px] text-muted-foreground border-b">
+                  <th className="w-[36px] px-3 py-2.5">
+                    <button
+                      onClick={toggleAll}
+                      className={`h-4 w-4 rounded border flex items-center justify-center transition-colors ${allFilteredSelected ? "bg-primary border-primary text-primary-foreground" : "border-muted-foreground/30 hover:border-foreground"}`}
+                      title="Select all filtered"
+                    >
+                      {allFilteredSelected && <Check className="h-3 w-3" />}
+                    </button>
+                  </th>
                   <SortableTh label="Domain" k="domain" sortKey={sortKey} onClick={toggleSort} className="text-left" />
                   <SortableTh label="Source" k="source" sortKey={sortKey} onClick={toggleSort} className="text-left w-[190px]" />
                   <SortableTh label="In use" k="inUse" sortKey={sortKey} onClick={toggleSort} className="text-left w-[100px]" />
@@ -165,7 +217,15 @@ export function AllDomainsTable() {
                 </tr>
               </thead>
               <tbody className="divide-y">
-                {pageRows.map((r) => <Row key={r.domain} r={r} />)}
+                {pageRows.map((r) => (
+                  <Row
+                    key={r.domain}
+                    r={r}
+                    selected={selected.has(r.domain)}
+                    onMouseDown={() => startDrag(r.domain)}
+                    onMouseEnter={() => { if (dragging.current) applyDrag(r.domain); }}
+                  />
+                ))}
               </tbody>
             </table>
           </div>
@@ -186,13 +246,24 @@ export function AllDomainsTable() {
   );
 }
 
-function Row({ r }: { r: InventoryRow }) {
+function Row({ r, selected, onMouseDown, onMouseEnter }: {
+  r: InventoryRow; selected: boolean; onMouseDown: () => void; onMouseEnter: () => void;
+}) {
   return (
-    <tr className="hover:bg-muted/30 transition-colors">
+    <tr
+      className={`transition-colors cursor-pointer ${selected ? "bg-primary/5" : "hover:bg-muted/30"}`}
+      onMouseDown={onMouseDown}
+      onMouseEnter={onMouseEnter}
+    >
+      <td className="px-3 py-2.5">
+        <div className={`h-4 w-4 rounded border flex items-center justify-center transition-colors ${selected ? "bg-primary border-primary text-primary-foreground" : "border-muted-foreground/30"}`}>
+          {selected && <Check className="h-3 w-3" />}
+        </div>
+      </td>
       <td className="px-3 py-2.5">
         <div className="flex items-center gap-2">
           <Globe className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
-          <span className="font-medium">{r.domain}</span>
+          <span className="font-medium select-text cursor-text">{r.domain}</span>
         </div>
       </td>
       <td className="px-3 py-2.5">

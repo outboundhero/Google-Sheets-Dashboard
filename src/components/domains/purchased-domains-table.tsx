@@ -1,9 +1,11 @@
 "use client";
 
-import { useMemo, useState } from "react";
-import { Globe, Search, X, RefreshCw, Loader2, ShoppingBag } from "lucide-react";
+import { useMemo, useState, useRef, useEffect, useCallback } from "react";
+import { Globe, Search, X, RefreshCw, Loader2, ShoppingBag, Check, RotateCw } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { usePurchasedDomains, type PurchasedRow } from "@/lib/hooks/use-purchased-domains";
+import { useAuth } from "@/lib/auth-context";
+import { useDomainOps } from "./domain-ops-context";
 
 const PROVIDER_BADGE: Record<string, string> = {
   google: "bg-blue-500/10 text-blue-600 border-blue-500/20",
@@ -24,7 +26,10 @@ function fmtDate(iso: string | null): string {
 }
 
 export function PurchasedDomainsTable() {
+  const { role } = useAuth();
+  const isAdmin = role === "admin";
   const { rows, counts, isLoading, mutate } = usePurchasedDomains();
+  const { runAutoRenew } = useDomainOps();
   const [search, setSearch] = useState("");
   const [refreshing, setRefreshing] = useState(false);
 
@@ -33,6 +38,29 @@ export function PurchasedDomainsTable() {
     const out = q ? rows.filter((r) => r.domain.toLowerCase().includes(q)) : rows;
     return [...out].sort((a, b) => (b.purchasedAt || "").localeCompare(a.purchasedAt || ""));
   }, [rows, search]);
+
+  // ── Bulk selection (click + drag) ──────────────────────────────────────
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const dragging = useRef(false);
+  const dragAdd = useRef(true);
+  useEffect(() => {
+    const up = () => { dragging.current = false; };
+    window.addEventListener("mouseup", up);
+    return () => window.removeEventListener("mouseup", up);
+  }, []);
+  const applyDrag = useCallback((d: string) => setSelected((s) => {
+    const n = new Set(s);
+    if (dragAdd.current) n.add(d); else n.delete(d);
+    return n;
+  }), []);
+  const startDrag = useCallback((d: string) => {
+    dragging.current = true;
+    dragAdd.current = !selected.has(d);
+    applyDrag(d);
+  }, [selected, applyDrag]);
+  const allSelected = filtered.length > 0 && filtered.every((r) => selected.has(r.domain));
+  const toggleAll = () => setSelected(allSelected ? new Set() : new Set(filtered.map((r) => r.domain)));
+  const selectedList = useMemo(() => Array.from(selected), [selected]);
 
   const refresh = async () => {
     setRefreshing(true);
@@ -72,6 +100,22 @@ export function PurchasedDomainsTable() {
         </div>
       </div>
 
+      {/* Selection action bar */}
+      {isAdmin && selected.size > 0 && (
+        <div className="sticky top-0 z-30 flex flex-wrap items-center justify-between gap-2 rounded-xl border bg-card/95 backdrop-blur px-4 py-2.5 shadow-sm">
+          <span className="text-xs font-medium">{selected.size} selected</span>
+          <div className="flex flex-wrap items-center gap-2">
+            <Button variant="outline" size="sm" className="h-7 text-xs gap-1.5" onClick={() => { runAutoRenew(selectedList, true); setSelected(new Set()); }}>
+              <RotateCw className="h-3 w-3" /> Auto-renew ON
+            </Button>
+            <Button variant="outline" size="sm" className="h-7 text-xs gap-1.5" onClick={() => { runAutoRenew(selectedList, false); setSelected(new Set()); }}>
+              <RotateCw className="h-3 w-3" /> Auto-renew OFF
+            </Button>
+            <Button variant="ghost" size="sm" className="h-7 text-xs" onClick={() => setSelected(new Set())}>Clear</Button>
+          </div>
+        </div>
+      )}
+
       {/* Table */}
       <div className="rounded-xl border bg-card overflow-hidden">
         {isLoading && rows.length === 0 ? (
@@ -81,10 +125,19 @@ export function PurchasedDomainsTable() {
             {rows.length === 0 ? "No purchased domains yet — buy some from the Buy tab." : "No domains match your search."}
           </div>
         ) : (
-          <div className="overflow-x-auto">
+          <div className="overflow-x-auto select-none">
             <table className="w-full text-sm">
               <thead>
                 <tr className="text-[11px] text-muted-foreground border-b">
+                  <th className="w-[36px] px-3 py-2.5">
+                    <button
+                      onClick={toggleAll}
+                      className={`h-4 w-4 rounded border flex items-center justify-center transition-colors ${allSelected ? "bg-primary border-primary text-primary-foreground" : "border-muted-foreground/30 hover:border-foreground"}`}
+                      title="Select all"
+                    >
+                      {allSelected && <Check className="h-3 w-3" />}
+                    </button>
+                  </th>
                   <th className="text-left font-medium px-3 py-2.5">Domain</th>
                   <th className="text-right font-medium px-3 py-2.5 w-[110px]">Price paid</th>
                   <th className="text-right font-medium px-3 py-2.5 w-[130px]">Purchased</th>
@@ -94,7 +147,15 @@ export function PurchasedDomainsTable() {
                 </tr>
               </thead>
               <tbody className="divide-y">
-                {filtered.map((r) => <Row key={r.domain} r={r} />)}
+                {filtered.map((r) => (
+                  <Row
+                    key={r.domain}
+                    r={r}
+                    selected={selected.has(r.domain)}
+                    onMouseDown={() => startDrag(r.domain)}
+                    onMouseEnter={() => { if (dragging.current) applyDrag(r.domain); }}
+                  />
+                ))}
               </tbody>
             </table>
           </div>
@@ -104,13 +165,24 @@ export function PurchasedDomainsTable() {
   );
 }
 
-function Row({ r }: { r: PurchasedRow }) {
+function Row({ r, selected, onMouseDown, onMouseEnter }: {
+  r: PurchasedRow; selected: boolean; onMouseDown: () => void; onMouseEnter: () => void;
+}) {
   return (
-    <tr className="hover:bg-muted/30 transition-colors">
+    <tr
+      className={`transition-colors cursor-pointer ${selected ? "bg-primary/5" : "hover:bg-muted/30"}`}
+      onMouseDown={onMouseDown}
+      onMouseEnter={onMouseEnter}
+    >
+      <td className="px-3 py-2.5">
+        <div className={`h-4 w-4 rounded border flex items-center justify-center transition-colors ${selected ? "bg-primary border-primary text-primary-foreground" : "border-muted-foreground/30"}`}>
+          {selected && <Check className="h-3 w-3" />}
+        </div>
+      </td>
       <td className="px-3 py-2.5">
         <div className="flex items-center gap-2">
           <Globe className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
-          <span className="font-medium">{r.domain}</span>
+          <span className="font-medium select-text cursor-text">{r.domain}</span>
         </div>
       </td>
       <td className="px-3 py-2.5 text-right tabular-nums text-violet-500 font-medium">
