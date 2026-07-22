@@ -4,7 +4,7 @@ import { generateUniqueIdentities, buildAliasesFromNameSpec } from "@/lib/inbox-
 import * as scaledmail from "@/lib/scaledmail";
 import * as milkbox from "@/lib/milkbox";
 import * as inboxing from "@/lib/inboxing";
-import { resolveDomainOrders } from "@/lib/inbox-order-accounts";
+import { resolveDomainOrders, milkboxSequencerFor } from "@/lib/inbox-order-accounts";
 import type {
   CreateOrderInput,
   InboxOrderProvider,
@@ -127,7 +127,10 @@ export async function POST(request: Request) {
       const r = await scaledmail.createOrder(orderInput, resolved.scaledmail);
       providerOrderId = r.orderId;
     } else if (provider === "milkbox") {
-      const r = await milkbox.createOrder(orderInput, resolved.milkbox);
+      const r = await milkbox.createOrder(orderInput, {
+        domainProviderId: resolved.milkbox?.domainProviderId,
+        sequencerId: milkboxSequencerFor(instance), // per Bison instance
+      });
       providerOrderId = r.orderId;
     } else {
       const r = await inboxing.createDomain(orderInput, resolved.inboxing);

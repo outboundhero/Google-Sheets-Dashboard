@@ -10,11 +10,14 @@ const BASE = "https://api.milkboxmail.com/api/v1";
 // by the caller; the legacy MILKBOX_DOMAIN_PROVIDER_ID is a single-account fallback.
 function env() {
   const key = process.env.MILKBOX_API_KEY;
-  const sequencerId = process.env.MILKBOX_SEQUENCER_ID;
-  if (!key || !sequencerId) {
-    throw new Error("MilkBox env missing (MILKBOX_API_KEY / MILKBOX_SEQUENCER_ID)");
-  }
-  return { key, sequencerId, domainProviderId: process.env.MILKBOX_DOMAIN_PROVIDER_ID || null };
+  if (!key) throw new Error("MilkBox env missing (MILKBOX_API_KEY)");
+  // sequencer_id (per instance) + domain_provider_id (per Porkbun account) are
+  // resolved by the caller; these are legacy single-value fallbacks.
+  return {
+    key,
+    sequencerId: process.env.MILKBOX_SEQUENCER_ID || null,
+    domainProviderId: process.env.MILKBOX_DOMAIN_PROVIDER_ID || null,
+  };
 }
 
 async function call<T>(
@@ -89,10 +92,14 @@ export interface MilkboxCreateOrderResult {
 
 export async function createOrder(
   input: CreateOrderInput,
-  opts?: { domainProviderId?: string | null },
+  opts?: { domainProviderId?: string | null; sequencerId?: string | null },
 ): Promise<MilkboxCreateOrderResult> {
-  const { sequencerId, domainProviderId: legacyProvider } = env();
+  const { sequencerId: legacySeq, domainProviderId: legacyProvider } = env();
+  const sequencerId = opts?.sequencerId ?? legacySeq;
   const domainProviderId = opts?.domainProviderId ?? legacyProvider;
+  if (!sequencerId) {
+    throw new Error("MilkBox createOrder: no sequencer_id for this order's instance");
+  }
   if (!domainProviderId) {
     throw new Error("MilkBox createOrder: no domain_provider_id for this domain's Porkbun account");
   }

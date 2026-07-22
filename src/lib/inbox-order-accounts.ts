@@ -32,14 +32,39 @@ function inboxingRegistrarFor(source: string | null): string | null {
   return map[source] ?? null;
 }
 
-// ── MilkBox (domain-provider UUIDs from GET /api/v1/domain-providers) ─────────
+// ── MilkBox ───────────────────────────────────────────────────────────────
+// domain_provider_id UUIDs from GET /api/v1/domain-providers (hardcoded; env-
+// overridable). "Previous Porkbun" is assumed = spencersellstech (only other
+// Porkbun provider on the account) — confirm with the team.
+const MILKBOX_PROVIDER_BY_SOURCE: Record<string, string> = {
+  porkbun_outboundhero: "98fd7218-1efe-4acd-9209-a30678d8afdf",     // "OutboundHero Porkbun"
+  porkbun_spencersellstech: "b016befe-a7af-4e63-a687-f130646bad70", // "Previous Porkbun"
+};
 function milkboxProviderFor(source: string | null): string | null {
   if (!source) return null;
-  const map: Record<string, string | undefined> = {
+  const env: Record<string, string | undefined> = {
     porkbun_outboundhero: process.env.MILKBOX_DOMAIN_PROVIDER_OUTBOUNDHERO,
     porkbun_spencersellstech: process.env.MILKBOX_DOMAIN_PROVIDER_SPENCERSELLSTECH,
   };
-  return map[source] ?? process.env.MILKBOX_DOMAIN_PROVIDER_ID ?? null; // legacy fallback
+  return env[source] || MILKBOX_PROVIDER_BY_SOURCE[source] || process.env.MILKBOX_DOMAIN_PROVIDER_ID || null;
+}
+
+// sequencer_id UUIDs from GET /api/v1/sequencers — one per Bison instance.
+const MILKBOX_SEQUENCER_BY_INSTANCE: Record<string, string> = {
+  outboundhero: "465c2e62-3a9c-4c89-854b-234fcb388eb9",   // "OutboundHero EmailBison"
+  cleaningoutbound: "eab5134e-418c-48da-8d57-027b0e22ded4", // "CleaningOutbound (B2C #1)"
+  facilityreach: "ee6bf048-c384-4c08-a7ae-00667e44ca60",  // "FacilityReach (B2B #2)"
+  outboundclean: "23c11aa5-25ab-4f13-8e86-98445f88a477",  // "OutboundClean (B2C #2)"
+};
+/** MilkBox sequencer for the order's Bison instance (env-overridable). */
+export function milkboxSequencerFor(instance: string): string | null {
+  const env: Record<string, string | undefined> = {
+    outboundhero: process.env.MILKBOX_SEQUENCER_OUTBOUNDHERO,
+    cleaningoutbound: process.env.MILKBOX_SEQUENCER_CLEANINGOUTBOUND,
+    facilityreach: process.env.MILKBOX_SEQUENCER_FACILITYREACH,
+    outboundclean: process.env.MILKBOX_SEQUENCER_OUTBOUNDCLEAN,
+  };
+  return env[instance] || MILKBOX_SEQUENCER_BY_INSTANCE[instance] || process.env.MILKBOX_SEQUENCER_ID || null;
 }
 
 // ── ScaledMail (Porkbun hosting login per account) ────────────────────────────
