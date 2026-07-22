@@ -1,6 +1,7 @@
 "use client";
 
-import { useState, useMemo, useEffect } from "react";
+import { useState, useMemo, useEffect, Suspense } from "react";
+import { useSearchParams, useRouter } from "next/navigation";
 import {
   RefreshCw,
   Plus,
@@ -57,14 +58,17 @@ function statusBadgeVariant(status: InboxOrder["status"]): "default" | "secondar
   return "secondary";
 }
 
-export default function InboxOrdersPage() {
+function InboxOrdersPageInner() {
   const { role } = useAuth();
   const isAdmin = role === "admin";
   const { instances: scopedInstances, instancesQuery } = useInstance();
   const { orders, isLoading, mutate } = useInboxOrders(60_000, instancesQuery);
+  const searchParams = useSearchParams();
+  const router = useRouter();
 
   const [createOpen, setCreateOpen] = useState(false);
   const [bulkOpen, setBulkOpen] = useState(false);
+  const [bulkPrefill, setBulkPrefill] = useState("");
   const [creating, setCreating] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
 
@@ -88,6 +92,30 @@ export default function InboxOrdersPage() {
   const [previewing, setPreviewing] = useState(false);
   // Inboxing only: which Porkbun account the domain belongs to (drives registrar).
   const [domainAccount, setDomainAccount] = useState<{ accountLabel: string | null; ok: boolean; reason: string | null } | null>(null);
+
+  // Handoff from the Domains page: ?create=1&domain=<d> opens the single-create
+  // dialog pre-filled; ?bulk=1 opens the bulk dialog seeded from localStorage.
+  // Runs once on mount, then strips the params so a refresh won't re-trigger.
+  useEffect(() => {
+    if (searchParams.get("create") === "1") {
+      const d = (searchParams.get("domain") || "").trim();
+      if (d) setDomain(d);
+      setCreateOpen(true);
+      router.replace("/deliverability/inbox-orders");
+    } else if (searchParams.get("bulk") === "1") {
+      try {
+        const raw = localStorage.getItem("inbox-orders:bulk-prefill");
+        if (raw) {
+          const parsed = JSON.parse(raw) as { domains?: string[] };
+          const domains = (parsed.domains || []).filter((x): x is string => typeof x === "string" && !!x.trim());
+          if (domains.length > 0) { setBulkPrefill(domains.join("\n")); setBulkOpen(true); }
+        }
+        localStorage.removeItem("inbox-orders:bulk-prefill");
+      } catch { /* ignore malformed prefill */ }
+      router.replace("/deliverability/inbox-orders");
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Resolve the entered domain's Porkbun account for the selected provider.
   useEffect(() => {
@@ -718,7 +746,16 @@ export default function InboxOrdersPage() {
         onOpenChange={setBulkOpen}
         onComplete={() => mutate()}
         defaultInstance={orderInstance}
+        defaultCsv={bulkPrefill}
       />
     </div>
+  );
+}
+
+export default function InboxOrdersPage() {
+  return (
+    <Suspense fallback={null}>
+      <InboxOrdersPageInner />
+    </Suspense>
   );
 }

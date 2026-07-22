@@ -80,6 +80,8 @@ interface Props {
   onOpenChange: (v: boolean) => void;
   onComplete: () => void;
   defaultInstance?: BisonInstanceSlug;
+  /** Seed the CSV textarea when the dialog opens (e.g. domains handed off from the Domains page). */
+  defaultCsv?: string;
 }
 
 const TEMPLATE_HEADER = "domain,companyName,clientTag,name1,name2";
@@ -91,6 +93,7 @@ export function BulkCreateInboxOrdersDialog({
   onOpenChange,
   onComplete,
   defaultInstance,
+  defaultCsv,
 }: Props) {
   const [provider, setProvider] = useState<InboxOrderProvider>("milkbox");
   const [bisonInstance, setBisonInstance] = useState<BisonInstanceSlug>(
@@ -125,7 +128,8 @@ export function BulkCreateInboxOrdersDialog({
       return;
     }
     if (defaultInstance) setBisonInstance(defaultInstance);
-  }, [open, defaultInstance]);
+    if (defaultCsv) setCsvText(defaultCsv);
+  }, [open, defaultInstance, defaultCsv]);
 
   // Previewed names/aliases are tied to the current settings/rows — clear them
   // when any of those change so a stale preview can't be submitted.

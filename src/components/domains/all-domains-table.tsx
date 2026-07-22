@@ -1,7 +1,8 @@
 "use client";
 
 import { useMemo, useState, useRef, useEffect, useCallback } from "react";
-import { Globe, Search, X, RefreshCw, Loader2, ArrowUpDown, Signal, Check, RotateCw, EyeOff, Eye, ChevronDown, ChevronRight, ShieldAlert } from "lucide-react";
+import { Globe, Search, X, RefreshCw, Loader2, ArrowUpDown, Signal, Check, RotateCw, EyeOff, Eye, ChevronDown, ChevronRight, ShieldAlert, Send } from "lucide-react";
+import { sendDomainsToInboxOrders } from "@/lib/inbox-order-handoff";
 import { Button } from "@/components/ui/button";
 import { useAuth } from "@/lib/auth-context";
 import { useDomainInventory, type InventoryRow } from "@/lib/hooks/use-domain-inventory";
@@ -225,6 +226,9 @@ export function AllDomainsTable() {
             </Button>
             <Button variant="outline" size="sm" className="h-7 text-xs gap-1.5" onClick={() => { runSpamhaus(selectedList); }}>
               <ShieldAlert className="h-3 w-3" /> Check Spamhaus
+            </Button>
+            <Button size="sm" className="h-7 text-xs gap-1.5" onClick={() => sendDomainsToInboxOrders(selectedList)}>
+              <Send className="h-3 w-3" /> Send to inbox orders
             </Button>
             <Button variant="ghost" size="sm" className="h-7 text-xs" onClick={() => setSelected(new Set())}>Clear</Button>
           </div>
