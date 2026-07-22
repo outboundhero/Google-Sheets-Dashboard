@@ -25,6 +25,11 @@ export interface InventoryRow {
   expireDate: string | null;
   autoRenew: boolean | null;
   porkbunStatus: string | null;
+  hidden: boolean;
+  surblListed: boolean | null;
+  surblCheckedAt: string | null;
+  spamhausListed: boolean | null;
+  spamhausCheckedAt: string | null;
 }
 
 export interface InventoryCounts {
@@ -64,6 +69,11 @@ interface RawInventoryRow {
   expire_date: string | null;
   auto_renew: boolean | null;
   mx_provider: string | null;
+  hidden: boolean | null;
+  surbl_listed: boolean | null;
+  surbl_checked_at: string | null;
+  spamhaus_listed: boolean | null;
+  spamhaus_checked_at: string | null;
 }
 
 /** Read every domain_inventory row (paged). */
@@ -75,7 +85,7 @@ async function readInventory(): Promise<RawInventoryRow[]> {
   for (let guard = 0; guard < 100; guard++) {
     const { data, error } = await supabase
       .from("domain_inventory")
-      .select("domain, source, manual, tld, porkbun_status, expire_date, auto_renew, mx_provider")
+      .select("domain, source, manual, tld, porkbun_status, expire_date, auto_renew, mx_provider, hidden, surbl_listed, surbl_checked_at, spamhaus_listed, spamhaus_checked_at")
       .range(from, from + PAGE - 1);
     if (error) throw new Error(error.message);
     const rows = (data || []) as RawInventoryRow[];
@@ -142,6 +152,11 @@ export async function assembleInventory(): Promise<{ rows: InventoryRow[]; count
       expireDate: r.expire_date,
       autoRenew: r.auto_renew,
       porkbunStatus: r.porkbun_status,
+      hidden: !!r.hidden,
+      surblListed: r.surbl_listed,
+      surblCheckedAt: r.surbl_checked_at,
+      spamhausListed: r.spamhaus_listed,
+      spamhausCheckedAt: r.spamhaus_checked_at,
     };
   });
 

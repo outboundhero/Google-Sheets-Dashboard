@@ -1,11 +1,12 @@
 "use client";
 
 import { useMemo, useState, useRef, useEffect, useCallback } from "react";
-import { Globe, Search, X, RefreshCw, Loader2, ShoppingBag, Check, RotateCw } from "lucide-react";
+import { Globe, Search, X, RefreshCw, Loader2, ShoppingBag, Check, RotateCw, EyeOff, Eye, ChevronDown, ChevronRight } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { usePurchasedDomains, type PurchasedRow } from "@/lib/hooks/use-purchased-domains";
 import { useAuth } from "@/lib/auth-context";
 import { useDomainOps } from "./domain-ops-context";
+import { DomainFilterBuilder, applyFilters, type FilterField, type FilterCondition, type FilterMode } from "./domain-filter-builder";
 
 const PROVIDER_BADGE: Record<string, string> = {
   google: "bg-blue-500/10 text-blue-600 border-blue-500/20",
@@ -29,15 +30,38 @@ export function PurchasedDomainsTable() {
   const { role } = useAuth();
   const isAdmin = role === "admin";
   const { rows, counts, isLoading, mutate } = usePurchasedDomains();
-  const { runAutoRenew } = useDomainOps();
+  const { runAutoRenew, runHide } = useDomainOps();
   const [search, setSearch] = useState("");
   const [refreshing, setRefreshing] = useState(false);
+  const [conditions, setConditions] = useState<FilterCondition[]>([]);
+  const [filterMode, setFilterMode] = useState<FilterMode>("AND");
+  const [hiddenOpen, setHiddenOpen] = useState(false);
 
-  const filtered = useMemo(() => {
+  const sources = useMemo(() => Array.from(new Set(rows.map((r) => r.source))).sort(), [rows]);
+  const providers = useMemo(() => Array.from(new Set(rows.map((r) => r.provider))).sort(), [rows]);
+
+  const filterFields = useMemo<FilterField<PurchasedRow>[]>(() => [
+    { key: "domain", label: "Domain", type: "text", get: (r) => r.domain },
+    { key: "source", label: "Source", type: "enum", options: sources.map((s) => [s, s.replace("porkbun_", "")] as [string, string]), get: (r) => r.source },
+    { key: "provider", label: "Provider", type: "enum", options: providers.map((p) => [p, p] as [string, string]), get: (r) => r.provider },
+    { key: "inUse", label: "In use", type: "bool", get: (r) => r.inUse },
+    { key: "renewalDate", label: "Renewal date", type: "date", get: (r) => r.renewalDate },
+    { key: "autoRenew", label: "Auto-renew", type: "bool", get: (r) => !!r.autoRenew },
+    { key: "hidden", label: "Hidden", type: "bool", get: (r) => !!r.hidden },
+    { key: "surbl", label: "SURBL listed", type: "bool", get: (r) => !!r.surblListed },
+    { key: "spamhaus", label: "Spamhaus listed", type: "bool", get: (r) => !!r.spamhausListed },
+  ], [sources, providers]);
+
+  const matched = useMemo(() => {
     const q = search.trim().toLowerCase();
-    const out = q ? rows.filter((r) => r.domain.toLowerCase().includes(q)) : rows;
+    let out = q ? rows.filter((r) => r.domain.toLowerCase().includes(q)) : rows;
+    out = applyFilters(out, conditions, filterMode, filterFields);
     return [...out].sort((a, b) => (b.purchasedAt || "").localeCompare(a.purchasedAt || ""));
-  }, [rows, search]);
+  }, [rows, search, conditions, filterMode, filterFields]);
+
+  const nonHidden = useMemo(() => matched.filter((r) => !r.hidden), [matched]);
+  const hiddenRows = useMemo(() => matched.filter((r) => r.hidden), [matched]);
+  const clearAllFilters = () => { setSearch(""); setConditions([]); };
 
   // ── Bulk selection (click + drag) ──────────────────────────────────────
   const [selected, setSelected] = useState<Set<string>>(new Set());
@@ -58,8 +82,8 @@ export function PurchasedDomainsTable() {
     dragAdd.current = !selected.has(d);
     applyDrag(d);
   }, [selected, applyDrag]);
-  const allSelected = filtered.length > 0 && filtered.every((r) => selected.has(r.domain));
-  const toggleAll = () => setSelected(allSelected ? new Set() : new Set(filtered.map((r) => r.domain)));
+  const allSelected = matched.length > 0 && matched.every((r) => selected.has(r.domain));
+  const toggleAll = () => setSelected(allSelected ? new Set() : new Set(matched.map((r) => r.domain)));
   const selectedList = useMemo(() => Array.from(selected), [selected]);
 
   const refresh = async () => {
@@ -97,8 +121,16 @@ export function PurchasedDomainsTable() {
         <div className="flex flex-wrap items-center gap-2 text-[11px]">
           <Chip>{counts?.total ?? rows.length} purchased</Chip>
           <Chip accent="emerald">${(counts?.totalSpent ?? 0).toFixed(2)} spent</Chip>
+          {(search || conditions.length > 0) && (
+            <button onClick={clearAllFilters} className="ml-auto flex items-center gap-1 text-muted-foreground hover:text-foreground">
+              <X className="h-3 w-3" /> Clear filters
+            </button>
+          )}
         </div>
       </div>
+
+      {/* Advanced filter builder */}
+      <DomainFilterBuilder fields={filterFields} conditions={conditions} setConditions={setConditions} mode={filterMode} setMode={setFilterMode} />
 
       {/* Selection action bar */}
       {isAdmin && selected.size > 0 && (
@@ -111,19 +143,27 @@ export function PurchasedDomainsTable() {
             <Button variant="outline" size="sm" className="h-7 text-xs gap-1.5" onClick={() => { runAutoRenew(selectedList, false); setSelected(new Set()); }}>
               <RotateCw className="h-3 w-3" /> Auto-renew OFF
             </Button>
+            <Button variant="outline" size="sm" className="h-7 text-xs gap-1.5" onClick={() => { runHide(selectedList, true); setSelected(new Set()); }}>
+              <EyeOff className="h-3 w-3" /> Hide
+            </Button>
+            <Button variant="outline" size="sm" className="h-7 text-xs gap-1.5" onClick={() => { runHide(selectedList, false); setSelected(new Set()); }}>
+              <Eye className="h-3 w-3" /> Unhide
+            </Button>
             <Button variant="ghost" size="sm" className="h-7 text-xs" onClick={() => setSelected(new Set())}>Clear</Button>
           </div>
         </div>
       )}
 
-      {/* Table */}
+      {/* Table (non-hidden) */}
       <div className="rounded-xl border bg-card overflow-hidden">
         {isLoading && rows.length === 0 ? (
           <div className="text-sm text-muted-foreground text-center py-12">Loading…</div>
-        ) : filtered.length === 0 ? (
+        ) : matched.length === 0 ? (
           <div className="text-sm text-muted-foreground text-center py-12">
-            {rows.length === 0 ? "No purchased domains yet — buy some from the Buy tab." : "No domains match your search."}
+            {rows.length === 0 ? "No purchased domains yet — buy some from the Buy tab." : "No domains match your filters."}
           </div>
+        ) : nonHidden.length === 0 ? (
+          <div className="text-sm text-muted-foreground text-center py-12">All matching domains are hidden — see the Hidden section below.</div>
         ) : (
           <div className="overflow-x-auto select-none">
             <table className="w-full text-sm">
@@ -147,7 +187,7 @@ export function PurchasedDomainsTable() {
                 </tr>
               </thead>
               <tbody className="divide-y">
-                {filtered.map((r) => (
+                {nonHidden.map((r) => (
                   <Row
                     key={r.domain}
                     r={r}
@@ -161,6 +201,49 @@ export function PurchasedDomainsTable() {
           </div>
         )}
       </div>
+
+      {/* Hidden domains (collapsible) */}
+      {hiddenRows.length > 0 && (
+        <div className="rounded-xl border bg-card overflow-hidden">
+          <button
+            onClick={() => setHiddenOpen((v) => !v)}
+            className="flex w-full items-center gap-2 px-4 py-3 text-sm font-medium hover:bg-muted/30 transition-colors"
+          >
+            {hiddenOpen ? <ChevronDown className="h-4 w-4 text-muted-foreground" /> : <ChevronRight className="h-4 w-4 text-muted-foreground" />}
+            <EyeOff className="h-4 w-4 text-muted-foreground" />
+            Hidden domains
+            <span className="rounded-full bg-muted px-2 py-0.5 text-[11px] text-muted-foreground">{hiddenRows.length}</span>
+          </button>
+          {hiddenOpen && (
+            <div className="overflow-x-auto select-none border-t">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="text-[11px] text-muted-foreground border-b">
+                    <th className="w-[36px] px-3 py-2.5" />
+                    <th className="text-left font-medium px-3 py-2.5">Domain</th>
+                    <th className="text-right font-medium px-3 py-2.5 w-[110px]">Price paid</th>
+                    <th className="text-right font-medium px-3 py-2.5 w-[130px]">Purchased</th>
+                    <th className="text-right font-medium px-3 py-2.5 w-[130px]">Renewal</th>
+                    <th className="text-left font-medium px-3 py-2.5 w-[100px]">In use</th>
+                    <th className="text-left font-medium px-3 py-2.5 w-[130px]">Provider</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y">
+                  {hiddenRows.map((r) => (
+                    <Row
+                      key={r.domain}
+                      r={r}
+                      selected={selected.has(r.domain)}
+                      onMouseDown={() => startDrag(r.domain)}
+                      onMouseEnter={() => { if (dragging.current) applyDrag(r.domain); }}
+                    />
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }

@@ -14,6 +14,7 @@ const BATCH = 6;
 interface DomainOpsValue {
   panels: BulkPanel[];
   runAutoRenew: (domains: string[], enabled: boolean) => void;
+  runHide: (domains: string[], hidden: boolean) => void;
   dismiss: (id: number) => void;
   dismissAll: () => void;
   purchaseNotice: { count: number } | null;
@@ -64,13 +65,24 @@ export function DomainOpsProvider({ children }: { children: React.ReactNode }) {
     setPanels((prev) => prev.map((p) => (p.id === id ? { ...p, ...patch } : p)));
   }, []);
 
-  const runAutoRenew = useCallback((domains: string[], enabled: boolean) => {
-    const list = Array.from(new Set(domains.map((d) => d.trim().toLowerCase()).filter(Boolean)));
+  // Generic batched+retried driver for every domain bulk op. Each route returns
+  // { results: [{ domain, status: "ok"|"failed", error? }] }.
+  const runBulk = useCallback((opts: {
+    kind: BulkPanel["kind"];
+    title: string;
+    url: string;
+    body: (batch: string[]) => Record<string, unknown>;
+    domains: string[];
+    enabled?: boolean;
+    batchSize?: number;
+  }) => {
+    const list = Array.from(new Set(opts.domains.map((d) => d.trim().toLowerCase()).filter(Boolean)));
     if (list.length === 0) return;
+    const step = opts.batchSize ?? BATCH;
     const id = runIdRef.current++;
     replacePanel({
-      id, kind: "auto-renew", title: `Auto-renew ${enabled ? "ON" : "OFF"}`,
-      total: list.length, done: 0, failed: 0, running: false, queued: true, failures: [], retryDomains: [], enabled,
+      id, kind: opts.kind, title: opts.title,
+      total: list.length, done: 0, failed: 0, running: false, queued: true, failures: [], retryDomains: [], enabled: opts.enabled,
     });
     enqueue(async () => {
       if (dismissedRef.current.has(id)) return;
@@ -79,12 +91,10 @@ export function DomainOpsProvider({ children }: { children: React.ReactNode }) {
       const retry: string[] = [];
       let done = 0, failed = 0;
       try {
-        for (let i = 0; i < list.length; i += BATCH) {
+        for (let i = 0; i < list.length; i += step) {
           if (dismissedRef.current.has(id)) break;
-          const batch = list.slice(i, i + BATCH);
-          const rr = await fetchJsonWithRetry<{ results?: { domain: string; status: string; error?: string }[] }>(
-            "/api/domains/inventory/auto-renew", { domains: batch, enabled },
-          );
+          const batch = list.slice(i, i + step);
+          const rr = await fetchJsonWithRetry<{ results?: { domain: string; status: string; error?: string }[] }>(opts.url, opts.body(batch));
           if (!rr.ok || !rr.data) {
             for (const d of batch) { failed++; failures.push({ domain: d, error: rr.error || "request failed" }); retry.push(d); }
           } else {
@@ -102,6 +112,14 @@ export function DomainOpsProvider({ children }: { children: React.ReactNode }) {
       }
     });
   }, [enqueue, replacePanel, patchPanel]);
+
+  const runAutoRenew = useCallback((domains: string[], enabled: boolean) =>
+    runBulk({ kind: "auto-renew", title: `Auto-renew ${enabled ? "ON" : "OFF"}`, url: "/api/domains/inventory/auto-renew", body: (b) => ({ domains: b, enabled }), domains, enabled, batchSize: 6 }),
+  [runBulk]);
+
+  const runHide = useCallback((domains: string[], hidden: boolean) =>
+    runBulk({ kind: "hide", title: hidden ? "Hide domains" : "Unhide domains", url: "/api/domains/inventory/hide", body: (b) => ({ domains: b, hidden }), domains, enabled: hidden, batchSize: 200 }),
+  [runBulk]);
 
   const dismiss = useCallback((id: number) => {
     dismissedRef.current.add(id);
@@ -128,7 +146,7 @@ export function DomainOpsProvider({ children }: { children: React.ReactNode }) {
   }, [registered]);
 
   return (
-    <Ctx.Provider value={{ panels, runAutoRenew, dismiss, dismissAll, purchaseNotice, dismissPurchase }}>
+    <Ctx.Provider value={{ panels, runAutoRenew, runHide, dismiss, dismissAll, purchaseNotice, dismissPurchase }}>
       {children}
     </Ctx.Provider>
   );

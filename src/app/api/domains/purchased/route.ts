@@ -17,6 +17,23 @@ export interface PurchasedRow {
   sourceLabel: string;
   inUse: boolean;
   provider: InventoryProvider;
+  hidden: boolean;
+  autoRenew: boolean | null;
+  surblListed: boolean | null;
+  surblCheckedAt: string | null;
+  spamhausListed: boolean | null;
+  spamhausCheckedAt: string | null;
+}
+
+// Prefer whichever blacklist result was checked most recently (inventory vs porkbun).
+function pickRecent(
+  a: { listed: boolean | null; at: string | null } | undefined,
+  b: { listed: boolean | null; at: string | null } | undefined,
+): { listed: boolean | null; at: string | null } {
+  const av = a && a.at ? a : null;
+  const bv = b && b.at ? b : null;
+  if (av && bv) return (av.at! >= bv.at!) ? av : bv;
+  return av || bv || { listed: a?.listed ?? b?.listed ?? null, at: null };
 }
 
 function providerFromCounts(outlook: number, google: number): InventoryProvider {
@@ -30,13 +47,16 @@ export async function GET() {
   try {
     const supabase = getSupabaseAdmin();
 
-    // 1. Everything we registered.
-    const purchased: { domain: string; price: number | null; purchasedAt: string | null }[] = [];
+    // 1. Everything we registered (+ its SURBL/Spamhaus results if checked here).
+    const purchased: {
+      domain: string; price: number | null; purchasedAt: string | null;
+      surbl: { listed: boolean | null; at: string | null }; spamhaus: { listed: boolean | null; at: string | null };
+    }[] = [];
     let from = 0;
     for (let guard = 0; guard < 100; guard++) {
       const { data, error } = await supabase
         .from("porkbun_domains")
-        .select("domain, price_usd, registered_at")
+        .select("domain, price_usd, registered_at, surbl_listed, surbl_checked_at, spamhaus_listed, spamhaus_checked_at")
         .eq("registered", true)
         .order("registered_at", { ascending: false })
         .range(from, from + 999);
@@ -44,7 +64,13 @@ export async function GET() {
       const rows = data || [];
       for (const r of rows) {
         const p = typeof r.price_usd === "number" ? r.price_usd : parseFloat(String(r.price_usd ?? ""));
-        purchased.push({ domain: r.domain as string, price: Number.isFinite(p) ? p : null, purchasedAt: (r.registered_at as string) || null });
+        purchased.push({
+          domain: r.domain as string,
+          price: Number.isFinite(p) ? p : null,
+          purchasedAt: (r.registered_at as string) || null,
+          surbl: { listed: (r.surbl_listed as boolean | null) ?? null, at: (r.surbl_checked_at as string | null) ?? null },
+          spamhaus: { listed: (r.spamhaus_listed as boolean | null) ?? null, at: (r.spamhaus_checked_at as string | null) ?? null },
+        });
       }
       if (rows.length < 1000) break;
       from += 1000;
@@ -55,16 +81,28 @@ export async function GET() {
       return NextResponse.json({ rows: [], counts: { total: 0, totalSpent: 0 } });
     }
 
-    // 2. Inventory (renewal date / source / mx provider) for those domains.
-    const inv = new Map<string, { source: string; expire: string | null; mx: string | null }>();
+    // 2. Inventory (renewal date / source / mx provider / hidden / auto-renew /
+    //    blacklist results) for those domains.
+    const inv = new Map<string, {
+      source: string; expire: string | null; mx: string | null; hidden: boolean; autoRenew: boolean | null;
+      surbl: { listed: boolean | null; at: string | null }; spamhaus: { listed: boolean | null; at: string | null };
+    }>();
     for (let i = 0; i < domains.length; i += 300) {
       const slice = domains.slice(i, i + 300);
       const { data } = await supabase
         .from("domain_inventory")
-        .select("domain, source, expire_date, mx_provider")
+        .select("domain, source, expire_date, mx_provider, hidden, auto_renew, surbl_listed, surbl_checked_at, spamhaus_listed, spamhaus_checked_at")
         .in("domain", slice);
       for (const r of data || []) {
-        inv.set(r.domain as string, { source: (r.source as string) || "porkbun_outboundhero", expire: (r.expire_date as string) || null, mx: (r.mx_provider as string) || null });
+        inv.set(r.domain as string, {
+          source: (r.source as string) || "porkbun_outboundhero",
+          expire: (r.expire_date as string) || null,
+          mx: (r.mx_provider as string) || null,
+          hidden: !!r.hidden,
+          autoRenew: (r.auto_renew as boolean | null) ?? null,
+          surbl: { listed: (r.surbl_listed as boolean | null) ?? null, at: (r.surbl_checked_at as string | null) ?? null },
+          spamhaus: { listed: (r.spamhaus_listed as boolean | null) ?? null, at: (r.spamhaus_checked_at as string | null) ?? null },
+        });
       }
     }
 
@@ -93,6 +131,8 @@ export async function GET() {
         ? providerFromCounts(d.outlook, d.google)
         : ((i?.mx as InventoryProvider) ?? "unknown");
       const source = i?.source || "porkbun_outboundhero";
+      const surbl = pickRecent(i?.surbl, p.surbl);
+      const spamhaus = pickRecent(i?.spamhaus, p.spamhaus);
       return {
         domain: p.domain,
         pricePaid: p.price,
@@ -102,6 +142,12 @@ export async function GET() {
         sourceLabel: SOURCE_LABEL[source] || source,
         inUse,
         provider,
+        hidden: i?.hidden ?? false,
+        autoRenew: i?.autoRenew ?? null,
+        surblListed: surbl.listed,
+        surblCheckedAt: surbl.at,
+        spamhausListed: spamhaus.listed,
+        spamhausCheckedAt: spamhaus.at,
       };
     });
 
