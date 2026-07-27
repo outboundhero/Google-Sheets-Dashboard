@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { getConfig, resolveSpreadsheetId } from "@/lib/sheets-config";
 import { getSheetMetadata, appendDomainsToSheet } from "@/lib/google-sheets";
+import { recordPipelineAlert } from "@/lib/pipeline-alerts";
 
 interface SheetInfo {
   clientTag: string;
@@ -65,11 +66,12 @@ export async function GET() {
  * Appends domains to the client's "Domains" tab in Google Sheets.
  */
 export async function POST(request: Request) {
+  let clientTag = "";
+  let domains: string[] = [];
   try {
-    const { domains, clientTag } = (await request.json()) as {
-      domains: string[];
-      clientTag: string;
-    };
+    const body = (await request.json()) as { domains: string[]; clientTag: string };
+    domains = body.domains ?? [];
+    clientTag = body.clientTag ?? "";
 
     if (!domains?.length || !clientTag) {
       return NextResponse.json(
@@ -82,10 +84,10 @@ export async function POST(request: Request) {
     const config = await getConfig();
     const tracked = config.sheets.find((s) => s.clientTag === clientTag);
     if (!tracked) {
-      return NextResponse.json(
-        { error: `No tracked sheet found for client tag "${clientTag}"` },
-        { status: 404 }
-      );
+      const reason = `No tracked sheet found for client tag "${clientTag}"`;
+      // Loud failure: the domains never reached the client's Domains tab.
+      await recordPipelineAlert({ source: "send-to-sheet", clientTag, step: "find-sheet", reason, domains }).catch(() => {});
+      return NextResponse.json({ error: reason }, { status: 404 });
     }
     const sheetId = resolveSpreadsheetId(tracked);
     const sheetName = tracked.name;
@@ -101,6 +103,9 @@ export async function POST(request: Request) {
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Failed to send to sheet";
+    if (clientTag && domains.length) {
+      await recordPipelineAlert({ source: "send-to-sheet", clientTag, step: "append-sheet", reason: message, domains }).catch(() => {});
+    }
     return NextResponse.json({ error: message }, { status: 500 });
   }
 }

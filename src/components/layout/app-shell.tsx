@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { cn } from "@/lib/utils";
 import { Sidebar } from "./sidebar";
+import { PipelineAlertsBanner } from "@/components/shared/pipeline-alerts-banner";
 
 export function AppShell({ children }: { children: React.ReactNode }) {
   const [collapsed, setCollapsed] = useState(false);
@@ -16,7 +17,10 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           collapsed ? "ml-16" : "ml-64"
         )}
       >
-        <div className="p-6 lg:p-8">{children}</div>
+        <div className="p-6 lg:p-8">
+          <PipelineAlertsBanner />
+          {children}
+        </div>
       </main>
     </div>
   );

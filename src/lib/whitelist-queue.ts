@@ -83,6 +83,18 @@ export async function markSent(clientTag: string, domains: string[]): Promise<vo
   if (error) throw new Error(error.message);
 }
 
+/**
+ * ReplyRouter (and Bison) know a client by its BARE tag ("EXCL"), but the
+ * queue stores the tracked-sheet tag, which carries a section suffix
+ * ("EXCL: Leads"). Passing the suffixed tag to ReplyRouter 404s and the send
+ * is silently skipped — the domains stay queued forever. Strip everything from
+ * the first ':' so the recipient lookup resolves. A bare tag (no colon) is
+ * returned unchanged.
+ */
+export function bareClientTag(tag: string): string {
+  return (tag.split(":")[0] || tag).trim();
+}
+
 export interface ClientPartition {
   /** sub-tag → the domains that carry that sub-tag in Bison */
   buckets: Map<string, string[]>;
@@ -111,7 +123,9 @@ export async function partitionByClientSubTags(
   domains: string[],
 ): Promise<ClientPartition> {
   const list = norm(domains);
-  const subTags = clientTag.split("/").map((s) => s.trim()).filter(Boolean);
+  // Split compound tags on "/", then strip each sub-tag's ": Leads"-style
+  // suffix so it matches what ReplyRouter/Bison actually know it as.
+  const subTags = clientTag.split("/").map((s) => bareClientTag(s)).filter(Boolean);
 
   // Domain → lowercase tag set from deliverability_domains (any instance).
   const supabase = getSupabaseAdmin();
@@ -136,7 +150,7 @@ export async function partitionByClientSubTags(
   const buckets = new Map<string, string[]>();
   const unmatched: string[] = [];
   if (subTags.length <= 1) {
-    if (live.length > 0) buckets.set(subTags[0] ?? clientTag, live);
+    if (live.length > 0) buckets.set(subTags[0] ?? bareClientTag(clientTag), live);
     return { buckets, burnt, unmatched };
   }
   for (const d of live) {

@@ -1,19 +1,18 @@
 import { NextResponse } from "next/server";
-import { fetchClientRecipients, sendWhitelistEmail } from "@/lib/whitelist-email";
-import { getQueuedByClient, markSent, partitionByClientSubTags } from "@/lib/whitelist-queue";
+import { getQueuedByClient } from "@/lib/whitelist-queue";
+import { runWhitelistForClient } from "@/lib/whitelist-runner";
+import { recordPipelineAlert, resolveAlertsForClients } from "@/lib/pipeline-alerts";
 
 export const maxDuration = 300;
 
 // Daily whitelist-email batch. Scheduled 6:30 AM PT (14:30 UTC — see vercel.json).
 //
-// For each client with queued domains: partition into per-recipient buckets
-// (compound tags like "DBSM / DBSA / DBSNJ / DBSF" split into one bucket per
-// sub-client, matched by each domain's own Bison tag — ReplyRouter has no
-// client under the compound name), resolve each bucket's recipients from
-// ReplyRouter, send one email per bucket listing its domains, then mark them
-// sent. Failures / missing recipients leave the domains queued (retried next
-// run) and are reported. Burnt-tagged domains are dropped from the queue
-// without emailing — whitelisting a retiring domain is noise.
+// For each client with queued domains, runWhitelistForClient partitions into
+// per-recipient buckets (compound tags split into one bucket per sub-client;
+// the ": Leads" suffix stripped so ReplyRouter resolves), sends one email per
+// bucket, and marks those domains sent. Any failed step is recorded to
+// pipeline_alerts AND pinged to #leadsync-outbound — never silently skipped
+// like the 7/15 batch. A client that fully succeeds clears its open alert.
 export async function GET() {
   try {
     const grouped = await getQueuedByClient();
@@ -22,49 +21,36 @@ export async function GET() {
     let sentEmails = 0;
     let sentDomains = 0;
     let burntDropped = 0;
-    const skipped: { clientTag: string; reason: string; domains: number }[] = [];
+    const skipped: { clientTag: string; step: string; reason: string; domains: number }[] = [];
+    const recovered: string[] = [];
 
     for (const clientTag of clients) {
-      const domains = grouped[clientTag];
-      try {
-        const { buckets, burnt, unmatched } = await partitionByClientSubTags(clientTag, domains);
+      const r = await runWhitelistForClient(clientTag, grouped[clientTag]);
+      sentEmails += r.sentEmails;
+      sentDomains += r.sentDomains;
+      burntDropped += r.burntDropped;
 
-        if (burnt.length > 0) {
-          // Clear them from the queue (marked sent) so they stop clogging runs.
-          await markSent(clientTag, burnt);
-          burntDropped += burnt.length;
-        }
-        if (unmatched.length > 0) {
-          skipped.push({ clientTag, reason: "no sub-client tag on domain — left queued", domains: unmatched.length });
-        }
-
-        for (const [subTag, subDomains] of buckets) {
-          try {
-            const { cc, bcc } = await fetchClientRecipients(subTag);
-            const result = await sendWhitelistEmail({ clientTag: subTag, domains: subDomains, to: cc, bcc });
-            if (!result.sent) {
-              skipped.push({ clientTag: subTag === clientTag ? clientTag : `${clientTag} → ${subTag}`, reason: result.reason || "not sent", domains: subDomains.length });
-              continue;
-            }
-            await markSent(clientTag, subDomains);
-            sentEmails++;
-            sentDomains += subDomains.length;
-          } catch (err) {
-            skipped.push({
-              clientTag: subTag === clientTag ? clientTag : `${clientTag} → ${subTag}`,
-              reason: err instanceof Error ? err.message : "failed",
-              domains: subDomains.length,
-            });
-          }
-        }
-      } catch (err) {
+      for (const f of r.failures) {
         skipped.push({
-          clientTag,
-          reason: err instanceof Error ? err.message : "failed",
-          domains: domains.length,
+          clientTag: f.subTag === clientTag ? clientTag : `${clientTag} → ${f.subTag}`,
+          step: f.step,
+          reason: f.reason,
+          domains: f.domains.length,
+        });
+        await recordPipelineAlert({
+          source: "whitelist-queue",
+          clientTag, // keep the stored tag as the dedup key
+          step: f.step,
+          reason: f.reason,
+          domains: f.domains,
         });
       }
+
+      if (r.failures.length === 0) recovered.push(clientTag);
     }
+
+    // Clients that fully sent this run get their open alert closed automatically.
+    await resolveAlertsForClients("whitelist-queue", recovered);
 
     return NextResponse.json({
       ok: true,
@@ -77,6 +63,8 @@ export async function GET() {
   } catch (error) {
     const message = error instanceof Error ? error.message : "Failed";
     console.error("[cron/whitelist-queue]", message);
+    // A top-level crash is itself a loud failure — record it so it's visible.
+    await recordPipelineAlert({ source: "whitelist-queue", step: "cron", reason: message }).catch(() => {});
     return NextResponse.json({ error: message }, { status: 500 });
   }
 }
