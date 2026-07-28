@@ -4,7 +4,8 @@
 export async function postSlackMessage(
   text: string,
   channelOverride?: string,
-): Promise<{ ok: boolean; reason?: string }> {
+  opts: { threadTs?: string } = {},
+): Promise<{ ok: boolean; reason?: string; ts?: string }> {
   const token = process.env.SLACK_BOT_TOKEN;
   const channel = channelOverride || process.env.SLACK_TRIAGE_CHANNEL_ID;
   if (!token || !channel) {
@@ -17,11 +18,11 @@ export async function postSlackMessage(
         "Content-Type": "application/json; charset=utf-8",
         Authorization: `Bearer ${token}`,
       },
-      body: JSON.stringify({ channel, text }),
+      body: JSON.stringify({ channel, text, ...(opts.threadTs ? { thread_ts: opts.threadTs } : {}) }),
     });
-    const json = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string };
+    const json = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string; ts?: string };
     if (!json.ok) return { ok: false, reason: json.error || `HTTP ${res.status}` };
-    return { ok: true };
+    return { ok: true, ts: json.ts };
   } catch (e) {
     return { ok: false, reason: e instanceof Error ? e.message : "request failed" };
   }

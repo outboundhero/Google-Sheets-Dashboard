@@ -211,13 +211,25 @@ export async function getCancellations(statuses: string[] = ["pending"], limit =
   }));
 }
 
-export async function getEvents(limit = 200): Promise<ReplacementEvent[]> {
+export async function getEvents(
+  limit = 200,
+  opts: { withinDays?: number; olderThanDays?: number } = {},
+): Promise<ReplacementEvent[]> {
   const supabase = getSupabaseAdmin();
-  const { data, error } = await supabase
+  let q = supabase
     .from("replacement_events")
     .select("*")
     .order("created_at", { ascending: false })
     .limit(Math.min(limit, 1000));
+  // trailing-window vs archive views (Spencer: show 7 days, archive older) —
+  // rows are never deleted; "archive" is just the >N-days slice of the table
+  if (opts.withinDays && opts.withinDays > 0) {
+    q = q.gte("created_at", new Date(Date.now() - opts.withinDays * 86_400_000).toISOString());
+  }
+  if (opts.olderThanDays && opts.olderThanDays > 0) {
+    q = q.lt("created_at", new Date(Date.now() - opts.olderThanDays * 86_400_000).toISOString());
+  }
+  const { data, error } = await q;
   if (error) throw new Error(error.message);
   return (data || []).map((r) => ({
     id: r.id,

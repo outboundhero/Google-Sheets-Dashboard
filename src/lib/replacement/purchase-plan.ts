@@ -1,0 +1,67 @@
+// Purchase calculator — "buy X more domains per instance". READ-ONLY. Reuses the
+// replacement plan's client audit + reserve counts to answer: how many fresh
+// domains does each instance need to buy so every active client can be topped up
+// to its per-client cap (Spencer: 20 B2B / 5 B2C) AND we still keep a reserve
+// buffer left over? Pulling reserve to fill client caps depletes reserve, so the
+// buy target = (cap shortfall + reserve floor) − reserve on hand.
+import { buildReplacementPlan } from "./plan";
+import { ALL_INSTANCE_SLUGS, getInstance } from "@/lib/bison-instances";
+
+/** Reserve buffer we want to keep per instance after topping every client to cap. */
+const RESERVE_FLOOR = Math.max(0, Number(process.env.RESERVE_MIN_READY ?? 5));
+
+export interface ShortClient {
+  clientTag: string;
+  staying: number;   // healthy domains that remain (cap baseline)
+  capMax: number;
+  short: number;     // capMax − staying (>0)
+}
+
+export interface InstancePurchase {
+  instance: string;
+  tier: string;
+  clients: number;          // active clients in this instance
+  capDeficit: number;       // Σ shortfall to bring every client to cap
+  reserveFloor: number;     // buffer we want to keep
+  availableReserve: number; // current pull-able (outlook + google) reserve
+  toBuy: number;            // recommended purchase = max(0, capDeficit + floor − available)
+  shortClients: ShortClient[];
+}
+
+export interface PurchasePlanResult {
+  generatedFor: string;
+  reserveFloor: number;
+  totalToBuy: number;
+  byInstance: InstancePurchase[];
+}
+
+export async function computePurchasePlan(): Promise<PurchasePlanResult> {
+  const plan = await buildReplacementPlan({ infoMigration: false });
+
+  const byInstance: InstancePurchase[] = ALL_INSTANCE_SLUGS.map((inst) => {
+    const rows = plan.clientAudit.filter((a) => a.instance === inst);
+    const shortClients: ShortClient[] = rows
+      .map((a) => ({ clientTag: a.clientTag, staying: a.staying, capMax: a.capMax, short: Math.max(0, a.capMax - a.staying) }))
+      .filter((c) => c.short > 0)
+      .sort((a, b) => b.short - a.short);
+
+    const capDeficit = shortClients.reduce((s, c) => s + c.short, 0);
+    const r = plan.reserveReadyByInstance[inst];
+    const availableReserve = (r?.outlook ?? 0) + (r?.google ?? 0);
+    const toBuy = Math.max(0, capDeficit + RESERVE_FLOOR - availableReserve);
+
+    return {
+      instance: inst,
+      tier: getInstance(inst).tier,
+      clients: rows.length,
+      capDeficit,
+      reserveFloor: RESERVE_FLOOR,
+      availableReserve,
+      toBuy,
+      shortClients,
+    };
+  });
+
+  const totalToBuy = byInstance.reduce((s, i) => s + i.toBuy, 0);
+  return { generatedFor: plan.generatedFor, reserveFloor: RESERVE_FLOOR, totalToBuy, byInstance };
+}

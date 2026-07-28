@@ -21,7 +21,29 @@ export interface ExecuteInputs {
 export type StepState = "queued" | "running" | "done" | "failed" | "skipped" | "degraded";
 export interface ExecStep { key: string; label: string; state: StepState; note?: string }
 
+// Everything needed to re-run ONE failed step later, stored in the error
+// event's signals. The dashboard Retry card replays it against the same
+// deliverability endpoints (Slack only notifies — retry lives in LeadSync).
+export interface RetryPayload {
+  step: "tag" | "redirect" | "attach" | "sheet" | "whitelist" | "remove";
+  instance: string;
+  clientTag: string;
+  domains: string[];
+  tagNames?: string[];       // tag
+  newUrl?: string;           // redirect
+  campaignId?: number;       // attach
+  campaignName?: string;     // attach
+  instancesQuery?: string;   // remove
+}
+
 const RETRY = 3;
+// Retry-until-complete (Spencer 2026-07-27 Loom): rate-limited tag/attach calls
+// are re-run — only the still-failing subset — until everything landed or the
+// failures are permanent (disconnected accounts). Bounded so a hard outage
+// can't loop forever: up to MAX_PASSES with 5s→30s backoff (~4 min worst case).
+const MAX_PASSES = 10;
+const RETRYABLE_RE = /rate.?limit|429|too many|server error|5\d\d|network|timeout|retryable/i;
+const backoff = (pass: number) => Math.min(5000 * 2 ** pass, 30_000);
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 async function callJson(url: string, body: unknown, retries = RETRY): Promise<{ ok: boolean; data: unknown; error?: string }> {
@@ -78,15 +100,58 @@ export async function runExecution(inp: ExecuteInputs, emit: (steps: ExecStep[])
   // ── ADD REPLACEMENTS ──
   if (addRepl) {
     setStep("tag", { state: "running" });
-    const tagRes = await callJson("/api/deliverability/bulk-tags", { action: "add", tagNames: [clientTag], domains: replacementDomains });
-    setStep("tag", { state: tagRes.ok ? "done" : "failed", note: tagRes.ok ? undefined : tagRes.error });
-    record({ events: [{ instance, clientTag, eventType: tagRes.ok ? "tagged" : "error", detail: tagRes.ok ? `tagged ${replacementDomains.length}` : tagRes.error }] });
+    type TagData = {
+      inboxesAffected?: number; failed?: number; total?: number;
+      failedInboxes?: { email: string; domain: string; reason: string }[];
+    };
+    // Retry-until-complete: re-run bulk-tags on the still-failing domains while
+    // the failures look transient (rate limit / 5xx / network). Re-tagging an
+    // already-tagged inbox is idempotent, so retrying by domain is safe.
+    let tagOk = false;
+    let tagErr: string | undefined;
+    let tagFails: NonNullable<TagData["failedInboxes"]> = [];
+    let tagTotal = 0;
+    let tagDomains = replacementDomains;
+    for (let pass = 0; pass < MAX_PASSES; pass++) {
+      const res = await callJson("/api/deliverability/bulk-tags", { action: "add", tagNames: [clientTag], domains: tagDomains });
+      if (!res.ok) { tagOk = false; tagErr = res.error; break; }
+      tagOk = true;
+      const d = (res.data || {}) as TagData;
+      if (pass === 0) tagTotal = d.total ?? 0;
+      tagFails = d.failedInboxes ?? [];
+      if (tagFails.length === 0) break;
+      const retryable = tagFails.filter((f) => RETRYABLE_RE.test(f.reason));
+      if (retryable.length === 0 || pass === MAX_PASSES - 1) break;   // permanent fails / out of passes
+      tagDomains = [...new Set(retryable.map((f) => f.domain))];
+      setStep("tag", { state: "running", note: `pass ${pass + 2}: retrying ${retryable.length} rate-limited inbox(es)…` });
+      await sleep(backoff(pass));
+    }
+    const tagRetry: RetryPayload = { step: "tag", instance, clientTag, domains: replacementDomains, tagNames: [clientTag] };
+    if (!tagOk) {
+      setStep("tag", { state: "failed", note: tagErr });
+      record({ events: [{ instance, clientTag, eventType: "error", detail: `Tag failed: ${tagErr}`, signals: { kind: "tag_failed", retry: tagRetry } }] });
+    } else if (tagFails.length > 0) {
+      // partial tag survives all retries → degraded (never silently "done")
+      const note = `${Math.max(0, tagTotal - tagFails.length)}/${tagTotal || "?"} inboxes tagged · ${tagFails.length} failed`;
+      setStep("tag", { state: "degraded", note });
+      record({ events: [{
+        instance, clientTag, eventType: "error",
+        detail: `Tag incomplete — ${note}`,
+        signals: { kind: "tag_incomplete", failed: tagFails.length, total: tagTotal, sample: tagFails.slice(0, 8), retry: tagRetry },
+      }] });
+    } else {
+      setStep("tag", { state: "done" });
+      record({ events: [{ instance, clientTag, eventType: "tagged", detail: `tagged ${replacementDomains.length} domain(s)${tagTotal ? ` (${tagTotal} inboxes)` : ""}` }] });
+    }
 
     if (redirectUrl) {
       setStep("redirect", { state: "running" });
       const rRes = await callJson("/api/deliverability/change-redirect", { dryRun: false, domains: replacementDomains, newUrl: redirectUrl });
       setStep("redirect", { state: rRes.ok ? "done" : "failed", note: rRes.ok ? undefined : rRes.error });
-      record({ events: [{ instance, clientTag, eventType: rRes.ok ? "redirect_set" : "error", detail: rRes.ok ? redirectUrl : rRes.error }] });
+      record({ events: [{
+        instance, clientTag, eventType: rRes.ok ? "redirect_set" : "error", detail: rRes.ok ? redirectUrl : rRes.error,
+        signals: rRes.ok ? null : { kind: "redirect_failed", retry: { step: "redirect", instance, clientTag, domains: replacementDomains, newUrl: redirectUrl } satisfies RetryPayload },
+      }] });
     }
 
     type AttachData = {
@@ -98,19 +163,22 @@ export async function runExecution(inp: ExecuteInputs, emit: (steps: ExecStep[])
       let aRes = await callJson(`/api/deliverability/attach-domains-to-campaign?instance=${instance}`, { campaign_id: c.id, domains: replacementDomains });
       let d = (aRes.data || {}) as AttachData;
 
-      // Auto-retry once more for rate-limit / transient skips. The route already
-      // backs off internally; this re-attempts whatever's still unattached
-      // (already-attached are filtered server-side) — critical in unattended mode
-      // where nobody is watching to click "retry".
-      if (aRes.ok && (d.rateLimited ?? 0) > 0) {
-        await sleep(4000);
+      // Retry-until-complete for rate-limit / transient skips. The route backs
+      // off internally and filters already-attached server-side, so re-posting
+      // the full list only re-attempts what's still missing — keeps going until
+      // everything attached or only permanent (disconnected) skips remain.
+      for (let pass = 0; aRes.ok && (d.rateLimited ?? 0) > 0 && pass < MAX_PASSES - 1; pass++) {
+        setStep(`attach:${c.id}`, { state: "running", note: `pass ${pass + 2}: retrying ${d.rateLimited} rate-limited…` });
+        await sleep(backoff(pass));
         const retry = await callJson(`/api/deliverability/attach-domains-to-campaign?instance=${instance}`, { campaign_id: c.id, domains: replacementDomains });
-        if (retry.ok) { aRes = retry; d = (retry.data || {}) as AttachData; }
+        if (!retry.ok) break;
+        aRes = retry; d = (retry.data || {}) as AttachData;
       }
 
+      const attachRetry: RetryPayload = { step: "attach", instance, clientTag, domains: replacementDomains, campaignId: c.id, campaignName: c.name };
       if (!aRes.ok) {
         setStep(`attach:${c.id}`, { state: "failed", note: aRes.error });
-        record({ events: [{ instance, clientTag, eventType: "error", detail: `${c.name}: ${aRes.error}` }] });
+        record({ events: [{ instance, clientTag, eventType: "error", detail: `${c.name}: ${aRes.error}`, signals: { kind: "attach_failed", retry: attachRetry } }] });
         continue;
       }
 
@@ -126,7 +194,7 @@ export async function runExecution(inp: ExecuteInputs, emit: (steps: ExecStep[])
         record({ events: [{
           instance, clientTag, eventType: "error",
           detail: `Attach incomplete — "${c.name}": ${newly} attached, ${failed} skipped (${parts})`,
-          signals: { kind: "attach_incomplete", campaign: c.name, campaignId: c.id, newlyAttached: newly, failed, rateLimited: retr, sample: (d.failedInboxes || []).slice(0, 8) },
+          signals: { kind: "attach_incomplete", campaign: c.name, campaignId: c.id, newlyAttached: newly, failed, rateLimited: retr, sample: (d.failedInboxes || []).slice(0, 8), retry: attachRetry },
         }] });
       } else {
         setStep(`attach:${c.id}`, { state: "done" });
@@ -137,10 +205,12 @@ export async function runExecution(inp: ExecuteInputs, emit: (steps: ExecStep[])
     setStep("sheet", { state: "running" });
     const sRes = await callJson("/api/deliverability/send-to-sheet", { domains: replacementDomains, clientTag });
     setStep("sheet", { state: sRes.ok ? "done" : "failed", note: sRes.ok ? undefined : sRes.error });
+    if (!sRes.ok) record({ events: [{ instance, clientTag, eventType: "error", detail: `Sheet append failed: ${sRes.error}`, signals: { kind: "sheet_failed", retry: { step: "sheet", instance, clientTag, domains: replacementDomains } satisfies RetryPayload } }] });
 
     setStep("whitelist", { state: "running" });
     const wRes = await callJson("/api/deliverability/whitelist/queue", { domains: replacementDomains, clientTag });
     setStep("whitelist", { state: wRes.ok ? "done" : "failed", note: wRes.ok ? undefined : wRes.error });
+    if (!wRes.ok) record({ events: [{ instance, clientTag, eventType: "error", detail: `Whitelist queue failed: ${wRes.error}`, signals: { kind: "whitelist_failed", retry: { step: "whitelist", instance, clientTag, domains: replacementDomains } satisfies RetryPayload } }] });
 
     record({ lifecycle: replacementDomains.map((d) => ({ instance, domain: d, state: "assigned" as const, clientTag })) });
   }
@@ -152,10 +222,15 @@ export async function runExecution(inp: ExecuteInputs, emit: (steps: ExecStep[])
     const campaigns = ((dRes.data as { campaigns?: unknown[] })?.campaigns) || [];
     setStep("discover", { state: dRes.ok ? "done" : "failed", note: dRes.ok ? `${campaigns.length} campaign(s)` : dRes.error });
 
+    const removeRetry: RetryPayload = { step: "remove", instance, clientTag, domains: removeDomains, instancesQuery };
+    if (!dRes.ok) {
+      record({ events: [{ instance, clientTag, eventType: "error", detail: `Campaign discovery failed: ${dRes.error}`, signals: { kind: "remove_failed", retry: removeRetry } }] });
+    }
     if (dRes.ok && campaigns.length > 0) {
       setStep("remove", { state: "running" });
       const rmRes = await callJson(`/api/deliverability/remove-from-campaigns?${instancesQuery}`, { domains: removeDomains, campaigns });
       setStep("remove", { state: rmRes.ok ? "done" : "failed", note: rmRes.ok ? undefined : rmRes.error });
+      if (!rmRes.ok) record({ events: [{ instance, clientTag, eventType: "error", detail: `Remove from campaigns failed: ${rmRes.error}`, signals: { kind: "remove_failed", retry: removeRetry } }] });
     } else {
       setStep("remove", { state: "skipped", note: "no campaigns to remove from" });
     }
@@ -167,6 +242,17 @@ export async function runExecution(inp: ExecuteInputs, emit: (steps: ExecStep[])
       cancellations: removeDomains.map((d) => ({ instance, domain: d, clientTag, reason: "burnt — replaced" })),
     });
     setStep("schedule", { state: "done", note: "vendor delete in 5 days (not yet fired)" });
+  }
+
+  // Slack notification for any failed/degraded step (retry lives in LeadSync —
+  // the "Failed steps" card replays the stored payloads; Slack only alerts).
+  const failures = steps.filter((s) => s.state === "failed" || s.state === "degraded");
+  if (failures.length > 0) {
+    fetch("/api/replacement/notify-failure", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ clientTag, instance, steps: failures.map((s) => ({ label: s.label, state: s.state, note: s.note })) }),
+    }).catch(() => {});
   }
 
   return { ok };

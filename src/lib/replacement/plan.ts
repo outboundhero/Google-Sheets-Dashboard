@@ -8,6 +8,7 @@ import { ALL_INSTANCE_SLUGS, getInstance, type BisonInstanceSlug } from "@/lib/b
 import { pstDateString } from "@/lib/date-utils";
 import { getSettings, getHandledDomains } from "./store";
 import { evaluateDomain, type DomainSignals } from "./detect";
+import { evaluateSegments, type ThresholdConfig, type DomainMetrics } from "./threshold-groups";
 import { deriveCampaignMap, type CampaignRef } from "./campaigns";
 import { INSTANCE_CAP } from "./types";
 
@@ -97,6 +98,7 @@ export interface ReserveDomain {
 
 export interface PlanResult {
   generatedFor: string;            // pst date
+  burntSource?: "guardrails" | "groups"; // which detector decided "burnt" for this build
   infoMigration: boolean;          // was migration mode on for this build
   burntCount: number;              // replaceable domains WITH a client tag
   unassignedBurntCount: number;    // replaceable spare/reserve domains (no tag) — clean up, not replace
@@ -111,8 +113,16 @@ function ageDays(created: string | null, nowMs: number): number {
   return Math.floor((nowMs - new Date(created).getTime()) / 86_400_000);
 }
 
-export async function buildReplacementPlan(opts: { infoMigration?: boolean } = {}): Promise<PlanResult> {
+export async function buildReplacementPlan(
+  opts: { infoMigration?: boolean; burntSource?: "guardrails" | "groups"; groupConfig?: ThresholdConfig } = {},
+): Promise<PlanResult> {
   const infoMigration = opts.infoMigration ?? false;
+  // Detection source. Default = the flat guardrails (unchanged behaviour for
+  // every existing caller). "groups" swaps ONLY the burnt verdict to Spencer's
+  // segmented per-client-tag threshold groups — the rest of the plan (reserve,
+  // caps, top-up, campaigns) is identical. Still observe-only: executes nothing.
+  const burntSource = opts.burntSource ?? "guardrails";
+  const groupConfig = opts.groupConfig;
   const supabase = getSupabaseAdmin();
   const cfg = await getSettings();
   const today = pstDateString(new Date());
@@ -138,9 +148,11 @@ export async function buildReplacementPlan(opts: { infoMigration?: boolean } = {
     off += 1000;
   }
 
-  // 2) windowed rates if needed
+  // 2) windowed rates if needed. Always load them when detecting via groups —
+  //    the group rules are window-based (reply15d/30d, bounce30d↩15d) regardless
+  //    of the flat guardrails' lookback setting.
   const rateByKey = new Map<string, RateRow>();
-  if (cfg.lookbackWindow !== "all") {
+  if (cfg.lookbackWindow !== "all" || burntSource === "groups") {
     let r = 0;
     while (true) {
       const { data, error } = await supabase
@@ -199,16 +211,35 @@ export async function buildReplacementPlan(opts: { infoMigration?: boolean } = {
     return "other";
   };
   interface Enriched { d: DomRow; provider: Provider; tag: string | null; burnt: boolean; replaceable: boolean; reasons: string[] }
-  const enriched: Enriched[] = domains.map((d) => {
+  // "is this domain burnt?" — either the flat guardrails (default) or the
+  // segmented threshold groups. Only this verdict differs between the two paths.
+  const burntVerdict = (d: DomRow): { burnt: boolean; reasons: string[] } => {
+    if (burntSource === "groups" && groupConfig) {
+      const rr = rateByKey.get(`${d.instance}:${d.domain}`);
+      const m: DomainMetrics = {
+        sent: d.total_sent ?? 0,
+        reply_10: rr?.reply_10 ?? null, reply_15: rr?.reply_15 ?? null, reply_30: rr?.reply_30 ?? null,
+        bounce_10: rr?.bounce_10 ?? null, bounce_15: rr?.bounce_15 ?? null, bounce_30: rr?.bounce_30 ?? null,
+        surbl: d.blacklisted, spamhaus: d.spamhaus_dbl,
+      };
+      const tagsUpper = new Set((d.tags || []).map((t) => String(t).trim().toUpperCase()));
+      const v = evaluateSegments(m, tagsUpper, groupConfig);
+      // prefix reasons with which segment › group fired (Spencer: "save which group triggered")
+      return { burnt: v.burnt, reasons: v.burnt ? [`${v.segmentName} › ${v.groupName}`, ...v.reasons] : [] };
+    }
     const signals: DomainSignals = {
       instance: d.instance, domain: d.domain, totalSent: d.total_sent ?? 0,
       replyRate: rateOf(d, "reply"), bounceRate: rateOf(d, "bounce"),
       surbl: d.blacklisted, spamhaus: d.spamhaus_dbl,
     };
     const r = evaluateDomain(signals, cfg);
-    const replaceable = r.burnt || (infoMigration && isInfo(d.domain));
-    const reasons = r.burnt ? r.reasons : (replaceable ? [".info domain (migration)"] : []);
-    return { d, provider: providerOf(d), tag: clientTagOf(d.tags), burnt: r.burnt, replaceable, reasons };
+    return { burnt: r.burnt, reasons: r.burnt ? r.reasons : [] };
+  };
+  const enriched: Enriched[] = domains.map((d) => {
+    const v = burntVerdict(d);
+    const replaceable = v.burnt || (infoMigration && isInfo(d.domain));
+    const reasons = v.burnt ? v.reasons : (replaceable ? [".info domain (migration)"] : []);
+    return { d, provider: providerOf(d), tag: clientTagOf(d.tags), burnt: v.burnt, replaceable, reasons };
   });
 
   // 5) reserve-ready pools per (instance, provider) — consumable. Ready =
@@ -349,5 +380,5 @@ export async function buildReplacementPlan(opts: { infoMigration?: boolean } = {
       redirectUrl, targetCampaigns, replacementDomain, removeOnly, capCurrent: healthy, capMax, blockers,
     });
   }
-  return { generatedFor: today, infoMigration, burntCount: items.length, items, reserveReadyByInstance, reserveList, unassignedBurntCount, clientAudit };
+  return { generatedFor: today, burntSource, infoMigration, burntCount: items.length, items, reserveReadyByInstance, reserveList, unassignedBurntCount, clientAudit };
 }

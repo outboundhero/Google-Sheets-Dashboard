@@ -8,6 +8,14 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { useAuth } from "@/lib/auth-context";
 import { ExecuteDialog } from "@/components/replacement/execute-dialog";
+import { ThresholdGroupsEditor } from "@/components/replacement/threshold-groups-editor";
+import { GroupPlanCard } from "@/components/replacement/group-plan-card";
+import { DailyReportCard } from "@/components/replacement/daily-report-card";
+import { RetryCard } from "@/components/replacement/retry-card";
+import { PurchasePlanCard } from "@/components/replacement/purchase-plan-card";
+import { GoingLiveCard } from "@/components/replacement/going-live-card";
+import { WarmupForecastCard } from "@/components/replacement/warmup-forecast-card";
+import { PurchaseProposalCard } from "@/components/replacement/purchase-proposal-card";
 import { runExecution, type ExecuteInputs, type ExecStep } from "@/lib/replacement/execute-runner";
 import type { ReplacementSettings, LookbackWindow } from "@/lib/replacement/types";
 
@@ -233,6 +241,7 @@ export default function ReplacementPage() {
   const [execClient, setExecClient] = useState("");      // "clientTag|instance"
   const [execInputs, setExecInputs] = useState<ExecuteInputs | null>(null);
   const [activity, setActivity] = useState<ActivityEvent[] | null>(null);
+  const [activityArchive, setActivityArchive] = useState(false);
   const [loadingActivity, setLoadingActivity] = useState(false);
   const [cancellations, setCancellations] = useState<PendingCancellation[] | null>(null);
   const [loadingCancels, setLoadingCancels] = useState(false);
@@ -298,10 +307,13 @@ export default function ReplacementPage() {
     setLoadingMap(false);
   };
 
-  const loadActivity = async () => {
+  const loadActivity = async (archive = false) => {
     setLoadingActivity(true);
+    setActivityArchive(archive);
     try {
-      const res = await fetch("/api/replacement/events?limit=300", { cache: "no-store" });
+      // default view = trailing 7 days; archive = everything older (never deleted)
+      const qs = archive ? "limit=500&archive=1&days=7" : "limit=300&days=7";
+      const res = await fetch(`/api/replacement/events?${qs}`, { cache: "no-store" });
       const data = await res.json();
       if (res.ok) setActivity(data.events || []);
     } catch { /* ignore */ }
@@ -458,6 +470,28 @@ export default function ReplacementPage() {
         </CardContent>
       </Card>
 
+      {/* Segmented threshold groups (per-client-tag) */}
+      <ThresholdGroupsEditor />
+
+      {/* Group-driven replacement plan (observe) — same plan, groups decide burnt */}
+      <GroupPlanCard />
+
+      {/* Failed execution steps with one-click retry (hidden when none) */}
+      <RetryCard />
+
+      {/* End-of-day report — what replacement did (audit log, per PST day) */}
+      <DailyReportCard />
+
+      <PurchasePlanCard />
+
+      {/* Staged domain buys — approve-first, nothing purchased without a click */}
+      <PurchaseProposalCard />
+
+      {/* When reserve domains finish warm-up (read-only forecast) */}
+      <WarmupForecastCard />
+
+      <GoingLiveCard />
+
       {/* Observe-only preview */}
       <Card>
         <CardContent className="p-5 space-y-4">
@@ -509,7 +543,7 @@ export default function ReplacementPage() {
           <div className="flex items-center justify-between">
             <div>
               <div className="text-sm font-medium">Campaign match — where replacements would attach</div>
-              <div className="text-[11px] text-muted-foreground">Eligible = active · draft · launching · launch processing (not failed/paused/completed/archived)</div>
+              <div className="text-[11px] text-muted-foreground">Eligible = active · draft · launching · launch processing · paused (not failed/completed/archived)</div>
             </div>
             <Button size="sm" variant="outline" onClick={loadCampaignMap} disabled={loadingMap} className="gap-2">
               <RefreshCw className={`h-4 w-4 ${loadingMap ? "animate-spin" : ""}`} />
@@ -528,7 +562,7 @@ export default function ReplacementPage() {
               </div>
               <div className="flex flex-wrap gap-2">
                 {Object.entries(campaignMap.statusDistribution).sort((a, b) => b[1] - a[1]).map(([s, n]) => (
-                  <Badge key={s} variant="outline" className={`text-[10px] ${["active","draft","launching","launch processing"].includes(s) ? "border-emerald-500/30 text-emerald-500" : "text-muted-foreground"}`}>
+                  <Badge key={s} variant="outline" className={`text-[10px] ${["active","draft","launching","launch processing","paused"].includes(s) ? "border-emerald-500/30 text-emerald-500" : "text-muted-foreground"}`}>
                     {s}: {n}
                   </Badge>
                 ))}
@@ -839,16 +873,21 @@ export default function ReplacementPage() {
           <div className="flex items-center justify-between">
             <div>
               <div className="text-sm font-medium">Activity log — what was executed</div>
-              <div className="text-[11px] text-muted-foreground">Every real action (tag · redirect · attach · removed · cancellation scheduled), newest first.</div>
+              <div className="text-[11px] text-muted-foreground">Every real action (tag · redirect · attach · removed · cancellation scheduled), newest first. Default = trailing 7 days; older lives in the archive.</div>
             </div>
-            <Button size="sm" variant="outline" onClick={loadActivity} disabled={loadingActivity} className="gap-2">
-              <RefreshCw className={`h-4 w-4 ${loadingActivity ? "animate-spin" : ""}`} />
-              {loadingActivity ? "Loading…" : "Load activity"}
-            </Button>
+            <div className="flex items-center gap-2">
+              <Button size="sm" variant={activityArchive ? "outline" : "default"} onClick={() => loadActivity(false)} disabled={loadingActivity} className="gap-2">
+                <RefreshCw className={`h-4 w-4 ${loadingActivity && !activityArchive ? "animate-spin" : ""}`} />
+                Last 7 days
+              </Button>
+              <Button size="sm" variant={activityArchive ? "default" : "outline"} onClick={() => loadActivity(true)} disabled={loadingActivity} className="gap-2">
+                Archive (&gt;7d)
+              </Button>
+            </div>
           </div>
           {activity && (
             activity.length === 0 ? (
-              <p className="text-sm text-muted-foreground">No actions executed yet.</p>
+              <p className="text-sm text-muted-foreground">{activityArchive ? "Nothing in the archive (no actions older than 7 days)." : "No actions in the last 7 days."}</p>
             ) : (
               <div className="rounded-lg border divide-y max-h-[420px] overflow-y-auto">
                 <div className="grid grid-cols-[140px_90px_1fr_110px_1fr] gap-2 px-3 py-2 text-[11px] text-muted-foreground font-medium bg-muted/30 sticky top-0">
