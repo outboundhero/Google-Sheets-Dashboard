@@ -316,6 +316,9 @@ export default function CampaignsPage() {
   // Client lifecycle filter: campaigns whose client tag is currently active vs
   // churned (per the Client Tracker sheet). "all" = no filter (default).
   const [clientStatusFilter, setClientStatusFilter] = useState<"all" | "active" | "paused" | "churned">("all");
+  // Nurture vs main campaigns (Nick 2026-07-29): going-live day = filter a client
+  // tag, select all, resume — WITHOUT nurture campaigns sneaking into the selection.
+  const [typeFilter, setTypeFilter] = useState<"all" | "main" | "nurture">("all");
   const { clients: trackerClients } = useClientTracker();
   const [selectedCampaign, setSelectedCampaign] = useState<Campaign | null>(null);
   const [lowLeadsOpen, setLowLeadsOpen] = useState(true);
@@ -484,6 +487,9 @@ export default function CampaignsPage() {
     if (clientStatusFilter === "active") result = result.filter((c) => !isChurnedCampaign(c) && !isPausedCampaign(c));
     else if (clientStatusFilter === "paused") result = result.filter((c) => !isChurnedCampaign(c) && isPausedCampaign(c));
     else if (clientStatusFilter === "churned") result = result.filter((c) => isChurnedCampaign(c));
+    // nurture campaigns are identified by "[Nurture]" (any case) in the name
+    if (typeFilter === "nurture") result = result.filter((c) => c.name.toLowerCase().includes("nurture"));
+    else if (typeFilter === "main") result = result.filter((c) => !c.name.toLowerCase().includes("nurture"));
     // Search supports a comma-separated list of client tag abbreviations (or any
     // substring): a campaign matches if its name or tag contains ANY of the terms.
     const terms = search.split(",").map((s) => s.trim().toLowerCase()).filter(Boolean);
@@ -501,7 +507,7 @@ export default function CampaignsPage() {
       }
       return sortDir === "desc" ? b[sortField] - a[sortField] : a[sortField] - b[sortField];
     });
-  }, [campaigns, statusFilter, clientFilters, clientStatusFilter, isChurnedCampaign, isPausedCampaign, search, sortField, sortDir]);
+  }, [campaigns, statusFilter, clientFilters, clientStatusFilter, typeFilter, isChurnedCampaign, isPausedCampaign, search, sortField, sortDir]);
 
   // Clients with <1500 remaining leads. "Active only" means active CLIENTS —
   // exclude churned/paused clients (not just non-active campaigns), so a churned
@@ -850,6 +856,37 @@ export default function CampaignsPage() {
               <span className="ml-1 opacity-60">{p.count}</span>
             </button>
           ))}
+        </div>
+
+        {/* Main vs nurture campaigns — so "select all → resume" on a going-live
+            day never sweeps nurture campaigns in (Nick's ask). */}
+        <div className="flex items-center gap-1 pl-2 ml-1 border-l">
+          {([
+            { key: "all",     label: "All types" },
+            { key: "main",    label: "Main only" },
+            { key: "nurture", label: "Nurture only" },
+          ] as const).map((t) => {
+            const count = t.key === "all"
+              ? campaigns.length
+              : t.key === "nurture"
+                ? campaigns.filter((c) => c.name.toLowerCase().includes("nurture")).length
+                : campaigns.filter((c) => !c.name.toLowerCase().includes("nurture")).length;
+            return (
+              <button
+                key={t.key}
+                onClick={() => setTypeFilter(t.key)}
+                className={`text-xs px-2.5 py-1.5 rounded-full border transition-colors ${
+                  typeFilter === t.key
+                    ? "bg-primary text-primary-foreground border-primary"
+                    : "border-border text-muted-foreground hover:border-foreground hover:text-foreground"
+                }`}
+                title={t.key === "main" ? "Hide campaigns with “Nurture” in the name" : t.key === "nurture" ? "Only campaigns with “Nurture” in the name" : "All campaigns"}
+              >
+                {t.label}
+                <span className="ml-1 opacity-60">{count}</span>
+              </button>
+            );
+          })}
         </div>
 
         <ClientFilterDropdown
