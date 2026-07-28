@@ -8,6 +8,7 @@ import { getSupabaseAdmin } from "@/lib/supabase";
 import { postSlackMessage } from "@/lib/slack";
 import { generateDomainCandidates } from "@/lib/openai-domains";
 import { computePurchasePlan } from "./purchase-plan";
+import { getCapacityLimits } from "./bison-capacity";
 
 /** Max domains per proposal per instance (user 2026-07-29: 25). */
 const BATCH_CAP = Math.max(1, Number(process.env.AUTO_PURCHASE_BATCH_CAP ?? 25));
@@ -64,11 +65,6 @@ export interface GenerateResult {
   alerted: boolean;
 }
 
-/** Bison sender-account capacity per instance, via env
- *  `BISON_SENDER_CAPACITY_<SLUG>`. 0/unset = no known limit → check skipped. */
-function capacityFor(instance: string): number {
-  return Math.max(0, Number(process.env[`BISON_SENDER_CAPACITY_${instance.toUpperCase()}`] ?? 0));
-}
 const MAILBOXES_PER_DOMAIN = 49; // Inboxing standard order size
 
 /** Propose a capped batch per short instance (skips instances that already
@@ -77,6 +73,7 @@ export async function generateProposals(): Promise<GenerateResult> {
   const supabase = getSupabaseAdmin();
   const plan = await computePurchasePlan();
   const pending = (await listProposals(100)).filter((p) => p.status === "pending");
+  const capacityLimits = await getCapacityLimits(); // dashboard-editable, env fallback
 
   const created: PurchaseProposal[] = [];
   const skipped: GenerateResult["skipped"] = [];
@@ -95,7 +92,7 @@ export async function generateProposals(): Promise<GenerateResult> {
     // Bison capacity gate (Spencer 2026-07-29): if the new mailboxes won't fit
     // the instance's sender-account limit, DON'T propose — alert instead so
     // Nick/Spencer ask for more capacity in #outboundhero-bison.
-    const capacity = capacityFor(inst.instance);
+    const capacity = capacityLimits[inst.instance] ?? 0;
     if (capacity > 0) {
       const { count } = await supabase
         .from("deliverability_inboxes")

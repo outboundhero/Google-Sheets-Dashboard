@@ -16,6 +16,7 @@ import { PurchasePlanCard } from "@/components/replacement/purchase-plan-card";
 import { GoingLiveCard } from "@/components/replacement/going-live-card";
 import { WarmupForecastCard } from "@/components/replacement/warmup-forecast-card";
 import { PurchaseProposalCard } from "@/components/replacement/purchase-proposal-card";
+import { BisonCapacityCard } from "@/components/replacement/bison-capacity-card";
 import { runExecution, type ExecuteInputs, type ExecStep } from "@/lib/replacement/execute-runner";
 import type { ReplacementSettings, LookbackWindow } from "@/lib/replacement/types";
 
@@ -486,6 +487,9 @@ export default function ReplacementPage() {
 
       {/* Staged domain buys — approve-first, nothing purchased without a click */}
       <PurchaseProposalCard />
+
+      {/* Sender-account limits per workspace — drives the purchase capacity gate */}
+      <BisonCapacityCard />
 
       {/* When reserve domains finish warm-up (read-only forecast) */}
       <WarmupForecastCard />
