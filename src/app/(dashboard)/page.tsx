@@ -32,6 +32,7 @@ import { CrossTagAuditCard } from "@/components/dashboard/cross-tag-audit-card";
 import { DuplicateDomainsCard } from "@/components/dashboard/duplicate-domains-card";
 import { NurtureDraftsCard } from "@/components/dashboard/nurture-drafts-card";
 import { AttachFailuresCard } from "@/components/dashboard/attach-failures-card";
+import { ReplacementStatusWidget } from "@/components/dashboard/replacement-status-widget";
 import { PendingOffboardingsCard } from "@/components/dashboard/pending-offboardings-card";
 import { OffboardingProgressCard, type OffboardingPlan } from "@/components/dashboard/offboarding-progress-card";
 import { ChurnedOffboardDialog } from "@/components/dashboard/churned-offboard-dialog";
@@ -421,6 +422,9 @@ export default function DashboardPage() {
           </div>
         </div>
       )}
+
+      {/* Replacement status — what auto-replacement did (24h default) + retry. */}
+      {isAdmin && <ReplacementStatusWidget />}
 
       {/* Replacement attach failures — admin only; self-hides when none. */}
       {isAdmin && <AttachFailuresCard />}

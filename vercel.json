@@ -37,6 +37,8 @@
 
     { "path": "/api/cron/purchase-proposal",               "schedule": "30 15 * * 1-5" },
 
+    { "path": "/api/cron/attach-queue",                    "schedule": "20 * * * *" },
+
     { "path": "/api/cron/mrl-pace-check",                  "schedule": "0 16 * * *" },
 
     { "path": "/api/cron/daily-account-status-report",     "schedule": "55 7 * * *" },

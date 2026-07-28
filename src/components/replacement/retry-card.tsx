@@ -36,8 +36,9 @@ async function post(url: string, body: unknown): Promise<{ ok: boolean; error?: 
   }
 }
 
-/** Replay one stored step. Mirrors the runner's endpoint calls exactly. */
-async function replay(r: RetryPayload): Promise<{ ok: boolean; note: string }> {
+/** Replay one stored step. Mirrors the runner's endpoint calls exactly.
+ *  Exported for the dashboard Replacement-status widget. */
+export async function replay(r: RetryPayload): Promise<{ ok: boolean; note: string }> {
   switch (r.step) {
     case "tag": {
       const res = await post("/api/deliverability/bulk-tags", { action: "add", tagNames: r.tagNames ?? [r.clientTag], domains: r.domains });

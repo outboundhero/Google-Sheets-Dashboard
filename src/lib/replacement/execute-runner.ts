@@ -176,6 +176,12 @@ export async function runExecution(inp: ExecuteInputs, emit: (steps: ExecStep[])
       }
 
       const attachRetry: RetryPayload = { step: "attach", instance, clientTag, domains: replacementDomains, campaignId: c.id, campaignName: c.name };
+      // report the outcome — server defers an 8h re-attach when the campaign is
+      // queued/launching (Bison ignores adds then), or on failure/rate-limits
+      fetch("/api/replacement/attach-queue", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ instance, campaignId: c.id, campaignName: c.name, clientTag, domains: replacementDomains, ok: aRes.ok, remainingRateLimited: d.rateLimited ?? 0 }),
+      }).catch(() => {});
       if (!aRes.ok) {
         setStep(`attach:${c.id}`, { state: "failed", note: aRes.error });
         record({ events: [{ instance, clientTag, eventType: "error", detail: `${c.name}: ${aRes.error}`, signals: { kind: "attach_failed", retry: attachRetry } }] });
