@@ -7,8 +7,10 @@
 import { buildReplacementPlan } from "./plan";
 import { ALL_INSTANCE_SLUGS, getInstance } from "@/lib/bison-instances";
 
-/** Reserve buffer we want to keep per instance after topping every client to cap. */
-const RESERVE_FLOOR = Math.max(0, Number(process.env.RESERVE_MIN_READY ?? 5));
+/** Reserve buffer per CLIENT TAG (Spencer 2026-07-29): 3 on B2B instances,
+ *  2 on B2C — an instance's floor scales with how many clients live on it. */
+const BUFFER_PER_TAG_B2B = Math.max(0, Number(process.env.RESERVE_BUFFER_PER_TAG_B2B ?? 3));
+const BUFFER_PER_TAG_B2C = Math.max(0, Number(process.env.RESERVE_BUFFER_PER_TAG_B2C ?? 2));
 
 export interface ShortClient {
   clientTag: string;
@@ -30,7 +32,7 @@ export interface InstancePurchase {
 
 export interface PurchasePlanResult {
   generatedFor: string;
-  reserveFloor: number;
+  bufferPerTag: { b2b: number; b2c: number };
   totalToBuy: number;
   byInstance: InstancePurchase[];
 }
@@ -48,14 +50,17 @@ export async function computePurchasePlan(): Promise<PurchasePlanResult> {
     const capDeficit = shortClients.reduce((s, c) => s + c.short, 0);
     const r = plan.reserveReadyByInstance[inst];
     const availableReserve = (r?.outlook ?? 0) + (r?.google ?? 0);
-    const toBuy = Math.max(0, capDeficit + RESERVE_FLOOR - availableReserve);
+    const tier = getInstance(inst).tier;
+    // floor = per-tag buffer × active clients on this instance
+    const reserveFloor = (tier === "b2b" ? BUFFER_PER_TAG_B2B : BUFFER_PER_TAG_B2C) * rows.length;
+    const toBuy = Math.max(0, capDeficit + reserveFloor - availableReserve);
 
     return {
       instance: inst,
-      tier: getInstance(inst).tier,
+      tier,
       clients: rows.length,
       capDeficit,
-      reserveFloor: RESERVE_FLOOR,
+      reserveFloor,
       availableReserve,
       toBuy,
       shortClients,
@@ -63,5 +68,10 @@ export async function computePurchasePlan(): Promise<PurchasePlanResult> {
   });
 
   const totalToBuy = byInstance.reduce((s, i) => s + i.toBuy, 0);
-  return { generatedFor: plan.generatedFor, reserveFloor: RESERVE_FLOOR, totalToBuy, byInstance };
+  return {
+    generatedFor: plan.generatedFor,
+    bufferPerTag: { b2b: BUFFER_PER_TAG_B2B, b2c: BUFFER_PER_TAG_B2C },
+    totalToBuy,
+    byInstance,
+  };
 }

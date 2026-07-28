@@ -31,6 +31,8 @@
 
     { "path": "/api/cron/low-domain-alert",                "schedule": "0 15 * * 1-5" },
 
+    { "path": "/api/cron/reserve-alert",                   "schedule": "5 15 * * 1-5" },
+
     { "path": "/api/cron/replacement-daily-report",        "schedule": "0 1 * * *" },
 
     { "path": "/api/cron/purchase-proposal",               "schedule": "30 15 * * 1-5" },

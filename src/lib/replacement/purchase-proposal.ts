@@ -60,8 +60,16 @@ export async function listProposals(limit = 50): Promise<PurchaseProposal[]> {
 export interface GenerateResult {
   created: PurchaseProposal[];
   skipped: { instance: string; reason: string }[];
+  capacityAlerts: { instance: string; current: number; capacity: number; incoming: number }[];
   alerted: boolean;
 }
+
+/** Bison sender-account capacity per instance, via env
+ *  `BISON_SENDER_CAPACITY_<SLUG>`. 0/unset = no known limit → check skipped. */
+function capacityFor(instance: string): number {
+  return Math.max(0, Number(process.env[`BISON_SENDER_CAPACITY_${instance.toUpperCase()}`] ?? 0));
+}
+const MAILBOXES_PER_DOMAIN = 49; // Inboxing standard order size
 
 /** Propose a capped batch per short instance (skips instances that already
  *  have a pending proposal). Generates candidate names only — buys nothing. */
@@ -72,6 +80,7 @@ export async function generateProposals(): Promise<GenerateResult> {
 
   const created: PurchaseProposal[] = [];
   const skipped: GenerateResult["skipped"] = [];
+  const capacityAlerts: GenerateResult["capacityAlerts"] = [];
   // names already staged (open proposals + this run) — passed as the generator's
   // exclusion set so instances never propose the same name twice
   const taken: string[] = pending.flatMap((p) => p.domains);
@@ -82,6 +91,25 @@ export async function generateProposals(): Promise<GenerateResult> {
       continue;
     }
     const want = Math.min(inst.toBuy, BATCH_CAP);
+
+    // Bison capacity gate (Spencer 2026-07-29): if the new mailboxes won't fit
+    // the instance's sender-account limit, DON'T propose — alert instead so
+    // Nick/Spencer ask for more capacity in #outboundhero-bison.
+    const capacity = capacityFor(inst.instance);
+    if (capacity > 0) {
+      const { count } = await supabase
+        .from("deliverability_inboxes")
+        .select("id", { count: "exact", head: true })
+        .eq("instance", inst.instance);
+      const current = count ?? 0;
+      const incoming = want * MAILBOXES_PER_DOMAIN;
+      if (current + incoming > capacity) {
+        capacityAlerts.push({ instance: inst.instance, current, capacity, incoming });
+        skipped.push({ instance: inst.instance, reason: `Bison at capacity (${current}/${capacity} senders; +${incoming} won't fit)` });
+        continue;
+      }
+    }
+
     let names: string[];
     try {
       names = (await generateDomainCandidates({
@@ -122,7 +150,15 @@ export async function generateProposals(): Promise<GenerateResult> {
     const slack = await postSlackMessage(lines.join("\n"), channelId());
     alerted = slack.ok;
   }
-  return { created, skipped, alerted };
+  if (capacityAlerts.length > 0) {
+    const lines = [`*🚨 EmailBison at capacity — LeadSync* ${mentionPrefix()}`];
+    for (const c of capacityAlerts) {
+      lines.push(`• *${c.instance}*: ${c.current.toLocaleString()} of ${c.capacity.toLocaleString()} sender accounts — the next order (+${c.incoming.toLocaleString()}) won't fit.`);
+    }
+    lines.push("Please message *#outboundhero-bison* to get more sender-account capacity (≈10k per bump), then re-run the proposal.");
+    await postSlackMessage(lines.join("\n"), channelId());
+  }
+  return { created, skipped, capacityAlerts, alerted };
 }
 
 /** Record the human decision (+ per-domain outcomes from the approval run). */

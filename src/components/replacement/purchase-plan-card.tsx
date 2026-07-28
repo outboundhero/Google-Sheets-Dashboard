@@ -22,7 +22,7 @@ interface InstancePurchase {
 }
 interface PurchasePlanResult {
   generatedFor: string;
-  reserveFloor: number;
+  bufferPerTag: { b2b: number; b2c: number };
   totalToBuy: number;
   byInstance: InstancePurchase[];
 }
@@ -72,7 +72,7 @@ export function PurchasePlanCard() {
           <>
             <div className="flex flex-wrap gap-4 text-sm">
               <span className="text-muted-foreground">Total to buy <b className={data.totalToBuy > 0 ? "text-amber-500" : "text-emerald-500"}>{data.totalToBuy.toLocaleString()}</b></span>
-              <span className="text-muted-foreground">Reserve floor <b className="text-foreground">{data.reserveFloor}</b>/instance</span>
+              <span className="text-muted-foreground">Buffer <b className="text-foreground">{data.bufferPerTag?.b2b ?? 3}</b>/tag B2B · <b className="text-foreground">{data.bufferPerTag?.b2c ?? 2}</b>/tag B2C</span>
             </div>
 
             <div className="rounded-lg border divide-y">
