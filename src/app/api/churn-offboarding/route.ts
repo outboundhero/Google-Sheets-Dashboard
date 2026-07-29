@@ -207,3 +207,43 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: message }, { status: 500 });
   }
 }
+
+// PATCH /api/churn-offboarding — undo a skip (Spencer's Loom: "how do you undo a
+// skip??"). Flips a `skipped` row back to `pending` so the client can be
+// offboarded normally. Admin-only.
+export async function PATCH(request: Request) {
+  try {
+    const supabase = getSupabaseAdmin();
+    const cookieStore = await cookies();
+    const { data: { user } } = await createServerSupabaseClient(cookieStore).auth.getUser();
+    const role = user?.app_metadata?.role || user?.user_metadata?.role;
+    if (!user || role !== "admin") {
+      return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+    }
+    const body = await request.json().catch(() => ({}));
+    const { clientAbbr, churnDate, action } = body as { clientAbbr?: string; churnDate?: string; action?: string };
+    if (!clientAbbr || !churnDate || action !== "unskip") {
+      return NextResponse.json({ error: "clientAbbr, churnDate, action:'unskip' required" }, { status: 400 });
+    }
+    const abbr = clientAbbr.trim().toUpperCase();
+    const { data: existing } = await supabase
+      .from("client_offboarding_actions")
+      .select("status")
+      .eq("client_abbr", abbr)
+      .eq("churn_date", churnDate)
+      .maybeSingle();
+    if (!existing) return NextResponse.json({ error: "no offboarding row for this client/date" }, { status: 404 });
+    if (existing.status !== "skipped") {
+      return NextResponse.json({ error: `nothing to undo — row is '${existing.status}', not 'skipped'` }, { status: 409 });
+    }
+    const { error } = await supabase
+      .from("client_offboarding_actions")
+      .update({ status: "pending", decided_by: user.email || user.id, decided_at: new Date().toISOString() })
+      .eq("client_abbr", abbr)
+      .eq("churn_date", churnDate);
+    if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+    return NextResponse.json({ status: "pending" });
+  } catch (error) {
+    return NextResponse.json({ error: error instanceof Error ? error.message : "Failed" }, { status: 500 });
+  }
+}

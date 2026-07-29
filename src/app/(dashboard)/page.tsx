@@ -36,6 +36,7 @@ import { ReplacementStatusWidget } from "@/components/dashboard/replacement-stat
 import { PendingOffboardingsCard } from "@/components/dashboard/pending-offboardings-card";
 import { OffboardingProgressCard, type OffboardingPlan } from "@/components/dashboard/offboarding-progress-card";
 import { ChurnedOffboardDialog } from "@/components/dashboard/churned-offboard-dialog";
+import { useOffboardingStatus } from "@/lib/hooks/use-offboarding-status";
 import {
   Select,
   SelectContent,
@@ -149,6 +150,8 @@ export default function DashboardPage() {
   }, [trackerClients]);
 
   // Already churned clients (churn date in the past)
+  const { statusByTag: offboardStatus } = useOffboardingStatus();
+
   const churnedClients = useMemo(() => {
     const now = new Date();
     return trackerClients
@@ -309,19 +312,30 @@ export default function DashboardPage() {
                     <span className="text-zinc-700 dark:text-zinc-300 truncate min-w-0 flex-1">
                       {c.companyName} <span className="text-zinc-400 dark:text-zinc-600">({c.clientAbbr})</span>
                     </span>
-                    {isAdmin && (
-                      <button
-                        onClick={() => setChurnedOffboardTarget({
-                          clientAbbr: c.clientAbbr,
-                          companyName: c.companyName,
-                          churnDate: c.churnDate!,
-                        })}
-                        className="text-[10px] font-medium rounded-md bg-amber-500/15 hover:bg-amber-500/25 text-amber-700 dark:text-amber-300 border border-amber-500/30 px-2 py-0.5 shrink-0 transition-colors"
-                        title={`Pause campaigns + detach ${c.clientAbbr} tag from inboxes`}
-                      >
-                        Offboard
-                      </button>
-                    )}
+                    {isAdmin && (() => {
+                      // grey "Done" when no active campaigns AND no tagged domains
+                      // remain; else yellow "action needed" (Spencer's Loom).
+                      const st = offboardStatus[c.clientAbbr.trim().toUpperCase()];
+                      const done = st?.done === true;
+                      const remain = st ? `${st.activeCampaigns} active campaign(s) · ${st.taggedDomains} tagged domain(s)` : "checking…";
+                      return (
+                        <button
+                          onClick={() => setChurnedOffboardTarget({
+                            clientAbbr: c.clientAbbr,
+                            companyName: c.companyName,
+                            churnDate: c.churnDate!,
+                          })}
+                          className={`text-[10px] font-medium rounded-md px-2 py-0.5 shrink-0 border transition-colors ${
+                            done
+                              ? "bg-zinc-500/10 hover:bg-zinc-500/20 text-zinc-500 dark:text-zinc-400 border-zinc-500/30"
+                              : "bg-amber-500/15 hover:bg-amber-500/25 text-amber-700 dark:text-amber-300 border-amber-500/30"
+                          }`}
+                          title={done ? `Offboarded — ${remain}` : `Action needed — ${remain}`}
+                        >
+                          {done ? "Done" : "Offboard"}
+                        </button>
+                      );
+                    })()}
                     <span className="text-[10px] text-zinc-500 dark:text-zinc-500 shrink-0">
                       {formatDate(c.churnDate!)}
                     </span>

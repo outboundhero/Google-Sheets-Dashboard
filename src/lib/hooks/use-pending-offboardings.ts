@@ -38,6 +38,7 @@ export function useOffboardings() {
   return {
     items,
     pending: items.filter((i) => i.status === "pending"),
+    skipped: items.filter((i) => i.status === "skipped"),
     isLoading,
     error,
     mutate,

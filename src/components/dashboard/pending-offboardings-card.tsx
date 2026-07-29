@@ -108,14 +108,31 @@ function StatusDot({ state }: { state: StepState }) {
 }
 
 export function PendingOffboardingsCard() {
-  const { pending, isLoading, mutate } = useOffboardings();
+  const { pending, skipped, isLoading, mutate } = useOffboardings();
   const [item, setItem] = useState<OffboardingItem | null>(null);
   const [skipItem, setSkipItem] = useState<OffboardingItem | null>(null);
+  const [unskipping, setUnskipping] = useState<string | null>(null);
 
-  if (isLoading || pending.length === 0) return null;
+  const unskip = async (p: OffboardingItem) => {
+    const key = `${p.clientAbbr}|${p.churnDate}`;
+    setUnskipping(key);
+    try {
+      await fetch("/api/churn-offboarding", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ clientAbbr: p.clientAbbr, churnDate: p.churnDate, action: "unskip" }),
+      });
+      mutate();
+    } finally {
+      setUnskipping(null);
+    }
+  };
+
+  if (isLoading || (pending.length === 0 && skipped.length === 0)) return null;
 
   return (
     <>
+      {pending.length > 0 && (
       <div className="rounded-xl border-2 border-amber-400 dark:border-amber-600 bg-amber-50 dark:bg-amber-950/30 p-4">
         <div className="flex items-center gap-2 mb-3">
           <AlertTriangle className="h-4.5 w-4.5 text-amber-500 dark:text-amber-400 shrink-0" />
@@ -158,6 +175,41 @@ export function PendingOffboardingsCard() {
           ))}
         </div>
       </div>
+      )}
+
+      {skipped.length > 0 && (
+        <div className="rounded-xl border border-zinc-300 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-900/40 p-4 mt-2">
+          <div className="flex items-center gap-2 mb-3">
+            <MinusCircle className="h-4 w-4 text-zinc-400 dark:text-zinc-500 shrink-0" />
+            <div>
+              <h3 className="text-sm font-semibold text-zinc-600 dark:text-zinc-300">Skipped offboardings</h3>
+              <p className="text-[11px] text-zinc-500 dark:text-zinc-400">
+                {skipped.length} skipped — Undo to move back to pending and offboard
+              </p>
+            </div>
+          </div>
+          <div className="flex flex-col gap-1.5">
+            {skipped.map((p) => {
+              const key = `${p.clientAbbr}|${p.churnDate}`;
+              return (
+                <div key={key} className="flex items-center justify-between rounded-lg bg-zinc-100 dark:bg-zinc-800/40 border border-zinc-200 dark:border-zinc-700/50 px-3 py-2 text-sm gap-2">
+                  <div className="min-w-0 flex-1">
+                    <span className="font-medium text-zinc-700 dark:text-zinc-200 truncate">
+                      {p.companyName} <span className="font-normal text-zinc-500/70">({p.clientAbbr})</span>
+                    </span>
+                    <span className="ml-2 text-[10px] text-zinc-500 dark:text-zinc-400 bg-zinc-200 dark:bg-zinc-800 rounded px-1.5 py-0.5">
+                      churn {formatDate(p.churnDate)}
+                    </span>
+                  </div>
+                  <Button size="sm" variant="outline" disabled={unskipping === key} onClick={() => unskip(p)} className="shrink-0">
+                    {unskipping === key ? "Undoing…" : "Undo skip"}
+                  </Button>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
 
       {item && (
         <OffboardDialog
