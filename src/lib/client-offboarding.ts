@@ -67,6 +67,7 @@ export interface StepResult {
   skipped?: { reason: string };
   // Optional rolled-up counts so the frontend tally is accurate.
   pausedCampaign?: { instance: BisonInstanceSlug; id: number; name: string };
+  archiveNote?: string;   // set when pause succeeded but the archive step didn't
   detagged?: number;
   detagFailures?: { instance: BisonInstanceSlug; inboxId: number; reason: string }[];
 }
@@ -225,7 +226,7 @@ export async function planClientOffboarding(rawTag: string): Promise<Offboarding
         id: nextId(),
         kind: "pause-campaign",
         instance,
-        label: `Pause "${c.name}" (${instance})`,
+        label: `Pause + archive "${c.name}" (${instance})`,
         campaignId: c.id,
         campaignName: c.name,
       });
@@ -287,17 +288,27 @@ async function pauseCampaignStep(
   campaignName: string,
 ): Promise<StepResult> {
   try {
+    // Churned clients' campaigns should be ARCHIVED, not just paused (Spencer's
+    // Loom: "no harm archiving — these aren't current clients"). Bison requires
+    // pausing before archiving, so we pause first then archive.
     const res = await bisonFetch(instance, `/campaigns/${campaignId}/pause`, { method: "PATCH" });
     if (res.ok) {
+      let finalStatus = "Paused";
+      // archive right after pausing; a failed archive still leaves it paused
+      // (safe) — surfaced as a soft note, not a hard failure.
+      const arch = await bisonFetch(instance, `/campaigns/${campaignId}/archive`, { method: "PATCH" }).catch(() => null);
+      let archiveNote: string | undefined;
+      if (arch && arch.ok) finalStatus = "Archived";
+      else archiveNote = `paused OK but archive failed (${arch ? `Bison ${arch.status}` : "request error"}) — still paused`;
       // update our local row NOW — the campaigns cron only syncs daily, and the
       // stale "Active" row is why offboard previews kept showing campaigns to
-      // pause after they were already paused (Spencer's JPR loop)
+      // pause after they were already handled (Spencer's JPR loop)
       await getSupabaseAdmin()
         .from("campaigns")
-        .update({ status: "Paused" })
+        .update({ status: finalStatus })
         .eq("instance", instance)
         .eq("id", campaignId);
-      return { ok: true, error: null, pausedCampaign: { instance, id: campaignId, name: campaignName } };
+      return { ok: true, error: null, pausedCampaign: { instance, id: campaignId, name: campaignName }, archiveNote };
     }
     // Bison returns 404 when the campaign was deleted but our Supabase
     // `campaigns` row hasn't been pruned. Not a failure — just nothing to do.

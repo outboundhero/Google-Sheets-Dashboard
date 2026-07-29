@@ -161,3 +161,51 @@ export async function runAutoFireForOverdue(): Promise<{
 
   return { fired, failed };
 }
+
+/** Auto-retry offboardings that previously FAILED (Spencer's Loom: "it retries
+ *  automatically for us… after the third retry fails we can force retry").
+ *  Retries up to MAX_AUTO_RETRIES times; past that it leaves the row failed for
+ *  a human to force-retry via the Offboard button (which already allows a
+ *  failed row through). All offboarding steps are idempotent, so re-running is
+ *  safe. `retry_count` column tracks attempts. */
+const MAX_AUTO_RETRIES = 3;
+export async function runRetryForFailed(): Promise<{
+  recovered: { clientAbbr: string; churnDate: string }[];
+  stillFailing: { clientAbbr: string; churnDate: string; attempts: number; needsForce: boolean }[];
+}> {
+  const supabase = getSupabaseAdmin();
+  const { data, error } = await supabase
+    .from("client_offboarding_actions")
+    .select("client_abbr, churn_date, retry_count")
+    .eq("status", "failed");
+  if (error) throw new Error(`failed-retry query: ${error.message}`);
+
+  const recovered: { clientAbbr: string; churnDate: string }[] = [];
+  const stillFailing: { clientAbbr: string; churnDate: string; attempts: number; needsForce: boolean }[] = [];
+
+  for (const row of data || []) {
+    const attempts = (row.retry_count ?? 0) + 1;
+    if ((row.retry_count ?? 0) >= MAX_AUTO_RETRIES) {
+      stillFailing.push({ clientAbbr: row.client_abbr, churnDate: row.churn_date, attempts: row.retry_count ?? 0, needsForce: true });
+      continue; // exhausted auto-retries → wait for a human force-retry
+    }
+    try {
+      const result = await executeClientOffboarding(row.client_abbr);
+      await supabase
+        .from("client_offboarding_actions")
+        .update({ status: "confirmed", executed_at: new Date().toISOString(), result, retry_count: attempts })
+        .eq("client_abbr", row.client_abbr)
+        .eq("churn_date", row.churn_date);
+      recovered.push({ clientAbbr: row.client_abbr, churnDate: row.churn_date });
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : "retry failed";
+      await supabase
+        .from("client_offboarding_actions")
+        .update({ status: "failed", executed_at: new Date().toISOString(), result: { errors: [msg] }, retry_count: attempts })
+        .eq("client_abbr", row.client_abbr)
+        .eq("churn_date", row.churn_date);
+      stillFailing.push({ clientAbbr: row.client_abbr, churnDate: row.churn_date, attempts, needsForce: attempts >= MAX_AUTO_RETRIES });
+    }
+  }
+  return { recovered, stillFailing };
+}
