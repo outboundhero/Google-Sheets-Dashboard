@@ -38,7 +38,7 @@ export interface OffboardingPreview {
 
 // Step types — emitted by planClientOffboarding, consumed by executePlanStep.
 export type PlanStep =
-  | { id: string; kind: "pause-campaign"; instance: BisonInstanceSlug; label: string; campaignId: number; campaignName: string }
+  | { id: string; kind: "pause-campaign"; instance: BisonInstanceSlug; label: string; campaignId: number; campaignName: string; campaignStatus?: string }
   | { id: string; kind: "detag-inbox-batch"; instance: BisonInstanceSlug; label: string; tagId: number; tagName: string; inboxIds: number[]; domains: string[] }
   | { id: string; kind: "reaggregate-domains"; instance: BisonInstanceSlug; label: string; domains: string[] };
 
@@ -113,7 +113,14 @@ function resolveTargetInstances(): BisonInstanceSlug[] {
 // Fix: fetch by (instance, client_tag) then filter case-insensitively in JS
 // against an explicit allowlist of live statuses. Matches how Bison labels
 // campaigns as "Active" in the UI.
-const ACTIVE_CAMPAIGN_STATUSES = new Set(["active", "launching", "queued"]);
+// Statuses that still need pausing (actively sending / about to). Everything
+// else that isn't already archived/completed just needs archiving directly.
+const ACTIVE_CAMPAIGN_STATUSES = new Set(["active", "launching", "queued", "launch processing"]);
+// Churned clients: ARCHIVE every campaign that isn't already gone (Spencer's
+// Loom: "these aren't current clients — archive the campaign, no harm"). So we
+// act on everything EXCEPT already-archived/completed — including draft + paused
+// ones the old flow left sitting on the client (SQFT's 13 draft + 11 paused).
+const ALREADY_DONE_STATUSES = new Set(["archived", "completed"]);
 
 async function findActiveCampaignsForTag(
   instance: BisonInstanceSlug,
@@ -127,7 +134,7 @@ async function findActiveCampaignsForTag(
     .eq("client_tag", clientTag);
   if (error) throw new Error(`campaigns query (${instance}): ${error.message}`);
   const rows = (data as SupabaseCampaignRow[]) ?? [];
-  return rows.filter((c) => ACTIVE_CAMPAIGN_STATUSES.has((c.status || "").trim().toLowerCase()));
+  return rows.filter((c) => !ALREADY_DONE_STATUSES.has((c.status || "").trim().toLowerCase()));
 }
 
 async function findInboxesWithTag(
@@ -229,6 +236,7 @@ export async function planClientOffboarding(rawTag: string): Promise<Offboarding
         label: `Pause + archive "${c.name}" (${instance})`,
         campaignId: c.id,
         campaignName: c.name,
+        campaignStatus: c.status,
       });
     }
 
@@ -286,45 +294,56 @@ async function pauseCampaignStep(
   instance: BisonInstanceSlug,
   campaignId: number,
   campaignName: string,
+  campaignStatus?: string,
 ): Promise<StepResult> {
+  // A draft/paused campaign isn't sending — if we can't archive it, that's a
+  // harmless SKIP, not a failure to retry forever. Only a genuinely-active
+  // campaign we can't stop is a real failure.
+  const wasActive = ACTIVE_CAMPAIGN_STATUSES.has((campaignStatus || "active").trim().toLowerCase());
   try {
-    // Churned clients' campaigns should be ARCHIVED, not just paused (Spencer's
-    // Loom: "no harm archiving — these aren't current clients"). Bison requires
-    // pausing before archiving, so we pause first then archive.
-    const res = await bisonFetch(instance, `/campaigns/${campaignId}/pause`, { method: "PATCH" });
-    if (res.ok) {
-      let finalStatus = "Paused";
-      // archive right after pausing; a failed archive still leaves it paused
-      // (safe) — surfaced as a soft note, not a hard failure.
-      const arch = await bisonFetch(instance, `/campaigns/${campaignId}/archive`, { method: "PATCH" }).catch(() => null);
-      let archiveNote: string | undefined;
-      if (arch && arch.ok) finalStatus = "Archived";
-      else archiveNote = `paused OK but archive failed (${arch ? `Bison ${arch.status}` : "request error"}) — still paused`;
-      // update our local row NOW — the campaigns cron only syncs daily, and the
-      // stale "Active" row is why offboard previews kept showing campaigns to
-      // pause after they were already handled (Spencer's JPR loop)
-      await getSupabaseAdmin()
-        .from("campaigns")
-        .update({ status: finalStatus })
-        .eq("instance", instance)
-        .eq("id", campaignId);
-      return { ok: true, error: null, pausedCampaign: { instance, id: campaignId, name: campaignName }, archiveNote };
-    }
-    // Bison returns 404 when the campaign was deleted but our Supabase
-    // `campaigns` row hasn't been pruned. Not a failure — just nothing to do.
-    if (res.status === 404) {
-      // prune the stale row so it stops appearing in every offboard preview
-      await getSupabaseAdmin()
-        .from("campaigns")
-        .delete()
-        .eq("instance", instance)
-        .eq("id", campaignId);
+    // Churned clients' campaigns should end up ARCHIVED (Spencer's Loom: "no
+    // harm archiving — these aren't current clients"). Pause is best-effort
+    // (only active campaigns can pause; draft/paused ones can't and don't need
+    // to) — ARCHIVE is the real goal and we do it regardless.
+    const pauseRes = await bisonFetch(instance, `/campaigns/${campaignId}/pause`, { method: "PATCH" });
+    // 404 on pause = campaign gone from Bison → prune the stale local row.
+    if (pauseRes.status === 404) {
+      await getSupabaseAdmin().from("campaigns").delete().eq("instance", instance).eq("id", campaignId);
       return { ok: false, error: null, skipped: { reason: "no longer in Bison (stale row)" } };
     }
-    const text = await res.text().catch(() => "");
-    return { ok: false, error: `Bison ${res.status}: ${text.slice(0, 200)}` };
+    const paused = pauseRes.ok; // draft/already-paused → not ok, that's fine
+
+    // Archive — the outcome we actually want.
+    const arch = await bisonFetch(instance, `/campaigns/${campaignId}/archive`, { method: "PATCH" });
+    if (arch.status === 404) {
+      await getSupabaseAdmin().from("campaigns").delete().eq("instance", instance).eq("id", campaignId);
+      return { ok: false, error: null, skipped: { reason: "no longer in Bison (stale row)" } };
+    }
+    const archived = arch.ok;
+
+    // Update our local row NOW — the campaigns cron only syncs daily, and the
+    // stale status is why offboard previews kept re-listing already-handled
+    // campaigns (Spencer's JPR/SQFT loop).
+    const finalStatus = archived ? "Archived" : paused ? "Paused" : null;
+    if (finalStatus) {
+      await getSupabaseAdmin().from("campaigns").update({ status: finalStatus }).eq("instance", instance).eq("id", campaignId);
+    }
+
+    if (archived) {
+      return { ok: true, error: null, pausedCampaign: { instance, id: campaignId, name: campaignName } };
+    }
+    if (paused) {
+      // paused but archive failed → safe (not sending), surfaced as a soft note
+      const t = await arch.text().catch(() => "");
+      return { ok: true, error: null, pausedCampaign: { instance, id: campaignId, name: campaignName }, archiveNote: `paused OK but archive failed (Bison ${arch.status}: ${t.slice(0, 120)}) — still paused` };
+    }
+    // neither pause nor archive worked. If it was active (still sending) that's
+    // a real failure; if it was draft/paused it's a harmless skip.
+    const pt = await pauseRes.text().catch(() => "");
+    if (wasActive) return { ok: false, error: `pause+archive failed (pause ${pauseRes.status}: ${pt.slice(0, 120)})` };
+    return { ok: false, error: null, skipped: { reason: `${campaignStatus || "non-active"} campaign — couldn't archive (not sending, left as-is)` } };
   } catch (e) {
-    return { ok: false, error: e instanceof Error ? e.message : "pause failed" };
+    return { ok: false, error: e instanceof Error ? e.message : "pause/archive failed" };
   }
 }
 
@@ -444,7 +463,7 @@ export async function executePlanStep(step: PlanStep): Promise<StepResult> {
   }
   switch (step.kind) {
     case "pause-campaign":
-      return pauseCampaignStep(step.instance, step.campaignId, step.campaignName);
+      return pauseCampaignStep(step.instance, step.campaignId, step.campaignName, step.campaignStatus);
     case "detag-inbox-batch":
       return detagInboxBatchStep(step.instance, step.tagId, step.tagName, step.inboxIds);
     case "reaggregate-domains":
