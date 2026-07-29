@@ -85,8 +85,8 @@ export function BulkDeleteDialog({
   // the dialog opens (the page reuses one dialog for both the bulk-bar delete
   // and the post-move "remove from source" follow-up, which scope differently).
   const [picked, setPicked] = useState<Set<string>>(new Set(defaultInstances));
-  // Two-step flow: pick timing (now / in 5 days) → confirm "are you sure".
-  const SCHEDULE_DAYS = 5;
+  // Two-step flow: pick timing (now / in 3 days) → confirm "are you sure".
+  const SCHEDULE_DAYS = 3;
   const [confirmMode, setConfirmMode] = useState<"now" | "schedule" | null>(null);
   const [scheduled, setScheduled] = useState<{ count: number; days: number } | null>(null);
   useEffect(() => {

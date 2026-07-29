@@ -41,7 +41,7 @@ export async function POST(request: Request) {
     // ── Schedule: record a delayed delete (fired later by the
     //    fire-scheduled-deletions cron) instead of deleting now ───────────────
     if (body.action === "schedule") {
-      const days = Math.min(60, Math.max(1, Number(body.days) || 5));
+      const days = Math.min(60, Math.max(1, Number(body.days) || 3));
       const entries: { instance: string; domain: string }[] = [];
       for (const instance of instances) {
         for (const domain of domains) entries.push({ instance, domain: domain.toLowerCase() });

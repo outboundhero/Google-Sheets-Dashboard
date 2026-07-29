@@ -43,22 +43,23 @@ export interface CancelJob {
   domains: string[];
 }
 
-type Phase = "planning" | "review" | "error";
+type Phase = "planning" | "review" | "running" | "done" | "error";
 
 interface Props {
   open: boolean;
   onOpenChange: (v: boolean) => void;
   selectedDomains: string[];
-  /** Page takes over: batched apply + top progress panel + Slack + provider check. */
-  onStart: (job: CancelJob) => void;
+  /** @deprecated staged flow is server-orchestrated now; kept for call-site compat. */
+  onStart?: (job: CancelJob) => void;
 }
 
 const PROVIDER_LABEL: Record<string, string> = { inboxing: "Inboxing", milkbox: "MilkBox", scaledmail: "ScaledMail" };
 
-export function CancelDomainsDialog({ open, onOpenChange, selectedDomains, onStart }: Props) {
+export function CancelDomainsDialog({ open, onOpenChange, selectedDomains }: Props) {
   const [phase, setPhase] = useState<Phase>("planning");
   const [plan, setPlan] = useState<PlanResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [doneMsg, setDoneMsg] = useState<string>("");
 
   // Snapshot the selection on the open transition only.
   useEffect(() => {
@@ -96,10 +97,33 @@ export function CancelDomainsDialog({ open, onOpenChange, selectedDomains, onSta
     [plan],
   );
 
-  const start = () => {
+  // Staged wind-down (Spencer 2026-07-29): both modes first throttle to 1/day +
+  // remove from all campaigns; then cancel now (→ delete senders ~10 min later)
+  // or cancel in 3 days (→ then delete). Server-orchestrated via one endpoint.
+  const run = async (mode: "immediate" | "delayed") => {
     if (cancelable.length === 0) return;
-    onStart({ domains: cancelable.map((p) => p.domain) });
-    onOpenChange(false);
+    setPhase("running");
+    setError(null);
+    try {
+      const res = await fetch("/api/deliverability/schedule-cancellation", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ domains: cancelable.map((p) => p.domain), mode }),
+      });
+      const text = await res.text();
+      let data: { ok?: boolean; error?: string };
+      try { data = JSON.parse(text); } catch { throw new Error(`non-JSON response (HTTP ${res.status})`); }
+      if (!res.ok || data.error) throw new Error(data.error || `HTTP ${res.status}`);
+      setDoneMsg(
+        mode === "immediate"
+          ? `Throttled to 1/day, removed from campaigns, and cancelled ${cancelable.length} domain(s) at the vendor. Sender accounts delete from Bison in ~10 min.`
+          : `Throttled to 1/day and removed ${cancelable.length} domain(s) from campaigns. The vendor cancel (then Bison sender delete) fires automatically in 3 days.`,
+      );
+      setPhase("done");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed");
+      setPhase("error");
+    }
   };
 
   return (
@@ -111,10 +135,11 @@ export function CancelDomainsDialog({ open, onOpenChange, selectedDomains, onSta
             Cancel Domains
           </DialogTitle>
           <DialogDescription>
-            Cancels the selected domains at their provider (Inboxing / MilkBox) —
-            deactivation and billing stop on the provider side. The domains{" "}
-            <b>stay visible in LeadSync</b>; removing them from the dashboard is the
-            separate Delete button. Progress shows in the panel at the top of the page.
+            Staged wind-down. Both options first <b>throttle to 1/day</b> and{" "}
+            <b>remove from all campaigns</b> right away. Then either cancel now
+            (Bison sender accounts delete ~10 min later) or cancel in 3 days (a
+            buffer, then the vendor cancel + Bison sender delete fire automatically).
+            Inboxing / MilkBox only — ScaledMail is skipped.
           </DialogDescription>
         </DialogHeader>
 
@@ -201,21 +226,38 @@ export function CancelDomainsDialog({ open, onOpenChange, selectedDomains, onSta
           </div>
         )}
 
+        {phase === "running" && (
+          <div className="flex items-center gap-2 rounded-md border px-3 py-2 text-sm text-muted-foreground">
+            <Loader2 className="h-4 w-4 animate-spin" /> Throttling, removing from campaigns…
+          </div>
+        )}
+        {phase === "done" && (
+          <div className="rounded-md border border-emerald-500/30 bg-emerald-500/5 px-3 py-2 text-sm text-emerald-500">{doneMsg}</div>
+        )}
+
         <DialogFooter>
           {phase === "review" && (
             <>
               <Button variant="ghost" onClick={() => onOpenChange(false)}>Close</Button>
               <Button
+                variant="outline"
+                onClick={() => run("delayed")}
+                disabled={cancelable.length === 0}
+                title={cancelable.length === 0 ? "Nothing cancelable — all selected domains will be skipped" : "Throttle + remove now; vendor cancel in 3 days"}
+              >
+                Cancel in 3 days ({cancelable.length})
+              </Button>
+              <Button
                 variant="destructive"
-                onClick={start}
+                onClick={() => run("immediate")}
                 disabled={cancelable.length === 0}
                 title={cancelable.length === 0 ? "Nothing cancelable — all selected domains will be skipped" : undefined}
               >
-                Cancel {cancelable.length} Domain{cancelable.length !== 1 ? "s" : ""}
+                Cancel now ({cancelable.length})
               </Button>
             </>
           )}
-          {phase === "error" && <Button onClick={() => onOpenChange(false)}>Close</Button>}
+          {(phase === "done" || phase === "error") && <Button onClick={() => onOpenChange(false)}>Close</Button>}
         </DialogFooter>
       </DialogContent>
     </Dialog>
