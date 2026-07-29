@@ -289,11 +289,25 @@ async function pauseCampaignStep(
   try {
     const res = await bisonFetch(instance, `/campaigns/${campaignId}/pause`, { method: "PATCH" });
     if (res.ok) {
+      // update our local row NOW — the campaigns cron only syncs daily, and the
+      // stale "Active" row is why offboard previews kept showing campaigns to
+      // pause after they were already paused (Spencer's JPR loop)
+      await getSupabaseAdmin()
+        .from("campaigns")
+        .update({ status: "Paused" })
+        .eq("instance", instance)
+        .eq("id", campaignId);
       return { ok: true, error: null, pausedCampaign: { instance, id: campaignId, name: campaignName } };
     }
     // Bison returns 404 when the campaign was deleted but our Supabase
     // `campaigns` row hasn't been pruned. Not a failure — just nothing to do.
     if (res.status === 404) {
+      // prune the stale row so it stops appearing in every offboard preview
+      await getSupabaseAdmin()
+        .from("campaigns")
+        .delete()
+        .eq("instance", instance)
+        .eq("id", campaignId);
       return { ok: false, error: null, skipped: { reason: "no longer in Bison (stale row)" } };
     }
     const text = await res.text().catch(() => "");

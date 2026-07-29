@@ -22,6 +22,7 @@
 import { bisonFetch } from "@/lib/bison";
 import { getSupabaseAdmin } from "@/lib/supabase";
 import { isInstanceSlug, type BisonInstanceSlug } from "@/lib/bison-instances";
+import { getOffboardedClientTags, isOffboardedTagName } from "@/lib/offboarded-tags";
 
 // Campaign statuses we RE-ATTACH the sender to on reconnect. Matches the
 // user's "include Paused" pick — a paused-on-purpose campaign should still
@@ -193,9 +194,11 @@ async function processRow(row: PendingRow): Promise<ProcessRowResult> {
       .maybeSingle();
     const domainRow = dRow as DomainRow | null;
     if (domainRow && Array.isArray(domainRow.tags)) {
+      // churned clients' tags are never wanted — don't resurrect on reconnect
+      const offboarded = await getOffboardedClientTags();
       for (const t of domainRow.tags) {
         const u = (t || "").trim().toUpperCase();
-        if (u) wantedTagNames.add(u);
+        if (u && !isOffboardedTagName(u, offboarded)) wantedTagNames.add(u);
       }
     }
   }
@@ -271,8 +274,11 @@ async function processRow(row: PendingRow): Promise<ProcessRowResult> {
   //    duplicates are silently ignored.
   let campaignsAttached = 0;
   let campaignsSkipped = 0;
-  if (finalTagNamesUpper.size > 0) {
-    const clientTagsUpper = [...finalTagNamesUpper];
+  // never re-attach to a CHURNED client's campaigns (they're being offboarded)
+  const offboardedForAttach = await getOffboardedClientTags();
+  const attachableTags = [...finalTagNamesUpper].filter((t) => !isOffboardedTagName(t, offboardedForAttach));
+  if (attachableTags.length > 0) {
+    const clientTagsUpper = attachableTags;
     // Case-insensitive: the campaigns table stores client_tag verbatim, so
     // fetch and filter in JS.
     const { data: campaignRows, error: campErr } = await supabase

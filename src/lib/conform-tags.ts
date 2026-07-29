@@ -9,6 +9,7 @@ import { randomUUID } from "crypto";
 import { bisonFetch } from "@/lib/bison";
 import { getSupabaseAdmin } from "@/lib/supabase";
 import type { BisonInstanceSlug } from "@/lib/bison-instances";
+import { getOffboardedClientTags, isOffboardedTagName } from "@/lib/offboarded-tags";
 
 interface DomainRow {
   instance: BisonInstanceSlug;
@@ -161,12 +162,14 @@ async function loadDomainWantedMap(
   const byKey = new Map<string, Set<string>>();
   const scannedByInstance = new Map<BisonInstanceSlug, number>();
   for (const inst of instances) scannedByInstance.set(inst, 0);
+  // churned clients' tags are never "wanted" — conform must not resurrect them
+  const offboarded = await getOffboardedClientTags();
   for (const r of rows) {
     if (!Array.isArray(r.tags) || r.tags.length === 0) continue;
     const wanted = new Set<string>();
     for (const t of r.tags) {
       const u = (t || "").trim().toUpperCase();
-      if (u) wanted.add(u);
+      if (u && !isOffboardedTagName(u, offboarded)) wanted.add(u);
     }
     if (wanted.size === 0) continue;
     byKey.set(`${r.instance}::${r.domain}`, wanted);

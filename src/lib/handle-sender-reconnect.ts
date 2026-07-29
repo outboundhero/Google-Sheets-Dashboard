@@ -25,6 +25,7 @@ import { bisonFetch } from "@/lib/bison";
 import { getSupabaseAdmin } from "@/lib/supabase";
 import type { BisonInstanceSlug } from "@/lib/bison-instances";
 import { enqueueReconnect } from "@/lib/reconnect-worker";
+import { getOffboardedClientTags, isOffboardedTagName } from "@/lib/offboarded-tags";
 
 interface StoredTag { id: number; name: string }
 interface BisonTag { id: number; name: string }
@@ -105,7 +106,11 @@ export async function handleSenderReconnect(entry: {
     }
 
     const rawTags = (inbox as { tags?: unknown }).tags;
-    const storedTags: StoredTag[] = Array.isArray(rawTags) ? rawTags.filter(isStoredTag) : [];
+    let storedTags: StoredTag[] = Array.isArray(rawTags) ? rawTags.filter(isStoredTag) : [];
+    // never resurrect a CHURNED client's tag (offboarding would just have to
+    // strip it again — Spencer's daily manual de-tag loop)
+    const offboarded = await getOffboardedClientTags();
+    storedTags = storedTags.filter((t) => !isOffboardedTagName(t.name, offboarded));
     if (storedTags.length === 0) {
       await logReconnect({
         instance, senderId, senderEmail, tagsRestored: 0, tagsTotal: 0,
