@@ -17,7 +17,7 @@ import { deleteDomainFromInstance } from "@/lib/deliverability/delete-domain";
 
 const MAX_PER_RUN = 15; // stay comfortably inside maxDuration; overflow waits for the next run
 const RUN_BUDGET_MS = 240_000; // stop starting new rows before Vercel's 300s limit kills the run mid-row — per-row progress already marked survives
-const ROW_TIMEOUT_MS = 90_000; // a row that can't verify+delete in 90s is wedged (hung Bison call) — rotate it to the back and move on
+const ROW_TIMEOUT_MS = 150_000; // fits two slow (≤60s) verify calls + deletes; a row beyond this is wedged — rotate it to the back and move on
 const REQUEUE_DELAY_MS = 6 * 3600_000;
 
 // Any row that didn't fully complete rotates to the back (+6h) instead of

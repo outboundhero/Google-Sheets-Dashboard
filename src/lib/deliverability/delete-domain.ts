@@ -17,7 +17,7 @@ import type { BisonInstanceSlug } from "@/lib/bison-instances";
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 const DELETE_CONC = 10;      // concurrent DELETEs per batch (kind to Bison's per-minute window)
-const FETCH_TIMEOUT_MS = 30_000; // a Bison call with no answer in 30s is hung — abort it so the retry loop (not Vercel's 300s kill) handles it
+const FETCH_TIMEOUT_MS = 60_000; // Bison's sender search can legitimately take 30s+ on busy instances (facilityreach) — only abort truly hung calls
 const MAX_ATTEMPTS = 5;      // per-request retry attempts on transient errors (429/5xx/network)
 const MAX_SWEEPS = 4;        // delete → re-verify passes before giving up
 const SEARCH_MAX_PAGES = 40; // safety cap when paging the domain search
