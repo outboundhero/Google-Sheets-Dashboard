@@ -199,6 +199,38 @@ export async function previewClientOffboarding(rawTag: string): Promise<Offboard
   };
 }
 
+// Domains whose LOCAL rollup still lists the tag (bare-prefix match — same
+// rule as the churned-card Done check). These linger when the tag sits only at
+// the domain level (its inboxes already clean or gone), because nothing
+// refreshes that rollup until the next deliverability sync.
+async function findDomainsStillShowingTag(
+  instance: BisonInstanceSlug,
+  clientTag: string,
+): Promise<string[]> {
+  const supabase = getSupabaseAdmin();
+  const bare = normalize(clientTag).split(":")[0].trim();
+  const out: string[] = [];
+  let offset = 0;
+  while (true) {
+    const { data, error } = await supabase
+      .from("deliverability_domains")
+      .select("domain,tags")
+      .eq("instance", instance)
+      .range(offset, offset + 999);
+    if (error) throw new Error(error.message);
+    if (!data || data.length === 0) break;
+    for (const d of data) {
+      const tags = Array.isArray(d.tags) ? (d.tags as string[]) : [];
+      if (tags.some((t) => String(t).split(":")[0].trim().toUpperCase() === bare)) {
+        out.push(d.domain as string);
+      }
+    }
+    if (data.length < 1000) break;
+    offset += 1000;
+  }
+  return out;
+}
+
 // ===== plan (full ordered step list for FE-driven execution) =====
 
 export async function planClientOffboarding(rawTag: string): Promise<OffboardingPlan> {
@@ -240,11 +272,13 @@ export async function planClientOffboarding(rawTag: string): Promise<Offboarding
       });
     }
 
+    const coveredDomains = new Set<string>();
     if (inboxes.length > 0 && tagId != null) {
       const domains = new Set<string>();
       for (const ib of inboxes) {
         domains.add(ib.domain);
         allDomainPairs.add(`${instance}:${ib.domain}`);
+        coveredDomains.add(ib.domain);
       }
       const domainList = Array.from(domains).sort();
 
@@ -271,6 +305,24 @@ export async function planClientOffboarding(rawTag: string): Promise<Offboarding
         instance,
         label: `Refresh domain rollups (${instance}, ${domainList.length} domains)`,
         domains: domainList,
+      });
+    }
+
+    // Sweep: rollups that still show the tag beyond the domains handled above
+    // (tag lingering only at the domain level, inboxes already clean or gone).
+    // Those never refreshed until the next deliverability sync, which left the
+    // churned card sitting on "Offboard" long after a finished offboarding.
+    // Reaggregating from inbox truth flips "Done" immediately and stays
+    // honest — an inbox that really still carries the tag keeps its rollup.
+    const lingering = (await findDomainsStillShowingTag(instance, clientTag))
+      .filter((d) => !coveredDomains.has(d));
+    if (lingering.length > 0) {
+      steps.push({
+        id: nextId(),
+        kind: "reaggregate-domains",
+        instance,
+        label: `Refresh ${lingering.length} lingering domain rollup(s) (${instance})`,
+        domains: lingering,
       });
     }
   }
