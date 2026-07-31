@@ -160,7 +160,9 @@ export async function sendDailyReplacementReport(
     main.push("_No execution activity today._");
   }
   main.push(`Detection now: *${r.detection.burnt}* burnt · *${r.detection.ready}* replacement-ready · *${r.detection.blocked}* blocked · *${r.detection.removeOnly}* remove-only (at cap)`);
-  main.push(`Pending vendor-cancellations: *${r.pendingCancellations}*${r.nextCancellation ? ` (next: ${r.nextCancellation.slice(0, 10)})` : ""}`);
+  const nextCancelDay = r.nextCancellation ? r.nextCancellation.slice(0, 10) : null;
+  const nextCancelLabel = nextCancelDay ? (nextCancelDay < r.date ? ` (overdue since ${nextCancelDay})` : ` (next: ${nextCancelDay})`) : "";
+  main.push(`Pending vendor-cancellations: *${r.pendingCancellations}*${nextCancelLabel}`);
 
   const channel = channelId();
   const slack = await postSlackMessage(main.join("\n"), channel);

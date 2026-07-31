@@ -32,17 +32,23 @@ export function SendToSheetDialog({
   const [search, setSearch] = useState("");
   const [error, setError] = useState<string | null>(null);
 
-  // Auto-detect most common tag that matches a tracked sheet
+  // Auto-detect most common tag that matches a tracked sheet. Sheet clientTags
+  // may carry a ": Leads"-style suffix while Bison tags are bare — match on the
+  // bare prefix. No match → no preselect (never guess an unrelated sheet).
   const autoDetectedTag = useMemo(() => {
     if (sheets.length === 0 || domainTags.length === 0) return null;
-    const sheetTags = new Set(sheets.map((s) => s.clientTag));
+    const bare = (t: string) => t.split(":")[0].trim().toUpperCase();
+    const byBare = new Map<string, string>();
+    for (const s of sheets) {
+      const k = bare(s.clientTag);
+      if (k && !byBare.has(k)) byBare.set(k, s.clientTag);
+    }
     const freq = new Map<string, number>();
     for (const tag of domainTags) {
-      if (sheetTags.has(tag)) {
-        freq.set(tag, (freq.get(tag) || 0) + 1);
-      }
+      const hit = byBare.get(bare(tag));
+      if (hit) freq.set(hit, (freq.get(hit) || 0) + 1);
     }
-    if (freq.size === 0) return sheets[0]?.clientTag || null;
+    if (freq.size === 0) return null;
     let best = "";
     let bestCount = 0;
     for (const [tag, count] of freq) {

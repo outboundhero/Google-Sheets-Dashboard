@@ -97,11 +97,16 @@ export async function getClientTierMap(): Promise<Map<string, TrackerEntry>> {
 // abbreviations like K&LCS / TM&VC intact).
 export function resolveTier(clientTag: string, map: Map<string, TrackerEntry>): TrackerEntry | null {
   const candidates = new Set<string>();
-  candidates.add(clientTag.trim().toUpperCase());
-  for (const slash of clientTag.split("/")) {
-    for (const amp of slash.split(" & ")) {
-      const v = amp.trim().toUpperCase();
-      if (v) candidates.add(v);
+  // Tracked-sheet tags often carry a ": Leads"-style suffix the tracker's
+  // abbreviations don't have ("GJS: Leads" vs "GJS") — try the bare prefix too.
+  for (const base of [clientTag, clientTag.split(":")[0]]) {
+    const whole = base.trim().toUpperCase();
+    if (whole) candidates.add(whole);
+    for (const slash of base.split("/")) {
+      for (const amp of slash.split(" & ")) {
+        const v = amp.trim().toUpperCase();
+        if (v) candidates.add(v);
+      }
     }
   }
   for (const c of candidates) {

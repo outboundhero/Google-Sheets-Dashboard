@@ -109,7 +109,7 @@ export function DailyReportCard() {
 
             <div className="flex flex-wrap gap-4 text-xs text-muted-foreground">
               <span>Detection now: <b className="text-amber-500">{report.detection.burnt}</b> burnt · <b className="text-emerald-500">{report.detection.ready}</b> ready · <b className="text-destructive">{report.detection.blocked}</b> blocked · {report.detection.removeOnly} remove-only</span>
-              <span>Pending cancellations: <b className="text-foreground">{report.pendingCancellations}</b>{report.nextCancellation ? ` (next: ${report.nextCancellation.slice(0, 10)})` : ""}</span>
+              <span>Pending cancellations: <b className="text-foreground">{report.pendingCancellations}</b>{report.nextCancellation ? (report.nextCancellation.slice(0, 10) < report.date ? ` (overdue since ${report.nextCancellation.slice(0, 10)})` : ` (next: ${report.nextCancellation.slice(0, 10)})`) : ""}</span>
             </div>
 
             {report.byClient.length > 0 && (
