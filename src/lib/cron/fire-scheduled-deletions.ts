@@ -16,6 +16,7 @@ import { deleteDomainFromInstance } from "@/lib/deliverability/delete-domain";
 // daily run retries it (the delete is idempotent).
 
 const MAX_PER_RUN = 15; // stay comfortably inside maxDuration; overflow waits for the next run
+const RUN_BUDGET_MS = 240_000; // stop starting new rows before Vercel's 300s limit kills the run mid-row — per-row progress already marked survives
 
 export async function runScheduledDeletions(limit = MAX_PER_RUN): Promise<NextResponse> {
   const supabase = getSupabaseAdmin();
@@ -35,7 +36,9 @@ export async function runScheduledDeletions(limit = MAX_PER_RUN): Promise<NextRe
   const rows = (due || []) as { instance: string; domain: string }[];
   const results: { instance: string; domain: string; deleted: number; notFound: number; failed: number; remainingInBison: number; done: boolean }[] = [];
 
+  const startedAt = Date.now();
   for (const row of rows) {
+    if (Date.now() - startedAt > RUN_BUDGET_MS) break; // bank what finished; next run continues from here
     if (!isInstanceSlug(row.instance)) {
       // Unknown instance slug — mark done so it doesn't loop forever.
       await supabase.from("duplicate_domain_deletions").update({ status: "done" }).eq("instance", row.instance).eq("domain", row.domain);

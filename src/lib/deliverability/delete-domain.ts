@@ -68,7 +68,10 @@ async function listBisonSenders(instance: BisonInstanceSlug, domain: string): Pr
   const found = new Map<number, SenderLite>();
   let page = 1;
   while (page <= SEARCH_MAX_PAGES) {
-    const res = await bisonGetWithRetry(instance, `/sender-emails?search=${encodeURIComponent(domain)}&page=${page}&per_page=15`);
+    // per_page=100 (Bison accepts it — campaigns sync uses the same): the old
+    // per_page=15 meant up to 40 paged calls per verify; on a rate-limited
+    // instance that blew the cron's whole time budget on a single domain.
+    const res = await bisonGetWithRetry(instance, `/sender-emails?search=${encodeURIComponent(domain)}&page=${page}&per_page=100`);
     if (!res || !res.ok) break;
     const json = await res.json().catch(() => null);
     const payload = Array.isArray(json) ? json[0] : json;
