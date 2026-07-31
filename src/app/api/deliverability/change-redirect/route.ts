@@ -3,6 +3,7 @@ import { getSupabaseAdmin } from "@/lib/supabase";
 import * as scaledmail from "@/lib/scaledmail";
 import * as milkbox from "@/lib/milkbox";
 import * as inboxing from "@/lib/inboxing";
+import { meansNoRedirect } from "@/lib/deliverability/redirect-normalize";
 
 export const maxDuration = 300;
 
@@ -66,9 +67,10 @@ function detectProvider(tags: string[]): { provider: ProviderSlug | null; skipRe
   return { provider: null, skipReason: "No vendor tag" };
 }
 
+// newUrl === null means "clear the redirect" → each provider's NONE endpoint.
 async function callProviderUpdateRedirect(
   routing: DomainRouting,
-  newUrl: string,
+  newUrl: string | null,
 ): Promise<void> {
   if (routing.provider === "milkbox") {
     if (!routing.providerDomainId) throw new Error("Missing MilkBox provider_domain_id");
@@ -81,7 +83,8 @@ async function callProviderUpdateRedirect(
     return;
   }
   if (routing.provider === "scaledmail") {
-    await scaledmail.updateRedirect(routing.domain, newUrl);
+    // ScaledMail's swap-redirect takes a string; empty = clear.
+    await scaledmail.updateRedirect(routing.domain, newUrl ?? "");
     return;
   }
   throw new Error(`Unsupported provider: ${routing.provider}`);
@@ -217,14 +220,20 @@ export async function POST(request: Request) {
     const inputDomains: string[] = Array.isArray(body?.domains)
       ? body.domains.map((d: unknown) => String(d).trim().toLowerCase()).filter(Boolean)
       : [];
-    const newUrl: string = typeof body?.newUrl === "string" ? body.newUrl.trim() : "";
+    const rawNewUrl = typeof body?.newUrl === "string" ? body.newUrl.trim() : "";
+    // Clear the redirect (→ each provider's NONE endpoint) only on an EXPLICIT
+    // signal: a `clearRedirect: true` flag, or a non-blank no-redirect sentinel
+    // like "n/a" / "none". A blank field is NOT treated as clear — that would
+    // let an accidental empty submit wipe every selected domain's redirect.
+    const clearRedirect = body?.clearRedirect === true || (rawNewUrl !== "" && meansNoRedirect(rawNewUrl));
+    const newUrl: string | null = clearRedirect ? null : rawNewUrl;
 
     if (inputDomains.length === 0) {
       return NextResponse.json({ error: "domains required" }, { status: 400 });
     }
     if (!dryRun) {
-      if (!newUrl || !/^https?:\/\/.+/i.test(newUrl)) {
-        return NextResponse.json({ error: "newUrl required (http:// or https://)" }, { status: 400 });
+      if (!clearRedirect && !/^https?:\/\/.+/i.test(newUrl ?? "")) {
+        return NextResponse.json({ error: "newUrl required (http:// or https://), or send a clear value (n/a / none)" }, { status: 400 });
       }
     }
 

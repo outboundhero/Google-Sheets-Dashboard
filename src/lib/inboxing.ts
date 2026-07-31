@@ -124,7 +124,7 @@ export async function createDomain(
     user_count: 49,
     ...(input.redirectUrl
       ? { redirect_url: input.redirectUrl, redirect_type: "REGULAR" as const }
-      : {}),
+      : { redirect_type: "NONE" as const }),
     cloudflare_credential_id: cloudflareId,
     registrar_credential_id: registrarId,
   };

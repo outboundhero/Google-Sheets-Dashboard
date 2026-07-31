@@ -16,8 +16,12 @@ import { deleteDomainFromInstance } from "@/lib/deliverability/delete-domain";
 // daily run retries it (the delete is idempotent).
 
 const MAX_PER_RUN = 15; // stay comfortably inside maxDuration; overflow waits for the next run
-const RUN_BUDGET_MS = 240_000; // stop starting new rows before Vercel's 300s limit kills the run mid-row — per-row progress already marked survives
-const ROW_TIMEOUT_MS = 150_000; // fits two slow (≤60s) verify calls + deletes; a row beyond this is wedged — rotate it to the back and move on
+// Hard guarantee against Vercel's 300s FUNCTION_INVOCATION_TIMEOUT (which returns
+// an HTML 504 — no JSON, no per-row progress banked, exactly the "still stuck"
+// symptom): never START a row after RUN_BUDGET_MS, and cap any single row at
+// ROW_TIMEOUT_MS. Worst case = start at 139.9s + run 130s = ~270s < 300s.
+const RUN_BUDGET_MS = 140_000; // don't start a new row past this — leaves room for one full ROW_TIMEOUT_MS row + the trailing count query
+const ROW_TIMEOUT_MS = 130_000; // a row beyond this is wedged (or on a very slow instance) — rotate it to the back; its deletes usually already landed, so the requeued retry verifies-clean fast
 const REQUEUE_DELAY_MS = 6 * 3600_000;
 
 // Any row that didn't fully complete rotates to the back (+6h) instead of

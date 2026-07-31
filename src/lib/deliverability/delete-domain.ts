@@ -228,6 +228,7 @@ export async function deleteDomainFromInstance(
   let notFound = 0;
   let toDelete: SenderLite[] = [...candidates.entries()].map(([id, email]) => ({ id, email }));
 
+  let confirmedZero = false; // a sweep's re-verify already reported 0 → skip the extra final search (each search is 30–60s on slow instances like facilityreach)
   for (let sweep = 0; sweep < MAX_SWEEPS && toDelete.length > 0; sweep++) {
     const r = await deleteBatch(instance, dom, toDelete);
     deleted += r.deleted;
@@ -238,11 +239,11 @@ export async function deleteDomainFromInstance(
     // Ask Bison what's actually left; those become the next sweep's targets.
     if (sweep < MAX_SWEEPS - 1) await delay(500);
     const survivors = await listBisonSenders(instance, dom);
-    if (survivors.length === 0) { toDelete = []; break; }
+    if (survivors.length === 0) { toDelete = []; confirmedZero = true; break; }
     toDelete = survivors;
   }
 
-  const finalRemaining = await listBisonSenders(instance, dom);
+  const finalRemaining = confirmedZero ? [] : await listBisonSenders(instance, dom);
   const remainingIds = new Set(finalRemaining.map((s) => s.id));
   // Anything Bison no longer reports is gone — clear it from the failure list.
   for (const id of [...failureMap.keys()]) if (!remainingIds.has(id)) failureMap.delete(id);

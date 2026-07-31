@@ -5,6 +5,7 @@ import * as scaledmail from "@/lib/scaledmail";
 import * as milkbox from "@/lib/milkbox";
 import * as inboxing from "@/lib/inboxing";
 import { resolveDomainOrders, milkboxSequencerFor } from "@/lib/inbox-order-accounts";
+import { meansNoRedirect } from "@/lib/deliverability/redirect-normalize";
 import type {
   CreateOrderInput,
   InboxOrderProvider,
@@ -60,10 +61,16 @@ export async function POST(request: Request) {
     const tag = typeof body?.tag === "string" ? body.tag.slice(0, 20) : null;
     const companyName = typeof body?.companyName === "string" ? body.companyName.trim() : null;
     const clientTag = typeof body?.clientTag === "string" ? body.clientTag.trim() : null;
-    const redirectUrl =
-      typeof body?.redirectUrl === "string" && body.redirectUrl.trim()
-        ? body.redirectUrl.trim()
-        : DEFAULT_REDIRECT;
+    const redirectRaw = typeof body?.redirectUrl === "string" ? body.redirectUrl.trim() : "";
+    // Blank/omitted → default redirect (unchanged). An explicit "n/a" / "none" /
+    // "-" means the operator wants NO redirect → empty string, which the
+    // provider layer turns into its NONE endpoint. Previously "n/a" was stored
+    // verbatim and pushed to Inboxing as a REGULAR redirect (Ramon's bug).
+    const redirectUrl = !redirectRaw
+      ? DEFAULT_REDIRECT
+      : meansNoRedirect(redirectRaw)
+        ? ""
+        : redirectRaw;
 
     if (!isValidProvider(provider)) {
       return NextResponse.json({ error: "Invalid provider" }, { status: 400 });
