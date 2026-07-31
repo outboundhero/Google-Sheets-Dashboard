@@ -51,7 +51,7 @@ export async function runScheduledDeletions(limit = MAX_PER_RUN): Promise<NextRe
   }
 
   const rows = (due || []) as { instance: string; domain: string }[];
-  const results: { instance: string; domain: string; deleted: number; notFound: number; failed: number; remainingInBison: number; done: boolean }[] = [];
+  const results: { instance: string; domain: string; deleted: number; notFound: number; failed: number; remainingInBison: number; done: boolean; error?: string }[] = [];
 
   const startedAt = Date.now();
   for (const row of rows) {
@@ -75,8 +75,9 @@ export async function runScheduledDeletions(limit = MAX_PER_RUN): Promise<NextRe
       results.push({ instance: row.instance, domain: row.domain, deleted: r.inboxesDeleted, notFound: r.notFound, failed: r.failed, remainingInBison: r.remainingInBison, done });
     } catch (e) {
       await requeueToBack(supabase, row);
-      console.error(`[cron/fire-scheduled-deletions] ${row.instance}:${row.domain} failed:`, e instanceof Error ? e.message : e);
-      results.push({ instance: row.instance, domain: row.domain, deleted: 0, notFound: 0, failed: 1, remainingInBison: -1, done: false });
+      const msg = e instanceof Error ? e.message : String(e);
+      console.error(`[cron/fire-scheduled-deletions] ${row.instance}:${row.domain} failed:`, msg);
+      results.push({ instance: row.instance, domain: row.domain, deleted: 0, notFound: 0, failed: 1, remainingInBison: -1, done: false, error: msg.slice(0, 200) });
     }
   }
 
