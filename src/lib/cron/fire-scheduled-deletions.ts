@@ -17,6 +17,23 @@ import { deleteDomainFromInstance } from "@/lib/deliverability/delete-domain";
 
 const MAX_PER_RUN = 15; // stay comfortably inside maxDuration; overflow waits for the next run
 const RUN_BUDGET_MS = 240_000; // stop starting new rows before Vercel's 300s limit kills the run mid-row — per-row progress already marked survives
+const ROW_TIMEOUT_MS = 90_000; // a row that can't verify+delete in 90s is wedged (hung Bison call) — rotate it to the back and move on
+const REQUEUE_DELAY_MS = 6 * 3600_000;
+
+// Any row that didn't fully complete rotates to the back (+6h) instead of
+// re-heading the oldest-first queue — one wedged domain can otherwise starve
+// everything behind it forever, which is exactly how the queue sat frozen
+// with zero progress for 6 days (Jul 25–31).
+async function requeueToBack(
+  supabase: ReturnType<typeof getSupabaseAdmin>,
+  row: { instance: string; domain: string },
+): Promise<void> {
+  await supabase
+    .from("duplicate_domain_deletions")
+    .update({ scheduled_at: new Date(Date.now() + REQUEUE_DELAY_MS).toISOString() })
+    .eq("instance", row.instance)
+    .eq("domain", row.domain);
+}
 
 export async function runScheduledDeletions(limit = MAX_PER_RUN): Promise<NextResponse> {
   const supabase = getSupabaseAdmin();
@@ -45,14 +62,19 @@ export async function runScheduledDeletions(limit = MAX_PER_RUN): Promise<NextRe
       continue;
     }
     try {
-      const r = await deleteDomainFromInstance(row.instance, row.domain);
+      const r = await Promise.race([
+        deleteDomainFromInstance(row.instance, row.domain),
+        new Promise<never>((_, reject) => setTimeout(() => reject(new Error(`row timeout after ${ROW_TIMEOUT_MS / 1000}s`)), ROW_TIMEOUT_MS)),
+      ]);
       const done = r.remainingInBison === 0 && r.failed === 0;
       if (done) {
         await supabase.from("duplicate_domain_deletions").update({ status: "done" }).eq("instance", row.instance).eq("domain", row.domain);
+      } else {
+        await requeueToBack(supabase, row);
       }
       results.push({ instance: row.instance, domain: row.domain, deleted: r.inboxesDeleted, notFound: r.notFound, failed: r.failed, remainingInBison: r.remainingInBison, done });
     } catch (e) {
-      // Leave pending → retried next run.
+      await requeueToBack(supabase, row);
       console.error(`[cron/fire-scheduled-deletions] ${row.instance}:${row.domain} failed:`, e instanceof Error ? e.message : e);
       results.push({ instance: row.instance, domain: row.domain, deleted: 0, notFound: 0, failed: 1, remainingInBison: -1, done: false });
     }

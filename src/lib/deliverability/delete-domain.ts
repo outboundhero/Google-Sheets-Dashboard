@@ -17,6 +17,7 @@ import type { BisonInstanceSlug } from "@/lib/bison-instances";
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 const DELETE_CONC = 10;      // concurrent DELETEs per batch (kind to Bison's per-minute window)
+const FETCH_TIMEOUT_MS = 30_000; // a Bison call with no answer in 30s is hung — abort it so the retry loop (not Vercel's 300s kill) handles it
 const MAX_ATTEMPTS = 5;      // per-request retry attempts on transient errors (429/5xx/network)
 const MAX_SWEEPS = 4;        // delete → re-verify passes before giving up
 const SEARCH_MAX_PAGES = 40; // safety cap when paging the domain search
@@ -47,7 +48,7 @@ export interface DeleteDomainResult {
 async function bisonGetWithRetry(instance: BisonInstanceSlug, path: string): Promise<Response | null> {
   for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
     try {
-      const res = await bisonFetch(instance, path);
+      const res = await bisonFetch(instance, path, { signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
       if (res.ok) return res;
       if (res.status === 429 || res.status >= 500) {
         const ra = parseInt(res.headers.get("retry-after") || "", 10);
@@ -100,6 +101,7 @@ async function deleteSenderEmail(
       const res = await bisonFetch(instance, `/sender-emails/${id}`, {
         method: "DELETE",
         headers: { "Content-Type": "application/json" },
+        signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
       });
       if (res.ok) return { outcome: "deleted", status: res.status, error: "" };
       if (res.status === 404) return { outcome: "not_found", status: 404, error: "not found in Bison" };
