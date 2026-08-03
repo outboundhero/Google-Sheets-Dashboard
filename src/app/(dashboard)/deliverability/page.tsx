@@ -902,9 +902,13 @@ function DeliverabilityPageInner() {
   const [showExportMenu, setShowExportMenu] = useState(false);
   const [exportCopied, setExportCopied] = useState(false);
   const [showSendToSheet, setShowSendToSheet] = useState(false);
+  // Spencer's "force push" reuses the same picker dialog; this flag flips its
+  // copy + routes the confirm to the force-requeue endpoint instead of the
+  // normal whitelist append.
+  const [forceWhitelistMode, setForceWhitelistMode] = useState(false);
 
   // Standalone sheet append (Whitelist button) — stacked runs too.
-  interface SheetAppendJob { id: number; status: "running" | "done" | "error"; label: string; added?: number; duplicates?: number; error?: string; whitelist?: string; retryDoms?: string[]; retryClientTag?: string }
+  interface SheetAppendJob { id: number; status: "running" | "done" | "error"; label: string; added?: number; duplicates?: number; error?: string; whitelist?: string; retryDoms?: string[]; retryClientTag?: string; kind?: "append" | "force" }
   const [sheetAppendJobs, setSheetAppendJobs] = useState<SheetAppendJob[]>(() => {
     const jobs = readPanelLS<SheetAppendJob[]>("sheetAppendJobs");
     // Keep finished jobs; in-flight ones are auto-resumed on mount.
@@ -1496,6 +1500,44 @@ function DeliverabilityPageInner() {
     }
   }, []);
 
+  // Spencer's "force push even though already sent": re-queue domains for the
+  // next 6:30 AM PT whitelist batch, OVERRIDING the "already sent" dedup. Used
+  // when a client's ReplyRouter recipient was wrong (bounced) and the same
+  // domains must go out again — a normal Whitelist re-queue would skip them as
+  // already sent. Additive to whitelist_queue; the daily cron picks them up and
+  // pulls the (corrected) recipients fresh at send time.
+  const startForceRequeue = useCallback(async (doms: string[], clientTag: string) => {
+    const jobId = runIdRef.current++;
+    const patchJob = (patch: Partial<SheetAppendJob>) =>
+      setSheetAppendJobs((prev) => prev.map((j) => (j.id === jobId ? { ...j, ...patch } : j)));
+    setSheetAppendJobs((prev) => [...prev, { id: jobId, status: "running", label: `Force re-queuing ${doms.length} domain${doms.length !== 1 ? "s" : ""} for ${clientTag}...`, kind: "force", retryDoms: doms, retryClientTag: clientTag }]);
+    setSelectedDomains(new Set());
+    try {
+      const res = await fetch("/api/deliverability/whitelist/force-requeue", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ domains: doms, clientTag }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data?.error || `HTTP ${res.status}`);
+      const n = data.requeued ?? doms.length;
+      patchJob({
+        status: "done",
+        label: `Force re-queued ${n} domain${n !== 1 ? "s" : ""} for ${clientTag}`,
+        whitelist: "will send at the next 6:30 AM PT batch (recipients pulled fresh)",
+      });
+    } catch (err) {
+      patchJob({
+        status: "error",
+        label: "Force re-queue failed",
+        error: err instanceof Error ? err.message : "Failed",
+        kind: "force",
+        retryDoms: doms,
+        retryClientTag: clientTag,
+      });
+    }
+  }, []);
+
   useEffect(() => {
     loadDomains();
     loadStats();
@@ -1562,7 +1604,8 @@ function DeliverabilityPageInner() {
     }
     for (const job of snap.sheet || []) {
       if (job.status === "running" && job.retryDoms && job.retryDoms.length) {
-        startBackgroundSheetAppend(job.retryDoms, job.retryClientTag || "");
+        if (job.kind === "force") startForceRequeue(job.retryDoms, job.retryClientTag || "");
+        else startBackgroundSheetAppend(job.retryDoms, job.retryClientTag || "");
       }
     }
     if (snap.provider && snap.provider.some((r) => r.state === "running")) {
@@ -3434,12 +3477,16 @@ function DeliverabilityPageInner() {
               <span className="font-medium">{job.label}</span>
               {job.status === "done" && (
                 <span className="text-xs text-emerald-500 ml-2">
-                  +{job.added} added
-                  {(job.duplicates ?? 0) > 0 && (
-                    <span className="text-amber-500"> ({job.duplicates} duplicates)</span>
+                  {job.added != null && (
+                    <>
+                      +{job.added} added
+                      {(job.duplicates ?? 0) > 0 && (
+                        <span className="text-amber-500"> ({job.duplicates} duplicates)</span>
+                      )}
+                    </>
                   )}
                   {job.whitelist && (
-                    <span className="text-muted-foreground"> · {job.whitelist}</span>
+                    <span className="text-muted-foreground">{job.added != null ? " · " : ""}{job.whitelist}</span>
                   )}
                 </span>
               )}
@@ -3450,9 +3497,9 @@ function DeliverabilityPageInner() {
             <div className="flex items-center gap-3">
               {job.status === "error" && job.retryDoms && job.retryDoms.length > 0 && (
                 <button
-                  onClick={() => { setSheetAppendJobs((prev) => prev.filter((j) => j.id !== job.id)); startBackgroundSheetAppend(job.retryDoms!, job.retryClientTag || ""); }}
+                  onClick={() => { setSheetAppendJobs((prev) => prev.filter((j) => j.id !== job.id)); (job.kind === "force" ? startForceRequeue : startBackgroundSheetAppend)(job.retryDoms!, job.retryClientTag || ""); }}
                   className="flex items-center gap-1 text-xs text-primary hover:underline"
-                  title="Re-run the whitelist append for these domains"
+                  title={job.kind === "force" ? "Re-run the force re-queue for these domains" : "Re-run the whitelist append for these domains"}
                 >
                   <RefreshCw className="h-3 w-3" /> Retry {job.retryDoms.length}
                 </button>
@@ -4415,10 +4462,20 @@ function DeliverabilityPageInner() {
                       size="sm"
                       variant="outline"
                       className="h-7 text-xs gap-1.5"
-                      onClick={() => setShowSendToSheet(true)}
+                      onClick={() => { setForceWhitelistMode(false); setShowSendToSheet(true); }}
                     >
                       <Send className="h-3 w-3" />
                       Whitelist
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="h-7 text-xs gap-1.5"
+                      onClick={() => { setForceWhitelistMode(true); setShowSendToSheet(true); }}
+                      title="Re-queue these domains for the next 6:30 AM PT whitelist email even if they were already sent"
+                    >
+                      <RefreshCw className="h-3 w-3" />
+                      Force Push
                     </Button>
                     <Button
                       size="sm"
@@ -5195,10 +5252,11 @@ function DeliverabilityPageInner() {
         onStart={runCancelDomains}
       />
 
-      {/* Send to Sheet Dialog */}
+      {/* Send to Sheet Dialog (doubles as Spencer's force-push picker) */}
       <SendToSheetDialog
         open={showSendToSheet}
-        onOpenChange={setShowSendToSheet}
+        onOpenChange={(v) => { setShowSendToSheet(v); if (!v) setForceWhitelistMode(false); }}
+        force={forceWhitelistMode}
         selectedDomains={Array.from(selectedDomains)}
         domainTags={(() => {
           const tags: string[] = [];
@@ -5209,7 +5267,8 @@ function DeliverabilityPageInner() {
           return tags;
         })()}
         onConfirm={({ domains: doms, clientTag }) => {
-          startBackgroundSheetAppend(doms, clientTag);
+          if (forceWhitelistMode) startForceRequeue(doms, clientTag);
+          else startBackgroundSheetAppend(doms, clientTag);
         }}
       />
 

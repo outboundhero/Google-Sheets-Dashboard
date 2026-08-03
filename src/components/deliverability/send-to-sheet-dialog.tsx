@@ -21,10 +21,14 @@ interface SendToSheetDialogProps {
   domainTags: string[];
   /** Called when user confirms */
   onConfirm: (info: { domains: string[]; clientTag: string }) => void;
+  /** Force mode: re-queue for the next 6:30 AM PT batch even if the domains
+   *  were already sent (Spencer's "force push", for when a client's recipient
+   *  was wrong/bounced). Only changes copy + the confirm handler's intent. */
+  force?: boolean;
 }
 
 export function SendToSheetDialog({
-  open, onOpenChange, selectedDomains, domainTags, onConfirm,
+  open, onOpenChange, selectedDomains, domainTags, onConfirm, force = false,
 }: SendToSheetDialogProps) {
   const [sheets, setSheets] = useState<SheetOption[]>([]);
   const [loading, setLoading] = useState(false);
@@ -106,7 +110,7 @@ export function SendToSheetDialog({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="sm:!max-w-md max-h-[80vh] flex flex-col">
         <DialogHeader>
-          <DialogTitle>Whitelist Domains</DialogTitle>
+          <DialogTitle>{force ? "Force Re-queue Whitelist" : "Whitelist Domains"}</DialogTitle>
         </DialogHeader>
 
         {loading ? (
@@ -120,9 +124,20 @@ export function SendToSheetDialog({
         ) : (
           <div className="space-y-3 flex-1 overflow-hidden flex flex-col">
             <p className="text-sm text-muted-foreground">
-              {selectedDomains.length} domain{selectedDomains.length !== 1 ? "s" : ""} will be added to the Domains tab
-              and the client&apos;s contacts will be emailed now to whitelist them. Duplicates and
-              already-whitelisted domains are skipped.
+              {force ? (
+                <>
+                  {selectedDomains.length} domain{selectedDomains.length !== 1 ? "s" : ""} will be re-queued for the next
+                  6:30&nbsp;AM&nbsp;PT whitelist email — <span className="font-medium text-foreground">even if they were already sent</span>.
+                  Use this when the client&apos;s recipient was wrong and the email must go out again. Recipients are pulled
+                  fresh from ReplyRouter at send time.
+                </>
+              ) : (
+                <>
+                  {selectedDomains.length} domain{selectedDomains.length !== 1 ? "s" : ""} will be added to the Domains tab
+                  and the client&apos;s contacts will be emailed now to whitelist them. Duplicates and
+                  already-whitelisted domains are skipped.
+                </>
+              )}
             </p>
 
             <div className="flex items-center gap-2 rounded-lg border bg-background px-3 py-1.5">
@@ -169,7 +184,7 @@ export function SendToSheetDialog({
             <div className="flex justify-end gap-2 pt-1">
               <Button variant="ghost" size="sm" onClick={() => onOpenChange(false)}>Cancel</Button>
               <Button size="sm" disabled={!selectedTag} onClick={handleConfirm}>
-                Whitelist &amp; Send
+                {force ? "Force Re-queue" : "Whitelist & Send"}
               </Button>
             </div>
           </div>
