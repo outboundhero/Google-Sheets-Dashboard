@@ -10,6 +10,7 @@ import { useAuth } from "@/lib/auth-context";
 import { ExecuteDialog } from "@/components/replacement/execute-dialog";
 import { ThresholdGroupsEditor } from "@/components/replacement/threshold-groups-editor";
 import { GroupPlanCard } from "@/components/replacement/group-plan-card";
+import { ShortfallCard } from "@/components/replacement/shortfall-card";
 import { DailyReportCard } from "@/components/replacement/daily-report-card";
 import { RetryCard } from "@/components/replacement/retry-card";
 import { PurchasePlanCard } from "@/components/replacement/purchase-plan-card";
@@ -476,6 +477,9 @@ export default function ReplacementPage() {
 
       {/* Group-driven replacement plan (observe) — same plan, groups decide burnt */}
       <GroupPlanCard />
+
+      {/* Tier-aware shortfall — how many domains to add per b2b/b2c instance per tag */}
+      <ShortfallCard />
 
       {/* Failed execution steps with one-click retry (hidden when none) */}
       <RetryCard />
