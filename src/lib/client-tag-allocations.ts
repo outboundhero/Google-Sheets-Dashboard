@@ -4,18 +4,26 @@ import type { BisonGroup } from "@/lib/bison-instances";
 /**
  * Client-tag → Bison group allocation.
  *
- * Source of truth is ONE Google Sheet maintained by the agency:
+ * Source of truth is Spencer's client-tag allocation tab, a side-by-side
+ * two-group table on gid 239723744 of the main Client Tracker workbook:
  *   - Column A = client tags belonging to Group 1 (B2B#1 + B2C#1)
- *   - Column C = client tags belonging to Group 2 (B2B#2 + B2C#2)
- *   - (Columns B / D are "DONE" checkboxes — ignored.)
+ *   - Column E = client tags belonging to Group 2 (B2B#2 + B2C#2)
+ *   - (B/F = Status, C/G = Churn Date, D/H = Plan — read by other modules,
+ *      ignored here; churn is handled in churn-offboarding.ts.)
  *
  * This module reads that sheet and caches the parsed map in Redis. It is
  * completely independent of the per-client tracked-sheets system.
+ *
+ * NOTE: pinned to the sheet id + gid directly (not via env) — the old
+ * CLIENT_TAG_ALLOCATION_SHEET_ID env still points at the retired single-tab
+ * sheet, whose 2-column layout has no Group-2 column E.
  */
 
-const ALLOCATION_SHEET_ID =
-  process.env.CLIENT_TAG_ALLOCATION_SHEET_ID ||
-  "1P-5H4pxB-cRO0i2tp6WjXNN77ibIB4hCnNTuyRzQOYw";
+const ALLOCATION_SHEET_ID = "1MGqSgGNoeN6WgjZnT7_Ij_nZftyyj7Z9DT77rVYLKuQ";
+
+// The allocation table's tab (gid) inside the workbook. Resolved to a title
+// at read time so we address it by name for values.batchGet.
+const ALLOCATION_TAB_GID = 239723744;
 
 const REDIS_KEY = "client-tag-allocations";
 
@@ -39,26 +47,26 @@ function normalizeTag(raw: unknown): string {
   return String(raw ?? "").trim().toUpperCase();
 }
 
-/** Reads the allocation sheet live and parses columns A + B into a map. */
+/** Reads the allocation sheet live and parses columns A + E into a map. */
 export async function fetchAllocationsFromSheet(): Promise<ClientTagAllocations> {
   const sheets = await getSheetsClient();
 
-  // The allocation data lives on the first tab; resolve its name dynamically.
+  // Resolve the allocation tab by its gid (sheetId) so a tab rename can't break us.
   const meta = await sheets.spreadsheets.get({
     spreadsheetId: ALLOCATION_SHEET_ID,
-    fields: "sheets.properties.title",
+    fields: "sheets.properties(sheetId,title)",
   });
-  const tab = meta.data.sheets?.[0]?.properties?.title || "Sheet1";
+  const tab =
+    meta.data.sheets?.find((s) => s.properties?.sheetId === ALLOCATION_TAB_GID)
+      ?.properties?.title ||
+    meta.data.sheets?.[0]?.properties?.title ||
+    "Sheet1";
 
-  // Column A = Group 1 client tags, Column B = Group 2 client tags. The sheet
-  // used to have B as a "DONE" checkbox column (so we read A + C), but it has
-  // since been collapsed: B is now Group 2, and C no longer exists at all.
-  // Reading C2:C against the current 2-column sheet returned "exceeds grid
-  // limits" → every Group 2 tag was being treated as unallocated, leaking
-  // them into BOTH groups in the UI (per the fallback rule).
+  // Column A = Group 1 client tags, Column E = Group 2 client tags (side-by-side
+  // two-group table; B/C/D and F/G/H are Status/Churn Date/Plan for each side).
   const res = await sheets.spreadsheets.values.batchGet({
     spreadsheetId: ALLOCATION_SHEET_ID,
-    ranges: [`${tab}!A2:A`, `${tab}!B2:B`],
+    ranges: [`${tab}!A2:A`, `${tab}!E2:E`],
   });
 
   const group1Col = res.data.valueRanges?.[0]?.values || [];
