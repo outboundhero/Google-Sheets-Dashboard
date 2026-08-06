@@ -73,6 +73,27 @@ const record = (payload: unknown) =>
  *  on every change. Resolves with ok=false if any step failed. */
 export async function runExecution(inp: ExecuteInputs, emit: (steps: ExecStep[]) => void): Promise<{ ok: boolean }> {
   const { clientTag, instance, instancesQuery, redirectUrl, targetCampaigns, replacementDomains, removeDomains } = inp;
+
+  // Churn blackout (Spencer 2026-08-06): never run replacement within 5 days of
+  // a client's churn date (or after it). Single chokepoint — blocks every path.
+  try {
+    const g = await fetch(`/api/replacement/churn-guard?clientTag=${encodeURIComponent(clientTag)}`);
+    const guard = (await g.json().catch(() => null)) as { blocked?: boolean; reason?: string } | null;
+    if (guard?.blocked) {
+      const blocked: ExecStep = {
+        key: "churn-blackout",
+        label: `Skipped — ${clientTag} ${guard.reason || "within churn blackout"}`,
+        state: "skipped",
+        note: "Replacement blocked: within 5 days of churn date.",
+      };
+      emit([blocked]);
+      record({ events: [{ instance, clientTag, eventType: "skipped", detail: `churn blackout — ${guard.reason || "within 5d of churn"}` }] });
+      return { ok: true };
+    }
+  } catch {
+    // Fail open: a transient guard error shouldn't block a legitimate run.
+  }
+
   const steps: ExecStep[] = [];
   let ok = true;
   const setStep = (key: string, patch: Partial<ExecStep>) => {
