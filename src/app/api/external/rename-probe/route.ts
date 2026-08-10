@@ -26,6 +26,7 @@ export async function GET(request: Request) {
 
   // 2. try rename candidates
   const candidates: [string, string][] = [
+    [`/campaigns/${newId}/update`, "PATCH"],
     [`/campaigns/${newId}`, "POST"],
     [`/campaigns/${newId}/general-settings`, "PUT"],
     [`/campaigns/${newId}/general-settings`, "POST"],
