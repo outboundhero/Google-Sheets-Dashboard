@@ -1,7 +1,7 @@
 import { Redis } from "@upstash/redis";
 import { getSupabaseAdmin } from "@/lib/supabase";
 import { isInstanceSlug } from "@/lib/bison-instances";
-import { duplicateOne, renameCampaign, logCampaignEvent } from "@/lib/campaigns/duplication";
+import { duplicateOne, logCampaignEvent } from "@/lib/campaigns/duplication";
 import { recordPipelineAlert } from "@/lib/pipeline-alerts";
 
 // Drains the shared duplication queue — ONE client-tag set per call, strictly
@@ -62,14 +62,8 @@ export async function drainDuplicationOnce(): Promise<{ processed: number; remai
         await supabase.from("campaign_dup_queue").update({ status: "duplicating", updated_at: stamp() }).eq("id", item.id);
         const res = await duplicateOne(item.instance, item.source_id);
         if (res.ok) {
-          // Bison auto-names the copy "Copy of <name>". Rename it to the clean
-          // source name (best-effort — a rename failure doesn't fail the dup).
-          let finalName = res.newName ?? null;
-          if (res.newId && item.source_name && /^copy of /i.test(res.newName || "")) {
-            const rn = await renameCampaign(item.instance, res.newId, item.source_name);
-            if (rn.ok) finalName = item.source_name;
-          }
-          await supabase.from("campaign_dup_queue").update({ status: "done", new_id: res.newId ?? null, new_name: finalName, error: null, updated_at: stamp() }).eq("id", item.id);
+          // Keep Bison's default "Copy of <name>" — do not rename.
+          await supabase.from("campaign_dup_queue").update({ status: "done", new_id: res.newId ?? null, new_name: res.newName ?? null, error: null, updated_at: stamp() }).eq("id", item.id);
           await logCampaignEvent(supabase, { instance: item.instance, campaignId: res.newId ?? null, clientTag: item.client_tag, eventType: "duplicated", detail: `Duplicated "${item.source_name}" → ${res.newName ?? res.newId}`, meta: { sourceId: item.source_id, jobId: item.job_id } });
           processed++;
         } else {
