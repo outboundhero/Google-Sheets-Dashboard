@@ -30,6 +30,17 @@ export async function duplicateOne(instance: BisonInstanceSlug, sourceId: number
   }
 }
 
+/** Rename (and otherwise update settings on) a campaign: PATCH /campaigns/{id}/update. */
+export async function renameCampaign(instance: BisonInstanceSlug, id: number, name: string): Promise<{ ok: boolean; error?: string }> {
+  try {
+    const res = await bisonFetch(instance, `/campaigns/${id}/update`, {
+      method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name }),
+    });
+    if (!res.ok) { const t = await res.text().catch(() => ""); return { ok: false, error: `Bison ${res.status}: ${t.slice(0, 120)}` }; }
+    return { ok: true };
+  } catch (e) { return { ok: false, error: e instanceof Error ? e.message : "rename failed" }; }
+}
+
 export async function logCampaignEvent(
   sb: SupabaseClient,
   ev: { instance?: string | null; campaignId?: number | null; clientTag?: string | null; eventType: string; detail?: string | null; actor?: string | null; meta?: Record<string, unknown> | null },
