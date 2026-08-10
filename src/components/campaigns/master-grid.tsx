@@ -1,7 +1,7 @@
 "use client";
 
 import { useMemo, useState, useRef, useEffect, useCallback } from "react";
-import { Send, Search, X, RefreshCw, Loader2, Check, ChevronDown, Play, Pause, Archive, Copy, ArrowUpDown, CalendarClock } from "lucide-react";
+import { Send, Search, X, RefreshCw, Loader2, Check, ChevronDown, Play, Pause, Archive, Copy, ArrowUpDown, CalendarClock, PanelRight } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useAuth } from "@/lib/auth-context";
 import { useInstance } from "@/lib/instance-context";
@@ -11,11 +11,12 @@ import { stageOrder } from "@/lib/campaigns/stage";
 import { DuplicateDialog } from "./duplicate-dialog";
 import { DuplicationQueuePanel } from "./duplication-queue-panel";
 import { BulkScheduleDialog } from "./bulk-schedule-dialog";
+import { CampaignDetailDrawer } from "./campaign-detail-drawer";
 
 const keyOf = (c: CampaignData) => `${c.instance}:${c.id}`;
 const replyRate = (c: CampaignData) => (c.total_leads_contacted > 0 ? (c.unique_replies / c.total_leads_contacted) * 100 : 0);
 
-type SortKey = "campaign" | "stage" | "class" | "instance" | "status" | "remaining" | "leads" | "completion" | "senders" | "schedule" | "reply" | "created";
+type SortKey = "campaign" | "stage" | "class" | "instance" | "status" | "remaining" | "leads" | "completion" | "senders" | "schedule" | "reply" | "start" | "golive" | "created";
 function compareBy(a: CampaignData, b: CampaignData, key: SortKey): number {
   switch (key) {
     case "campaign": return a.name.localeCompare(b.name);
@@ -29,6 +30,8 @@ function compareBy(a: CampaignData, b: CampaignData, key: SortKey): number {
     case "senders": return (a.sender_count || 0) - (b.sender_count || 0);
     case "schedule": return (a.sched_start_time || "").localeCompare(b.sched_start_time || "");
     case "reply": return replyRate(a) - replyRate(b);
+    case "start": return (a.client_start_date || "").localeCompare(b.client_start_date || "");
+    case "golive": return (a.go_live_date || "").localeCompare(b.go_live_date || "");
     case "created": return (a.created_at || "").localeCompare(b.created_at || "");
   }
 }
@@ -94,6 +97,7 @@ export function MasterGrid() {
   const [busy, setBusy] = useState(false);
   const [dupOpen, setDupOpen] = useState(false);
   const [schedOpen, setSchedOpen] = useState(false);
+  const [detail, setDetail] = useState<CampaignData | null>(null);
   const [sortKey, setSortKey] = useState<SortKey>("created");
   const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
   const nowBucket = currentBucket();
@@ -300,14 +304,18 @@ export function MasterGrid() {
                   <STh label="Senders" k="senders" sk={sortKey} sd={sortDir} on={toggleSort} align="right" w="w-[70px]" />
                   <STh label="Schedule" k="schedule" sk={sortKey} sd={sortDir} on={toggleSort} w="w-[150px]" />
                   <STh label="Reply" k="reply" sk={sortKey} sd={sortDir} on={toggleSort} align="right" w="w-[80px]" />
-                  <STh label="Created" k="created" sk={sortKey} sd={sortDir} on={toggleSort} align="right" w="w-[110px]" />
+                  <STh label="Start date" k="start" sk={sortKey} sd={sortDir} on={toggleSort} align="right" w="w-[100px]" />
+                  <STh label="Go-live" k="golive" sk={sortKey} sd={sortDir} on={toggleSort} align="right" w="w-[100px]" />
+                  <STh label="Created" k="created" sk={sortKey} sd={sortDir} on={toggleSort} align="right" w="w-[100px]" />
+                  <th className="w-[36px]" />
                 </tr>
               </thead>
               <tbody className="divide-y">
                 {filtered.map((c) => (
                   <Row key={keyOf(c)} c={c} selected={selected.has(keyOf(c))}
                     onMouseDown={() => startDrag(keyOf(c))}
-                    onMouseEnter={() => { if (dragging.current) applyDrag(keyOf(c)); }} />
+                    onMouseEnter={() => { if (dragging.current) applyDrag(keyOf(c)); }}
+                    onOpen={() => setDetail(c)} />
                 ))}
               </tbody>
             </table>
@@ -318,14 +326,16 @@ export function MasterGrid() {
 
       <DuplicateDialog open={dupOpen} onOpenChange={setDupOpen} selected={selectedRows} onQueued={() => { setSelected(new Set()); }} />
       <BulkScheduleDialog open={schedOpen} onOpenChange={setSchedOpen} selected={selectedRows} onDone={() => { mutate(); }} />
+      <CampaignDetailDrawer campaign={detail} onClose={() => setDetail(null)} onSaved={() => mutate()} />
     </div>
   );
 }
 
-function Row({ c, selected, onMouseDown, onMouseEnter }: { c: CampaignData; selected: boolean; onMouseDown: () => void; onMouseEnter: () => void }) {
+function Row({ c, selected, onMouseDown, onMouseEnter, onOpen }: { c: CampaignData; selected: boolean; onMouseDown: () => void; onMouseEnter: () => void; onOpen: () => void }) {
   const stage = c.effective_stage || "Main";
-  const replyRate = c.total_leads_contacted > 0 ? (c.unique_replies / c.total_leads_contacted) * 100 : 0;
+  const rr = c.total_leads_contacted > 0 ? (c.unique_replies / c.total_leads_contacted) * 100 : 0;
   const pct = Math.max(0, Math.min(100, c.completion_percentage || 0));
+  const overridden = !!c.stage_override || !!c.client_tag_override;
   return (
     <tr className={`transition-colors cursor-pointer ${selected ? "bg-primary/5" : "hover:bg-muted/30"}`} onMouseDown={onMouseDown} onMouseEnter={onMouseEnter}>
       <td className="px-3 py-2.5">
@@ -333,9 +343,15 @@ function Row({ c, selected, onMouseDown, onMouseEnter }: { c: CampaignData; sele
       </td>
       <td className="px-3 py-2.5">
         <div className="font-medium select-text cursor-text leading-tight">{c.name}</div>
-        {c.client_tag && <div className="text-[10px] text-muted-foreground">{c.client_tag}</div>}
+        <div className="text-[10px] text-muted-foreground truncate max-w-[280px]">
+          {c.client_tag}{c.client_name ? <span className="text-muted-foreground/70"> · {c.client_name}</span> : null}
+        </div>
       </td>
-      <td className="px-3 py-2.5"><span className={`inline-flex items-center rounded-md border px-1.5 py-0.5 text-[10px] font-medium ${stageBadge(stage)}`}>{stage}</span></td>
+      <td className="px-3 py-2.5">
+        <span className={`inline-flex items-center gap-1 rounded-md border px-1.5 py-0.5 text-[10px] font-medium ${stageBadge(stage)}`}>
+          {stage}{overridden && <span className="h-1 w-1 rounded-full bg-current opacity-60" title="manually corrected" />}
+        </span>
+      </td>
       <td className="px-3 py-2.5 text-[11px] text-muted-foreground">{c.classification || "—"}</td>
       <td className="px-3 py-2.5"><span className="inline-flex items-center rounded-md border bg-muted/40 px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground">{INSTANCE_SHORT_LABELS[c.instance] || c.instance}</span></td>
       <td className="px-3 py-2.5"><span className={`inline-flex items-center rounded-md border px-1.5 py-0.5 text-[10px] font-medium capitalize ${STATUS_BADGE[c.status] || "bg-muted text-muted-foreground border-border"}`}>{c.status}</span></td>
@@ -353,8 +369,13 @@ function Row({ c, selected, onMouseDown, onMouseEnter }: { c: CampaignData; sele
           <span title={c.sched_timezone || undefined}>{hhmm(c.sched_start_time)}–{hhmm(c.sched_end_time)} <span className="text-muted-foreground/60">{tzAbbr(c.sched_timezone)}</span></span>
         ) : "—"}
       </td>
-      <td className="px-3 py-2.5 text-right tabular-nums text-[11px] text-muted-foreground">{replyRate.toFixed(1)}%</td>
+      <td className="px-3 py-2.5 text-right tabular-nums text-[11px] text-muted-foreground">{rr.toFixed(1)}%</td>
+      <td className="px-3 py-2.5 text-right text-[11px] text-muted-foreground tabular-nums">{c.client_start_date ? new Date(c.client_start_date).toLocaleDateString() : "—"}</td>
+      <td className="px-3 py-2.5 text-right text-[11px] text-muted-foreground tabular-nums">{c.go_live_date ? new Date(c.go_live_date).toLocaleDateString() : "—"}</td>
       <td className="px-3 py-2.5 text-right text-[11px] text-muted-foreground tabular-nums">{c.created_at ? new Date(c.created_at).toLocaleDateString() : "—"}</td>
+      <td className="px-2 py-2.5 text-right">
+        <button onMouseDown={(e) => e.stopPropagation()} onClick={onOpen} className="text-muted-foreground/50 hover:text-foreground" title="Details & history"><PanelRight className="h-3.5 w-3.5" /></button>
+      </td>
     </tr>
   );
 }

@@ -32,6 +32,9 @@ export interface CampaignData {
   sequence_id?: number | null;
   stage?: string | null;
   stage_override?: string | null;
+  client_tag_override?: string | null;
+  client_name?: string | null;
+  go_live_date?: string | null;
   first_sending_at?: string | null;
   max_emails_per_day?: number | null;
   max_new_leads_per_day?: number | null;
@@ -198,24 +201,33 @@ export async function GET(request: Request) {
     const tiers = await getClientTiers().catch(() => new Map<string, string>());
     const classByTag = new Map<string, string>();
     const startByTag = new Map<string, string | null>();
+    const companyByTag = new Map<string, string>();
+    const goLiveByTag = new Map<string, string | null>();
     for (const r of tracker) {
       for (const a of r.clientAbbr.split(" & ")) {
         const k = a.trim().toUpperCase();
         if (!k) continue;
         if (r.classification?.trim()) classByTag.set(k, r.classification.trim());
         if (r.startDate && !startByTag.has(k)) startByTag.set(k, r.startDate);
+        if (r.companyName?.trim() && !companyByTag.has(k)) companyByTag.set(k, r.companyName.trim());
+        if (r.goLiveDate && !goLiveByTag.has(k)) goLiveByTag.set(k, r.goLiveDate);
       }
     }
     const enriched: CampaignData[] = filtered.map((c) => {
-      const tagU = (c.client_tag || "").toUpperCase();
+      // Effective client tag honours a manual reassignment override (§5).
+      const effTag = (c.client_tag_override || c.client_tag || "").trim();
+      const tagU = effTag.toUpperCase();
       return {
         ...c,
+        client_tag: effTag,
         effective_stage: c.stage_override || c.stage || deriveStage(c.name),
         set_role: deriveSetRole(c.name),
         classification: classByTag.get(tagU) || classificationFromName(c.name) || "",
         group: alloc.map[tagU] ?? null,
         tier: tiers.get(tagU) ?? null,
         client_start_date: startByTag.get(tagU) ?? null,
+        client_name: companyByTag.get(tagU) ?? null,
+        go_live_date: goLiveByTag.get(tagU) ?? null,
       };
     });
 
