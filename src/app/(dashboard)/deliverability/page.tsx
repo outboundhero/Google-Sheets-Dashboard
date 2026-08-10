@@ -614,6 +614,8 @@ function DeliverabilityPageInner() {
   const [activeTab, setActiveTab] = useState<"inboxes" | "warmup">("inboxes");
   const [savedPage, setSavedPage] = useState<number | null>(null);
   const [domainSearch, setDomainSearch] = useState("");
+  // Comma-separated domain search: "contains" (substring) vs "exact" (full-domain match).
+  const [domainSearchMode, setDomainSearchMode] = useState<"contains" | "exact">("contains");
   const [redirectSearch, setRedirectSearch] = useState("");
   const [warmupSearch, setWarmupSearch] = useState("");
   const [typeFilter, setTypeFilter] = useState<"all" | "outlook" | "google">("all");
@@ -685,6 +687,14 @@ function DeliverabilityPageInner() {
     // Successfully moved domains grouped by the instance they were moved FROM,
     // so the finished panel can offer "remove from previous instance".
     movedBySource: Record<string, string[]>;
+    // Post-move campaign cleanup on the source instance (opt-in checkbox in the
+    // dialog): campaigns the moved senders were pulled out of, or the error.
+    campaignsRemoved?: number;
+    campaignsRemoveError?: string;
+    // Verified-only source auto-delete (24h grace): how many source copies got
+    // scheduled, or the error. Partials are never scheduled.
+    sourceDeleteScheduled?: number;
+    sourceDeleteError?: string;
     // Skipped + failed domain names + the original job, so the finished panel's
     // "Retry" button can re-run ONLY those without re-selecting anything.
     retryJob?: MoveJob;
@@ -1768,6 +1778,53 @@ function DeliverabilityPageInner() {
           paint(true);
         }
       } finally {
+        // Post-move campaign cleanup (dialog checkbox): pull the moved senders
+        // out of the campaigns they're in on the SOURCE instance only. Runs on
+        // fully-landed domains — failed/still-uploading ones are left alone.
+        let campaignsRemoved: number | undefined;
+        let campaignsRemoveError: string | undefined;
+        const movedDomains = Object.values(movedBySource).flat();
+        if (job.removeFromCampaigns && movedDomains.length > 0) {
+          try {
+            const sourceSet = new Set(Object.keys(movedBySource));
+            const disc = await fetchJsonWithRetry<{ error?: string; campaigns?: { id: number; instance: string; name: string; status?: string; inboxIds?: number[] }[] }>(
+              "/api/deliverability/remove-from-campaigns",
+              { domains: movedDomains, discover: true },
+            );
+            if (!disc.ok || disc.data?.error) throw new Error(disc.data?.error || `discover HTTP ${disc.status}`);
+            // Source-instance campaigns only — never touch the target's.
+            const sourceCampaigns = (disc.data?.campaigns || []).filter((c) => sourceSet.has(c.instance));
+            if (sourceCampaigns.length > 0) {
+              const rm = await fetchJsonWithRetry<{ error?: string; details?: unknown[] }>(
+                "/api/deliverability/remove-from-campaigns",
+                { domains: movedDomains, campaigns: sourceCampaigns },
+              );
+              if (!rm.ok || rm.data?.error) throw new Error(rm.data?.error || `remove HTTP ${rm.status}`);
+            }
+            campaignsRemoved = sourceCampaigns.length;
+          } catch (e) {
+            campaignsRemoveError = e instanceof Error ? e.message : "campaign cleanup failed";
+          }
+        }
+
+        // Nick's confirmed #4: schedule the 24h source-copy auto-delete for
+        // FULLY-VERIFIED domains only; partial moves are flagged (panel +
+        // Slack via move-finalize) and never deleted — safe to retry.
+        let sourceDeleteScheduled: number | undefined;
+        let sourceDeleteError: string | undefined;
+        if (job.autoDeleteSource) {
+          const schedule = Object.entries(movedBySource).flatMap(([src, doms]) => doms.map((domain) => ({ instance: src, domain })));
+          const partials = inflight.map((f) => ({ domain: f.domain, landed: f.landed, expected: f.expected, sourceInstance: f.sourceInstance }));
+          if (schedule.length > 0 || partials.length > 0) {
+            const fin = await fetchJsonWithRetry<{ error?: string; scheduled?: number }>(
+              "/api/deliverability/move-finalize",
+              { schedule, partials, targetInstance: job.targetInstance },
+            );
+            if (!fin.ok || fin.data?.error) sourceDeleteError = fin.data?.error || `HTTP ${fin.status}`;
+            else sourceDeleteScheduled = fin.data?.scheduled ?? schedule.length;
+          }
+        }
+
         // Remaining in-flight stay "uploading" (safe to re-run — upload skips
         // already-verified). Offer Retry for failed + skipped + still-uploading.
         counts.uploading = inflight.length;
@@ -1781,6 +1838,10 @@ function DeliverabilityPageInner() {
           running: false,
           queued: false,
           movedBySource: { ...movedBySource },
+          campaignsRemoved,
+          campaignsRemoveError,
+          sourceDeleteScheduled,
+          sourceDeleteError,
           retryJob: job,
           retryDomains,
         } : prev));
@@ -2513,7 +2574,8 @@ function DeliverabilityPageInner() {
       });
     }
     if (domainSearch.trim()) {
-      // Comma-separated: matches a domain if it contains ANY of the terms.
+      // Comma-separated: matches a domain if it contains ANY of the terms
+      // ("contains" mode) or equals one of them exactly ("exact" mode).
       const terms = domainSearch
         .toLowerCase()
         .split(",")
@@ -2522,7 +2584,9 @@ function DeliverabilityPageInner() {
       if (terms.length > 0) {
         result = result.filter((d) => {
           const dom = d.domain.toLowerCase();
-          return terms.some((t) => dom.includes(t));
+          return domainSearchMode === "exact"
+            ? terms.some((t) => dom === t)
+            : terms.some((t) => dom.includes(t));
         });
       }
     }
@@ -2662,7 +2726,7 @@ function DeliverabilityPageInner() {
       });
     }
     return result;
-  }, [domains, tagFilters, tagMatchMode, domainSearch, redirectSearch, typeFilter, showFlagged, flagSubFilter, showHealthy, showBlacklisted, showNotBlacklisted, showSpamhausListed, showSpamhausClean, showReserve, showAssigned, showMultiClient, providerStatusFilter, providerStatusMap, domainInstancesMap, warmupDaysFilter, warmupDaysFrom, warmupDaysTo, filterConditions, filterMatchMode, sortField, sortDir, isDomainFlagged, hasReplyIssue, hasBounceIssue, isDomainReserve, isDomainAssigned, isDomainMultiClient, now]);
+  }, [domains, tagFilters, tagMatchMode, domainSearch, domainSearchMode, redirectSearch, typeFilter, showFlagged, flagSubFilter, showHealthy, showBlacklisted, showNotBlacklisted, showSpamhausListed, showSpamhausClean, showReserve, showAssigned, showMultiClient, providerStatusFilter, providerStatusMap, domainInstancesMap, warmupDaysFilter, warmupDaysFrom, warmupDaysTo, filterConditions, filterMatchMode, sortField, sortDir, isDomainFlagged, hasReplyIssue, hasBounceIssue, isDomainReserve, isDomainAssigned, isDomainMultiClient, now]);
 
   // Reset the progressive-render windows whenever the visible lists change
   // (filters, sort, instance switch, data reload).
@@ -2936,9 +3000,31 @@ function DeliverabilityPageInner() {
               <span className="text-amber-300">{moveProgress.uploading.join(", ")}</span>
             </div>
           )}
+          {/* Post-move campaign cleanup outcome (source instance only) */}
+          {typeof moveProgress.campaignsRemoved === "number" && (
+            <div className="text-[11px] text-muted-foreground">
+              Removed moved senders from <span className="text-foreground">{moveProgress.campaignsRemoved}</span> source-instance campaign{moveProgress.campaignsRemoved === 1 ? "" : "s"}.
+            </div>
+          )}
+          {moveProgress.campaignsRemoveError && (
+            <div className="rounded-md border border-amber-500/30 bg-amber-950/10 px-3 py-1.5 text-[11px] text-amber-400">
+              Campaign cleanup on the source instance failed: {moveProgress.campaignsRemoveError} — the moved senders are still in their old campaigns; remove them via “Remove from Campaigns”.
+            </div>
+          )}
+          {/* Verified-only 24h source auto-delete outcome */}
+          {typeof moveProgress.sourceDeleteScheduled === "number" && moveProgress.sourceDeleteScheduled > 0 && (
+            <div className="text-[11px] text-muted-foreground">
+              <span className="text-foreground">{moveProgress.sourceDeleteScheduled}</span> fully-verified source cop{moveProgress.sourceDeleteScheduled === 1 ? "y" : "ies"} scheduled for auto-delete in 24h — cancel from the Duplicate domains card on the dashboard. Partial moves are never deleted.
+            </div>
+          )}
+          {moveProgress.sourceDeleteError && (
+            <div className="rounded-md border border-amber-500/30 bg-amber-950/10 px-3 py-1.5 text-[11px] text-amber-400">
+              Couldn&apos;t schedule the 24h source auto-delete: {moveProgress.sourceDeleteError} — source copies remain; use the Remove buttons below.
+            </div>
+          )}
           {/* Follow-up: the source copy is left in place — offer to remove it
               per source instance via the Delete Domains flow (confirmed). */}
-          {!moveProgress.running && !moveProgress.queued && Object.keys(moveProgress.movedBySource).length > 0 && (
+          {!moveProgress.running && !moveProgress.queued && Object.keys(moveProgress.movedBySource).length > 0 && !(typeof moveProgress.sourceDeleteScheduled === "number" && moveProgress.sourceDeleteScheduled > 0) && (
             <div className="rounded-md border border-border bg-background/40 px-3 py-2 space-y-1.5">
               <div className="text-[11px] text-muted-foreground">
                 Moved domains are now on <span className="text-foreground">{moveProgress.targetLabel}</span> and still on their source instance.
@@ -3708,6 +3794,14 @@ function DeliverabilityPageInner() {
                   <X className="h-3 w-3 text-muted-foreground hover:text-foreground" />
                 </button>
               )}
+              {/* Contains vs exact match for the comma-separated terms */}
+              <button
+                onClick={() => setDomainSearchMode((m) => (m === "contains" ? "exact" : "contains"))}
+                title={domainSearchMode === "contains" ? "Matching domains that CONTAIN a term — click for exact match" : "Matching domains EXACTLY equal to a term — click for contains"}
+                className={`shrink-0 text-[10px] font-medium rounded border px-1.5 py-0.5 transition-colors ${domainSearchMode === "exact" ? "bg-primary/10 text-primary border-primary/40" : "text-muted-foreground border-border hover:text-foreground"}`}
+              >
+                {domainSearchMode === "exact" ? "Exact" : "Contains"}
+              </button>
             </div>
 
             {/* Redirect URL search */}

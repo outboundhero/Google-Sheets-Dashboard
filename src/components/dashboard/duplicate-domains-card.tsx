@@ -9,7 +9,7 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { ChevronDown, ChevronRight, RefreshCw, Loader2, Copy, Trash2, Clock, Check } from "lucide-react";
 
-interface DupInstance { instance: string; inboxes: number; tags: string[]; createdAt: string | null }
+interface DupInstance { instance: string; inboxes: number; tags: string[]; createdAt: string | null; sent?: number; replied?: number }
 interface DuplicateDomain { domain: string; instances: DupInstance[] }
 interface PendingDeletion { instance: string; domain: string; scheduledAt: string; status: string }
 
@@ -261,7 +261,7 @@ export function DuplicateDomainsCard() {
                             onMouseDown={() => startDrag(k)}
                             onMouseEnter={() => { if (dragging.current) applyDrag(k); }}
                             title={sel ? "Will remove from this instance" : "Click to remove the domain from this instance"}
-                            className={`group grid grid-cols-[92px_78px_150px_1fr_16px] items-center gap-3 rounded-md px-2 py-1.5 cursor-pointer transition-colors ${sel ? "bg-destructive/10 ring-1 ring-inset ring-destructive/40" : "hover:bg-muted/50"}`}
+                            className={`group grid grid-cols-[92px_78px_140px_120px_1fr_16px] items-center gap-3 rounded-md px-2 py-1.5 cursor-pointer transition-colors ${sel ? "bg-destructive/10 ring-1 ring-inset ring-destructive/40" : "hover:bg-muted/50"}`}
                           >
                             <span className={`justify-self-start text-[10px] font-medium rounded border px-1.5 py-0.5 ${instanceAccent[inst.instance] ?? "bg-muted text-muted-foreground border-border"}`}>
                               {short[inst.instance] ?? inst.instance}
@@ -270,6 +270,13 @@ export function DuplicateDomainsCard() {
                               <span className="font-medium">{inst.inboxes}</span> <span className="text-muted-foreground">inbox{inst.inboxes === 1 ? "" : "es"}</span>
                             </span>
                             <span className="text-[10px] text-muted-foreground whitespace-nowrap">created {fmtDate(inst.createdAt)}</span>
+                            {/* Per-instance send/reply totals (all senders under this domain in THIS instance) */}
+                            <span className="text-[10px] whitespace-nowrap" title="Emails sent · replies received — this instance only">
+                              <span className="font-medium text-foreground/80">{(inst.sent ?? 0).toLocaleString()}</span>
+                              <span className="text-muted-foreground"> sent · </span>
+                              <span className="font-medium text-foreground/80">{(inst.replied ?? 0).toLocaleString()}</span>
+                              <span className="text-muted-foreground"> repl</span>
+                            </span>
                             <div className="flex items-center gap-1 overflow-hidden">
                               {inst.tags.length === 0 ? (
                                 <span className="text-[10px] text-muted-foreground/50 italic">no tags</span>

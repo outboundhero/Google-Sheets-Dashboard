@@ -13,10 +13,12 @@ export interface DupInstance {
   inboxes: number;
   tags: string[];
   createdAt: string | null; // domain_created_at ISO, or null
+  sent: number;             // emails sent by all senders under this domain IN THIS instance
+  replied: number;          // replies received by all senders under this domain IN THIS instance
 }
 export interface DuplicateDomain { domain: string; instances: DupInstance[] }
 
-/** Domains present in 2+ instances, with per-instance inbox counts, tags, and created date. */
+/** Domains present in 2+ instances, with per-instance inbox counts, tags, created date, and sent/reply totals. */
 export async function getDuplicateDomains(): Promise<DuplicateDomain[]> {
   const supabase = getSupabaseAdmin();
   const map = new Map<string, DupInstance[]>();
@@ -24,7 +26,7 @@ export async function getDuplicateDomains(): Promise<DuplicateDomain[]> {
   while (true) {
     const { data } = await supabase
       .from("deliverability_domains")
-      .select("instance,domain,inbox_count,tags,domain_created_at")
+      .select("instance,domain,inbox_count,tags,domain_created_at,total_sent,total_replied")
       .in("instance", ALL_INSTANCE_SLUGS)
       .range(off, off + 999);
     if (!data || data.length === 0) break;
@@ -35,6 +37,8 @@ export async function getDuplicateDomains(): Promise<DuplicateDomain[]> {
         inboxes: r.inbox_count || 0,
         tags: Array.isArray(r.tags) ? r.tags : [],
         createdAt: r.domain_created_at ?? null,
+        sent: r.total_sent || 0,
+        replied: r.total_replied || 0,
       });
       map.set(r.domain, arr);
     }
@@ -78,7 +82,10 @@ export async function getPendingDeletions(): Promise<PendingDeletion[]> {
     .from("duplicate_domain_deletions")
     .select("instance,domain,scheduled_at,status")
     .eq("status", "pending")
-    .eq("source", "duplicate")
+    // "duplicate" = scheduled from this card; "move" = post-move verified
+    // source-copy auto-deletes (24h grace) — both cancellable here. The manual
+    // Delete button's "manual" rows stay out (they have their own flow).
+    .in("source", ["duplicate", "move"])
     .order("scheduled_at");
   return (data || []).map((r) => ({ instance: r.instance, domain: r.domain, scheduledAt: r.scheduled_at, status: r.status }));
 }
