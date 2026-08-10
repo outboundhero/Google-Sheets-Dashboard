@@ -2,7 +2,7 @@
 
 import { useMemo, useState, useRef, useEffect, useCallback } from "react";
 import useSWR from "swr";
-import { Send, Search, X, RefreshCw, Loader2, Check, ChevronDown, Play, Pause, Archive, Copy, ArrowUpDown, CalendarClock, PanelRight } from "lucide-react";
+import { Send, Search, X, RefreshCw, Loader2, Check, ChevronDown, Play, Pause, Archive, Copy, ArrowUpDown, CalendarClock, PanelRight, AlertTriangle } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useAuth } from "@/lib/auth-context";
 import { useInstance } from "@/lib/instance-context";
@@ -86,9 +86,16 @@ export function MasterGrid() {
   const isAdmin = role === "admin";
   const { instancesQuery } = useInstance();
   const { campaigns, activeClients, isLoading, mutate } = useCampaigns(instancesQuery);
-  const { data: dupStatus } = useSWR<{ totals: { queued: number; duplicating: number; failed: number; blocked: number } }>("/api/campaigns/duplicate", (u: string) => fetch(u).then((r) => r.json()), { refreshInterval: 15000 });
+  const { data: dupStatus } = useSWR<{ totals: { queued: number; duplicating: number; failed: number; blocked: number }; jobs: { tags: { clientTag: string; counts: { failed: number; blocked: number } }[] }[] }>("/api/campaigns/duplicate", (u: string) => fetch(u).then((r) => r.json()), { refreshInterval: 15000 });
   const dupQueued = (dupStatus?.totals?.queued ?? 0) + (dupStatus?.totals?.duplicating ?? 0);
   const dupFailed = (dupStatus?.totals?.failed ?? 0) + (dupStatus?.totals?.blocked ?? 0);
+  // Client tags with a failed/blocked duplication → per-row warning (§3 warning status).
+  const dupIssueTags = useMemo(() => {
+    const s = new Set<string>();
+    for (const j of dupStatus?.jobs || []) for (const t of j.tags) if ((t.counts.failed || 0) + (t.counts.blocked || 0) > 0) s.add(t.clientTag.toUpperCase());
+    return s;
+  }, [dupStatus]);
+  const hasWarning = (c: CampaignData) => c.status === "failed" || dupIssueTags.has((c.client_tag || "").toUpperCase());
 
   const [search, setSearch] = useState("");
   const [stages, setStages] = useState<Set<string>>(new Set(["Main"])); // default: Main only
@@ -96,6 +103,8 @@ export function MasterGrid() {
   const [classification, setClassification] = useState("all");
   const [group, setGroup] = useState("all");
   const [instanceFilter, setInstanceFilter] = useState("all");
+  const [tzFilter, setTzFilter] = useState("all");
+  const [warnOnly, setWarnOnly] = useState(false);
   const [bucket, setBucket] = useState("all");
   const [stageOpen, setStageOpen] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
@@ -116,6 +125,8 @@ export function MasterGrid() {
   const allStatuses = useMemo(() => Array.from(new Set(campaigns.map((c) => c.status))).filter(Boolean).sort(), [campaigns]);
   const allClasses = useMemo(() => Array.from(new Set(campaigns.map((c) => c.classification || "").filter(Boolean))).sort(), [campaigns]);
   const allInstances = useMemo(() => Array.from(new Set(campaigns.map((c) => c.instance))).sort(), [campaigns]);
+  const allTimezones = useMemo(() => Array.from(new Set(campaigns.map((c) => c.sched_timezone).filter(Boolean) as string[])).sort(), [campaigns]);
+  const lastUpdated = useMemo(() => campaigns.reduce((m, c) => (c.updated_at && c.updated_at > m ? c.updated_at : m), ""), [campaigns]);
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -126,12 +137,14 @@ export function MasterGrid() {
       if (classification !== "all" && (c.classification || "") !== classification) return false;
       if (group !== "all" && String(c.group ?? "") !== group) return false;
       if (instanceFilter !== "all" && c.instance !== instanceFilter) return false;
+      if (tzFilter !== "all" && c.sched_timezone !== tzFilter) return false;
+      if (warnOnly && !(c.status === "failed" || dupIssueTags.has((c.client_tag || "").toUpperCase()))) return false;
       if (bucket !== "all" && startBucket(c.client_start_date) !== bucket) return false;
       return true;
     });
     const dir = sortDir === "asc" ? 1 : -1;
     return out.sort((a, b) => compareBy(a, b, sortKey) * dir || a.name.localeCompare(b.name));
-  }, [campaigns, search, stages, status, classification, group, instanceFilter, bucket, sortKey, sortDir]);
+  }, [campaigns, search, stages, status, classification, group, instanceFilter, tzFilter, warnOnly, bucket, sortKey, sortDir, dupIssueTags]);
 
   // Summary counts (reactive to filters).
   const summary = useMemo(() => {
@@ -189,8 +202,8 @@ export function MasterGrid() {
     if (n.has(s)) n.delete(s); else n.add(s);
     return n;
   });
-  const clearFilters = () => { setSearch(""); setStages(new Set()); setStatus("all"); setClassification("all"); setGroup("all"); setInstanceFilter("all"); setBucket("all"); };
-  const anyFilter = search || stages.size || status !== "all" || classification !== "all" || group !== "all" || instanceFilter !== "all" || bucket !== "all";
+  const clearFilters = () => { setSearch(""); setStages(new Set()); setStatus("all"); setClassification("all"); setGroup("all"); setInstanceFilter("all"); setTzFilter("all"); setWarnOnly(false); setBucket("all"); };
+  const anyFilter = search || stages.size || status !== "all" || classification !== "all" || group !== "all" || instanceFilter !== "all" || tzFilter !== "all" || warnOnly || bucket !== "all";
 
   return (
     <div className="space-y-4">
@@ -254,6 +267,10 @@ export function MasterGrid() {
           {allClasses.length > 0 && <Select value={classification} onChange={setClassification} options={[["all", "All classes"], ...allClasses.map((s) => [s, s] as [string, string])]} />}
           <Select value={group} onChange={setGroup} options={[["all", "All groups"], ["1", "Group 1"], ["2", "Group 2"]]} />
           {allInstances.length > 1 && <Select value={instanceFilter} onChange={setInstanceFilter} options={[["all", "All instances"], ...allInstances.map((s) => [s, INSTANCE_SHORT_LABELS[s as keyof typeof INSTANCE_SHORT_LABELS] || s] as [string, string])]} />}
+          {allTimezones.length > 1 && <Select value={tzFilter} onChange={setTzFilter} options={[["all", "All timezones"], ...allTimezones.map((t) => [t, t.split("/").pop()!.replace(/_/g, " ")] as [string, string])]} />}
+          <button onClick={() => setWarnOnly((v) => !v)} className={`inline-flex items-center gap-1 rounded-lg border px-2.5 py-1.5 text-xs ${warnOnly ? "border-amber-500/50 bg-amber-500/10 text-amber-600" : "bg-background hover:bg-muted/40"}`}>
+            <AlertTriangle className="h-3.5 w-3.5" /> Warnings
+          </button>
 
           {anyFilter ? <Button variant="ghost" size="sm" className="h-8 text-xs gap-1" onClick={clearFilters}><X className="h-3.5 w-3.5" /> Clear</Button> : null}
         </div>
@@ -320,7 +337,7 @@ export function MasterGrid() {
               </thead>
               <tbody className="divide-y">
                 {filtered.map((c) => (
-                  <Row key={keyOf(c)} c={c} selected={selected.has(keyOf(c))}
+                  <Row key={keyOf(c)} c={c} selected={selected.has(keyOf(c))} warning={hasWarning(c)}
                     onMouseDown={() => startDrag(keyOf(c))}
                     onMouseEnter={() => { if (dragging.current) applyDrag(keyOf(c)); }}
                     onOpen={() => setDetail(c)} />
@@ -330,7 +347,7 @@ export function MasterGrid() {
           </div>
         )}
       </div>
-      <p className="text-[11px] text-muted-foreground">Showing {filtered.length} of {campaigns.length} campaigns · Automatically refreshes daily at 12:00 p.m. PT</p>
+      <p className="text-[11px] text-muted-foreground">Showing {filtered.length} of {campaigns.length} campaigns · Automatically refreshes daily at 12:00 p.m. PT{lastUpdated ? ` · last updated ${new Date(lastUpdated).toLocaleString()}` : ""}</p>
 
       <DuplicateDialog open={dupOpen} onOpenChange={setDupOpen} selected={selectedRows} onQueued={() => { setSelected(new Set()); }} />
       <BulkScheduleDialog open={schedOpen} onOpenChange={setSchedOpen} selected={selectedRows} onDone={() => { mutate(); }} />
@@ -339,7 +356,7 @@ export function MasterGrid() {
   );
 }
 
-function Row({ c, selected, onMouseDown, onMouseEnter, onOpen }: { c: CampaignData; selected: boolean; onMouseDown: () => void; onMouseEnter: () => void; onOpen: () => void }) {
+function Row({ c, selected, warning, onMouseDown, onMouseEnter, onOpen }: { c: CampaignData; selected: boolean; warning: boolean; onMouseDown: () => void; onMouseEnter: () => void; onOpen: () => void }) {
   const stage = c.effective_stage || "Main";
   const rr = c.total_leads_contacted > 0 ? (c.unique_replies / c.total_leads_contacted) * 100 : 0;
   const pct = Math.max(0, Math.min(100, c.completion_percentage || 0));
@@ -383,7 +400,10 @@ function Row({ c, selected, onMouseDown, onMouseEnter, onOpen }: { c: CampaignDa
       <td className="px-3 py-2.5 text-right text-[11px] text-muted-foreground tabular-nums">{c.go_live_date ? new Date(c.go_live_date).toLocaleDateString() : "—"}</td>
       <td className="px-3 py-2.5 text-right text-[11px] text-muted-foreground tabular-nums">{c.created_at ? new Date(c.created_at).toLocaleDateString() : "—"}</td>
       <td className="px-2 py-2.5 text-right">
-        <button onMouseDown={(e) => e.stopPropagation()} onClick={onOpen} className="text-muted-foreground/50 hover:text-foreground" title="Details & history"><PanelRight className="h-3.5 w-3.5" /></button>
+        <div className="flex items-center justify-end gap-1.5">
+          {warning && <AlertTriangle className="h-3.5 w-3.5 text-amber-500" aria-label="warning" />}
+          <button onMouseDown={(e) => e.stopPropagation()} onClick={onOpen} className="text-muted-foreground/50 hover:text-foreground" title="Details & history"><PanelRight className="h-3.5 w-3.5" /></button>
+        </div>
       </td>
     </tr>
   );
