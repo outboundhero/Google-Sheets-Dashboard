@@ -240,7 +240,21 @@ export async function getLeadsFromSheet(
   const columnMap = buildColumnMap(headers);
 
   return rows
-    .map((row) => mapRowToLead(row, columnMap, spreadsheetId, sheetName, sheetClientTag))
+    .map((row) => {
+      const lead = mapRowToLead(row, columnMap, spreadsheetId, sheetName, sheetClientTag);
+      // Self-heal swapped leading columns: some sheets order the first trio as
+      // [Company, Email, Name] while the row-writer appends [Email, Name, Company]
+      // (standard order — everything from col 4 on still lines up). Header
+      // mapping then puts a NAME in `email` and the row would be silently
+      // dropped below (FCS bug: months of leads vanished from the dashboard).
+      // If the header-mapped email isn't an email but col 0 is, remap the trio.
+      if ((!lead.email || !lead.email.includes("@")) && (row[0] || "").includes("@")) {
+        lead.email = row[0] || "";
+        lead.name = row[1] || "";
+        lead.company = row[2] || "";
+      }
+      return lead;
+    })
     .filter((lead) => {
       // Must have valid email
       if (!lead.email || !lead.email.includes("@")) return false;
