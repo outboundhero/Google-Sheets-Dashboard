@@ -2,7 +2,7 @@
 
 import { Fragment, useMemo, useState } from "react";
 import useSWR from "swr";
-import { Users, Search, X, ChevronRight, ChevronDown, RefreshCw, Loader2, AlertTriangle } from "lucide-react";
+import { Users, Search, X, ChevronRight, ChevronDown, RefreshCw, Loader2, AlertTriangle, ArrowUpDown } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useInstance } from "@/lib/instance-context";
 import { useCampaigns, type CampaignData } from "@/lib/hooks/use-campaigns";
@@ -15,6 +15,7 @@ import { INSTANCE_SHORT_LABELS } from "@/lib/bison-instances";
 
 const fetcher = (url: string) => fetch(url).then((r) => r.json());
 const isMain = (c: CampaignData) => /^main$/i.test(c.effective_stage || "");
+type CSortKey = "tag" | "campaigns" | "main" | "mainLeads" | "completion" | "remaining" | "issues";
 
 interface Agg { campaigns: number; mainCampaigns: number; mainLeads: number; mainContacted: number; remaining: number }
 function emptyAgg(): Agg { return { campaigns: 0, mainCampaigns: 0, mainLeads: 0, mainContacted: 0, remaining: 0 }; }
@@ -32,6 +33,12 @@ export function ClientSummary() {
   const [search, setSearch] = useState("");
   const [open, setOpen] = useState<Set<string>>(new Set());
   const [refreshing, setRefreshing] = useState(false);
+  const [sortKey, setSortKey] = useState<CSortKey>("tag");
+  const [sortDir, setSortDir] = useState<"asc" | "desc">("asc");
+  const toggleSort = (k: CSortKey) => {
+    if (sortKey === k) setSortDir((d) => (d === "asc" ? "desc" : "asc"));
+    else { setSortKey(k); setSortDir(k === "tag" ? "asc" : "desc"); }
+  };
 
   // Failed/blocked duplication actions per client tag.
   const dupIssues = useMemo(() => {
@@ -64,6 +71,25 @@ export function ClientSummary() {
     for (const c of campaigns) add(g, c);
     return g;
   }, [campaigns]);
+
+  const sortedClients = useMemo(() => {
+    const dir = sortDir === "asc" ? 1 : -1;
+    const num = (e: (typeof clients)[number]): number => {
+      switch (sortKey) {
+        case "campaigns": return e.total.campaigns;
+        case "main": return e.total.mainCampaigns;
+        case "mainLeads": return e.total.mainLeads;
+        case "completion": return completion(e.total);
+        case "remaining": return e.total.remaining;
+        case "issues": return dupIssues.get(e.tag) || 0;
+        default: return 0;
+      }
+    };
+    return [...clients].sort((a, b) => {
+      const c = sortKey === "tag" ? a.tag.localeCompare(b.tag) : num(a) - num(b);
+      return c * dir || a.tag.localeCompare(b.tag);
+    });
+  }, [clients, sortKey, sortDir, dupIssues]);
 
   const toggle = (tag: string) => setOpen((s) => { const n = new Set(s); if (n.has(tag)) n.delete(tag); else n.add(tag); return n; });
   const refresh = async () => { setRefreshing(true); try { await mutate(); } finally { setRefreshing(false); } };
@@ -104,17 +130,17 @@ export function ClientSummary() {
             <table className="w-full text-sm">
               <thead>
                 <tr className="text-[11px] text-muted-foreground border-b">
-                  <th className="text-left font-medium px-3 py-2.5">Client tag</th>
-                  <th className="text-right font-medium px-3 py-2.5 w-[90px]">Campaigns</th>
-                  <th className="text-right font-medium px-3 py-2.5 w-[100px]">Main</th>
-                  <th className="text-right font-medium px-3 py-2.5 w-[110px]">Main leads</th>
-                  <th className="text-left font-medium px-3 py-2.5 w-[150px]">Main completion</th>
-                  <th className="text-right font-medium px-3 py-2.5 w-[110px]">Remaining</th>
-                  <th className="text-right font-medium px-3 py-2.5 w-[110px]">Dup issues</th>
+                  <CTh label="Client tag" k="tag" sk={sortKey} sd={sortDir} on={toggleSort} />
+                  <CTh label="Campaigns" k="campaigns" sk={sortKey} sd={sortDir} on={toggleSort} align="right" w="w-[90px]" />
+                  <CTh label="Main" k="main" sk={sortKey} sd={sortDir} on={toggleSort} align="right" w="w-[100px]" />
+                  <CTh label="Main leads" k="mainLeads" sk={sortKey} sd={sortDir} on={toggleSort} align="right" w="w-[110px]" />
+                  <CTh label="Main completion" k="completion" sk={sortKey} sd={sortDir} on={toggleSort} w="w-[150px]" />
+                  <CTh label="Remaining" k="remaining" sk={sortKey} sd={sortDir} on={toggleSort} align="right" w="w-[110px]" />
+                  <CTh label="Dup issues" k="issues" sk={sortKey} sd={sortDir} on={toggleSort} align="right" w="w-[110px]" />
                 </tr>
               </thead>
               <tbody className="divide-y">
-                {clients.map((e) => {
+                {sortedClients.map((e) => {
                   const multi = e.byInstance.size > 1;
                   const isOpen = open.has(e.tag);
                   const issues = dupIssues.get(e.tag) || 0;
@@ -155,6 +181,18 @@ export function ClientSummary() {
         )}
       </div>
     </div>
+  );
+}
+
+function CTh({ label, k, sk, sd, on, align, w }: { label: string; k: CSortKey; sk: CSortKey; sd: "asc" | "desc"; on: (k: CSortKey) => void; align?: "right"; w?: string }) {
+  const active = sk === k;
+  return (
+    <th className={`font-medium px-3 py-2.5 ${w || ""} ${align === "right" ? "text-right" : "text-left"}`}>
+      <button onClick={() => on(k)} className={`inline-flex items-center gap-1 hover:text-foreground w-full ${align === "right" ? "justify-end" : "justify-start"} ${active ? "text-foreground" : ""}`}>
+        {label}
+        <ArrowUpDown className={`h-3 w-3 ${active ? "text-foreground" : "text-muted-foreground/40"} ${active && sd === "asc" ? "rotate-180" : ""}`} />
+      </button>
+    </th>
   );
 }
 
