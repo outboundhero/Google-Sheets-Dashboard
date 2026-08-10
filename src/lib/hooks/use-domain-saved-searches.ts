@@ -7,6 +7,7 @@ export interface SavedSearch {
   name: string;
   filter: Record<string, unknown>;
   updatedAt: string;
+  isDefault: boolean;
 }
 
 const fetcher = (url: string) => fetch(url).then((r) => r.json());

@@ -18,11 +18,11 @@ export async function GET(request: Request) {
     const supabase = getSupabaseAdmin();
     const { data, error } = await supabase
       .from("domain_saved_searches")
-      .select("id, name, filter, updated_at")
+      .select("id, name, filter, updated_at, is_default")
       .eq("scope", scope)
       .order("name", { ascending: true });
     if (error) return NextResponse.json({ error: error.message }, { status: 500 });
-    const searches = (data || []).map((r) => ({ id: r.id, name: r.name, filter: r.filter, updatedAt: r.updated_at }));
+    const searches = (data || []).map((r) => ({ id: r.id, name: r.name, filter: r.filter, updatedAt: r.updated_at, isDefault: !!r.is_default }));
     return NextResponse.json({ searches });
   } catch (error) {
     return NextResponse.json({ error: error instanceof Error ? error.message : "Failed" }, { status: 500 });
@@ -46,6 +46,27 @@ export async function POST(request: Request) {
       .single();
     if (error) return NextResponse.json({ error: error.message }, { status: 500 });
     return NextResponse.json({ search: { id: data.id, name: data.name, filter: data.filter, updatedAt: data.updated_at } });
+  } catch (error) {
+    return NextResponse.json({ error: error instanceof Error ? error.message : "Failed" }, { status: 500 });
+  }
+}
+
+// Set (or clear) the auto-applied default for a scope. Body: { scope, id }.
+// id = a search id → make it the sole default; id = null → clear the default.
+export async function PATCH(request: Request) {
+  try {
+    const body = (await request.json().catch(() => ({}))) as { scope?: string; id?: number | null };
+    const scope = (body.scope || "").trim();
+    if (!VALID_SCOPES.has(scope)) return NextResponse.json({ error: "invalid scope" }, { status: 400 });
+    const supabase = getSupabaseAdmin();
+    // Clear every default in this scope first, then set the chosen one.
+    const clear = await supabase.from("domain_saved_searches").update({ is_default: false }).eq("scope", scope).eq("is_default", true);
+    if (clear.error) return NextResponse.json({ error: clear.error.message }, { status: 500 });
+    if (body.id != null) {
+      const set = await supabase.from("domain_saved_searches").update({ is_default: true }).eq("scope", scope).eq("id", body.id);
+      if (set.error) return NextResponse.json({ error: set.error.message }, { status: 500 });
+    }
+    return NextResponse.json({ ok: true });
   } catch (error) {
     return NextResponse.json({ error: error instanceof Error ? error.message : "Failed" }, { status: 500 });
   }

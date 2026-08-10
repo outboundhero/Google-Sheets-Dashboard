@@ -1,18 +1,19 @@
 "use client";
 
 import { useState, useRef, useEffect } from "react";
-import { Bookmark, ChevronDown, Trash2, Check, X, Loader2, Plus } from "lucide-react";
+import { Bookmark, ChevronDown, Trash2, Check, X, Loader2, Plus, Star } from "lucide-react";
 import { useDomainSavedSearches, type SavedSearch } from "@/lib/hooks/use-domain-saved-searches";
 
 // Load / save / delete filter presets for a Domains tab's advanced filter
 // builder. Server-persisted + team-shared. `snapshot()` serializes the current
-// filter state; `onApply` restores a saved one.
+// filter state; `onApply` restores a saved one. The scope's default preset (if
+// any) is auto-applied once when this bar mounts (i.e. on entering the tab).
 export function SavedSearchesBar({ scope, snapshot, onApply }: {
   scope: "all-domains" | "purchased";
   snapshot: () => Record<string, unknown>;
   onApply: (filter: Record<string, unknown>) => void;
 }) {
-  const { searches, mutate } = useDomainSavedSearches(scope);
+  const { searches, isLoading, mutate } = useDomainSavedSearches(scope);
   const [open, setOpen] = useState(false);
   const [naming, setNaming] = useState(false);
   const [name, setName] = useState("");
@@ -28,7 +29,31 @@ export function SavedSearchesBar({ scope, snapshot, onApply }: {
     return () => document.removeEventListener("mousedown", onDoc);
   }, []);
 
+  // Auto-apply the scope's default preset once, on mount / first load.
+  const appliedDefaultRef = useRef(false);
+  useEffect(() => {
+    if (appliedDefaultRef.current || isLoading) return;
+    appliedDefaultRef.current = true;
+    const def = searches.find((s) => s.isDefault);
+    if (def) { onApply(def.filter || {}); setActiveName(def.name); }
+  }, [isLoading, searches, onApply]);
+
   const apply = (s: SavedSearch) => { onApply(s.filter || {}); setActiveName(s.name); setOpen(false); };
+
+  const toggleDefault = async (s: SavedSearch) => {
+    setBusy(true); setError(null);
+    try {
+      const res = await fetch("/api/domains/saved-searches", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ scope, id: s.isDefault ? null : s.id }),
+      });
+      if (!res.ok) { const d = await res.json().catch(() => ({})); throw new Error(d?.error || `HTTP ${res.status}`); }
+      await mutate();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed");
+    } finally { setBusy(false); }
+  };
 
   const save = async () => {
     const trimmed = name.trim();
@@ -83,7 +108,15 @@ export function SavedSearchesBar({ scope, snapshot, onApply }: {
             ) : (
               <div className="max-h-72 overflow-y-auto py-1">
                 {searches.map((s) => (
-                  <div key={s.id} className="group flex items-center justify-between gap-2 px-2 py-1.5 hover:bg-muted/40">
+                  <div key={s.id} className="group flex items-center gap-1.5 px-2 py-1.5 hover:bg-muted/40">
+                    <button
+                      onClick={() => toggleDefault(s)}
+                      disabled={busy}
+                      className={`shrink-0 ${s.isDefault ? "text-amber-500" : "text-muted-foreground/40 opacity-0 group-hover:opacity-100 hover:text-amber-500"}`}
+                      title={s.isDefault ? "Default — auto-applies when you open this tab (click to unset)" : "Set as default (auto-apply on open)"}
+                    >
+                      <Star className={`h-3.5 w-3.5 ${s.isDefault ? "fill-amber-500" : ""}`} />
+                    </button>
                     <button onClick={() => apply(s)} className="flex-1 min-w-0 text-left text-xs truncate" title={s.name}>{s.name}</button>
                     <button onClick={() => remove(s)} className="opacity-0 group-hover:opacity-100 text-muted-foreground hover:text-destructive shrink-0" title="Delete">
                       <Trash2 className="h-3.5 w-3.5" />
