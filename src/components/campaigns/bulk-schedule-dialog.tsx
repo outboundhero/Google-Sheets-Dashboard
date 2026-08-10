@@ -22,6 +22,13 @@ export function BulkScheduleDialog({ open, onOpenChange, selected, onDone }: {
   const [error, setError] = useState<string | null>(null);
 
   const locked = useMemo(() => selected.filter((c) => c.sched_timezone && !isUsCaTimezone(c.sched_timezone)), [selected]);
+  // §23 — show the previous value (or "varies") for the fields being changed.
+  const common = (vals: (string | null | undefined)[]) => { const s = new Set(vals.map((v) => (v || "").slice(0, 5))); return s.size === 1 ? [...s][0] || "—" : "varies"; };
+  const prev = useMemo(() => ({
+    start: common(selected.map((c) => c.sched_start_time)),
+    end: common(selected.map((c) => c.sched_end_time)),
+    tz: (() => { const s = new Set(selected.map((c) => c.sched_timezone || "")); return s.size === 1 ? timezoneLabel([...s][0]) || "—" : "varies"; })(),
+  }), [selected]);
   const changing = [start && "start time", end && "end time", tz && "timezone"].filter(Boolean) as string[];
   const nothingSet = changing.length === 0;
   const affected = selected.length - (includeLocked ? 0 : locked.length);
@@ -77,11 +84,11 @@ export function BulkScheduleDialog({ open, onOpenChange, selected, onDone }: {
             {nothingSet ? (
               <span className="text-muted-foreground">Set at least one field above.</span>
             ) : (
-              <span className="text-muted-foreground">
-                Applying to <span className="font-semibold text-foreground">{affected}</span> campaign{affected === 1 ? "" : "s"}: changing <span className="text-foreground">{changing.join(", ")}</span>
-                {tz && <> → timezone <span className="text-foreground">{timezoneLabel(tz)}</span></>}
-                {(start || end) && <> → window <span className="text-foreground">{start || "—"}–{end || "—"}</span></>}.
-              </span>
+              <div className="text-muted-foreground space-y-0.5">
+                <div>Applying to <span className="font-semibold text-foreground">{affected}</span> campaign{affected === 1 ? "" : "s"}: changing <span className="text-foreground">{changing.join(", ")}</span>.</div>
+                {(start || end) && <div>Window: <span className="text-foreground/70">{prev.start}–{prev.end}</span> → <span className="text-foreground">{start || prev.start}–{end || prev.end}</span></div>}
+                {tz && <div>Timezone: <span className="text-foreground/70">{prev.tz}</span> → <span className="text-foreground">{timezoneLabel(tz)}</span></div>}
+              </div>
             )}
           </div>
 

@@ -104,6 +104,7 @@ export function MasterGrid() {
   const [group, setGroup] = useState("all");
   const [instanceFilter, setInstanceFilter] = useState("all");
   const [tzFilter, setTzFilter] = useState("all");
+  const [complFilter, setComplFilter] = useState("all");
   const [warnOnly, setWarnOnly] = useState(false);
   const [bucket, setBucket] = useState("all");
   const [stageOpen, setStageOpen] = useState(false);
@@ -127,6 +128,16 @@ export function MasterGrid() {
   const allInstances = useMemo(() => Array.from(new Set(campaigns.map((c) => c.instance))).sort(), [campaigns]);
   const allTimezones = useMemo(() => Array.from(new Set(campaigns.map((c) => c.sched_timezone).filter(Boolean) as string[])).sort(), [campaigns]);
   const lastUpdated = useMemo(() => campaigns.reduce((m, c) => (c.updated_at && c.updated_at > m ? c.updated_at : m), ""), [campaigns]);
+  // §12 "Campaign Missing": rows whose sync went stale vs the newest sync (i.e.
+  // no longer returned by Bison, so the sync stopped touching them).
+  const lastSync = useMemo(() => campaigns.reduce((m, c) => (c.synced_at && c.synced_at > m ? c.synced_at : m), ""), [campaigns]);
+  const isMissing = useCallback((c: CampaignData) => !!(c.synced_at && lastSync && new Date(lastSync).getTime() - new Date(c.synced_at).getTime() > 2 * 86_400_000), [lastSync]);
+  // §28 connection-errors card: open campaign sync/connection alerts.
+  const { data: alerts } = useSWR<{ alerts?: { source: string; status: string }[] } | { source: string; status: string }[]>("/api/pipeline-alerts", (u: string) => fetch(u).then((r) => r.json()));
+  const connErrors = useMemo(() => {
+    const arr = Array.isArray(alerts) ? alerts : (alerts?.alerts || []);
+    return arr.filter((a) => (a.source || "").startsWith("campaigns")).length;
+  }, [alerts]);
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -138,13 +149,17 @@ export function MasterGrid() {
       if (group !== "all" && String(c.group ?? "") !== group) return false;
       if (instanceFilter !== "all" && c.instance !== instanceFilter) return false;
       if (tzFilter !== "all" && c.sched_timezone !== tzFilter) return false;
-      if (warnOnly && !(c.status === "failed" || dupIssueTags.has((c.client_tag || "").toUpperCase()))) return false;
+      const pct = c.completion_percentage || 0;
+      if (complFilter === "lt50" && pct >= 50) return false;
+      if (complFilter === "50-80" && !(pct >= 50 && pct < 80)) return false;
+      if (complFilter === "gte80" && pct < 80) return false;
+      if (warnOnly && !(c.status === "failed" || dupIssueTags.has((c.client_tag || "").toUpperCase()) || isMissing(c))) return false;
       if (bucket !== "all" && startBucket(c.client_start_date) !== bucket) return false;
       return true;
     });
     const dir = sortDir === "asc" ? 1 : -1;
     return out.sort((a, b) => compareBy(a, b, sortKey) * dir || a.name.localeCompare(b.name));
-  }, [campaigns, search, stages, status, classification, group, instanceFilter, tzFilter, warnOnly, bucket, sortKey, sortDir, dupIssueTags]);
+  }, [campaigns, search, stages, status, classification, group, instanceFilter, tzFilter, complFilter, warnOnly, bucket, sortKey, sortDir, dupIssueTags, isMissing]);
 
   // Summary counts (reactive to filters).
   const summary = useMemo(() => {
@@ -202,8 +217,8 @@ export function MasterGrid() {
     if (n.has(s)) n.delete(s); else n.add(s);
     return n;
   });
-  const clearFilters = () => { setSearch(""); setStages(new Set()); setStatus("all"); setClassification("all"); setGroup("all"); setInstanceFilter("all"); setTzFilter("all"); setWarnOnly(false); setBucket("all"); };
-  const anyFilter = search || stages.size || status !== "all" || classification !== "all" || group !== "all" || instanceFilter !== "all" || tzFilter !== "all" || warnOnly || bucket !== "all";
+  const clearFilters = () => { setSearch(""); setStages(new Set()); setStatus("all"); setClassification("all"); setGroup("all"); setInstanceFilter("all"); setTzFilter("all"); setComplFilter("all"); setWarnOnly(false); setBucket("all"); };
+  const anyFilter = search || stages.size || status !== "all" || classification !== "all" || group !== "all" || instanceFilter !== "all" || tzFilter !== "all" || complFilter !== "all" || warnOnly || bucket !== "all";
 
   return (
     <div className="space-y-4">
@@ -223,7 +238,7 @@ export function MasterGrid() {
       {isAdmin && <DuplicationQueuePanel />}
 
       {/* Summary chips */}
-      <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-7 gap-2">
+      <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-8 gap-2">
         <StatCard label="Campaigns" value={summary.total} />
         <StatCard label="Active" value={summary.active} accent="emerald" />
         <StatCard label="Main" value={summary.main} accent="primary" />
@@ -231,6 +246,7 @@ export function MasterGrid() {
         <StatCard label="Remaining leads" value={summary.remaining.toLocaleString()} />
         <StatCard label="Dup queued" value={dupQueued} accent={dupQueued > 0 ? "primary" : undefined} />
         <StatCard label="Dup failed" value={dupFailed} accent={dupFailed > 0 ? "red" : undefined} />
+        <StatCard label="Conn errors" value={connErrors} accent={connErrors > 0 ? "red" : undefined} />
       </div>
 
       {/* Toolbar */}
@@ -268,6 +284,7 @@ export function MasterGrid() {
           <Select value={group} onChange={setGroup} options={[["all", "All groups"], ["1", "Group 1"], ["2", "Group 2"]]} />
           {allInstances.length > 1 && <Select value={instanceFilter} onChange={setInstanceFilter} options={[["all", "All instances"], ...allInstances.map((s) => [s, INSTANCE_SHORT_LABELS[s as keyof typeof INSTANCE_SHORT_LABELS] || s] as [string, string])]} />}
           {allTimezones.length > 1 && <Select value={tzFilter} onChange={setTzFilter} options={[["all", "All timezones"], ...allTimezones.map((t) => [t, t.split("/").pop()!.replace(/_/g, " ")] as [string, string])]} />}
+          <Select value={complFilter} onChange={setComplFilter} options={[["all", "All completion"], ["lt50", "< 50%"], ["50-80", "50–80%"], ["gte80", "≥ 80%"]]} />
           <button onClick={() => setWarnOnly((v) => !v)} className={`inline-flex items-center gap-1 rounded-lg border px-2.5 py-1.5 text-xs ${warnOnly ? "border-amber-500/50 bg-amber-500/10 text-amber-600" : "bg-background hover:bg-muted/40"}`}>
             <AlertTriangle className="h-3.5 w-3.5" /> Warnings
           </button>
@@ -337,7 +354,7 @@ export function MasterGrid() {
               </thead>
               <tbody className="divide-y">
                 {filtered.map((c) => (
-                  <Row key={keyOf(c)} c={c} selected={selected.has(keyOf(c))} warning={hasWarning(c)}
+                  <Row key={keyOf(c)} c={c} selected={selected.has(keyOf(c))} warning={hasWarning(c) || isMissing(c)} missing={isMissing(c)}
                     onMouseDown={() => startDrag(keyOf(c))}
                     onMouseEnter={() => { if (dragging.current) applyDrag(keyOf(c)); }}
                     onOpen={() => setDetail(c)} />
@@ -349,14 +366,14 @@ export function MasterGrid() {
       </div>
       <p className="text-[11px] text-muted-foreground">Showing {filtered.length} of {campaigns.length} campaigns · Automatically refreshes daily at 12:00 p.m. PT{lastUpdated ? ` · last updated ${new Date(lastUpdated).toLocaleString()}` : ""}</p>
 
-      <DuplicateDialog open={dupOpen} onOpenChange={setDupOpen} selected={selectedRows} onQueued={() => { setSelected(new Set()); }} />
+      <DuplicateDialog open={dupOpen} onOpenChange={setDupOpen} selected={selectedRows} allCampaigns={campaigns} onQueued={() => { setSelected(new Set()); }} />
       <BulkScheduleDialog open={schedOpen} onOpenChange={setSchedOpen} selected={selectedRows} onDone={() => { mutate(); }} />
       <CampaignDetailDrawer campaign={detail} clientTags={activeClients} onClose={() => setDetail(null)} onSaved={() => mutate()} />
     </div>
   );
 }
 
-function Row({ c, selected, warning, onMouseDown, onMouseEnter, onOpen }: { c: CampaignData; selected: boolean; warning: boolean; onMouseDown: () => void; onMouseEnter: () => void; onOpen: () => void }) {
+function Row({ c, selected, warning, missing, onMouseDown, onMouseEnter, onOpen }: { c: CampaignData; selected: boolean; warning: boolean; missing: boolean; onMouseDown: () => void; onMouseEnter: () => void; onOpen: () => void }) {
   const stage = c.effective_stage || "Main";
   const rr = c.total_leads_contacted > 0 ? (c.unique_replies / c.total_leads_contacted) * 100 : 0;
   const pct = Math.max(0, Math.min(100, c.completion_percentage || 0));
@@ -380,7 +397,10 @@ function Row({ c, selected, warning, onMouseDown, onMouseEnter, onOpen }: { c: C
       <td className="px-3 py-2.5 text-[11px] text-muted-foreground">{c.classification || "—"}</td>
       <td className="px-3 py-2.5 text-[11px] text-muted-foreground">{c.group ? `G${c.group}` : "—"}</td>
       <td className="px-3 py-2.5"><span className="inline-flex items-center rounded-md border bg-muted/40 px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground">{INSTANCE_SHORT_LABELS[c.instance] || c.instance}</span></td>
-      <td className="px-3 py-2.5"><span className={`inline-flex items-center rounded-md border px-1.5 py-0.5 text-[10px] font-medium capitalize ${STATUS_BADGE[c.status] || "bg-muted text-muted-foreground border-border"}`}>{c.status}</span></td>
+      <td className="px-3 py-2.5">
+        <span className={`inline-flex items-center rounded-md border px-1.5 py-0.5 text-[10px] font-medium capitalize ${STATUS_BADGE[c.status] || "bg-muted text-muted-foreground border-border"}`}>{c.status}</span>
+        {missing && <span className="ml-1 text-[9px] text-destructive" title="No longer found in Bison (stale)">missing</span>}
+      </td>
       <td className="px-3 py-2.5 text-right tabular-nums">{(c.remaining_leads || 0).toLocaleString()}</td>
       <td className="px-3 py-2.5 text-right tabular-nums text-muted-foreground">{(c.total_leads || 0).toLocaleString()}</td>
       <td className="px-3 py-2.5">

@@ -11,10 +11,11 @@ import type { CampaignData } from "@/lib/hooks/use-campaigns";
 const ROLE_OPTIONS: [string, string][] = [["google_custom", "Google + Custom"], ["outlook", "Outlook"], ["segs", "SEGs"], ["", "—"]];
 const keyOf = (c: CampaignData) => `${c.instance}:${c.id}`;
 
-export function DuplicateDialog({ open, onOpenChange, selected, onQueued }: {
+export function DuplicateDialog({ open, onOpenChange, selected, allCampaigns, onQueued }: {
   open: boolean;
   onOpenChange: (v: boolean) => void;
   selected: CampaignData[];
+  allCampaigns: CampaignData[];
   onQueued: (enqueued: number) => void;
 }) {
   const [overrides, setOverrides] = useState<Record<string, string>>({});
@@ -42,6 +43,12 @@ export function DuplicateDialog({ open, onOpenChange, selected, onQueued }: {
   }, [selected, overrides]);
 
   const unassigned = selected.filter((c) => !roleFor(c)).length;
+
+  // §22 — flag sources that already have a "Copy of …" in the same instance.
+  const existingCopies = useMemo(() => {
+    const names = new Set(allCampaigns.map((c) => `${c.instance}::${(c.name || "").toLowerCase()}`));
+    return selected.filter((c) => names.has(`${c.instance}::copy of ${(c.name || "").toLowerCase()}`)).length;
+  }, [allCampaigns, selected]);
 
   const queue = async () => {
     setBusy(true); setError(null);
@@ -98,6 +105,12 @@ export function DuplicateDialog({ open, onOpenChange, selected, onQueued }: {
           ))}
         </div>
 
+        {existingCopies > 0 && (
+          <div className="flex items-start gap-2 rounded-lg border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-[11px] text-amber-600">
+            <AlertTriangle className="h-3.5 w-3.5 shrink-0 mt-0.5" />
+            <span>{existingCopies} of these already have a “Copy of …” in the same instance — duplicating again will create another copy.</span>
+          </div>
+        )}
         {unassigned > 0 && (
           <div className="flex items-start gap-2 rounded-lg border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-[11px] text-amber-600">
             <AlertTriangle className="h-3.5 w-3.5 shrink-0 mt-0.5" />

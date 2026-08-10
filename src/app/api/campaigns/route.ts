@@ -27,6 +27,7 @@ export interface CampaignData {
   completion_percentage: number;
   created_at: string;
   updated_at: string;
+  synced_at?: string | null;
   // Extended (Phase 1) — stored on the row where present:
   campaign_type?: string | null;
   sequence_id?: number | null;
