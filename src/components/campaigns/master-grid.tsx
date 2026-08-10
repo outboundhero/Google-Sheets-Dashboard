@@ -63,7 +63,7 @@ export function MasterGrid() {
   const { campaigns, isLoading, mutate } = useCampaigns(instancesQuery);
 
   const [search, setSearch] = useState("");
-  const [stages, setStages] = useState<Set<string>>(new Set()); // empty = all
+  const [stages, setStages] = useState<Set<string>>(new Set(["Main"])); // default: Main only
   const [status, setStatus] = useState("all");
   const [classification, setClassification] = useState("all");
   const [group, setGroup] = useState("all");
@@ -330,9 +330,16 @@ function Row({ c, selected, onMouseDown, onMouseEnter }: { c: CampaignData; sele
 
 function Select({ value, onChange, options }: { value: string; onChange: (v: string) => void; options: [string, string][] }) {
   return (
-    <select value={value} onChange={(e) => onChange(e.target.value)} className="text-xs rounded-lg border bg-background px-2.5 py-1.5 outline-none focus:ring-1 focus:ring-primary">
-      {options.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
-    </select>
+    <div className="relative">
+      <select
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        className="appearance-none text-xs rounded-lg border bg-background pl-2.5 pr-7 py-1.5 outline-none focus:ring-1 focus:ring-primary cursor-pointer"
+      >
+        {options.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
+      </select>
+      <ChevronDown className="pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 h-3 w-3 text-muted-foreground" />
+    </div>
   );
 }
 
