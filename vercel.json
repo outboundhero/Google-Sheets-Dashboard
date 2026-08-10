@@ -13,6 +13,7 @@
     { "path": "/api/cron/campaigns-facilityreach",    "schedule": "30 */6 * * *" },
     { "path": "/api/cron/campaigns-outboundclean",    "schedule": "45 */6 * * *" },
     { "path": "/api/cron/campaigns-refresh",          "schedule": "0 19 * * *" },
+    { "path": "/api/cron/campaign-dup-drain",         "schedule": "*/3 * * * *" },
 
     { "path": "/api/cron/deliverability-outboundhero",     "schedule": "0 12 */2 * *" },
     { "path": "/api/cron/deliverability-cleaningoutbound", "schedule": "30 12 */2 * *" },
