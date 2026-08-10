@@ -83,7 +83,7 @@ export function MasterGrid() {
   const { role } = useAuth();
   const isAdmin = role === "admin";
   const { instancesQuery } = useInstance();
-  const { campaigns, isLoading, mutate } = useCampaigns(instancesQuery);
+  const { campaigns, activeClients, isLoading, mutate } = useCampaigns(instancesQuery);
 
   const [search, setSearch] = useState("");
   const [stages, setStages] = useState<Set<string>>(new Set(["Main"])); // default: Main only
@@ -326,7 +326,7 @@ export function MasterGrid() {
 
       <DuplicateDialog open={dupOpen} onOpenChange={setDupOpen} selected={selectedRows} onQueued={() => { setSelected(new Set()); }} />
       <BulkScheduleDialog open={schedOpen} onOpenChange={setSchedOpen} selected={selectedRows} onDone={() => { mutate(); }} />
-      <CampaignDetailDrawer campaign={detail} onClose={() => setDetail(null)} onSaved={() => mutate()} />
+      <CampaignDetailDrawer campaign={detail} clientTags={activeClients} onClose={() => setDetail(null)} onSaved={() => mutate()} />
     </div>
   );
 }

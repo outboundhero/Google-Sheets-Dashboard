@@ -349,6 +349,52 @@ export interface InboxingUploadResult {
  * idempotent (already-uploaded emails on this connection are skipped);
  * sync_tags pushes the Inboxing domain tags onto the uploaded accounts.
  */
+export interface InboxingEmailUploadResult {
+  success: boolean;
+  jobsCreated: number;
+  matched: number;
+  skipped: { no_domain?: number; not_in_csv?: number; already_uploaded?: number } | null;
+  platform: string;
+  connectionName: string;
+  message: string;
+}
+
+/**
+ * Upload specific email accounts to a sequencer platform connection
+ * (POST /upload). Unlike the domain-based upload, this pushes individual
+ * emails (max 100). Emails are matched to active domains with credentials;
+ * unmatched ones come back under `skipped`. ASYNC — one job per matched email.
+ */
+export async function uploadEmailsToPlatform(
+  emails: string[],
+  platformConnectionId: string,
+): Promise<InboxingEmailUploadResult> {
+  const result = await call<{
+    success?: boolean;
+    jobs_created?: number;
+    matched?: number;
+    skipped?: { no_domain?: number; not_in_csv?: number; already_uploaded?: number };
+    platform?: string;
+    connection_name?: string;
+    message?: string;
+  }>("POST", `/upload`, {
+    emails,
+    platform_connection_id: platformConnectionId,
+    enable_warmup: true,
+    skip_verified: false,
+    sync_tags: false,
+  }, true);
+  return {
+    success: result.success ?? false,
+    jobsCreated: result.jobs_created ?? 0,
+    matched: result.matched ?? 0,
+    skipped: result.skipped ?? null,
+    platform: result.platform || "",
+    connectionName: result.connection_name || "",
+    message: result.message || "",
+  };
+}
+
 export async function uploadDomainToPlatform(
   domainId: string,
   platformConnectionId: string,

@@ -15,8 +15,9 @@ const fmtDate = (d?: string | null) => (d ? new Date(d).toLocaleDateString() : "
 
 interface Ev { id: number; event_type: string; detail: string | null; actor: string | null; created_at: string }
 
-export function CampaignDetailDrawer({ campaign, onClose, onSaved }: {
+export function CampaignDetailDrawer({ campaign, clientTags, onClose, onSaved }: {
   campaign: CampaignData | null;
+  clientTags: string[];
   onClose: () => void;
   onSaved: () => void;
 }) {
@@ -91,11 +92,13 @@ export function CampaignDetailDrawer({ campaign, onClose, onSaved }: {
                 </select>
               </label>
               <label className="space-y-1"><span className="text-[10px] uppercase tracking-wide text-muted-foreground">Client tag</span>
-                <input value={tag} onChange={(e) => setTag(e.target.value)} className="w-full text-xs rounded-md border bg-background px-2 py-1.5 outline-none focus:ring-1 focus:ring-primary uppercase" />
+                <select value={tag} onChange={(e) => setTag(e.target.value)} className="w-full text-xs rounded-md border bg-background px-2 py-1.5 outline-none focus:ring-1 focus:ring-primary">
+                  {[...new Set([tag, ...clientTags].filter(Boolean))].sort().map((t) => <option key={t} value={t}>{t}</option>)}
+                </select>
               </label>
             </div>
             <div className="flex items-center justify-between">
-              <span className="text-[10px] text-muted-foreground">Overrides the value auto-read from the name.</span>
+              <span className="text-[10px] text-muted-foreground">Reassigns this campaign to the chosen client in LeadSync (grouping, filters, classification, duplication) — it doesn&apos;t rename or touch Bison.</span>
               <div className="flex items-center gap-2">
                 {msg && <span className={`text-[11px] ${msg === "Saved" ? "text-emerald-500" : "text-destructive"}`}>{msg}</span>}
                 <Button size="sm" className="h-7 text-xs gap-1.5" onClick={save} disabled={saving}>{saving ? <Loader2 className="h-3 w-3 animate-spin" /> : <Save className="h-3 w-3" />} Save</Button>
