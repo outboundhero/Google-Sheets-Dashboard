@@ -10,6 +10,7 @@ export interface ClientTrackerRow {
   companyName: string;
   clientAbbr: string;
   status: string;
+  classification: string; // Cleaning / Non-cleaning / OS / Internal (from tracker column)
   startDate: string | null;
   goLiveDate: string | null;
   churnDate: string | null;
@@ -314,6 +315,10 @@ export async function getClientTrackerData(): Promise<ClientTrackerRow[]> {
   const goLiveIdx = idx("go live date");
   const churnIdx = idx("churn date");
   const pauseIdx = idx("pause date");
+  // Classification column (Cleaning / Non-cleaning / OS / Internal). Header name
+  // is confirmed on the sheet — try the likely labels in priority order.
+  const classificationIdx = ["classification", "client classification", "client type", "category"]
+    .map((n) => idx(n)).find((i) => i >= 0) ?? -1;
 
   const result: ClientTrackerRow[] = allRows
     .slice(1)
@@ -321,6 +326,7 @@ export async function getClientTrackerData(): Promise<ClientTrackerRow[]> {
       companyName: row[companyIdx] || "",
       clientAbbr: row[abbrIdx] || "",
       status: statusIdx >= 0 ? (row[statusIdx] || "") : "",
+      classification: classificationIdx >= 0 ? (row[classificationIdx] || "") : "",
       startDate: startDateIdx >= 0 ? (row[startDateIdx] || null) : null,
       goLiveDate: goLiveIdx >= 0 ? (row[goLiveIdx] || null) : null,
       churnDate: churnIdx >= 0 ? (row[churnIdx] || null) : null,

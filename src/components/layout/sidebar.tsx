@@ -19,6 +19,7 @@ import {
   Recycle,
   Gauge,
   Server,
+  LayoutGrid,
   ChevronDown,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -72,7 +73,17 @@ const allNavItems: NavEntry[] = [
     ],
   },
   { href: "/account-status", label: "Account Status", icon: PlugZap, roles: ["admin", "viewer"] },
-  { href: "/campaigns", label: "Campaigns", icon: Send, roles: ["admin"] },
+  {
+    group: "campaigns",
+    label: "Campaigns",
+    icon: Send,
+    defaultHref: "/campaigns",
+    roles: ["admin"],
+    children: [
+      { href: "/campaigns", label: "Master Grid", icon: LayoutGrid, roles: ["admin"] },
+      { href: "/campaigns/remaining-leads", label: "Remaining Leads", icon: Gauge, roles: ["admin"] },
+    ],
+  },
   { href: "/mrl-pacing", label: "MRL Pacing", icon: Gauge, roles: ["admin"] },
   { href: "/replacement", label: "Replacement", icon: Recycle, roles: ["admin"] },
   { href: "/settings", label: "Settings", icon: Settings, roles: ["admin"] },

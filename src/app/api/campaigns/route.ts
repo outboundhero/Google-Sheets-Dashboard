@@ -1,6 +1,9 @@
 import { NextResponse } from "next/server";
 import { getSupabaseAdmin } from "@/lib/supabase";
 import { getClientTrackerData } from "@/lib/google-sheets";
+import { getAllocations } from "@/lib/client-tag-allocations";
+import { getClientTiers } from "@/lib/replacement/client-tiers";
+import { deriveStage, deriveSetRole, classificationFromName } from "@/lib/campaigns/stage";
 import { bisonFetch, resolveInstance, resolveInstances } from "@/lib/bison";
 import type { BisonInstanceSlug } from "@/lib/bison-instances";
 
@@ -24,6 +27,25 @@ export interface CampaignData {
   completion_percentage: number;
   created_at: string;
   updated_at: string;
+  // Extended (Phase 1) — stored on the row where present:
+  campaign_type?: string | null;
+  sequence_id?: number | null;
+  stage?: string | null;
+  stage_override?: string | null;
+  first_sending_at?: string | null;
+  max_emails_per_day?: number | null;
+  max_new_leads_per_day?: number | null;
+  sender_count?: number | null;
+  sched_start_time?: string | null;
+  sched_end_time?: string | null;
+  sched_timezone?: string | null;
+  // Enriched at read-time (not stored):
+  classification?: string;
+  group?: number | null;
+  tier?: string | null;
+  effective_stage?: string;
+  set_role?: string | null;
+  client_start_date?: string | null;
 }
 
 // Try Supabase first, fall back to direct API. Returns rows from all requested instances.
@@ -170,8 +192,35 @@ export async function GET(request: Request) {
           .filter((c) => !c.client_tag || activeClientsUpper.has(c.client_tag.toUpperCase()))
           .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
 
+    // Enrich each campaign with client-level attributes (classification / group /
+    // tier / start date, all keyed by client tag) + effective stage + set role.
+    const alloc = await getAllocations().catch(() => ({ map: {} as Record<string, number> }));
+    const tiers = await getClientTiers().catch(() => new Map<string, string>());
+    const classByTag = new Map<string, string>();
+    const startByTag = new Map<string, string | null>();
+    for (const r of tracker) {
+      for (const a of r.clientAbbr.split(" & ")) {
+        const k = a.trim().toUpperCase();
+        if (!k) continue;
+        if (r.classification?.trim()) classByTag.set(k, r.classification.trim());
+        if (r.startDate && !startByTag.has(k)) startByTag.set(k, r.startDate);
+      }
+    }
+    const enriched: CampaignData[] = filtered.map((c) => {
+      const tagU = (c.client_tag || "").toUpperCase();
+      return {
+        ...c,
+        effective_stage: c.stage_override || c.stage || deriveStage(c.name),
+        set_role: deriveSetRole(c.name),
+        classification: classByTag.get(tagU) || classificationFromName(c.name) || "",
+        group: alloc.map[tagU] ?? null,
+        tier: tiers.get(tagU) ?? null,
+        client_start_date: startByTag.get(tagU) ?? null,
+      };
+    });
+
     const response: Record<string, unknown> = {
-      campaigns: filtered,
+      campaigns: enriched,
       activeClients: activeClientTags.sort(),
     };
 
