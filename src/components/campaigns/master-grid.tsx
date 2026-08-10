@@ -1,7 +1,7 @@
 "use client";
 
 import { useMemo, useState, useRef, useEffect, useCallback } from "react";
-import { Send, Search, X, RefreshCw, Loader2, Check, ChevronDown, Play, Pause, Archive, Copy } from "lucide-react";
+import { Send, Search, X, RefreshCw, Loader2, Check, ChevronDown, Play, Pause, Archive, Copy, ArrowUpDown, CalendarClock } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useAuth } from "@/lib/auth-context";
 import { useInstance } from "@/lib/instance-context";
@@ -10,8 +10,28 @@ import { INSTANCE_SHORT_LABELS } from "@/lib/bison-instances";
 import { stageOrder } from "@/lib/campaigns/stage";
 import { DuplicateDialog } from "./duplicate-dialog";
 import { DuplicationQueuePanel } from "./duplication-queue-panel";
+import { BulkScheduleDialog } from "./bulk-schedule-dialog";
 
 const keyOf = (c: CampaignData) => `${c.instance}:${c.id}`;
+const replyRate = (c: CampaignData) => (c.total_leads_contacted > 0 ? (c.unique_replies / c.total_leads_contacted) * 100 : 0);
+
+type SortKey = "campaign" | "stage" | "class" | "instance" | "status" | "remaining" | "leads" | "completion" | "senders" | "schedule" | "reply" | "created";
+function compareBy(a: CampaignData, b: CampaignData, key: SortKey): number {
+  switch (key) {
+    case "campaign": return a.name.localeCompare(b.name);
+    case "stage": return stageOrder(a.effective_stage || "") - stageOrder(b.effective_stage || "");
+    case "class": return (a.classification || "").localeCompare(b.classification || "");
+    case "instance": return a.instance.localeCompare(b.instance);
+    case "status": return a.status.localeCompare(b.status);
+    case "remaining": return (a.remaining_leads || 0) - (b.remaining_leads || 0);
+    case "leads": return (a.total_leads || 0) - (b.total_leads || 0);
+    case "completion": return (a.completion_percentage || 0) - (b.completion_percentage || 0);
+    case "senders": return (a.sender_count || 0) - (b.sender_count || 0);
+    case "schedule": return (a.sched_start_time || "").localeCompare(b.sched_start_time || "");
+    case "reply": return replyRate(a) - replyRate(b);
+    case "created": return (a.created_at || "").localeCompare(b.created_at || "");
+  }
+}
 
 const STATUS_BADGE: Record<string, string> = {
   active: "bg-emerald-500/10 text-emerald-600 border-emerald-500/20",
@@ -73,7 +93,14 @@ export function MasterGrid() {
   const [refreshing, setRefreshing] = useState(false);
   const [busy, setBusy] = useState(false);
   const [dupOpen, setDupOpen] = useState(false);
+  const [schedOpen, setSchedOpen] = useState(false);
+  const [sortKey, setSortKey] = useState<SortKey>("created");
+  const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
   const nowBucket = currentBucket();
+  const toggleSort = (k: SortKey) => {
+    if (sortKey === k) setSortDir((d) => (d === "asc" ? "desc" : "asc"));
+    else { setSortKey(k); setSortDir(k === "campaign" || k === "stage" || k === "class" || k === "instance" || k === "status" ? "asc" : "desc"); }
+  };
 
   // Distinct filter option sources.
   const allStages = useMemo(() => Array.from(new Set(campaigns.map((c) => c.effective_stage || "Main"))).sort((a, b) => stageOrder(a) - stageOrder(b)), [campaigns]);
@@ -83,7 +110,7 @@ export function MasterGrid() {
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
-    return campaigns.filter((c) => {
+    const out = campaigns.filter((c) => {
       if (q && !(`${c.name} ${c.client_tag}`.toLowerCase().includes(q))) return false;
       if (stages.size > 0 && !stages.has(c.effective_stage || "Main")) return false;
       if (status !== "all" && c.status !== status) return false;
@@ -93,7 +120,9 @@ export function MasterGrid() {
       if (bucket !== "all" && startBucket(c.client_start_date) !== bucket) return false;
       return true;
     });
-  }, [campaigns, search, stages, status, classification, group, instanceFilter, bucket]);
+    const dir = sortDir === "asc" ? 1 : -1;
+    return out.sort((a, b) => compareBy(a, b, sortKey) * dir || a.name.localeCompare(b.name));
+  }, [campaigns, search, stages, status, classification, group, instanceFilter, bucket, sortKey, sortDir]);
 
   // Summary counts (reactive to filters).
   const summary = useMemo(() => {
@@ -237,6 +266,7 @@ export function MasterGrid() {
           <span className="text-xs font-medium">{selected.size} selected</span>
           <div className="flex items-center gap-2">
             <Button size="sm" className="h-7 text-xs gap-1.5" onClick={() => setDupOpen(true)}><Copy className="h-3 w-3" /> Duplicate</Button>
+            <Button variant="outline" size="sm" className="h-7 text-xs gap-1.5" onClick={() => setSchedOpen(true)}><CalendarClock className="h-3 w-3" /> Schedule</Button>
             <Button variant="outline" size="sm" className="h-7 text-xs gap-1.5" disabled={busy} onClick={() => runBulk("resume")}><Play className="h-3 w-3" /> Resume</Button>
             <Button variant="outline" size="sm" className="h-7 text-xs gap-1.5" disabled={busy} onClick={() => runBulk("pause")}><Pause className="h-3 w-3" /> Pause</Button>
             <Button variant="outline" size="sm" className="h-7 text-xs gap-1.5" disabled={busy} onClick={() => runBulk("archive")}><Archive className="h-3 w-3" /> Archive</Button>
@@ -259,18 +289,18 @@ export function MasterGrid() {
                   <th className="w-[36px] px-3 py-2.5">
                     <button onClick={toggleAll} className={`h-4 w-4 rounded border flex items-center justify-center ${allSelected ? "bg-primary border-primary text-primary-foreground" : "border-muted-foreground/30 hover:border-foreground"}`}>{allSelected && <Check className="h-3 w-3" />}</button>
                   </th>
-                  <th className="text-left font-medium px-3 py-2.5">Campaign</th>
-                  <th className="text-left font-medium px-3 py-2.5 w-[100px]">Stage</th>
-                  <th className="text-left font-medium px-3 py-2.5 w-[110px]">Class</th>
-                  <th className="text-left font-medium px-3 py-2.5 w-[90px]">Instance</th>
-                  <th className="text-left font-medium px-3 py-2.5 w-[100px]">Status</th>
-                  <th className="text-right font-medium px-3 py-2.5 w-[90px]">Remaining</th>
-                  <th className="text-right font-medium px-3 py-2.5 w-[90px]">Leads</th>
-                  <th className="text-left font-medium px-3 py-2.5 w-[130px]">Completion</th>
-                  <th className="text-right font-medium px-3 py-2.5 w-[70px]">Senders</th>
-                  <th className="text-left font-medium px-3 py-2.5 w-[150px]">Schedule</th>
-                  <th className="text-right font-medium px-3 py-2.5 w-[80px]">Reply</th>
-                  <th className="text-right font-medium px-3 py-2.5 w-[110px]">Created</th>
+                  <STh label="Campaign" k="campaign" sk={sortKey} sd={sortDir} on={toggleSort} />
+                  <STh label="Stage" k="stage" sk={sortKey} sd={sortDir} on={toggleSort} w="w-[100px]" />
+                  <STh label="Class" k="class" sk={sortKey} sd={sortDir} on={toggleSort} w="w-[110px]" />
+                  <STh label="Instance" k="instance" sk={sortKey} sd={sortDir} on={toggleSort} w="w-[90px]" />
+                  <STh label="Status" k="status" sk={sortKey} sd={sortDir} on={toggleSort} w="w-[100px]" />
+                  <STh label="Remaining" k="remaining" sk={sortKey} sd={sortDir} on={toggleSort} align="right" w="w-[90px]" />
+                  <STh label="Leads" k="leads" sk={sortKey} sd={sortDir} on={toggleSort} align="right" w="w-[90px]" />
+                  <STh label="Completion" k="completion" sk={sortKey} sd={sortDir} on={toggleSort} w="w-[130px]" />
+                  <STh label="Senders" k="senders" sk={sortKey} sd={sortDir} on={toggleSort} align="right" w="w-[70px]" />
+                  <STh label="Schedule" k="schedule" sk={sortKey} sd={sortDir} on={toggleSort} w="w-[150px]" />
+                  <STh label="Reply" k="reply" sk={sortKey} sd={sortDir} on={toggleSort} align="right" w="w-[80px]" />
+                  <STh label="Created" k="created" sk={sortKey} sd={sortDir} on={toggleSort} align="right" w="w-[110px]" />
                 </tr>
               </thead>
               <tbody className="divide-y">
@@ -287,6 +317,7 @@ export function MasterGrid() {
       <p className="text-[11px] text-muted-foreground">Showing {filtered.length} of {campaigns.length} campaigns · Automatically refreshes daily at 12:00 p.m. PT</p>
 
       <DuplicateDialog open={dupOpen} onOpenChange={setDupOpen} selected={selectedRows} onQueued={() => { setSelected(new Set()); }} />
+      <BulkScheduleDialog open={schedOpen} onOpenChange={setSchedOpen} selected={selectedRows} onDone={() => { mutate(); }} />
     </div>
   );
 }
@@ -325,6 +356,18 @@ function Row({ c, selected, onMouseDown, onMouseEnter }: { c: CampaignData; sele
       <td className="px-3 py-2.5 text-right tabular-nums text-[11px] text-muted-foreground">{replyRate.toFixed(1)}%</td>
       <td className="px-3 py-2.5 text-right text-[11px] text-muted-foreground tabular-nums">{c.created_at ? new Date(c.created_at).toLocaleDateString() : "—"}</td>
     </tr>
+  );
+}
+
+function STh({ label, k, sk, sd, on, align, w }: { label: string; k: SortKey; sk: SortKey; sd: "asc" | "desc"; on: (k: SortKey) => void; align?: "right"; w?: string }) {
+  const active = sk === k;
+  return (
+    <th className={`font-medium px-3 py-2.5 ${w || ""} ${align === "right" ? "text-right" : "text-left"}`}>
+      <button onClick={() => on(k)} className={`inline-flex items-center gap-1 hover:text-foreground w-full ${align === "right" ? "justify-end" : "justify-start"} ${active ? "text-foreground" : ""}`}>
+        {label}
+        <ArrowUpDown className={`h-3 w-3 ${active ? "text-foreground" : "text-muted-foreground/40"} ${active && sd === "asc" ? "rotate-180" : ""}`} />
+      </button>
+    </th>
   );
 }
 
