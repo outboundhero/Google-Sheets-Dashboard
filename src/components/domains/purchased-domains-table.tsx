@@ -9,6 +9,7 @@ import { useAuth } from "@/lib/auth-context";
 import { useDomainOps } from "./domain-ops-context";
 import { DomainFilterBuilder, applyFilters, type FilterField, type FilterCondition, type FilterMode } from "./domain-filter-builder";
 import { BlacklistBadge } from "./blacklist-badge";
+import { SavedSearchesBar } from "./saved-searches-bar";
 
 const PROVIDER_BADGE: Record<string, string> = {
   google: "bg-blue-500/10 text-blue-600 border-blue-500/20",
@@ -64,6 +65,14 @@ export function PurchasedDomainsTable() {
   const nonHidden = useMemo(() => matched.filter((r) => !r.hidden), [matched]);
   const hiddenRows = useMemo(() => matched.filter((r) => r.hidden), [matched]);
   const clearAllFilters = () => { setSearch(""); setConditions([]); };
+
+  const buildSnapshot = (): Record<string, unknown> => ({ v: 1, search, mode: filterMode, conditions });
+  const applySnapshot = (s: Record<string, unknown>) => {
+    setSearch(typeof s.search === "string" ? s.search : "");
+    setFilterMode(s.mode === "OR" ? "OR" : "AND");
+    const raw = Array.isArray(s.conditions) ? (s.conditions as Partial<FilterCondition>[]) : [];
+    setConditions(raw.map((c, i) => ({ id: i + 1, fieldKey: String(c.fieldKey ?? "domain"), op: String(c.op ?? "contains"), value: String(c.value ?? "") })));
+  };
 
   // ── Bulk selection (click + drag) ──────────────────────────────────────
   const [selected, setSelected] = useState<Set<string>>(new Set());
@@ -131,7 +140,8 @@ export function PurchasedDomainsTable() {
         </div>
       </div>
 
-      {/* Advanced filter builder */}
+      {/* Saved searches + advanced filter builder */}
+      {isAdmin && <SavedSearchesBar scope="purchased" snapshot={buildSnapshot} onApply={applySnapshot} />}
       <DomainFilterBuilder fields={filterFields} conditions={conditions} setConditions={setConditions} mode={filterMode} setMode={setFilterMode} />
 
       {/* Selection action bar */}

@@ -11,6 +11,7 @@ import { useInventory } from "./inventory-context";
 import { useDomainOps } from "./domain-ops-context";
 import { DomainFilterBuilder, applyFilters, type FilterField, type FilterCondition, type FilterMode } from "./domain-filter-builder";
 import { BlacklistBadge } from "./blacklist-badge";
+import { SavedSearchesBar } from "./saved-searches-bar";
 
 const PAGE_SIZE = 100;
 
@@ -134,6 +135,19 @@ export function AllDomainsTable() {
   const selectedList = useMemo(() => Array.from(selected), [selected]);
   const clearAllFilters = () => { setSearch(""); setSourceFilter("all"); setInUseFilter("all"); setProviderFilter("all"); setConditions([]); setPage(0); };
 
+  // Saved-search serialization (full filter state).
+  const buildSnapshot = (): Record<string, unknown> => ({ v: 1, search, source: sourceFilter, inUse: inUseFilter, provider: providerFilter, mode: filterMode, conditions });
+  const applySnapshot = (s: Record<string, unknown>) => {
+    setSearch(typeof s.search === "string" ? s.search : "");
+    setSourceFilter(typeof s.source === "string" ? s.source : "all");
+    setInUseFilter(typeof s.inUse === "string" ? s.inUse : "all");
+    setProviderFilter(typeof s.provider === "string" ? s.provider : "all");
+    setFilterMode(s.mode === "OR" ? "OR" : "AND");
+    const raw = Array.isArray(s.conditions) ? (s.conditions as Partial<FilterCondition>[]) : [];
+    setConditions(raw.map((c, i) => ({ id: i + 1, fieldKey: String(c.fieldKey ?? "domain"), op: String(c.op ?? "contains"), value: String(c.value ?? "") })));
+    setPage(0);
+  };
+
   return (
     <div className="space-y-4">
       {/* Toolbar */}
@@ -201,7 +215,8 @@ export function AllDomainsTable() {
         {syncMsg && <div className="text-xs text-muted-foreground border-t pt-2">{syncMsg}</div>}
       </div>
 
-      {/* Advanced filter builder */}
+      {/* Saved searches + advanced filter builder */}
+      {isAdmin && <SavedSearchesBar scope="all-domains" snapshot={buildSnapshot} onApply={applySnapshot} />}
       <DomainFilterBuilder fields={filterFields} conditions={conditions} setConditions={(c) => { setConditions(c); setPage(0); }} mode={filterMode} setMode={setFilterMode} />
 
       {/* Selection action bar */}

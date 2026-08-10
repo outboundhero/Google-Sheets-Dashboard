@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useState } from "react";
 import { Plus, X, Filter as FilterIcon, Eraser } from "lucide-react";
 
 // A focused multi-condition filter builder (AND/OR + Clear) reused by the
@@ -89,10 +89,14 @@ export function DomainFilterBuilder<R>({ fields, conditions, setConditions, mode
   setMode: (m: FilterMode) => void;
 }) {
   const [open, setOpen] = useState(false);
-  const nextId = useRef(1);
   const activeCount = conditions.filter((c) => c.value || fields.find((f) => f.key === c.fieldKey)?.type === "bool").length;
 
-  const addRow = () => setConditions([...conditions, { id: nextId.current++, fieldKey: fields[0].key, op: OPS_BY_TYPE[fields[0].type][0][0], value: fields[0].type === "bool" ? "yes" : "" }]);
+  // Derive the next id from the current rows (rather than a counter) so loading
+  // a saved search's conditions can never collide with a freshly-added row.
+  const addRow = () => {
+    const nextId = conditions.reduce((m, c) => Math.max(m, c.id), 0) + 1;
+    setConditions([...conditions, { id: nextId, fieldKey: fields[0].key, op: OPS_BY_TYPE[fields[0].type][0][0], value: fields[0].type === "bool" ? "yes" : "" }]);
+  };
   const removeRow = (id: number) => setConditions(conditions.filter((c) => c.id !== id));
   const clearAll = () => setConditions([]);
   const patch = (id: number, p: Partial<FilterCondition>) => setConditions(conditions.map((c) => (c.id === id ? { ...c, ...p } : c)));
