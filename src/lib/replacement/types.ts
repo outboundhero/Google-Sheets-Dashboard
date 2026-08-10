@@ -18,6 +18,13 @@ export interface ReplacementSettings {
   maxBounceRate: number | null;
   flagOnSurbl: boolean;
   flagOnSpamhaus: boolean;
+  /**
+   * Allow SURBL-listed domains to be pulled as replacements (Nick + Spencer
+   * Aug-10: "allow SURBL blacklist for now"). Clean reserves are always
+   * consumed first; Spamhaus-listed are excluded regardless. Flip this off
+   * once inventory recovers — no code change needed.
+   */
+  allowSurblReserves: boolean;
   /** How many signals must be true simultaneously to confirm burnt. */
   minSignals: number;
   lookbackWindow: LookbackWindow;
@@ -31,6 +38,7 @@ export const DEFAULT_SETTINGS: ReplacementSettings = {
   maxBounceRate: 5.0,
   flagOnSurbl: true,
   flagOnSpamhaus: true,
+  allowSurblReserves: true,
   minSignals: 2,
   lookbackWindow: "30",
   minSent: 50,

@@ -12,6 +12,13 @@ export interface ExecuteInputs {
   targetCampaigns: { id: number; name: string }[];
   replacementDomains: string[];    // reserves to add (zero-blocker replace rows only)
   removeDomains: string[];         // all burnt domains to remove from campaigns
+  /**
+   * Cross-instance donor reserves (Nick Aug-10): these replacementDomains live
+   * on a DONOR instance and must be MOVED onto `instance` (Inboxing move,
+   * verify-all) before tagging. Verified moves schedule the donor copy's 24h
+   * auto-delete; failed/partial moves drop out of the run and are flagged.
+   */
+  crossMoves?: { domain: string; fromInstance: string; platformConnectionId: string }[];
 }
 
 // "degraded" = the call succeeded but some inboxes couldn't be attached (e.g.
@@ -103,7 +110,11 @@ export async function runExecution(inp: ExecuteInputs, emit: (steps: ExecStep[])
     emit([...steps]);
   };
 
+  const crossMoves = inp.crossMoves || [];
   const addRepl = replacementDomains.length > 0;
+  if (crossMoves.length > 0) {
+    steps.push({ key: "crossmove", label: `Move ${crossMoves.length} donor reserve(s) → this instance (verify all inboxes)`, state: "queued" });
+  }
   if (addRepl) {
     steps.push({ key: "tag", label: `Tag ${replacementDomains.length} reserve domain(s) → ${clientTag}`, state: "queued" });
     steps.push({ key: "redirect", label: `Set redirect → ${redirectUrl ? redirectUrl.replace(/^https?:\/\//, "") : "(none)"}`, state: redirectUrl ? "queued" : "skipped" });
@@ -118,8 +129,84 @@ export async function runExecution(inp: ExecuteInputs, emit: (steps: ExecStep[])
   }
   emit([...steps]);
 
+  // ── CROSS-INSTANCE DONOR MOVES (before anything touches the target) ──
+  // Move donor reserves onto this instance via the proven Inboxing move flow
+  // (submit → poll-verify). Domains whose move doesn't FULLY verify are dropped
+  // from this run (never tagged/attached half-moved); verified ones get the
+  // donor copy's 24h auto-delete scheduled + partials flagged via move-finalize.
+  if (crossMoves.length > 0) {
+    setStep("crossmove", { state: "running" });
+    const connId = crossMoves[0].platformConnectionId;
+    let inflight: { domain: string; sourceInstance: string; expected: number }[] = [];
+    const verified: { domain: string; fromInstance: string }[] = [];
+    const failedMoves: string[] = [];
+    const sub = await callJson("/api/deliverability/move-domains", {
+      mode: "submit", dryRun: false,
+      domains: crossMoves.map((m) => m.domain),
+      targetInstance: instance, platformConnectionId: connId,
+    });
+    const subData = (sub.data || {}) as { results?: { domain: string; status: string; sourceInstance?: string; expected?: number; error?: string }[] };
+    if (!sub.ok) {
+      failedMoves.push(...crossMoves.map((m) => m.domain));
+    } else {
+      for (const r of subData.results || []) {
+        const src = crossMoves.find((m) => m.domain === r.domain)?.fromInstance || r.sourceInstance || "";
+        if (r.status === "uploading") inflight.push({ domain: r.domain, sourceInstance: src, expected: r.expected ?? 1 });
+        else if (r.status === "done") verified.push({ domain: r.domain, fromInstance: src });
+        else failedMoves.push(r.domain);
+      }
+    }
+    const moveDeadline = Date.now() + 10 * 60 * 1000;
+    while (inflight.length > 0 && Date.now() < moveDeadline) {
+      await sleep(12_000);
+      const pr = await callJson("/api/deliverability/move-domains", { mode: "poll", dryRun: false, inflight, targetInstance: instance });
+      const prData = (pr.data || {}) as { results?: { domain: string; status: string }[] };
+      if (pr.ok && Array.isArray(prData.results)) {
+        const still: typeof inflight = [];
+        for (const r of prData.results) {
+          const f = inflight.find((x) => x.domain === r.domain);
+          if (!f) continue;
+          if (r.status === "done") verified.push({ domain: f.domain, fromInstance: f.sourceInstance });
+          else still.push(f);
+        }
+        inflight = still;
+      }
+      setStep("crossmove", { state: "running", note: `${verified.length} landed · ${inflight.length} uploading` });
+    }
+    // Anything still in-flight at the deadline = NOT verified → drop from run.
+    failedMoves.push(...inflight.map((f) => f.domain));
+    // Schedule the donor copies' 24h auto-delete + flag partials (Slack + panel).
+    if (verified.length > 0 || inflight.length > 0) {
+      await callJson("/api/deliverability/move-finalize", {
+        schedule: verified.map((v) => ({ instance: v.fromInstance, domain: v.domain })),
+        partials: inflight.map((f) => ({ domain: f.domain, sourceInstance: f.sourceInstance })),
+        targetInstance: instance,
+      });
+    }
+    // Drop unverified donors from the replacement list — never half-run them.
+    for (const dom of failedMoves) {
+      const i = replacementDomains.indexOf(dom);
+      if (i >= 0) replacementDomains.splice(i, 1);
+    }
+    if (failedMoves.length === 0) {
+      setStep("crossmove", { state: "done", note: `${verified.length} moved + verified` });
+    } else if (verified.length > 0) {
+      setStep("crossmove", { state: "degraded", note: `${verified.length} verified · ${failedMoves.length} dropped (move incomplete — retry later)` });
+      record({ events: [{ instance, clientTag, eventType: "error", detail: `Donor move incomplete — dropped: ${failedMoves.join(", ")}` }] });
+    } else {
+      setStep("crossmove", { state: "failed", note: "no donor move verified — replacements dropped" });
+      record({ events: [{ instance, clientTag, eventType: "error", detail: `Donor move failed for all ${crossMoves.length} domain(s)` }] });
+    }
+  }
+
   // ── ADD REPLACEMENTS ──
-  if (addRepl) {
+  if (addRepl && replacementDomains.length === 0) {
+    // every replacement was a donor whose move failed — skip the add chain
+    for (const k of ["tag", "redirect", "sheet", "whitelist", ...targetCampaigns.map((c) => `attach:${c.id}`)]) {
+      setStep(k, { state: "skipped", note: "no replacement domains left (donor move failed)" });
+    }
+  }
+  if (addRepl && replacementDomains.length > 0) {
     setStep("tag", { state: "running" });
     type TagData = {
       inboxesAffected?: number; failed?: number; total?: number;

@@ -30,6 +30,7 @@ export async function PUT(request: Request) {
     if (body.minReplyRate !== undefined) patch.minReplyRate = body.minReplyRate === null ? null : Number(body.minReplyRate);
     if (body.maxBounceRate !== undefined) patch.maxBounceRate = body.maxBounceRate === null ? null : Number(body.maxBounceRate);
     if (body.flagOnSurbl !== undefined) patch.flagOnSurbl = Boolean(body.flagOnSurbl);
+    if (body.allowSurblReserves !== undefined) patch.allowSurblReserves = Boolean(body.allowSurblReserves);
     if (body.flagOnSpamhaus !== undefined) patch.flagOnSpamhaus = Boolean(body.flagOnSpamhaus);
     if (body.minSignals !== undefined) patch.minSignals = Math.max(1, Math.floor(Number(body.minSignals)));
     if (body.minSent !== undefined) patch.minSent = Math.max(0, Math.floor(Number(body.minSent)));

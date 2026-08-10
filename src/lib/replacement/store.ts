@@ -27,6 +27,8 @@ export async function getSettings(): Promise<ReplacementSettings> {
     maxBounceRate: data.max_bounce_rate,
     flagOnSurbl: data.flag_on_surbl,
     flagOnSpamhaus: data.flag_on_spamhaus,
+    // ?? true: column may not exist yet — decision default is "allow".
+    allowSurblReserves: data.allow_surbl_reserves ?? true,
     minSignals: data.min_signals,
     lookbackWindow: data.lookback_window as LookbackWindow,
     minSent: data.min_sent,
@@ -41,6 +43,7 @@ export async function updateSettings(patch: Partial<ReplacementSettings>): Promi
   if (patch.maxBounceRate !== undefined) row.max_bounce_rate = patch.maxBounceRate;
   if (patch.flagOnSurbl !== undefined) row.flag_on_surbl = patch.flagOnSurbl;
   if (patch.flagOnSpamhaus !== undefined) row.flag_on_spamhaus = patch.flagOnSpamhaus;
+  if (patch.allowSurblReserves !== undefined) row.allow_surbl_reserves = patch.allowSurblReserves;
   if (patch.minSignals !== undefined) row.min_signals = patch.minSignals;
   if (patch.lookbackWindow !== undefined) row.lookback_window = patch.lookbackWindow;
   if (patch.minSent !== undefined) row.min_sent = patch.minSent;

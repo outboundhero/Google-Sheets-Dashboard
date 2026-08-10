@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { buildReplacementPlan } from "@/lib/replacement/plan";
 import { getThresholdConfig } from "@/lib/replacement/threshold-groups-store";
+import { getActiveCampaignKeys } from "@/lib/replacement/campaigns";
 import { capFor, totalTargetFor, getClientTiers, type ClientTier } from "@/lib/replacement/client-tiers";
 import {
   ALL_INSTANCE_SLUGS, getInstance, INSTANCE_SHORT_LABELS,
@@ -24,6 +25,9 @@ interface SideShort {
   totalTarget: number; // live cap + reserve buffer
   short: number;     // max(0, liveCap − have)
   excess: number;    // max(0, have − liveCap)
+  /** No actively-sending campaign for this tag on this instance → short forced
+   *  to 0 (Nick 2026-08-11: dormant campaigns must not trigger purchases). */
+  inactive?: boolean;
 }
 interface TagRow {
   clientTag: string;
@@ -37,9 +41,10 @@ export async function GET() {
   try {
     const cfg = await getThresholdConfig();
     const useGroups = cfg.enabled;
-    const [plan, tiers] = await Promise.all([
+    const [plan, tiers, activeKeys] = await Promise.all([
       buildReplacementPlan(useGroups ? { burntSource: "groups", groupConfig: cfg, infoMigration: false } : { infoMigration: false }),
       getClientTiers(),
+      getActiveCampaignKeys(),
     ]);
 
     // group → its b2b + b2c instance slug
@@ -85,6 +90,12 @@ export async function GET() {
         s.have = agg.byInst.get(slug)?.staying ?? 0;
         s.short = Math.max(0, s.liveCap - s.have);
         s.excess = Math.max(0, s.have - s.liveCap);
+        // Dormant side: tag has no actively-sending campaign on this instance
+        // → never counts toward buying (Nick 2026-08-11).
+        if (!activeKeys.has(`${tag.trim().toUpperCase()}:${slug}`)) {
+          s.short = 0;
+          s.inactive = true;
+        }
         return s;
       };
       rows.push({ clientTag: tag, tier, group, b2b: build(slugs.b2b), b2c: build(slugs.b2c) });

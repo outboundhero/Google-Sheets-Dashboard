@@ -7,6 +7,7 @@
 // Slack, ?force posts even when nothing is short.
 import { buildReplacementPlan } from "./plan";
 import { getThresholdConfig } from "./threshold-groups-store";
+import { getActiveCampaignKeys } from "./campaigns";
 import { capFor, getClientTiers, type ClientTier } from "./client-tiers";
 import { postSlackMessage } from "@/lib/slack";
 import {
@@ -54,9 +55,10 @@ function channelId(): string | undefined {
 export async function runBuyAlert(opts: { force?: boolean; dryRun?: boolean } = {}): Promise<BuyAlertResult> {
   const cfg = await getThresholdConfig();
   const useGroups = cfg.enabled;
-  const [plan, tiers] = await Promise.all([
+  const [plan, tiers, activeKeys] = await Promise.all([
     buildReplacementPlan(useGroups ? { burntSource: "groups", groupConfig: cfg, infoMigration: false } : { infoMigration: false }),
     getClientTiers(),
+    getActiveCampaignKeys(),
   ]);
 
   // ── per-instance shortfall (mirrors /api/replacement/shortfall `byInstance`) ──
@@ -94,7 +96,10 @@ export async function runBuyAlert(opts: { force?: boolean; dryRun?: boolean } = 
     const build = (slug: BisonInstanceSlug): Side => {
       const have = agg.byInst.get(slug)?.staying ?? 0;
       const liveCap = capFor(getInstance(slug).tier, tier);
-      return { instance: slug, short: Math.max(0, liveCap - have) };
+      // Dormant side (no actively-sending campaign for this tag here) never
+      // triggers buying — Nick 2026-08-11. Mirrors the shortfall route exactly.
+      const active = activeKeys.has(`${tag.trim().toUpperCase()}:${slug}`);
+      return { instance: slug, short: active ? Math.max(0, liveCap - have) : 0 };
     };
     rows.push({ b2b: build(slugs.b2b), b2c: build(slugs.b2c) });
   }

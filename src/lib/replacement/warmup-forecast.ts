@@ -5,6 +5,7 @@
 import { getSupabaseAdmin } from "@/lib/supabase";
 import { ALL_INSTANCE_SLUGS, type BisonInstanceSlug } from "@/lib/bison-instances";
 import { pstDateString } from "@/lib/date-utils";
+import { getSettings } from "./store";
 
 const WARMUP_DAYS = 21; // same completion rule as the replacement plan
 
@@ -48,6 +49,7 @@ export interface WarmupForecast {
 
 export async function buildWarmupForecast(): Promise<WarmupForecast> {
   const supabase = getSupabaseAdmin();
+  const allowSurbl = (await getSettings()).allowSurblReserves;
   const today = pstDateString(new Date());
   const todayMs = Date.parse(`${today}T00:00:00Z`);
 
@@ -99,7 +101,10 @@ export async function buildWarmupForecast(): Promise<WarmupForecast> {
       pullable:
         (provider === "outlook" || provider === "google") &&
         !d.domain.toLowerCase().endsWith(".info") &&
-        d.blacklisted !== true && d.spamhaus_dbl !== true,
+        // SURBL-listed allowed while the setting is on (Nick+Spencer Aug-10);
+        // Spamhaus stays a hard block either way.
+        (allowSurbl || d.blacklisted !== true) &&
+        d.spamhaus_dbl !== true,
     });
   }
 

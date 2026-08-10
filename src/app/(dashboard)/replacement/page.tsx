@@ -10,6 +10,7 @@ import { useAuth } from "@/lib/auth-context";
 import { ExecuteDialog } from "@/components/replacement/execute-dialog";
 import { ThresholdGroupsEditor } from "@/components/replacement/threshold-groups-editor";
 import { GroupPlanCard } from "@/components/replacement/group-plan-card";
+import { SkipCard } from "@/components/replacement/skip-card";
 import { ShortfallCard } from "@/components/replacement/shortfall-card";
 import { WrongInstanceCard } from "@/components/replacement/wrong-instance-card";
 import { DailyReportCard } from "@/components/replacement/daily-report-card";
@@ -21,6 +22,8 @@ import { PurchaseProposalCard } from "@/components/replacement/purchase-proposal
 import { BisonCapacityCard } from "@/components/replacement/bison-capacity-card";
 import { runExecution, type ExecuteInputs, type ExecStep } from "@/lib/replacement/execute-runner";
 import type { ReplacementSettings, LookbackWindow } from "@/lib/replacement/types";
+import { inboxingConnectionFor } from "@/lib/replacement/inboxing-connections";
+import type { BisonInstanceSlug } from "@/lib/bison-instances";
 
 interface Candidate {
   instance: string;
@@ -59,6 +62,7 @@ interface PlanItem {
   redirectUrl: string | null;
   targetCampaigns: CampaignRef[];
   replacementDomain: string | null;
+  replacementFrom?: string | null; // donor instance when ≠ instance (cross-instance pull)
   removeOnly: boolean;
   capCurrent: number;
   capMax: number;
@@ -446,6 +450,10 @@ export default function ReplacementPage() {
                   <input type="checkbox" checked={settings.flagOnSpamhaus} onChange={(e) => set("flagOnSpamhaus", e.target.checked)} />
                   Spamhaus DBL listed counts as a signal
                 </label>
+                <label className="flex items-center gap-2 text-sm" title="Nick + Spencer Aug-10: allow SURBL-listed reserves for now. Clean reserves are always pulled first; Spamhaus-listed are never pulled. Untick once inventory recovers.">
+                  <input type="checkbox" checked={settings.allowSurblReserves} onChange={(e) => set("allowSurblReserves", e.target.checked)} />
+                  Allow SURBL-listed domains as replacements
+                </label>
                 <label className="flex items-center gap-2 text-sm ml-auto">
                   <span className="text-xs text-muted-foreground">Mode</span>
                   <select
@@ -478,6 +486,9 @@ export default function ReplacementPage() {
 
       {/* Group-driven replacement plan (observe) — same plan, groups decide burnt */}
       <GroupPlanCard />
+
+      {/* Skip / Unflag — Spencer's false-positive guard (precondition for auto mode) */}
+      <SkipCard />
 
       {/* Tier-aware shortfall — how many domains to add per b2b/b2c instance per tag */}
       <ShortfallCard />
@@ -673,6 +684,15 @@ export default function ReplacementPage() {
                     targetCampaigns: (replItems[0]?.targetCampaigns ?? []).map((c) => ({ id: c.id, name: c.name })),
                     replacementDomains: replItems.map((i) => i.replacementDomain!),
                     removeDomains: items.map((i) => i.burntDomain),
+                    // Donor reserves living on another instance: the runner moves
+                    // them here (verify-all) before tagging; donor copy auto-deletes 24h later.
+                    crossMoves: replItems
+                      .filter((i) => i.replacementFrom && i.replacementFrom !== instance)
+                      .map((i) => ({
+                        domain: i.replacementDomain!,
+                        fromInstance: i.replacementFrom!,
+                        platformConnectionId: inboxingConnectionFor(instance as BisonInstanceSlug),
+                      })),
                   });
                 };
                 return (
@@ -709,7 +729,14 @@ export default function ReplacementPage() {
                         <span className="text-muted-foreground italic">remove only — at cap, no replacement</span>
                       ) : (<>
                         {it.replacementDomain
-                          ? <span className="text-emerald-500">{it.replacementDomain}</span>
+                          ? <>
+                              <span className="text-emerald-500">{it.replacementDomain}</span>
+                              {it.replacementFrom && it.replacementFrom !== it.instance && (
+                                <span className="text-sky-400" title={`Donor reserve — moved from ${INSTANCE_SHORT[it.replacementFrom] ?? it.replacementFrom} during execution (verify-all, donor copy auto-deletes in 24h)`}>
+                                  {" "}(move from {INSTANCE_SHORT[it.replacementFrom] ?? it.replacementFrom})
+                                </span>
+                              )}
+                            </>
                           : <span className="text-destructive">no reserve</span>}
                         {it.redirectUrl
                           ? <span className="text-muted-foreground"> → {it.redirectUrl.replace(/^https?:\/\//, "")}</span>

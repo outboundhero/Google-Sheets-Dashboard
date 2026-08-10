@@ -11,6 +11,11 @@ import { evaluateDomain, type DomainSignals } from "./detect";
 import { evaluateSegments, type ThresholdConfig, type DomainMetrics } from "./threshold-groups";
 import { deriveCampaignMap, type CampaignRef } from "./campaigns";
 import { INSTANCE_CAP } from "./types";
+import { getSkipSet, skipKey } from "./skips";
+
+// Cross-instance donor (Nick Aug-10): B2C instances with no local reserve pull
+// Inboxing-movable reserves from B2B #2. "For now" — single fixed donor.
+const CROSS_DONOR = "facilityreach" as const;
 
 const WARMUP_DAYS = 21; // a domain is "Complete" once it is >= 21 days old
 
@@ -51,6 +56,13 @@ export interface PlanItem {
   redirectUrl: string | null;
   targetCampaigns: CampaignRef[];
   replacementDomain: string | null;   // reserve domain (SAME provider) that would be pulled
+  /**
+   * Where the reserve lives. Normally === `instance`. "facilityreach" when the
+   * local pool was empty and an Inboxing-movable B2B#2 reserve is donated
+   * (Nick Aug-10: B2C pulls from B2B2 — move over, tag, redirect, map campaigns).
+   * Execution must MOVE the domain first when this differs from `instance`.
+   */
+  replacementFrom: BisonInstanceSlug | null;
   removeOnly: boolean;                 // true = burnt removed but NO replacement (client already at cap)
   capCurrent: number;                  // healthy domains that STAY for (tag, instance) — post-removal
   capMax: number;                      // 5 (b2c) | 20 (b2b)
@@ -106,6 +118,11 @@ export interface PlanResult {
   reserveReadyByInstance: Record<string, ReserveReady>;
   reserveList: ReserveDomain[];    // every untagged + ≥21d domain (sorted by instance, domain)
   clientAudit: ClientAuditRow[];
+  // Skip/Unflag (Spencer's false-positive guard): domains that WOULD be flagged
+  // burnt this build but are skipped — excluded from replace/remove/counts,
+  // still in campaigns, surfaced so the UI can mark them clearly.
+  skippedBurnt?: { instance: BisonInstanceSlug; domain: string; clientTag: string | null; reasons: string[] }[];
+  skippedCount?: number;           // total skip rows loaded (flagged or not)
 }
 
 function ageDays(created: string | null, nowMs: number): number {
@@ -235,11 +252,21 @@ export async function buildReplacementPlan(
     const r = evaluateDomain(signals, cfg);
     return { burnt: r.burnt, reasons: r.burnt ? r.reasons : [] };
   };
+  // Skip/Unflag layer: a skipped domain is NEVER treated as burnt/replaceable
+  // (not replaced, not removed, not counted) — it stays put and keeps showing
+  // health. Would-be-burnt skips are reported separately so the UI marks them.
+  const skipSet = await getSkipSet();
+  const skippedBurnt: NonNullable<PlanResult["skippedBurnt"]>[number][] = [];
   const enriched: Enriched[] = domains.map((d) => {
     const v = burntVerdict(d);
-    const replaceable = v.burnt || (infoMigration && isInfo(d.domain));
-    const reasons = v.burnt ? v.reasons : (replaceable ? [".info domain (migration)"] : []);
-    return { d, provider: providerOf(d), tag: clientTagOf(d.tags), burnt: v.burnt, replaceable, reasons };
+    const skipped = skipSet.has(skipKey(d.instance, d.domain));
+    if (skipped && v.burnt) {
+      skippedBurnt.push({ instance: d.instance, domain: d.domain, clientTag: clientTagOf(d.tags), reasons: v.reasons });
+    }
+    const burnt = v.burnt && !skipped;
+    const replaceable = burnt || (!skipped && infoMigration && isInfo(d.domain));
+    const reasons = burnt ? v.reasons : (replaceable ? [".info domain (migration)"] : []);
+    return { d, provider: providerOf(d), tag: clientTagOf(d.tags), burnt, replaceable, reasons };
   });
 
   // 5) reserve-ready pools per (instance, provider) — consumable. Ready =
@@ -252,12 +279,36 @@ export async function buildReplacementPlan(
     if (e.provider !== "outlook" && e.provider !== "google") continue;
     if (isInfo(e.d.domain)) continue;
     if (ageDays(e.d.domain_created_at, nowMs) < WARMUP_DAYS) continue;
-    if (e.d.blacklisted === true || e.d.spamhaus_dbl === true) continue;
+    // SURBL-listed reserves: allowed while cfg.allowSurblReserves is on (Nick +
+    // Spencer, Aug-10: "allow SURBL blacklist for now" — it's what's available;
+    // flip the setting off once inventory recovers). Clean ones are consumed
+    // first (pool sorted below). Spamhaus DBL stays a hard block either way.
+    if (e.d.spamhaus_dbl === true) continue;
+    if (!cfg.allowSurblReserves && e.d.blacklisted === true) continue;
     if (e.burnt) continue;
+    // A skipped domain hid its burnt verdict above — never pull it as a reserve.
+    if (skipSet.has(skipKey(e.d.instance, e.d.domain))) continue;
     const key = `${e.d.instance}:${e.provider}`;
     if (!reservePool.has(key)) reservePool.set(key, []);
     reservePool.get(key)!.push(e.d.domain);
   }
+  // Prefer CLEAN reserves: each pool consumes non-SURBL domains before
+  // SURBL-listed ones (listed are allowed, just last in line).
+  const surblListed = new Set(
+    enriched.filter((e) => e.d.blacklisted === true).map((e) => `${e.d.instance}:${e.d.domain}`),
+  );
+  // Inboxing-movable reserves — eligible as cross-instance donors (only the
+  // Inboxing provider can move a domain's inboxes between Bison instances).
+  const inboxingMovable = new Set(
+    enriched
+      .filter((e) => (e.d.tags || []).some((t) => String(t).trim().toLowerCase().startsWith("inboxing")))
+      .map((e) => `${e.d.instance}:${e.d.domain}`),
+  );
+  for (const [key, list] of reservePool) {
+    const inst = key.split(":")[0];
+    list.sort((a, b) => Number(surblListed.has(`${inst}:${a}`)) - Number(surblListed.has(`${inst}:${b}`)) || a.localeCompare(b));
+  }
+
   // Broader "total reserve" per instance — untagged + ≥ 21 days old, nothing
   // else. Doesn't affect what replacement pulls; only shown alongside the
   // per-provider counts so it's obvious how many warmed-up untagged domains
@@ -354,6 +405,7 @@ export async function buildReplacementPlan(
     const targetCampaigns = campaignsByKey.get(groupKey) ?? [];
 
     let replacementDomain: string | null = null;
+    let replacementFrom: BisonInstanceSlug | null = null;
     let removeOnly = false;
     const blockers: string[] = [];
 
@@ -362,12 +414,27 @@ export async function buildReplacementPlan(
       const pool = (provider === "outlook" || provider === "google")
         ? reservePool.get(`${d.instance}:${provider}`) : undefined;
       replacementDomain = pool && pool.length > 0 ? pool.shift()! : null;
+      if (replacementDomain) replacementFrom = d.instance;
+      // Cross-instance donor pull (Nick Aug-10): a B2C instance with an empty
+      // local pool borrows an INBOXING-movable reserve from B2B#2
+      // (facilityreach) — execution moves it over, then tags/redirects/attaches.
+      if (!replacementDomain && (provider === "outlook" || provider === "google")
+          && getInstance(d.instance).tier === "b2c" && d.instance !== CROSS_DONOR) {
+        const donor = reservePool.get(`${CROSS_DONOR}:${provider}`);
+        if (donor) {
+          const idx = donor.findIndex((dom) => inboxingMovable.has(`${CROSS_DONOR}:${dom}`));
+          if (idx >= 0) {
+            replacementDomain = donor.splice(idx, 1)[0];
+            replacementFrom = CROSS_DONOR;
+          }
+        }
+      }
       if (replacementDomain) assignedInGroup.set(groupKey, already + 1);
       // blockers only matter when we actually intend to add a replacement
       if (!redirectUrl) blockers.push("no redirect URL for tag");
       if (targetCampaigns.length === 0) blockers.push("no eligible campaign in this instance");
       if (provider === "mixed" || provider === "unknown") blockers.push(`${provider}-provider domain (manual)`);
-      else if (!replacementDomain) blockers.push(`no ready ${provider} reserve in this instance`);
+      else if (!replacementDomain) blockers.push(`no ready ${provider} reserve in this instance${getInstance(d.instance).tier === "b2c" ? " (and no Inboxing-movable B2B#2 donor)" : ""}`);
     } else {
       // client already at/over cap → remove the burnt domain, add NO replacement.
       // (Never remove excess healthy; just don't over-fill.)
@@ -377,8 +444,8 @@ export async function buildReplacementPlan(
     items.push({
       burntDomain: d.domain, instance: d.instance, provider, clientTag: tag, reasons: e.reasons,
       surbl: d.blacklisted, spamhaus: d.spamhaus_dbl,
-      redirectUrl, targetCampaigns, replacementDomain, removeOnly, capCurrent: healthy, capMax, blockers,
+      redirectUrl, targetCampaigns, replacementDomain, replacementFrom, removeOnly, capCurrent: healthy, capMax, blockers,
     });
   }
-  return { generatedFor: today, burntSource, infoMigration, burntCount: items.length, items, reserveReadyByInstance, reserveList, unassignedBurntCount, clientAudit };
+  return { generatedFor: today, burntSource, infoMigration, burntCount: items.length, items, reserveReadyByInstance, reserveList, unassignedBurntCount, clientAudit, skippedBurnt, skippedCount: skipSet.size };
 }
