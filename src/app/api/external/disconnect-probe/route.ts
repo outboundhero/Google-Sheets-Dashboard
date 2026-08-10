@@ -29,6 +29,18 @@ async function inboxingTagId(instance: (typeof ALL_INSTANCE_SLUGS)[number]): Pro
 
 export async function GET(request: Request) {
   if (request.headers.get("authorization") !== `Bearer ${TOKEN}`) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
+  const url = new URL(request.url);
+  if (url.searchParams.get("mode") === "fields") {
+    // Dump a sample sender's full fields (look for token/expiry/oauth flags) + test alt status filters.
+    const r = await bisonFetch("outboundhero", `/sender-emails?per_page=2&status=connected`);
+    const j = await r.json();
+    const sample = j?.data?.[0] || null;
+    const altCounts: Record<string, unknown> = {};
+    for (const s of ["expired", "token_expired", "reconnection_required", "disconnected", "warning"]) {
+      altCounts[s] = await total("outboundhero", `status=${s}`);
+    }
+    return NextResponse.json({ sampleKeys: sample ? Object.keys(sample) : null, sample, altStatusCounts: altCounts });
+  }
   const out = [];
   for (const inst of ALL_INSTANCE_SLUGS) {
     const tag = await inboxingTagId(inst);
