@@ -40,3 +40,13 @@ export function stageOrder(stage: string): number {
   const m = /nurture\s*(\d+)/i.exec(stage);
   return m ? Number(m[1]) : 99;
 }
+
+// Standard set order: Google + Custom → Outlook → SEGs. (Client-safe helpers,
+// shared by the duplication lib + the UI.)
+export const SET_ROLE_ORDER: Record<string, number> = { google_custom: 0, outlook: 1, segs: 2 };
+export function setRoleIndex(role: string | null | undefined): number {
+  return role && role in SET_ROLE_ORDER ? SET_ROLE_ORDER[role] : 9;
+}
+export function setRoleLabel(role: string | null | undefined): string {
+  return role === "google_custom" ? "Google + Custom" : role === "outlook" ? "Outlook" : role === "segs" ? "SEGs" : "—";
+}

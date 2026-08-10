@@ -4,16 +4,8 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 
 // Campaign duplication helpers. Bison: POST /campaigns/{id}/duplicate → 201,
 // creates a DRAFT copy (sequence preserved, 0 leads). Confirmed in the Phase-0
-// spike. The set-role order (Google + Custom → Outlook → SEGs) drives queue
-// ordering within a client tag.
-
-export const SET_ROLE_ORDER: Record<string, number> = { google_custom: 0, outlook: 1, segs: 2 };
-export function setRoleIndex(role: string | null | undefined): number {
-  return role && role in SET_ROLE_ORDER ? SET_ROLE_ORDER[role] : 9;
-}
-export function setRoleLabel(role: string | null | undefined): string {
-  return role === "google_custom" ? "Google + Custom" : role === "outlook" ? "Outlook" : role === "segs" ? "SEGs" : "—";
-}
+// spike. Set-role ordering helpers live in ./stage (client-safe).
+export { SET_ROLE_ORDER, setRoleIndex, setRoleLabel } from "./stage";
 
 export interface DuplicateResult { ok: boolean; newId?: number; newName?: string; error?: string }
 

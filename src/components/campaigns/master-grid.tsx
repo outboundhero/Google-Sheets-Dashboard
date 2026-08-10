@@ -1,13 +1,15 @@
 "use client";
 
 import { useMemo, useState, useRef, useEffect, useCallback } from "react";
-import { Send, Search, X, RefreshCw, Loader2, Check, ChevronDown, Play, Pause, Archive } from "lucide-react";
+import { Send, Search, X, RefreshCw, Loader2, Check, ChevronDown, Play, Pause, Archive, Copy } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useAuth } from "@/lib/auth-context";
 import { useInstance } from "@/lib/instance-context";
 import { useCampaigns, type CampaignData } from "@/lib/hooks/use-campaigns";
 import { INSTANCE_SHORT_LABELS } from "@/lib/bison-instances";
 import { stageOrder } from "@/lib/campaigns/stage";
+import { DuplicateDialog } from "./duplicate-dialog";
+import { DuplicationQueuePanel } from "./duplication-queue-panel";
 
 const keyOf = (c: CampaignData) => `${c.instance}:${c.id}`;
 
@@ -70,6 +72,7 @@ export function MasterGrid() {
   const [stageOpen, setStageOpen] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [dupOpen, setDupOpen] = useState(false);
   const nowBucket = currentBucket();
 
   // Distinct filter option sources.
@@ -165,6 +168,9 @@ export function MasterGrid() {
         </Button>
       </div>
 
+      {/* Live duplication queue (renders only when there's activity) */}
+      {isAdmin && <DuplicationQueuePanel />}
+
       {/* Summary chips */}
       <div className="grid grid-cols-2 sm:grid-cols-5 gap-2">
         <StatCard label="Campaigns" value={summary.total} />
@@ -230,6 +236,7 @@ export function MasterGrid() {
         <div className="sticky top-0 z-30 flex flex-wrap items-center justify-between gap-2 rounded-xl border bg-card/95 backdrop-blur px-4 py-2.5 shadow-sm">
           <span className="text-xs font-medium">{selected.size} selected</span>
           <div className="flex items-center gap-2">
+            <Button size="sm" className="h-7 text-xs gap-1.5" onClick={() => setDupOpen(true)}><Copy className="h-3 w-3" /> Duplicate</Button>
             <Button variant="outline" size="sm" className="h-7 text-xs gap-1.5" disabled={busy} onClick={() => runBulk("resume")}><Play className="h-3 w-3" /> Resume</Button>
             <Button variant="outline" size="sm" className="h-7 text-xs gap-1.5" disabled={busy} onClick={() => runBulk("pause")}><Pause className="h-3 w-3" /> Pause</Button>
             <Button variant="outline" size="sm" className="h-7 text-xs gap-1.5" disabled={busy} onClick={() => runBulk("archive")}><Archive className="h-3 w-3" /> Archive</Button>
@@ -278,6 +285,8 @@ export function MasterGrid() {
         )}
       </div>
       <p className="text-[11px] text-muted-foreground">Showing {filtered.length} of {campaigns.length} campaigns · Automatically refreshes daily at 12:00 p.m. PT</p>
+
+      <DuplicateDialog open={dupOpen} onOpenChange={setDupOpen} selected={selectedRows} onQueued={() => { setSelected(new Set()); }} />
     </div>
   );
 }
