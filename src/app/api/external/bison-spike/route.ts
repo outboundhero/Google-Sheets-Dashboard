@@ -103,6 +103,16 @@ export async function GET(request: Request) {
       if (!attempts[0].ok) attempts.push(await call(instance, "PATCH", `/campaigns/${id}/archive`));
       return NextResponse.json({ op, id, attempts });
     }
+    if (op === "raw") {
+      const method = (url.searchParams.get("method") || "GET").toUpperCase();
+      const path = url.searchParams.get("path");
+      if (!path) return NextResponse.json({ error: "path required" }, { status: 400 });
+      if (method !== "GET") needConfirm();
+      const bodyParam = url.searchParams.get("body");
+      let body: unknown;
+      if (bodyParam) { try { body = JSON.parse(bodyParam); } catch { return NextResponse.json({ error: "bad body json" }, { status: 400 }); } }
+      return NextResponse.json({ op, result: await call(instance, method, path, body) });
+    }
     return NextResponse.json({ error: `unknown op: ${op}` }, { status: 400 });
   } catch (e) {
     return NextResponse.json({ error: e instanceof Error ? e.message : "failed" }, { status: 400 });
