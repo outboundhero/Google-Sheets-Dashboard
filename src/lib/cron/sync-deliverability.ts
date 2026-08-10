@@ -211,6 +211,23 @@ export async function runDeliverabilitySync(instance: BisonInstanceSlug): Promis
       if (error) console.error(`[cron/deliverability:${instance}] domain upsert failed:`, error.message);
     }
 
+    // Warmup-days memory across instance moves (Spencer): freeze each domain's
+    // FIRST-ever-seen created date in domain_first_created (keyed by domain
+    // only, no instance). ignoreDuplicates → the first write wins forever, so
+    // moving a domain to another instance (new Bison created_at) no longer
+    // resets its warmup-day count — readers prefer this origin date.
+    const firstSeenRows = Array.from(domainEarliest.entries()).map(([domain, created_at]) => ({
+      domain,
+      first_created_at: created_at,
+      first_instance: instance,
+    }));
+    for (let i = 0; i < firstSeenRows.length; i += CONCURRENT_UPSERT_BATCH) {
+      const { error } = await supabase
+        .from("domain_first_created")
+        .upsert(firstSeenRows.slice(i, i + CONCURRENT_UPSERT_BATCH), { onConflict: "domain", ignoreDuplicates: true });
+      if (error) console.error(`[cron/deliverability:${instance}] first-created upsert failed:`, error.message);
+    }
+
     // Upsert inboxes
     const inboxRows = collected
       .filter((i) => i.email?.includes("@"))

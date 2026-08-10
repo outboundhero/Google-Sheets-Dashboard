@@ -79,6 +79,35 @@ export async function GET(request: Request) {
       startPage += BATCH_PAGES;
     }
 
+    // Warmup-days memory across instance moves: prefer each domain's frozen
+    // first-ever-seen date (domain_first_created, written by the sync) over
+    // the per-instance Bison created date, so moving a domain to another
+    // instance doesn't reset warmup-day / domain-age computations downstream.
+    try {
+      const origin = new Map<string, string>();
+      let off = 0;
+      while (true) {
+        const { data, error } = await supabase
+          .from("domain_first_created")
+          .select("domain,first_created_at")
+          .range(off, off + PAGE - 1);
+        if (error || !data || data.length === 0) break;
+        for (const r of data) origin.set(r.domain as string, r.first_created_at as string);
+        if (data.length < PAGE) break;
+        off += PAGE;
+      }
+      if (origin.size > 0) {
+        for (const d of allDomains) {
+          const first = origin.get(d.domain as string);
+          if (!first) continue;
+          const cur = d.domain_created_at as string | null;
+          if (!cur || first < cur) d.domain_created_at = first;
+        }
+      }
+    } catch {
+      // Missing table / transient error → fall back to per-instance dates.
+    }
+
     return NextResponse.json(allDomains);
   } catch (error) {
     const message = error instanceof Error ? error.message : "Failed";
