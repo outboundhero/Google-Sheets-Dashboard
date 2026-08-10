@@ -27,6 +27,21 @@ function stageBadge(stage: string): string {
   return "bg-violet-500/10 text-violet-600 border-violet-500/20";
 }
 
+// "09:00:00" → "9:00a"; drop seconds, 12h.
+function hhmm(t?: string | null): string {
+  if (!t) return "";
+  const [h, m] = t.split(":").map(Number);
+  if (Number.isNaN(h)) return t;
+  const ap = h < 12 ? "a" : "p";
+  const h12 = h % 12 || 12;
+  return `${h12}:${String(m || 0).padStart(2, "0")}${ap}`;
+}
+function tzAbbr(tz?: string | null): string {
+  if (!tz) return "";
+  const city = tz.split("/").pop() || tz;
+  return city.replace(/_/g, " ");
+}
+
 function startBucket(dateStr: string | null | undefined): "1-14" | "15-eom" | null {
   if (!dateStr) return null;
   const d = new Date(dateStr);
@@ -245,6 +260,8 @@ export function MasterGrid() {
                   <th className="text-right font-medium px-3 py-2.5 w-[90px]">Remaining</th>
                   <th className="text-right font-medium px-3 py-2.5 w-[90px]">Leads</th>
                   <th className="text-left font-medium px-3 py-2.5 w-[130px]">Completion</th>
+                  <th className="text-right font-medium px-3 py-2.5 w-[70px]">Senders</th>
+                  <th className="text-left font-medium px-3 py-2.5 w-[150px]">Schedule</th>
                   <th className="text-right font-medium px-3 py-2.5 w-[80px]">Reply</th>
                   <th className="text-right font-medium px-3 py-2.5 w-[110px]">Created</th>
                 </tr>
@@ -289,6 +306,12 @@ function Row({ c, selected, onMouseDown, onMouseEnter }: { c: CampaignData; sele
           <div className="h-1.5 flex-1 rounded-full bg-muted overflow-hidden"><div className="h-full bg-primary" style={{ width: `${pct}%` }} /></div>
           <span className="text-[10px] tabular-nums text-muted-foreground w-9 text-right">{pct.toFixed(0)}%</span>
         </div>
+      </td>
+      <td className="px-3 py-2.5 text-right tabular-nums text-[11px] text-muted-foreground">{c.sender_count ?? "—"}</td>
+      <td className="px-3 py-2.5 text-[11px] text-muted-foreground">
+        {c.sched_start_time ? (
+          <span title={c.sched_timezone || undefined}>{hhmm(c.sched_start_time)}–{hhmm(c.sched_end_time)} <span className="text-muted-foreground/60">{tzAbbr(c.sched_timezone)}</span></span>
+        ) : "—"}
       </td>
       <td className="px-3 py-2.5 text-right tabular-nums text-[11px] text-muted-foreground">{replyRate.toFixed(1)}%</td>
       <td className="px-3 py-2.5 text-right text-[11px] text-muted-foreground tabular-nums">{c.created_at ? new Date(c.created_at).toLocaleDateString() : "—"}</td>
