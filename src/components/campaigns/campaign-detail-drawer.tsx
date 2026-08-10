@@ -12,6 +12,15 @@ import type { CampaignData } from "@/lib/hooks/use-campaigns";
 const STAGE_OPTIONS = ["Main", "Nurture 1", "Nurture 2", "Nurture 3", "Nurture 4", "Nurture 5"];
 const fetcher = (url: string) => fetch(url).then((r) => r.json());
 const fmtDate = (d?: string | null) => (d ? new Date(d).toLocaleDateString() : "—");
+// Build period is 8 full days from the client start date (§7).
+function buildPeriodDay(start?: string | null): string {
+  if (!start) return "—";
+  const d = new Date(start);
+  if (Number.isNaN(d.getTime())) return "—";
+  const days = Math.floor((Date.now() - d.getTime()) / 86400000) + 1;
+  if (days < 1) return "not started";
+  return days <= 8 ? `Day ${days} / 8` : "complete";
+}
 
 interface Ev { id: number; event_type: string; detail: string | null; actor: string | null; created_at: string }
 
@@ -76,6 +85,7 @@ export function CampaignDetailDrawer({ campaign, clientTags, onClose, onSaved }:
             <Info label="Completion" value={`${(c.completion_percentage || 0).toFixed(0)}%`} />
             <Info label="Client start" value={fmtDate(c.client_start_date)} />
             <Info label="Go-live" value={fmtDate(c.go_live_date)} />
+            <Info label="Build-period day" value={buildPeriodDay(c.client_start_date)} />
             <Info label="Started sending" value={fmtDate(c.first_sending_at)} />
             <Info label="Senders" value={c.sender_count ?? "—"} />
             <Info label="Leads" value={`${(c.total_leads_contacted || 0).toLocaleString()} / ${(c.total_leads || 0).toLocaleString()}`} />

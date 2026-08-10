@@ -1,6 +1,7 @@
 "use client";
 
 import { useMemo, useState, useRef, useEffect, useCallback } from "react";
+import useSWR from "swr";
 import { Send, Search, X, RefreshCw, Loader2, Check, ChevronDown, Play, Pause, Archive, Copy, ArrowUpDown, CalendarClock, PanelRight } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useAuth } from "@/lib/auth-context";
@@ -16,12 +17,13 @@ import { CampaignDetailDrawer } from "./campaign-detail-drawer";
 const keyOf = (c: CampaignData) => `${c.instance}:${c.id}`;
 const replyRate = (c: CampaignData) => (c.total_leads_contacted > 0 ? (c.unique_replies / c.total_leads_contacted) * 100 : 0);
 
-type SortKey = "campaign" | "stage" | "class" | "instance" | "status" | "remaining" | "leads" | "completion" | "senders" | "schedule" | "reply" | "start" | "golive" | "created";
+type SortKey = "campaign" | "stage" | "class" | "group" | "instance" | "status" | "remaining" | "leads" | "completion" | "senders" | "schedule" | "reply" | "start" | "golive" | "created";
 function compareBy(a: CampaignData, b: CampaignData, key: SortKey): number {
   switch (key) {
     case "campaign": return a.name.localeCompare(b.name);
     case "stage": return stageOrder(a.effective_stage || "") - stageOrder(b.effective_stage || "");
     case "class": return (a.classification || "").localeCompare(b.classification || "");
+    case "group": return (a.group || 0) - (b.group || 0);
     case "instance": return a.instance.localeCompare(b.instance);
     case "status": return a.status.localeCompare(b.status);
     case "remaining": return (a.remaining_leads || 0) - (b.remaining_leads || 0);
@@ -84,6 +86,9 @@ export function MasterGrid() {
   const isAdmin = role === "admin";
   const { instancesQuery } = useInstance();
   const { campaigns, activeClients, isLoading, mutate } = useCampaigns(instancesQuery);
+  const { data: dupStatus } = useSWR<{ totals: { queued: number; duplicating: number; failed: number; blocked: number } }>("/api/campaigns/duplicate", (u: string) => fetch(u).then((r) => r.json()), { refreshInterval: 15000 });
+  const dupQueued = (dupStatus?.totals?.queued ?? 0) + (dupStatus?.totals?.duplicating ?? 0);
+  const dupFailed = (dupStatus?.totals?.failed ?? 0) + (dupStatus?.totals?.blocked ?? 0);
 
   const [search, setSearch] = useState("");
   const [stages, setStages] = useState<Set<string>>(new Set(["Main"])); // default: Main only
@@ -205,12 +210,14 @@ export function MasterGrid() {
       {isAdmin && <DuplicationQueuePanel />}
 
       {/* Summary chips */}
-      <div className="grid grid-cols-2 sm:grid-cols-5 gap-2">
+      <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-7 gap-2">
         <StatCard label="Campaigns" value={summary.total} />
         <StatCard label="Active" value={summary.active} accent="emerald" />
         <StatCard label="Main" value={summary.main} accent="primary" />
         <StatCard label="Nurture" value={summary.nurture} accent="violet" />
         <StatCard label="Remaining leads" value={summary.remaining.toLocaleString()} />
+        <StatCard label="Dup queued" value={dupQueued} accent={dupQueued > 0 ? "primary" : undefined} />
+        <StatCard label="Dup failed" value={dupFailed} accent={dupFailed > 0 ? "red" : undefined} />
       </div>
 
       {/* Toolbar */}
@@ -296,6 +303,7 @@ export function MasterGrid() {
                   <STh label="Campaign" k="campaign" sk={sortKey} sd={sortDir} on={toggleSort} />
                   <STh label="Stage" k="stage" sk={sortKey} sd={sortDir} on={toggleSort} w="w-[100px]" />
                   <STh label="Class" k="class" sk={sortKey} sd={sortDir} on={toggleSort} w="w-[110px]" />
+                  <STh label="Group" k="group" sk={sortKey} sd={sortDir} on={toggleSort} w="w-[70px]" />
                   <STh label="Instance" k="instance" sk={sortKey} sd={sortDir} on={toggleSort} w="w-[90px]" />
                   <STh label="Status" k="status" sk={sortKey} sd={sortDir} on={toggleSort} w="w-[100px]" />
                   <STh label="Remaining" k="remaining" sk={sortKey} sd={sortDir} on={toggleSort} align="right" w="w-[90px]" />
@@ -353,6 +361,7 @@ function Row({ c, selected, onMouseDown, onMouseEnter, onOpen }: { c: CampaignDa
         </span>
       </td>
       <td className="px-3 py-2.5 text-[11px] text-muted-foreground">{c.classification || "—"}</td>
+      <td className="px-3 py-2.5 text-[11px] text-muted-foreground">{c.group ? `G${c.group}` : "—"}</td>
       <td className="px-3 py-2.5"><span className="inline-flex items-center rounded-md border bg-muted/40 px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground">{INSTANCE_SHORT_LABELS[c.instance] || c.instance}</span></td>
       <td className="px-3 py-2.5"><span className={`inline-flex items-center rounded-md border px-1.5 py-0.5 text-[10px] font-medium capitalize ${STATUS_BADGE[c.status] || "bg-muted text-muted-foreground border-border"}`}>{c.status}</span></td>
       <td className="px-3 py-2.5 text-right tabular-nums">{(c.remaining_leads || 0).toLocaleString()}</td>
@@ -407,8 +416,8 @@ function Select({ value, onChange, options }: { value: string; onChange: (v: str
   );
 }
 
-function StatCard({ label, value, accent }: { label: string; value: string | number; accent?: "emerald" | "violet" | "primary" }) {
-  const color = accent === "emerald" ? "text-emerald-500" : accent === "violet" ? "text-violet-500" : accent === "primary" ? "text-primary" : "text-foreground";
+function StatCard({ label, value, accent }: { label: string; value: string | number; accent?: "emerald" | "violet" | "primary" | "red" }) {
+  const color = accent === "emerald" ? "text-emerald-500" : accent === "violet" ? "text-violet-500" : accent === "primary" ? "text-primary" : accent === "red" ? "text-destructive" : "text-foreground";
   return (
     <div className="rounded-xl border bg-card px-3 py-2">
       <p className="text-[10px] uppercase tracking-wide text-muted-foreground">{label}</p>

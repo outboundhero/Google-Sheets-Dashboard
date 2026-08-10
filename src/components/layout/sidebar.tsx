@@ -81,6 +81,7 @@ const allNavItems: NavEntry[] = [
     roles: ["admin"],
     children: [
       { href: "/campaigns", label: "Master Grid", icon: LayoutGrid, roles: ["admin"] },
+      { href: "/campaigns/summary", label: "By Client", icon: Users, roles: ["admin"] },
       { href: "/campaigns/remaining-leads", label: "Remaining Leads", icon: Gauge, roles: ["admin"] },
     ],
   },
