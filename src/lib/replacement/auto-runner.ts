@@ -85,14 +85,23 @@ export async function runAutoReplacement(
       .map((e) => `${e.clientTag}|${e.instance}`),
   );
 
-  // most replacement-ready first, then alphabetical — deterministic queue
+  // groups whose add-chain ran recently (tagged event) — an interrupted run
+  // that still owes its removals resumes BEFORE fresh clients get a slot
+  const recentlyTagged = new Set(
+    recentEvents
+      .filter((e) => e.clientTag && e.instance && e.eventType === "tagged" && new Date(e.createdAt).getTime() >= cutoff)
+      .map((e) => `${e.clientTag}|${e.instance}`),
+  );
+
+  // resume-first, then most replacement-ready, then alphabetical — deterministic
   const ordered = [...groups.entries()]
     .map(([key, items]) => {
       const [clientTag, instance] = key.split("|");
       const ready = items.filter((i) => !i.removeOnly && i.blockers.length === 0 && i.replacementDomain);
-      return { key, clientTag, instance, items, ready };
+      const resume = ready.length === 0 && items.every((i) => i.removeOnly) && recentlyTagged.has(key);
+      return { key, clientTag, instance, items, ready, resume };
     })
-    .sort((a, b) => b.ready.length - a.ready.length || a.clientTag.localeCompare(b.clientTag));
+    .sort((a, b) => Number(b.resume) - Number(a.resume) || b.ready.length - a.ready.length || a.clientTag.localeCompare(b.clientTag));
 
   for (const g of ordered) {
     result.candidates.push({
