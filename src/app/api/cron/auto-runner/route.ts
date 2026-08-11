@@ -1,7 +1,9 @@
 import { NextResponse } from "next/server";
 import { runAutoReplacement } from "@/lib/replacement/auto-runner";
 
-export const maxDuration = 300;
+// 800s (Fluid compute max): a big client = tag ~1k inboxes + 10-15 campaign
+// attaches + removal discovery — run #1 (CWSV) died at 300s mid-chain.
+export const maxDuration = 800;
 
 // GET /api/cron/auto-runner — executes the replacement plan WITHOUT a click,
 // but ONLY while the guardrail Mode on /replacement is "auto" (observe/confirm

@@ -71,12 +71,17 @@ export async function runAutoReplacement(
     groups.get(k)!.push(it);
   }
 
-  // clients touched by ANY execution in the last RECENT_HOURS (manual or auto)
+  // Clients whose run COMPLETED in the last RECENT_HOURS. Completion marker =
+  // a "removed" event (the remove chain is the final step of every group) or
+  // "skipped" (churn blackout). Runs that died mid-way (function timeout)
+  // leave neither, so the next tick resumes them — every step is idempotent
+  // (re-tag is a no-op, attach filters already-attached server-side).
   const recentEvents = await getEvents(1000, { withinDays: 1 });
   const cutoff = Date.now() - RECENT_HOURS * 3600_000;
   const ranRecently = new Set(
     recentEvents
-      .filter((e) => e.clientTag && e.instance && new Date(e.createdAt).getTime() >= cutoff)
+      .filter((e) => e.clientTag && e.instance && new Date(e.createdAt).getTime() >= cutoff
+        && (e.eventType === "removed" || e.eventType === "skipped"))
       .map((e) => `${e.clientTag}|${e.instance}`),
   );
 
@@ -106,8 +111,14 @@ export async function runAutoReplacement(
       result.skipped.push({ clientTag: g.clientTag, instance: g.instance, reason: `executed within last ${RECENT_HOURS}h` });
       continue;
     }
-    if (g.ready.length === 0) {
-      result.skipped.push({ clientTag: g.clientTag, instance: g.instance, reason: "no ready replacements (remove-only/blocked) — run manually" });
+    // Runnable: has ready replacements, OR is purely remove-only (every burnt
+    // domain is at/over cap — removal never drops the client below cap, and
+    // this is how an interrupted run finishes its removals next tick). Clients
+    // with BLOCKED below-cap replacements stay manual: auto never strips
+    // capacity without giving back.
+    const allRemoveOnly = g.items.every((i) => i.removeOnly);
+    if (g.ready.length === 0 && !allRemoveOnly) {
+      result.skipped.push({ clientTag: g.clientTag, instance: g.instance, reason: "no ready replacements (blocked) — run manually" });
       continue;
     }
     slots--;
