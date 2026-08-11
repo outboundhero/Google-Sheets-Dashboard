@@ -47,6 +47,8 @@
 
     { "path": "/api/cron/fire-scheduled-cancellations",    "schedule": "*/15 * * * *" },
 
+    { "path": "/api/cron/replacement-cancel-bridge",       "schedule": "50 * * * *" },
+
     { "path": "/api/cron/mrl-pace-check",                  "schedule": "0 16 * * *" },
 
     { "path": "/api/cron/daily-account-status-report",     "schedule": "55 7 * * *" },

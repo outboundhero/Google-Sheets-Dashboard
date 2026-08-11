@@ -28,11 +28,20 @@ export function RedirectIssuesCard() {
 
   const load = useCallback(async () => {
     setLoading(true); setError(null);
-    try {
-      const res = await fetch("/api/replacement/redirect-audit", { cache: "no-store" });
-      const d = await res.json();
-      if (res.ok) setData(d); else setError(d.error || "Failed to load");
-    } catch { setError("Failed to load"); }
+    // auto-retry transient failures (network drop / function timeout) before
+    // surfacing an error — and the error strip below has its own Retry button
+    let lastErr = "Failed to load";
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        const res = await fetch("/api/replacement/redirect-audit", { cache: "no-store" });
+        const d = await res.json().catch(() => null);
+        if (res.ok && d) { setData(d); setLoading(false); return; }
+        lastErr = d?.error || (res.status >= 500 ? "server timed out — the sheet read can be slow" : `HTTP ${res.status}`);
+        if (res.status < 500) break;
+      } catch { lastErr = "network error / request aborted"; }
+      if (attempt < 2) await new Promise((r) => setTimeout(r, 2000 * (attempt + 1)));
+    }
+    setError(`${lastErr} (retried 3×)`);
     setLoading(false);
   }, []);
   useEffect(() => { load(); }, [load]);
@@ -134,7 +143,14 @@ export function RedirectIssuesCard() {
           </Button>
         </div>
 
-        {error && <div className="flex items-center gap-2 text-sm text-destructive"><AlertTriangle className="h-4 w-4" />{error}</div>}
+        {error && (
+          <div className="flex items-center gap-2 text-sm text-destructive">
+            <AlertTriangle className="h-4 w-4" />{error}
+            <button onClick={load} disabled={loading} className="text-xs rounded border border-destructive/40 px-2 py-0.5 hover:bg-destructive/10 disabled:opacity-50">
+              Retry
+            </button>
+          </div>
+        )}
 
         {data && (
           total === 0 ? (
