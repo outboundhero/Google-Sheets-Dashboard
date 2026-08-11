@@ -98,7 +98,9 @@ export async function runAutoReplacement(
     .map(([key, items]) => {
       const [clientTag, instance] = key.split("|");
       const ready = items.filter((i) => !i.removeOnly && i.blockers.length === 0 && i.replacementDomain);
-      const resume = ready.length === 0 && items.every((i) => i.removeOnly) && recentlyTagged.has(key);
+      // touched recently (tagged) but never completed (no removed/skipped event)
+      // = an interrupted run — finish it before giving fresh clients a slot
+      const resume = recentlyTagged.has(key) && !ranRecently.has(key);
       return { key, clientTag, instance, items, ready, resume };
     })
     .sort((a, b) => Number(b.resume) - Number(a.resume) || b.ready.length - a.ready.length || a.clientTag.localeCompare(b.clientTag));
