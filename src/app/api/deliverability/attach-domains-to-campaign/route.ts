@@ -38,7 +38,7 @@ async function attachIds(
   instance: BisonInstanceSlug,
   campaignId: number,
   ids: number[],
-): Promise<{ attached: number; fails: Fail[] }> {
+): Promise<{ attached: number; fails: Fail[]; campaignMissing?: boolean }> {
   if (ids.length === 0) return { attached: 0, fails: [] };
 
   let status = 0;
@@ -71,6 +71,15 @@ async function attachIds(
   if (transient) {
     const reason = classifyReason(status, body);
     return { attached: 0, fails: ids.map((id) => ({ id, reason, retryable: true })) };
+  }
+
+  // The CAMPAIGN itself is gone from Bison ("Record not found" +
+  // record_not_found.campaign) — not an inbox problem. Report it as such
+  // instead of bisecting hundreds of healthy inboxes one by one (IJSD/ABM
+  // 2026-08-11: 735 inboxes misreported as "disconnected" against a deleted
+  // "Gmail + Others [Nurture]" campaign).
+  if (body.includes('"record_not_found"')) {
+    return { attached: 0, fails: [], campaignMissing: true };
   }
 
   // Permanent failure. One ID → terminal; many → bisect to find the bad ones.
@@ -143,6 +152,25 @@ export async function POST(request: Request) {
       return NextResponse.json({ total_matched: 0, already_attached: 0, newly_attached: 0 });
     }
 
+    // Campaign deleted in Bison → prune the stale local row (so plans and the
+    // campaign map stop offering it) and report campaign_missing — the caller
+    // treats this as a skip, not an inbox failure.
+    const pruneDeletedCampaign = async () => {
+      await supabase.from("campaigns").delete().eq("instance", instance).eq("id", campaign_id);
+      console.warn(`[ATTACH-DOMAIN:${instance}] Campaign ${campaign_id} no longer exists in Bison — pruned local row`);
+      return NextResponse.json({
+        campaign_missing: true,
+        total_matched: allInboxIds.length,
+        already_attached: 0,
+        newly_attached: 0,
+        failed: 0,
+        rateLimited: 0,
+        failedInboxes: [],
+        note: "campaign no longer exists in Bison — pruned from local campaigns",
+        instance,
+      });
+    };
+
     // 2. Get already-attached sender emails for this campaign
     const alreadyAttached = new Set<number>();
     let page = 1;
@@ -151,7 +179,11 @@ export async function POST(request: Request) {
         instance,
         `/campaigns/${campaign_id}/sender-emails?page=${page}&per_page=100`,
       );
-      if (!res.ok) break;
+      if (!res.ok) {
+        const t = await res.text().catch(() => "");
+        if (t.includes('"record_not_found"')) return await pruneDeletedCampaign();
+        break;
+      }
       const json = await res.json();
       const data = json.data || [];
       for (const item of data) alreadyAttached.add(item.id);
@@ -172,6 +204,7 @@ export async function POST(request: Request) {
     for (let i = 0; i < newIds.length; i += ATTACH_BATCH) {
       const batch = newIds.slice(i, i + ATTACH_BATCH);
       const r = await attachIds(instance, campaign_id, batch);
+      if (r.campaignMissing) return await pruneDeletedCampaign();
       attached += r.attached;
       fails.push(...r.fails);
       if (i + ATTACH_BATCH < newIds.length) await delay(300);

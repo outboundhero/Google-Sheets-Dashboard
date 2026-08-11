@@ -81,7 +81,10 @@ export async function runAutoReplacement(
   const ranRecently = new Set(
     recentEvents
       .filter((e) => e.clientTag && e.instance && new Date(e.createdAt).getTime() >= cutoff
-        && (e.eventType === "removed" || e.eventType === "skipped"))
+        && (e.eventType === "removed"
+          // whole-client skip (churn blackout) — NOT the per-campaign
+          // "pruned stale campaign" skip the attach step can emit mid-run
+          || (e.eventType === "skipped" && (e.detail || "").includes("churn blackout"))))
       .map((e) => `${e.clientTag}|${e.instance}`),
   );
 

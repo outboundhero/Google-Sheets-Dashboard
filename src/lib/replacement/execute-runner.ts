@@ -277,6 +277,7 @@ export async function runExecution(
 
     type AttachData = {
       newly_attached?: number; failed?: number; rateLimited?: number;
+      campaign_missing?: boolean;   // campaign deleted in Bison — route pruned the stale local row
       failedInboxes?: { email: string; domain: string; reason: string; retryable?: boolean }[];
     };
     for (const c of targetCampaigns) {
@@ -294,6 +295,14 @@ export async function runExecution(
         const retry = await callJson(`/api/deliverability/attach-domains-to-campaign?instance=${instance}`, { campaign_id: c.id, domains: replacementDomains });
         if (!retry.ok) break;
         aRes = retry; d = (retry.data || {}) as AttachData;
+      }
+
+      // Campaign no longer exists in Bison (stale local row, now pruned by the
+      // route) — a skip, not a failure: no Slack alert, no retry payload.
+      if (d.campaign_missing) {
+        setStep(`attach:${c.id}`, { state: "skipped", note: "campaign deleted in Bison — pruned from the plan" });
+        record({ events: [{ instance, clientTag, eventType: "skipped", detail: `"${c.name}" no longer exists in Bison — pruned stale campaign` }] });
+        continue;
       }
 
       const attachRetry: RetryPayload = { step: "attach", instance, clientTag, domains: replacementDomains, campaignId: c.id, campaignName: c.name };
