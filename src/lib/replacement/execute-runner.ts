@@ -53,11 +53,17 @@ const RETRYABLE_RE = /rate.?limit|429|too many|server error|5\d\d|network|timeou
 const backoff = (pass: number) => Math.min(5000 * 2 ** pass, 30_000);
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-async function callJson(url: string, body: unknown, retries = RETRY): Promise<{ ok: boolean; data: unknown; error?: string }> {
+// fetch is injectable so the auto-runner cron can run this SAME flow server-side
+// by dispatching these paths straight to the route handlers (no session, no
+// logic fork). Browser callers keep the global fetch.
+export type FetchLike = (input: string, init?: RequestInit) => Promise<Response>;
+const defaultFetch: FetchLike = (input, init) => fetch(input, init);
+
+async function callJsonWith(f: FetchLike, url: string, body: unknown, retries = RETRY): Promise<{ ok: boolean; data: unknown; error?: string }> {
   let lastErr = "";
   for (let i = 0; i < retries; i++) {
     try {
-      const res = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+      const res = await f(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
       const text = await res.text();
       let data: unknown = null;
       try { data = text ? JSON.parse(text) : null; } catch { lastErr = "non-JSON response"; if (i < retries - 1) { await sleep(800 * (i + 1)); continue; } return { ok: false, data: null, error: lastErr }; }
@@ -73,18 +79,25 @@ async function callJson(url: string, body: unknown, retries = RETRY): Promise<{ 
   return { ok: false, data: null, error: lastErr };
 }
 
-const record = (payload: unknown) =>
-  fetch("/api/replacement/record", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) }).catch(() => {});
+const recordWith = (f: FetchLike, payload: unknown) =>
+  f("/api/replacement/record", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) }).catch(() => {});
 
 /** Run the execution for one client. `emit` is called with a fresh steps array
  *  on every change. Resolves with ok=false if any step failed. */
-export async function runExecution(inp: ExecuteInputs, emit: (steps: ExecStep[]) => void): Promise<{ ok: boolean }> {
+export async function runExecution(
+  inp: ExecuteInputs,
+  emit: (steps: ExecStep[]) => void,
+  opts: { fetchImpl?: FetchLike; moveDeadlineMs?: number } = {},
+): Promise<{ ok: boolean }> {
+  const f = opts.fetchImpl ?? defaultFetch;
+  const callJson = (url: string, body: unknown, retries = RETRY) => callJsonWith(f, url, body, retries);
+  const record = (payload: unknown) => recordWith(f, payload);
   const { clientTag, instance, instancesQuery, redirectUrl, targetCampaigns, replacementDomains, removeDomains } = inp;
 
   // Churn blackout (Spencer 2026-08-06): never run replacement within 5 days of
   // a client's churn date (or after it). Single chokepoint — blocks every path.
   try {
-    const g = await fetch(`/api/replacement/churn-guard?clientTag=${encodeURIComponent(clientTag)}`);
+    const g = await f(`/api/replacement/churn-guard?clientTag=${encodeURIComponent(clientTag)}`);
     const guard = (await g.json().catch(() => null)) as { blocked?: boolean; reason?: string } | null;
     if (guard?.blocked) {
       const blocked: ExecStep = {
@@ -156,7 +169,7 @@ export async function runExecution(inp: ExecuteInputs, emit: (steps: ExecStep[])
         else failedMoves.push(r.domain);
       }
     }
-    const moveDeadline = Date.now() + 10 * 60 * 1000;
+    const moveDeadline = Date.now() + (opts.moveDeadlineMs ?? 10 * 60 * 1000);
     while (inflight.length > 0 && Date.now() < moveDeadline) {
       await sleep(12_000);
       const pr = await callJson("/api/deliverability/move-domains", { mode: "poll", dryRun: false, inflight, targetInstance: instance });
@@ -286,7 +299,7 @@ export async function runExecution(inp: ExecuteInputs, emit: (steps: ExecStep[])
       const attachRetry: RetryPayload = { step: "attach", instance, clientTag, domains: replacementDomains, campaignId: c.id, campaignName: c.name };
       // report the outcome — server defers an 8h re-attach when the campaign is
       // queued/launching (Bison ignores adds then), or on failure/rate-limits
-      fetch("/api/replacement/attach-queue", {
+      f("/api/replacement/attach-queue", {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ instance, campaignId: c.id, campaignName: c.name, clientTag, domains: replacementDomains, ok: aRes.ok, remainingRateLimited: d.rateLimited ?? 0 }),
       }).catch(() => {});
@@ -362,7 +375,7 @@ export async function runExecution(inp: ExecuteInputs, emit: (steps: ExecStep[])
   // the "Failed steps" card replays the stored payloads; Slack only alerts).
   const failures = steps.filter((s) => s.state === "failed" || s.state === "degraded");
   if (failures.length > 0) {
-    fetch("/api/replacement/notify-failure", {
+    f("/api/replacement/notify-failure", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ clientTag, instance, steps: failures.map((s) => ({ label: s.label, state: s.state, note: s.note })) }),

@@ -463,7 +463,7 @@ export default function ReplacementPage() {
                   >
                     <option value="observe">observe (safe)</option>
                     <option value="confirm">confirm</option>
-                    <option value="auto">auto</option>
+                    <option value="auto">auto (cron executes plan)</option>
                   </select>
                 </label>
               </div>
