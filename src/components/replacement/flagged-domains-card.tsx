@@ -331,7 +331,7 @@ export function FlaggedDomainsCard() {
 
             {/* the table */}
             <div className="rounded-lg border max-h-[520px] overflow-y-auto select-none">
-              <div className="grid grid-cols-[minmax(180px,1.2fr)_70px_65px_minmax(170px,1.3fr)_65px_60px_60px_60px_78px_minmax(200px,1.6fr)] gap-2 px-3 py-2 text-[11px] text-muted-foreground bg-muted/40 sticky top-0 z-10">
+              <div className="grid grid-cols-[minmax(180px,1.2fr)_70px_65px_minmax(170px,1.3fr)_65px_60px_60px_60px_78px_minmax(200px,1.6fr)] gap-2 px-3 py-2 text-[11px] text-muted-foreground font-medium bg-secondary sticky top-0 z-10">
                 {th("Domain", "domain")}
                 {th("Tag", "tag")}
                 {th("Inst", "instance")}
