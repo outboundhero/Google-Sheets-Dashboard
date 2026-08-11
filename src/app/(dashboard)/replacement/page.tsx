@@ -10,7 +10,7 @@ import { useAuth } from "@/lib/auth-context";
 import { ExecuteDialog } from "@/components/replacement/execute-dialog";
 import { ThresholdGroupsEditor } from "@/components/replacement/threshold-groups-editor";
 import { GroupPlanCard } from "@/components/replacement/group-plan-card";
-import { SkipCard } from "@/components/replacement/skip-card";
+import { FlaggedDomainsCard } from "@/components/replacement/flagged-domains-card";
 import { ShortfallCard } from "@/components/replacement/shortfall-card";
 import { WrongInstanceCard } from "@/components/replacement/wrong-instance-card";
 import { DailyReportCard } from "@/components/replacement/daily-report-card";
@@ -25,31 +25,7 @@ import type { ReplacementSettings, LookbackWindow } from "@/lib/replacement/type
 import { inboxingConnectionFor } from "@/lib/replacement/inboxing-connections";
 import type { BisonInstanceSlug } from "@/lib/bison-instances";
 
-interface Candidate {
-  instance: string;
-  domain: string;
-  totalSent: number;
-  replyRate: number | null;
-  bounceRate: number | null;
-  signalsHit: string[];
-  reasons: string[];
-}
-interface DetectResponse {
-  mode: string;
-  scanned: number;
-  flaggedCount: number;
-  byInstance: Record<string, number>;
-  candidates: Candidate[];
-}
-
 interface CampaignRef { id: number; name: string; status: string }
-interface CampaignMatch { clientTag: string; instance: string; eligible: CampaignRef[]; excluded: CampaignRef[] }
-interface CampaignMapResponse {
-  matches: CampaignMatch[];
-  blankTagCount: number;
-  statusDistribution: Record<string, number>;
-  totalCampaigns: number;
-}
 
 interface PlanItem {
   burntDomain: string;
@@ -237,11 +213,7 @@ export default function ReplacementPage() {
   const [settings, setSettings] = useState<ReplacementSettings | null>(null);
   const [saving, setSaving] = useState(false);
   const [savedAt, setSavedAt] = useState<number | null>(null);
-  const [preview, setPreview] = useState<DetectResponse | null>(null);
-  const [running, setRunning] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [campaignMap, setCampaignMap] = useState<CampaignMapResponse | null>(null);
-  const [loadingMap, setLoadingMap] = useState(false);
   const [plan, setPlan] = useState<PlanResponse | null>(null);
   const [loadingPlan, setLoadingPlan] = useState(false);
   const [infoMode, setInfoMode] = useState(false);
@@ -290,28 +262,6 @@ export default function ReplacementPage() {
       else setError(data.error || "Save failed");
     } catch { setError("Save failed"); }
     setSaving(false);
-  };
-
-  const runPreview = async () => {
-    setRunning(true); setError(null);
-    try {
-      const res = await fetch("/api/replacement/detect", { cache: "no-store" });
-      const data = await res.json();
-      if (res.ok) setPreview(data);
-      else setError(data.error || "Preview failed");
-    } catch { setError("Preview failed"); }
-    setRunning(false);
-  };
-
-  const loadCampaignMap = async () => {
-    setLoadingMap(true); setError(null);
-    try {
-      const res = await fetch("/api/replacement/campaign-map", { cache: "no-store" });
-      const data = await res.json();
-      if (res.ok) setCampaignMap(data);
-      else setError(data.error || "Campaign map failed");
-    } catch { setError("Campaign map failed"); }
-    setLoadingMap(false);
   };
 
   const loadActivity = async (archive = false) => {
@@ -487,8 +437,8 @@ export default function ReplacementPage() {
       {/* Group-driven replacement plan (observe) — same plan, groups decide burnt */}
       <GroupPlanCard />
 
-      {/* Skip / Unflag — Spencer's false-positive guard (precondition for auto mode) */}
-      <SkipCard />
+      {/* Flagged domains — reason-first table w/ drag-select bulk Skip + skipped queue */}
+      <FlaggedDomainsCard />
 
       {/* Tier-aware shortfall — how many domains to add per b2b/b2c instance per tag */}
       <ShortfallCard />
@@ -514,104 +464,6 @@ export default function ReplacementPage() {
       <WarmupForecastCard />
 
       <GoingLiveCard />
-
-      {/* Observe-only preview */}
-      <Card>
-        <CardContent className="p-5 space-y-4">
-          <div className="flex items-center justify-between">
-            <div className="text-sm font-medium">Preview — domains that would be flagged</div>
-            <Button size="sm" variant="outline" onClick={runPreview} disabled={running} className="gap-2">
-              <RefreshCw className={`h-4 w-4 ${running ? "animate-spin" : ""}`} />
-              {running ? "Scanning…" : "Run preview"}
-            </Button>
-          </div>
-
-          {preview && (
-            <div className="flex flex-wrap gap-4 text-sm">
-              <span className="text-muted-foreground">Scanned <b className="text-foreground">{preview.scanned.toLocaleString()}</b></span>
-              <span className="text-muted-foreground">Would flag <b className="text-amber-500">{preview.flaggedCount.toLocaleString()}</b></span>
-              {Object.entries(preview.byInstance).map(([inst, n]) => (
-                <span key={inst} className="text-muted-foreground">{inst}: <b className="text-foreground">{n}</b></span>
-              ))}
-            </div>
-          )}
-
-          {preview && preview.candidates.length > 0 && (
-            <div className="rounded-lg border divide-y max-h-[420px] overflow-y-auto">
-              <div className="grid grid-cols-[1fr_110px_70px_70px_70px_1.4fr] gap-2 px-3 py-2 text-[11px] text-muted-foreground font-medium bg-muted/30 sticky top-0">
-                <span>Domain</span><span>Instance</span><span className="text-center">Sent</span>
-                <span className="text-center">Reply</span><span className="text-center">Bounce</span><span>Why</span>
-              </div>
-              {preview.candidates.map((c) => (
-                <div key={`${c.instance}:${c.domain}`} className="grid grid-cols-[1fr_110px_70px_70px_70px_1.4fr] gap-2 px-3 py-2 text-xs items-center">
-                  <span className="font-medium truncate">{c.domain}</span>
-                  <span className="text-muted-foreground">{c.instance}</span>
-                  <span className="text-center tabular-nums">{c.totalSent.toLocaleString()}</span>
-                  <span className="text-center tabular-nums">{c.replyRate != null ? `${c.replyRate}%` : "—"}</span>
-                  <span className="text-center tabular-nums">{c.bounceRate != null ? `${c.bounceRate}%` : "—"}</span>
-                  <span className="text-muted-foreground truncate" title={c.reasons.join(" · ")}>{c.reasons.join(" · ")}</span>
-                </div>
-              ))}
-            </div>
-          )}
-          {preview && preview.candidates.length === 0 && (
-            <p className="text-sm text-muted-foreground">No domains match the current guardrails.</p>
-          )}
-        </CardContent>
-      </Card>
-
-      {/* Campaign match — which campaigns a replacement would attach to */}
-      <Card>
-        <CardContent className="p-5 space-y-4">
-          <div className="flex items-center justify-between">
-            <div>
-              <div className="text-sm font-medium">Campaign match — where replacements would attach</div>
-              <div className="text-[11px] text-muted-foreground">Eligible = active · draft · launching · launch processing · paused (not failed/completed/archived)</div>
-            </div>
-            <Button size="sm" variant="outline" onClick={loadCampaignMap} disabled={loadingMap} className="gap-2">
-              <RefreshCw className={`h-4 w-4 ${loadingMap ? "animate-spin" : ""}`} />
-              {loadingMap ? "Loading…" : "Load campaign map"}
-            </Button>
-          </div>
-
-          {campaignMap && (
-            <>
-              <div className="flex flex-wrap gap-4 text-sm">
-                <span className="text-muted-foreground">Campaigns <b className="text-foreground">{campaignMap.totalCampaigns.toLocaleString()}</b></span>
-                <span className="text-muted-foreground">Client·instance pairs <b className="text-foreground">{campaignMap.matches.length}</b></span>
-                {campaignMap.blankTagCount > 0 && (
-                  <span className="text-amber-500">No tag prefix: <b>{campaignMap.blankTagCount}</b> (naming issue)</span>
-                )}
-              </div>
-              <div className="flex flex-wrap gap-2">
-                {Object.entries(campaignMap.statusDistribution).sort((a, b) => b[1] - a[1]).map(([s, n]) => (
-                  <Badge key={s} variant="outline" className={`text-[10px] ${["active","draft","launching","launch processing","paused"].includes(s) ? "border-emerald-500/30 text-emerald-500" : "text-muted-foreground"}`}>
-                    {s}: {n}
-                  </Badge>
-                ))}
-              </div>
-              <div className="rounded-lg border divide-y max-h-[420px] overflow-y-auto">
-                <div className="grid grid-cols-[90px_120px_1fr] gap-2 px-3 py-2 text-[11px] text-muted-foreground font-medium bg-muted/30 sticky top-0">
-                  <span>Client</span><span>Instance</span><span>Eligible campaigns (would attach)</span>
-                </div>
-                {campaignMap.matches.map((m) => (
-                  <div key={`${m.clientTag}:${m.instance}`} className="grid grid-cols-[90px_120px_1fr] gap-2 px-3 py-2 text-xs items-start">
-                    <span className="font-medium">{m.clientTag}</span>
-                    <span className="text-muted-foreground">{m.instance}</span>
-                    <span>
-                      {m.eligible.length === 0 ? (
-                        <span className="text-amber-500">none eligible{m.excluded.length > 0 ? ` (${m.excluded.length} excluded)` : ""}</span>
-                      ) : (
-                        <span className="text-muted-foreground">{m.eligible.map((c) => c.name).join(" · ")}</span>
-                      )}
-                    </span>
-                  </div>
-                ))}
-              </div>
-            </>
-          )}
-        </CardContent>
-      </Card>
 
       {/* Replacement plan — full proposed action per burnt domain (observe-only) */}
       <Card>

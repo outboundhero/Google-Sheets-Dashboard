@@ -12,6 +12,7 @@ import { evaluateSegments, type ThresholdConfig, type DomainMetrics } from "./th
 import { deriveCampaignMap, type CampaignRef } from "./campaigns";
 import { INSTANCE_CAP } from "./types";
 import { getSkipSet, skipKey } from "./skips";
+import { recordFirstFlagged } from "./first-flagged";
 
 // Cross-instance donor (Nick Aug-10): B2C instances with no local reserve pull
 // Inboxing-movable reserves from B2B #2. "For now" — single fixed donor.
@@ -257,8 +258,10 @@ export async function buildReplacementPlan(
   // health. Would-be-burnt skips are reported separately so the UI marks them.
   const skipSet = await getSkipSet();
   const skippedBurnt: NonNullable<PlanResult["skippedBurnt"]>[number][] = [];
+  const flaggedNow: { instance: string; domain: string }[] = [];
   const enriched: Enriched[] = domains.map((d) => {
     const v = burntVerdict(d);
+    if (v.burnt) flaggedNow.push({ instance: d.instance, domain: d.domain });
     const skipped = skipSet.has(skipKey(d.instance, d.domain));
     if (skipped && v.burnt) {
       skippedBurnt.push({ instance: d.instance, domain: d.domain, clientTag: clientTagOf(d.tags), reasons: v.reasons });
@@ -268,6 +271,10 @@ export async function buildReplacementPlan(
     const reasons = burnt ? v.reasons : (replaceable ? [".info domain (migration)"] : []);
     return { d, provider: providerOf(d), tag: clientTagOf(d.tags), burnt, replaceable, reasons };
   });
+  // remember WHEN each domain first entered the flagged system (insert-only,
+  // fail-open) — plan builds run from several daily crons, so the dates stay
+  // fresh even when no one opens the page
+  await recordFirstFlagged(flaggedNow);
 
   // 5) reserve-ready pools per (instance, provider) — consumable. Ready =
   //    unassigned (no client tag) + pure provider + Complete (>=21d) + SURBL &

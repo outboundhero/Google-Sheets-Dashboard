@@ -3,10 +3,12 @@
 // Segmented threshold-group editor. Renders the per-client-tag rule-sets Spencer
 // asked for: conditions AND'd inside a group, groups OR'd within a segment, and
 // segments keyed by client tag (default = commercial cleaning / janitorial).
-// Self-contained: reads/writes /api/replacement/threshold-groups and previews via
-// /api/replacement/detect-groups. Additive — does not touch the flat guardrails.
+// Spencer Aug-11: the config is STATIC (read-only summary) until "Edit groups";
+// segments/groups can be DUPLICATED (e.g. copy the cleaning defaults onto SC)
+// instead of rebuilding from scratch. The flagged-domain preview moved out to
+// the FlaggedDomainsCard — this card is configuration only.
 import { useState, useEffect } from "react";
-import { Plus, Trash2, RefreshCw, Loader2, Save, Power, RotateCcw, Layers } from "lucide-react";
+import { Plus, Trash2, Loader2, Save, Power, RotateCcw, Layers, Pencil, Copy, X } from "lucide-react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -37,15 +39,12 @@ const isBoolField = (f: MetricField) => f === "surbl" || f === "spamhaus";
 const isPercentField = (f: MetricField) => f.startsWith("reply") || f.startsWith("bounce");
 const uid = () => (typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `id-${Date.now()}-${Math.random()}`);
 
-interface GroupCandidate {
-  instance: string; domain: string; clientTag: string | null;
-  sent: number; reply_15: number | null; reply_30: number | null; bounce_30f15: number | null;
-  segmentName: string; groupName: string; reasons: string[];
-}
-interface PreviewResp {
-  enabled: boolean; scanned: number; flaggedCount: number;
-  byInstance: Record<string, number>; bySegment: Record<string, number>;
-  candidates: GroupCandidate[];
+/** One condition as compact text for the read-only view, e.g. "Reply rate 15d < 1.6%". */
+function condText(c: Condition): string {
+  const f = FIELD_OPTIONS.find((x) => x.value === c.field)?.label ?? c.field;
+  if (isBoolField(c.field)) return `${f} ${c.op === "is_true" ? "is listed" : "is clean"}`;
+  const op = NUM_OPS.find((o) => o.value === c.op)?.label ?? c.op;
+  return `${f} ${op} ${c.value ?? "—"}${isPercentField(c.field) ? "%" : ""}`;
 }
 
 export function ThresholdGroupsEditor() {
@@ -53,9 +52,8 @@ export function ThresholdGroupsEditor() {
   const [saving, setSaving] = useState(false);
   const [savedAt, setSavedAt] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [preview, setPreview] = useState<PreviewResp | null>(null);
-  const [previewing, setPreviewing] = useState(false);
-  const [open, setOpen] = useState(false);
+  const [open, setOpen] = useState(true);
+  const [editing, setEditing] = useState(false);
 
   useEffect(() => {
     fetch("/api/replacement/threshold-groups")
@@ -76,8 +74,39 @@ export function ThresholdGroupsEditor() {
     patchCfg((c) => ({ ...c, segments: [...c.segments, { id: uid(), name: "New segment", clientTags: [], isDefault: false, groups: [] }] }));
   const removeSegment = (segId: string) =>
     patchCfg((c) => ({ ...c, segments: c.segments.filter((s) => s.id !== segId) }));
+  // Duplicate a whole segment (deep copy, fresh ids) — Spencer: "duplicate this
+  // and put it over to SC ... then we can edit once we've already duplicated".
+  // Tags start blank so the copy can't shadow the source's tags by accident.
+  const duplicateSegment = (segId: string) => {
+    setEditing(true);
+    patchCfg((c) => {
+      const src = c.segments.find((s) => s.id === segId);
+      if (!src) return c;
+      const copy: ThresholdSegment = {
+        id: uid(),
+        name: `${src.name} (copy)`,
+        clientTags: [],
+        isDefault: false,
+        groups: src.groups.map((g) => ({ id: uid(), name: g.name, conditions: g.conditions.map((cd) => ({ ...cd })) })),
+      };
+      const idx = c.segments.findIndex((s) => s.id === segId);
+      const segments = [...c.segments];
+      segments.splice(idx + 1, 0, copy);
+      return { ...c, segments };
+    });
+  };
   const addGroup = (segId: string) =>
     patchSeg(segId, (s) => ({ ...s, groups: [...s.groups, { id: uid(), name: `Group ${s.groups.length + 1}`, conditions: [{ field: "sent", op: "gte", value: 500 }] }] }));
+  const duplicateGroup = (segId: string, grpId: string) =>
+    patchSeg(segId, (s) => {
+      const src = s.groups.find((g) => g.id === grpId);
+      if (!src) return s;
+      const copy: ConditionGroup = { id: uid(), name: `${src.name} (copy)`, conditions: src.conditions.map((cd) => ({ ...cd })) };
+      const idx = s.groups.findIndex((g) => g.id === grpId);
+      const groups = [...s.groups];
+      groups.splice(idx + 1, 0, copy);
+      return { ...s, groups };
+    });
   const removeGroup = (segId: string, grpId: string) =>
     patchSeg(segId, (s) => ({ ...s, groups: s.groups.filter((g) => g.id !== grpId) }));
   const addCondition = (segId: string, grpId: string) =>
@@ -113,7 +142,7 @@ export function ThresholdGroupsEditor() {
       });
       const d = await res.json();
       if (d?.error) throw new Error(d.error);
-      setCfg(d); setSavedAt(true); setTimeout(() => setSavedAt(false), 2500);
+      setCfg(d); setSavedAt(true); setEditing(false); setTimeout(() => setSavedAt(false), 2500);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Save failed");
     } finally {
@@ -121,24 +150,20 @@ export function ThresholdGroupsEditor() {
     }
   };
 
+  const cancelEdit = async () => {
+    setEditing(false); setError(null);
+    // discard unsaved changes — reload the stored config
+    try {
+      const res = await fetch("/api/replacement/threshold-groups");
+      const d = await res.json();
+      if (!d?.error) setCfg(d);
+    } catch { /* keep local state if the refetch fails */ }
+  };
+
   const resetDefaults = async () => {
     const res = await fetch("/api/replacement/threshold-groups?defaults=1");
     const d = await res.json();
     if (!d?.error) setCfg((c) => ({ ...d, enabled: c?.enabled ?? false }));
-  };
-
-  const runPreview = async () => {
-    setPreviewing(true); setError(null);
-    try {
-      const res = await fetch("/api/replacement/detect-groups");
-      const d = await res.json();
-      if (d?.error) throw new Error(d.error);
-      setPreview(d);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Preview failed");
-    } finally {
-      setPreviewing(false);
-    }
   };
 
   const opsFor = (f: MetricField) => (isBoolField(f) ? BOOL_OPS : NUM_OPS);
@@ -154,12 +179,11 @@ export function ThresholdGroupsEditor() {
               {cfg?.enabled ? "active" : "off"}
             </Badge>
           </button>
-          <div className="flex items-center gap-2">
-            <Button size="sm" variant="outline" onClick={runPreview} disabled={previewing} className="gap-2">
-              <RefreshCw className={`h-4 w-4 ${previewing ? "animate-spin" : ""}`} />
-              {previewing ? "Scanning…" : "Run group preview"}
+          {open && cfg && !editing && (
+            <Button size="sm" variant="outline" onClick={() => setEditing(true)} className="gap-2">
+              <Pencil className="h-3.5 w-3.5" /> Edit groups
             </Button>
-          </div>
+          )}
         </div>
 
         <p className="text-[11px] text-muted-foreground -mt-1">
@@ -170,7 +194,41 @@ export function ThresholdGroupsEditor() {
 
         {error && <div className="rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive">{error}</div>}
 
-        {open && cfg && (
+        {/* Read-only summary — the config stays static until "Edit groups". */}
+        {open && cfg && !editing && (
+          <div className="space-y-2">
+            {cfg.segments.map((seg) => (
+              <div key={seg.id} className="rounded-xl border p-3 bg-muted/20 space-y-1">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <span className="text-sm font-medium">{seg.name}</span>
+                  {seg.isDefault ? (
+                    <Badge variant="outline" className="border-sky-500/30 text-sky-500">default · cleaning/janitorial</Badge>
+                  ) : seg.clientTags.length > 0 ? (
+                    <Badge variant="outline">{seg.clientTags.join(", ")}</Badge>
+                  ) : (
+                    <Badge variant="outline" className="text-muted-foreground">no tags</Badge>
+                  )}
+                  <Button size="sm" variant="ghost" onClick={() => duplicateSegment(seg.id)} className="gap-1 h-6 px-2 text-[11px] text-muted-foreground ml-auto" title="Duplicate this segment (then edit the copy)">
+                    <Copy className="h-3 w-3" /> duplicate
+                  </Button>
+                </div>
+                {seg.groups.length === 0 ? (
+                  <div className="text-xs text-muted-foreground italic">No groups — this segment never triggers a replacement.</div>
+                ) : (
+                  seg.groups.map((g, gi) => (
+                    <div key={g.id} className="text-xs text-muted-foreground">
+                      {gi > 0 && <span className="font-semibold mr-1.5 text-[10px]">OR</span>}
+                      <span className="text-foreground font-medium">{g.name}:</span>{" "}
+                      {g.conditions.map(condText).join("  AND  ")}
+                    </div>
+                  ))
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+
+        {open && cfg && editing && (
           <div className="space-y-4">
             {cfg.segments.map((seg) => (
               <div key={seg.id} className="rounded-xl border p-4 space-y-3 bg-muted/20">
@@ -193,11 +251,16 @@ export function ThresholdGroupsEditor() {
                       />
                     </label>
                   )}
-                  {!seg.isDefault && (
-                    <Button size="sm" variant="ghost" onClick={() => removeSegment(seg.id)} className="text-destructive gap-1 ml-auto">
-                      <Trash2 className="h-3.5 w-3.5" /> segment
+                  <div className="flex items-center gap-1 ml-auto">
+                    <Button size="sm" variant="ghost" onClick={() => duplicateSegment(seg.id)} className="gap-1 text-muted-foreground" title="Duplicate this segment">
+                      <Copy className="h-3.5 w-3.5" /> duplicate
                     </Button>
-                  )}
+                    {!seg.isDefault && (
+                      <Button size="sm" variant="ghost" onClick={() => removeSegment(seg.id)} className="text-destructive gap-1">
+                        <Trash2 className="h-3.5 w-3.5" /> segment
+                      </Button>
+                    )}
+                  </div>
                 </div>
 
                 {seg.groups.length === 0 && (
@@ -214,6 +277,9 @@ export function ThresholdGroupsEditor() {
                           onChange={(e) => patchGrp(seg.id, g.id, (grp) => ({ ...grp, name: e.target.value }))}
                           className="text-xs font-medium px-2 py-1 rounded border bg-background flex-1"
                         />
+                        <Button size="sm" variant="ghost" onClick={() => duplicateGroup(seg.id, g.id)} className="text-muted-foreground h-7 px-2" title="Duplicate this group">
+                          <Copy className="h-3.5 w-3.5" />
+                        </Button>
                         <Button size="sm" variant="ghost" onClick={() => removeGroup(seg.id, g.id)} className="text-destructive h-7 px-2">
                           <Trash2 className="h-3.5 w-3.5" />
                         </Button>
@@ -282,62 +348,16 @@ export function ThresholdGroupsEditor() {
                   <Power className="h-3.5 w-3.5" /> {cfg.enabled ? "Groups ON" : "Groups OFF"}
                 </Button>
               </label>
+              <Button size="sm" variant="outline" onClick={cancelEdit} disabled={saving} className="gap-1.5">
+                <X className="h-3.5 w-3.5" /> Cancel
+              </Button>
               <Button size="sm" onClick={save} disabled={saving} className="gap-2">
                 {saving ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Save className="h-3.5 w-3.5" />} Save groups
               </Button>
-              {savedAt && <span className="text-xs text-emerald-500">Saved</span>}
             </div>
           </div>
         )}
-
-        {preview && (
-          <div className="space-y-2 pt-1">
-            {!preview.enabled ? (
-              <div className="text-xs text-muted-foreground italic">Groups are OFF — turn them on and save to preview.</div>
-            ) : (
-              <>
-                <div className="flex flex-wrap gap-4 text-sm">
-                  <span className="text-muted-foreground">Scanned <b className="text-foreground">{preview.scanned.toLocaleString()}</b></span>
-                  <span className="text-muted-foreground">Would flag <b className="text-amber-500">{preview.flaggedCount.toLocaleString()}</b></span>
-                  {Object.entries(preview.bySegment).map(([k, v]) => (
-                    <span key={k} className="text-muted-foreground">{k}: <b className="text-foreground">{v}</b></span>
-                  ))}
-                </div>
-                {preview.candidates.length > 0 && (
-                  <div className="overflow-x-auto rounded-lg border">
-                    <table className="w-full text-xs">
-                      <thead className="bg-muted/40 text-muted-foreground">
-                        <tr>
-                          <th className="text-left px-2 py-1.5">Domain</th>
-                          <th className="text-left px-2 py-1.5">Tag</th>
-                          <th className="text-left px-2 py-1.5">Segment · group</th>
-                          <th className="text-right px-2 py-1.5">Sent</th>
-                          <th className="text-right px-2 py-1.5">R15/30</th>
-                          <th className="text-left px-2 py-1.5">Why</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {preview.candidates.slice(0, 200).map((c) => (
-                          <tr key={`${c.instance}:${c.domain}`} className="border-t">
-                            <td className="px-2 py-1.5 font-mono">{c.domain}</td>
-                            <td className="px-2 py-1.5">{c.clientTag ?? "—"}</td>
-                            <td className="px-2 py-1.5">{c.segmentName} · <span className="text-muted-foreground">{c.groupName}</span></td>
-                            <td className="px-2 py-1.5 text-right">{c.sent.toLocaleString()}</td>
-                            <td className="px-2 py-1.5 text-right">{c.reply_15 ?? "—"}/{c.reply_30 ?? "—"}</td>
-                            <td className="px-2 py-1.5 text-muted-foreground">{c.reasons.join(" · ")}</td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                    {preview.candidates.length > 200 && (
-                      <div className="px-2 py-1.5 text-[11px] text-muted-foreground">+{preview.candidates.length - 200} more…</div>
-                    )}
-                  </div>
-                )}
-              </>
-            )}
-          </div>
-        )}
+        {savedAt && <span className="text-xs text-emerald-500">Saved</span>}
       </CardContent>
     </Card>
   );
