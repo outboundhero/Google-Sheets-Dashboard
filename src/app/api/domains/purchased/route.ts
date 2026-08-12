@@ -123,11 +123,25 @@ export async function GET() {
       }
     }
 
+    // 3b. Domains already claimed by a live inbox order — in use from the
+    // moment the provider accepts them, not once mailboxes reach Bison.
+    const ordered = new Set<string>();
+    for (let i = 0; i < domains.length; i += 300) {
+      const slice = domains.slice(i, i + 300);
+      const { data } = await supabase
+        .from("inbox_orders")
+        .select("domain")
+        .in("status", ["pending", "active", "swapping", "swapped"])
+        .in("domain", slice);
+      for (const r of data || []) if (r.domain) ordered.add(String(r.domain).toLowerCase());
+    }
+
     const rows: PurchasedRow[] = purchased.map((p) => {
       const i = inv.get(p.domain);
       const d = deliv.get(p.domain);
-      const inUse = (d?.inbox ?? 0) > 0;
-      const provider: InventoryProvider = inUse && d
+      const hasInboxes = (d?.inbox ?? 0) > 0;
+      const inUse = hasInboxes || ordered.has(p.domain);
+      const provider: InventoryProvider = hasInboxes && d
         ? providerFromCounts(d.outlook, d.google)
         : ((i?.mx as InventoryProvider) ?? "unknown");
       const source = i?.source || "porkbun_outboundhero";

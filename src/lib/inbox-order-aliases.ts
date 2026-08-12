@@ -60,8 +60,9 @@ function parseRows(text: string, count: number): InboxOrderAlias[] {
     if (parts.length < 2) continue;
     const nameParts = parts[0].split(/\s+/);
     if (nameParts.length < 2) continue;
-    const first_name = nameParts[0];
-    const last_name = nameParts.slice(1).join(" ");
+    const first_name = asciiName(nameParts[0]);
+    const last_name = asciiName(nameParts.slice(1).join(" "));
+    if (!first_name || !last_name) continue;
     const alias = parts[1].toLowerCase();
     if (!/^[a-z._]+$/.test(alias)) continue;
     if (seen.has(alias)) continue;
@@ -172,6 +173,21 @@ function slug(s: string): string {
     .replace(/[^a-z]/g, "");
 }
 
+// Inboxing's POST /domains rejects a sender name containing anything but
+// letters/numbers ("Only letters numbers allowed") and fails the WHOLE order.
+// The alias was always folded to ASCII by slug(), but the display name went
+// out raw — so a Latina persona (María, Sofía) or an O'Brien / Anne-Marie
+// killed the domain while its 50-odd siblings in the same batch went through.
+// Fold accents to their base letter, drop everything else.
+export function asciiName(s: string): string {
+  return (s || "")
+    .normalize("NFD")
+    .replace(/[̀-ͯ]/g, "")
+    .replace(/[^A-Za-z ]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 // Ordered stream of unique alias candidates for one name: clean numberless
 // variations first, then (only once those run out) the same variations with a
 // numeric suffix so we can always reach a large mailbox count from one name.
@@ -215,7 +231,11 @@ export function buildAliases(personas: Persona[], mailboxCount: number): InboxOr
       const next = gen.next().value as string;
       if (used.has(next)) continue; // globally unique across both personas
       used.add(next);
-      out.push({ first_name: p.first_name.trim(), last_name: p.last_name.trim(), alias: next });
+      out.push({
+        first_name: asciiName(p.first_name) || p.first_name.trim(),
+        last_name: asciiName(p.last_name) || p.last_name.trim(),
+        alias: next,
+      });
       got++;
     }
   });
@@ -252,7 +272,10 @@ Rules: common United States or Latina women's names, as if born 1990–2005; rea
   for (const line of content.split(/\r?\n/)) {
     const parts = line.trim().replace(/^\d+[.)]\s*/, "").split(/\s+/);
     if (parts.length < 2) continue;
-    personas.push({ first_name: parts[0], last_name: parts.slice(1).join(" ") });
+    const first_name = asciiName(parts[0]);
+    const last_name = asciiName(parts.slice(1).join(" "));
+    if (!first_name || !last_name) continue;
+    personas.push({ first_name, last_name });
     if (personas.length >= n) break;
   }
   if (personas.length < n) throw new Error(`Persona generator returned ${personas.length}/${n}`);

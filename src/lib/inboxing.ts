@@ -6,6 +6,7 @@ import {
   DEFAULT_INBOXING_ACCOUNT, INBOXING_ACCOUNT_ORDER, inboxingAccountConfigured, inboxingAuth,
   inboxingCloudflareCredential, inboxingRedirectType, type InboxingAccount,
 } from "@/lib/inboxing-accounts";
+import { asciiName } from "@/lib/inbox-order-aliases";
 
 /** Accounts usable right now, default (legacy) account first. */
 export function configuredInboxingAccounts(): InboxingAccount[] {
@@ -120,9 +121,12 @@ export async function createDomain(
   for (const a of input.aliases) {
     const k = a.alias.toLowerCase();
     if (!namesMap.has(k)) {
+      // Inboxing 400s the whole order on a non-letter in a sender name ("Only
+      // letters numbers allowed"), so fold here too — the preview dialog can
+      // hand us names an operator typed, which skip the generator's cleanup.
       namesMap.set(k, {
-        first_name: a.first_name,
-        last_name: a.last_name,
+        first_name: asciiName(a.first_name) || a.first_name,
+        last_name: asciiName(a.last_name) || a.last_name,
         email_prefix: a.alias,
       });
     }

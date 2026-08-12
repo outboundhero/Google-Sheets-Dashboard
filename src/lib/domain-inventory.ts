@@ -20,6 +20,8 @@ export interface InventoryRow {
   manual: boolean;
   tld: string | null;
   inUse: boolean;
+  /** In use only because an order exists — mailboxes haven't reached Bison yet. */
+  inUsePending: boolean;
   provider: InventoryProvider;
   providerSource: "deliverability" | "mx" | "none";
   expireDate: string | null;
@@ -122,15 +124,46 @@ async function readDeliverability(): Promise<Map<string, { inbox: number; outloo
   return map;
 }
 
+// Domains claimed by a live inbox order. Inbox counts only appear once the
+// mailboxes reach Bison AND the per-instance deliverability cron next runs
+// (every 2 days), so between ordering and that crawl a domain looked free —
+// and could be handed out again as a reserve. An order claims it immediately.
+// Failed/deleted orders release it again.
+const ORDER_CLAIMS_DOMAIN = ["pending", "active", "swapping", "swapped"];
+
+async function readOrderedDomains(): Promise<Set<string>> {
+  const supabase = getSupabaseAdmin();
+  const claimed = new Set<string>();
+  let from = 0;
+  const PAGE = 1000;
+  for (let guard = 0; guard < 200; guard++) {
+    const { data, error } = await supabase
+      .from("inbox_orders")
+      .select("domain")
+      .in("status", ORDER_CLAIMS_DOMAIN)
+      .range(from, from + PAGE - 1);
+    if (error) throw new Error(error.message);
+    const rows = (data || []) as { domain: string | null }[];
+    for (const r of rows) if (r.domain) claimed.add(r.domain.toLowerCase());
+    if (rows.length < PAGE) break;
+    from += PAGE;
+  }
+  return claimed;
+}
+
 export async function assembleInventory(): Promise<{ rows: InventoryRow[]; counts: InventoryCounts }> {
-  const [inv, deliv] = await Promise.all([readInventory(), readDeliverability()]);
+  const [inv, deliv, ordered] = await Promise.all([readInventory(), readDeliverability(), readOrderedDomains()]);
 
   const rows: InventoryRow[] = inv.map((r) => {
     const d = deliv.get(r.domain);
-    const inUse = (d?.inbox ?? 0) > 0;
+    const hasInboxes = (d?.inbox ?? 0) > 0;
+    const inUsePending = !hasInboxes && ordered.has(r.domain);
+    const inUse = hasInboxes || inUsePending;
     let provider: InventoryProvider;
     let providerSource: InventoryRow["providerSource"];
-    if (inUse && d) {
+    // Only real inbox counts describe a provider — an order that hasn't
+    // landed yet tells us nothing, so those fall through to MX.
+    if (hasInboxes && d) {
       provider = providerFromCounts(d.outlook, d.google);
       providerSource = "deliverability";
     } else if (r.mx_provider) {
@@ -147,6 +180,7 @@ export async function assembleInventory(): Promise<{ rows: InventoryRow[]; count
       manual: !!r.manual,
       tld: r.tld,
       inUse,
+      inUsePending,
       provider,
       providerSource,
       expireDate: r.expire_date,

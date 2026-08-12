@@ -386,7 +386,16 @@ function Row({ r, selected, onMouseDown, onMouseEnter }: {
       </td>
       <td className="px-3 py-2.5">
         {r.inUse ? (
-          <span className="inline-flex items-center rounded-md border border-emerald-500/20 bg-emerald-500/10 px-1.5 py-0.5 text-[10px] font-medium text-emerald-600">In use</span>
+          <span
+            title={r.inUsePending ? "Ordered — mailboxes haven't reached Email Bison yet" : undefined}
+            className={`inline-flex items-center rounded-md border px-1.5 py-0.5 text-[10px] font-medium ${
+              r.inUsePending
+                ? "border-amber-500/20 bg-amber-500/10 text-amber-600"
+                : "border-emerald-500/20 bg-emerald-500/10 text-emerald-600"
+            }`}
+          >
+            {r.inUsePending ? "In use · ordered" : "In use"}
+          </span>
         ) : (
           <span className="text-[10px] text-muted-foreground">—</span>
         )}
