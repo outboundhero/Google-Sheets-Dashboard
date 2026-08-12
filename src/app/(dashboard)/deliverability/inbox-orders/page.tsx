@@ -38,6 +38,13 @@ import type { InboxOrder, InboxOrderProvider, InboxOrderAlias } from "@/types/in
 import { useAuth } from "@/lib/auth-context";
 import { useInstance } from "@/lib/instance-context";
 import { BISON_INSTANCES, type BisonInstanceSlug } from "@/lib/bison-instances";
+import {
+  DEFAULT_INBOXING_ACCOUNT,
+  INBOXING_ACCOUNT_LABEL,
+  INBOXING_ACCOUNT_LOGIN,
+  INBOXING_ACCOUNT_REGION,
+  type InboxingAccount,
+} from "@/lib/inboxing-accounts";
 
 const PROVIDER_LABEL: Record<InboxOrderProvider, string> = {
   scaledmail: "ScaledMail",
@@ -73,6 +80,9 @@ function InboxOrdersPageInner() {
   const [createError, setCreateError] = useState<string | null>(null);
 
   const [provider, setProvider] = useState<InboxOrderProvider>("scaledmail");
+  // Inboxing has two separate logins with their own slot pools and IP
+  // geography — an order has to say which one it's spending slots from.
+  const [inboxingAccount, setInboxingAccount] = useState<InboxingAccount>(DEFAULT_INBOXING_ACCOUNT);
   const [orderInstance, setOrderInstance] = useState<BisonInstanceSlug>(
     scopedInstances[0]?.slug ?? "outboundhero"
   );
@@ -210,6 +220,7 @@ function InboxOrdersPageInner() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           provider,
+          inboxingAccount,
           instance: orderInstance,
           domain: domain.trim().toLowerCase(),
           tag: tag.trim() || undefined,
@@ -397,7 +408,14 @@ function InboxOrdersPageInner() {
                 <td className="p-2 text-xs">
                   {BISON_INSTANCES[order.instance]?.label ?? order.instance}
                 </td>
-                <td className="p-2">{PROVIDER_LABEL[order.provider]}</td>
+                <td className="p-2">
+                  {PROVIDER_LABEL[order.provider]}
+                  {order.provider === "inboxing" && (
+                    <div className="text-[10px] text-muted-foreground">
+                      {order.inboxing_account === "regular" ? "Regular Tenants" : "Premium Tenants"}
+                    </div>
+                  )}
+                </td>
                 <td className="p-2">
                   <Badge variant={statusBadgeVariant(order.status)}>
                     {order.status}
@@ -518,6 +536,24 @@ function InboxOrdersPageInner() {
                 </SelectContent>
               </Select>
             </div>
+            {provider === "inboxing" && (
+              <div>
+                <label className="text-xs font-medium">Inboxing account</label>
+                <Select value={inboxingAccount} onValueChange={(v) => setInboxingAccount(v as InboxingAccount)}>
+                  <SelectTrigger><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    {(["regular", "premium"] as InboxingAccount[]).map((acc) => (
+                      <SelectItem key={acc} value={acc}>
+                        {INBOXING_ACCOUNT_LABEL[acc]} — {INBOXING_ACCOUNT_REGION[acc]}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <p className="text-[11px] text-muted-foreground mt-1">
+                  Login {INBOXING_ACCOUNT_LOGIN[inboxingAccount]}. Slots come out of this account only.
+                </p>
+              </div>
+            )}
             <div>
               <label className="text-xs font-medium">Bison instance</label>
               <Select value={orderInstance} onValueChange={(v) => setOrderInstance(v as BisonInstanceSlug)}>

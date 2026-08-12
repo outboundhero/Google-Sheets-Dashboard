@@ -3,12 +3,18 @@ import { getSupabaseAdmin } from "@/lib/supabase";
 import { bisonFetch } from "@/lib/bison";
 import { isInstanceSlug, type BisonInstanceSlug } from "@/lib/bison-instances";
 import {
-  findDomainByName,
+  findDomainAnyAccount,
   listPlatformConnections,
   setDomainTags,
   uploadDomainToPlatform,
   INBOXING_MAX_TAGS,
 } from "@/lib/inboxing";
+import {
+  DEFAULT_INBOXING_ACCOUNT,
+  inboxingConnectionFor,
+  isInboxingAccount,
+  type InboxingAccount,
+} from "@/lib/inboxing-accounts";
 
 export const maxDuration = 300;
 
@@ -104,17 +110,30 @@ function resolveSource(rows: DomainRowLite[], target: BisonInstanceSlug | null):
 }
 
 /** Inboxing UUIDs cached from past orders. */
-async function loadInboxingIds(domains: string[]): Promise<Map<string, string>> {
+// Domain → its Inboxing UUID *and* which Inboxing login holds it. A domain
+// only exists on one of the two accounts, and the key/connection used for
+// tags + upload must be that account's (a null column = the original account).
+interface InboxingRef {
+  id: string;
+  account: InboxingAccount;
+}
+
+async function loadInboxingIds(domains: string[]): Promise<Map<string, InboxingRef>> {
   const supabase = getSupabaseAdmin();
-  const map = new Map<string, string>();
+  const map = new Map<string, InboxingRef>();
   for (let i = 0; i < domains.length; i += 100) {
     const { data } = await supabase
       .from("inbox_orders")
-      .select("domain, provider_domain_id")
+      .select("domain, provider_domain_id, inboxing_account")
       .eq("provider", "inboxing")
       .in("domain", domains.slice(i, i + 100));
-    for (const r of (data || []) as { domain: string; provider_domain_id: string | null }[]) {
-      if (r.provider_domain_id) map.set(r.domain.toLowerCase(), r.provider_domain_id);
+    for (const r of (data || []) as { domain: string; provider_domain_id: string | null; inboxing_account: string | null }[]) {
+      if (r.provider_domain_id) {
+        map.set(r.domain.toLowerCase(), {
+          id: r.provider_domain_id,
+          account: isInboxingAccount(r.inboxing_account) ? r.inboxing_account : DEFAULT_INBOXING_ACCOUNT,
+        });
+      }
     }
   }
   return map;
@@ -316,7 +335,8 @@ export async function POST(request: Request) {
           // inboxes move once a target is chosen (for 2-instance rows only
           // the non-target copy moves — the summed count is misleading).
           perInstance: rows.map((r) => ({ instance: r.instance, inboxCount: r.inbox_count || 0 })),
-          inboxingId: inboxingIds.get(domain) ?? null, // null → resolved by name at apply
+          inboxingId: inboxingIds.get(domain)?.id ?? null, // null → resolved by name at apply
+          inboxingAccount: inboxingIds.get(domain)?.account ?? null,
           tags: anyRow.tags || [],
         };
       });
@@ -417,22 +437,29 @@ export async function POST(request: Request) {
       if (!hasInboxingTag(src.tags)) { results.push({ domain, status: "skipped", error: "not an Inboxing domain" }); continue; }
 
       // Inboxing domain id: cached order id, else resolve by name.
-      let inboxingId = inboxingIds.get(domain) ?? null;
+      let ref = inboxingIds.get(domain) ?? null;
       try {
-        if (!inboxingId) {
-          const hit = await findDomainByName(domain);
-          if (!hit) throw new Error("not found on the Inboxing account");
-          inboxingId = hit.id;
+        if (!ref) {
+          const hit = await findDomainAnyAccount(domain);
+          if (!hit) throw new Error("not found on either Inboxing account");
+          ref = { id: hit.id, account: hit.account };
         }
       } catch (e) {
         results.push({ domain, status: "failed", stage: "resolve", error: e instanceof Error ? e.message : "failed" });
         continue;
       }
+      const inboxingId = ref.id;
+      // The FE sends the connection id it saw for the default account; a domain
+      // on the other login needs THAT login's connection for the same target.
+      const connectionId =
+        ref.account === DEFAULT_INBOXING_ACCOUNT
+          ? platformConnectionId
+          : inboxingConnectionFor(target, ref.account) || platformConnectionId;
 
       // Stage: tag sync (before upload, so sync_tags carries the right tags).
       const tags = (src.tags || []).map((t) => t.trim()).filter(Boolean);
       try {
-        await setDomainTags(inboxingId, tags);
+        await setDomainTags(inboxingId, tags, ref.account);
       } catch (e) {
         results.push({ domain, status: "failed", stage: "tag_sync", error: e instanceof Error ? e.message : "failed" });
         continue;
@@ -440,7 +467,7 @@ export async function POST(request: Request) {
 
       // Stage: platform upload (async on Inboxing's side).
       try {
-        const up = await uploadDomainToPlatform(inboxingId, platformConnectionId);
+        const up = await uploadDomainToPlatform(inboxingId, connectionId, ref.account);
         const expected = up.jobsCreated > 0 ? up.jobsCreated : (src.inbox_count || 1);
         inFlight.push({ domain, source: src.instance, expected });
       } catch (e) {

@@ -6,6 +6,7 @@ import * as milkbox from "@/lib/milkbox";
 import * as inboxing from "@/lib/inboxing";
 import { resolveDomainOrders, milkboxSequencerFor } from "@/lib/inbox-order-accounts";
 import { meansNoRedirect } from "@/lib/deliverability/redirect-normalize";
+import { DEFAULT_INBOXING_ACCOUNT, isInboxingAccount, inboxingRegistrarCredential } from "@/lib/inboxing-accounts";
 import type {
   CreateOrderInput,
   InboxOrderProvider,
@@ -56,6 +57,12 @@ export async function POST(request: Request) {
   try {
     const body = await request.json().catch(() => ({}));
     const provider = body?.provider;
+    // Which Inboxing login this order belongs to (Spencer 2026-08-12): the
+    // Regular Tenants account is US-IP, Premium is Asia-IP. Stored on the row
+    // so every later call about this domain uses the SAME account's key.
+    const inboxingAccount = isInboxingAccount(body?.inboxingAccount)
+      ? body.inboxingAccount
+      : DEFAULT_INBOXING_ACCOUNT;
     const instance = isInstanceSlug(body?.instance) ? body.instance : DEFAULT_INSTANCE;
     const domain = typeof body?.domain === "string" ? body.domain.trim().toLowerCase() : "";
     const tag = typeof body?.tag === "string" ? body.tag.slice(0, 20) : null;
@@ -140,7 +147,17 @@ export async function POST(request: Request) {
       });
       providerOrderId = r.orderId;
     } else {
-      const r = await inboxing.createDomain(orderInput, resolved.inboxing);
+      const r = await inboxing.createDomain(
+        orderInput,
+        {
+          // registrar credential must come from the SAME Inboxing account
+          registrarCredentialId:
+            inboxingRegistrarCredential(inboxingAccount, resolved.source ?? null)
+            ?? resolved.inboxing?.registrarCredentialId ?? null,
+          cloudflareCredentialId: null, // resolved per-account inside createDomain
+        },
+        inboxingAccount,
+      );
       providerDomainId = r.domainId;
       providerStatusRaw = r.raw.status || null;
     }
@@ -151,6 +168,7 @@ export async function POST(request: Request) {
       .insert({
         instance,
         provider,
+        inboxing_account: provider === "inboxing" ? inboxingAccount : null,
         provider_order_id: providerOrderId,
         provider_domain_id: providerDomainId,
         provider_status_raw: providerStatusRaw,

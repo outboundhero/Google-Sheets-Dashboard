@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { getSupabaseAdmin } from "@/lib/supabase";
 import * as milkbox from "@/lib/milkbox";
 import * as inboxing from "@/lib/inboxing";
+import { DEFAULT_INBOXING_ACCOUNT } from "@/lib/inboxing-accounts";
 import type { InboxOrder } from "@/types/inbox-order";
 
 export const maxDuration = 30;
@@ -45,7 +46,7 @@ export async function DELETE(_request: Request, context: { params: Promise<{ id:
       if (!typed.provider_domain_id) {
         return NextResponse.json({ error: "Inboxing domain id missing" }, { status: 400 });
       }
-      await inboxing.deleteDomain(typed.provider_domain_id);
+      await inboxing.deleteDomain(typed.provider_domain_id, typed.inboxing_account ?? DEFAULT_INBOXING_ACCOUNT);
     }
 
     const { data: updated, error: updateErr } = await supabase

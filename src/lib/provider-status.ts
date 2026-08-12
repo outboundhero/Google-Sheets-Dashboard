@@ -134,16 +134,32 @@ export async function refreshProviderDomainStatus(entries: RefreshEntry[]): Prom
 
   // ── Inboxing: same shape as MilkBox — one list scan, in-memory join. ──
   if (inboxingEntries.length > 0) {
+    // Since Aug 2026 our domains are split across two Inboxing logins with
+    // separate slot pools. Scan EVERY configured account and merge — checking
+    // only one would report every domain on the other as "not_in_list", i.e.
+    // canceled, and flag a few hundred healthy domains.
     let byName: Map<string, { id: string; status: string }> | null = null;
     let listError: string | null = null;
-    try {
-      const list = await inboxing.listDomainsWithLifecycle();
-      byName = new Map(
-        list.map((d) => [d.name.toLowerCase(), { id: d.id, status: d.status }]),
-      );
-    } catch (e) {
-      listError = e instanceof Error ? e.message : "Inboxing list failed";
+    for (const account of inboxing.configuredInboxingAccounts()) {
+      try {
+        const list = await inboxing.listDomainsWithLifecycle(account);
+        byName ??= new Map();
+        for (const d of list) {
+          const k = d.name.toLowerCase();
+          // First account to claim a name wins; an active row always beats a
+          // deleted leftover on the other account.
+          const prev = byName.get(k);
+          if (!prev || ((prev.status || "").toLowerCase() !== "active" && (d.status || "").toLowerCase() === "active")) {
+            byName.set(k, { id: d.id, status: d.status });
+          }
+        }
+      } catch (e) {
+        // Only fail the pass if NO account answered — a single bad key
+        // shouldn't cancel the other account's domains.
+        listError = e instanceof Error ? e.message : "Inboxing list failed";
+      }
     }
+    if (byName != null) listError = null;
 
     for (const entry of inboxingEntries) {
       if (listError || byName == null) {

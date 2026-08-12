@@ -3,6 +3,7 @@ import { getSupabaseAdmin } from "@/lib/supabase";
 import * as scaledmail from "@/lib/scaledmail";
 import * as milkbox from "@/lib/milkbox";
 import * as inboxing from "@/lib/inboxing";
+import { DEFAULT_INBOXING_ACCOUNT } from "@/lib/inboxing-accounts";
 import type { InboxOrder, ProviderStatusResult } from "@/types/inbox-order";
 
 export const maxDuration = 30;
@@ -25,7 +26,7 @@ async function refreshOrder(order: InboxOrder): Promise<ProviderStatusResult & {
   if (!order.provider_domain_id) {
     return { status: "pending", rawStatus: null, setupStage: null, failureReason: null, completed: false };
   }
-  return inboxing.getDomainStatus(order.provider_domain_id);
+  return inboxing.getDomainStatus(order.provider_domain_id, order.inboxing_account ?? DEFAULT_INBOXING_ACCOUNT);
 }
 
 export async function GET(_request: Request, context: { params: Promise<{ id: string }> }) {

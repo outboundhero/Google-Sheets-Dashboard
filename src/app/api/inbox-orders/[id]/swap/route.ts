@@ -4,6 +4,8 @@ import * as scaledmail from "@/lib/scaledmail";
 import * as milkbox from "@/lib/milkbox";
 import * as inboxing from "@/lib/inboxing";
 import { generateAliases } from "@/lib/inbox-order-aliases";
+import { resolveDomainOrders } from "@/lib/inbox-order-accounts";
+import { DEFAULT_INBOXING_ACCOUNT, inboxingRegistrarCredential } from "@/lib/inboxing-accounts";
 import type { InboxOrder } from "@/types/inbox-order";
 
 export const maxDuration = 60;
@@ -72,26 +74,41 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
       return NextResponse.json({ order: updated });
     }
 
-    // Inboxing: emulate swap as delete + create
+    // Inboxing: emulate swap as delete + create. The replacement is created on
+    // the SAME Inboxing login as the domain it replaces — the two accounts have
+    // separate slot pools, so silently swapping across them would drain the
+    // wrong one.
+    const inboxingAccount = typed.inboxing_account ?? DEFAULT_INBOXING_ACCOUNT;
     if (typed.provider_domain_id) {
       try {
-        await inboxing.deleteDomain(typed.provider_domain_id);
+        await inboxing.deleteDomain(typed.provider_domain_id, inboxingAccount);
       } catch {
         // ignore delete errors; we still want to create the replacement
       }
     }
     const aliases = await generateAliases("inboxing", typed.mailbox_count);
-    const created = await inboxing.createDomain({
-      domain: newDomain,
-      redirectUrl: typed.redirect_url || "",
-      aliases,
-    });
+    const swapResolved = (await resolveDomainOrders([newDomain], "inboxing")).get(newDomain.toLowerCase());
+    const created = await inboxing.createDomain(
+      {
+        domain: newDomain,
+        redirectUrl: typed.redirect_url || "",
+        aliases,
+      },
+      {
+        registrarCredentialId:
+          inboxingRegistrarCredential(inboxingAccount, swapResolved?.source ?? null)
+          ?? swapResolved?.inboxing?.registrarCredentialId ?? null,
+        cloudflareCredentialId: null,
+      },
+      inboxingAccount,
+    );
     // Mark old row deleted, insert new row as the replacement.
     await supabase.from("inbox_orders").update({ status: "swapped" }).eq("id", id);
     const { data: inserted, error: insertErr } = await supabase
       .from("inbox_orders")
       .insert({
         provider: "inboxing",
+        inboxing_account: inboxingAccount,
         provider_domain_id: created.domainId,
         provider_status_raw: created.raw.status || null,
         domain: newDomain,

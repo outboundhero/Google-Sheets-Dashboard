@@ -1,4 +1,5 @@
 import type { BisonInstanceSlug } from "@/lib/bison-instances";
+import type { InboxingAccount } from "@/lib/inboxing-accounts";
 
 export type InboxOrderProvider = "scaledmail" | "milkbox" | "inboxing";
 
@@ -38,6 +39,12 @@ export interface InboxOrder {
   id: string;
   instance: BisonInstanceSlug;
   provider: InboxOrderProvider;
+  /**
+   * Inboxing only: which of the two Inboxing logins holds this domain. Null on
+   * every pre-Aug-2026 row and on non-Inboxing orders — both mean "the original
+   * (premium) account", which is what DEFAULT_INBOXING_ACCOUNT resolves to.
+   */
+  inboxing_account: InboxingAccount | null;
   provider_order_id: string | null;
   provider_domain_id: string | null;
   provider_status_raw: string | null;

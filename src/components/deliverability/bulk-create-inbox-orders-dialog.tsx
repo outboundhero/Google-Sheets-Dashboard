@@ -40,6 +40,13 @@ import {
 } from "lucide-react";
 import { BISON_INSTANCES, type BisonInstanceSlug } from "@/lib/bison-instances";
 import type { InboxOrderProvider, InboxOrderAlias } from "@/types/inbox-order";
+import {
+  DEFAULT_INBOXING_ACCOUNT,
+  INBOXING_ACCOUNT_LABEL,
+  INBOXING_ACCOUNT_LOGIN,
+  INBOXING_ACCOUNT_REGION,
+  type InboxingAccount,
+} from "@/lib/inboxing-accounts";
 
 const PROVIDER_MAILBOXES: Record<InboxOrderProvider, number> = {
   scaledmail: 25,
@@ -96,6 +103,8 @@ export function BulkCreateInboxOrdersDialog({
   defaultCsv,
 }: Props) {
   const [provider, setProvider] = useState<InboxOrderProvider>("milkbox");
+  // Which Inboxing login these orders spend slots from (see inboxing-accounts).
+  const [inboxingAccount, setInboxingAccount] = useState<InboxingAccount>(DEFAULT_INBOXING_ACCOUNT);
   const [bisonInstance, setBisonInstance] = useState<BisonInstanceSlug>(
     defaultInstance ?? "outboundhero",
   );
@@ -297,6 +306,7 @@ export function BulkCreateInboxOrdersDialog({
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
               provider,
+              inboxingAccount,
               instance: bisonInstance,
               domain: row.domain,
               companyName: row.companyName || undefined,
@@ -369,6 +379,28 @@ export function BulkCreateInboxOrdersDialog({
               </SelectContent>
             </Select>
           </div>
+          {provider === "inboxing" && (
+            <div>
+              <label className="text-xs font-medium">Inboxing account</label>
+              <Select
+                value={inboxingAccount}
+                onValueChange={(v) => setInboxingAccount(v as InboxingAccount)}
+                disabled={submitting}
+              >
+                <SelectTrigger><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  {(["regular", "premium"] as InboxingAccount[]).map((acc) => (
+                    <SelectItem key={acc} value={acc}>
+                      {INBOXING_ACCOUNT_LABEL[acc]} — {INBOXING_ACCOUNT_REGION[acc]}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <p className="text-[11px] text-muted-foreground mt-1">
+                {INBOXING_ACCOUNT_LOGIN[inboxingAccount]} — slots come out of this account only.
+              </p>
+            </div>
+          )}
           <div>
             <label className="text-xs font-medium">Bison instance</label>
             <Select

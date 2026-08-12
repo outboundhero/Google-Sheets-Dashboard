@@ -4,6 +4,7 @@ import * as inboxing from "@/lib/inboxing";
 import * as milkbox from "@/lib/milkbox";
 import * as scaledmail from "@/lib/scaledmail";
 import { isBogusStoredRedirect } from "@/lib/deliverability/redirect-normalize";
+import { DEFAULT_INBOXING_ACCOUNT, isInboxingAccount } from "@/lib/inboxing-accounts";
 
 export const maxDuration = 300;
 
@@ -30,6 +31,7 @@ interface OrderRow {
   provider: string;
   domain: string;
   provider_domain_id: string | null;
+  inboxing_account: string | null;
   redirect_url: string | null;
 }
 
@@ -37,7 +39,7 @@ async function loadBogusOrders(): Promise<OrderRow[]> {
   const supabase = getSupabaseAdmin();
   const { data, error } = await supabase
     .from("inbox_orders")
-    .select("instance, provider, domain, provider_domain_id, redirect_url")
+    .select("instance, provider, domain, provider_domain_id, inboxing_account, redirect_url")
     .limit(10000);
   if (error) throw new Error(error.message);
   return ((data || []) as OrderRow[]).filter((r) => isBogusStoredRedirect(r.redirect_url));
@@ -122,9 +124,15 @@ export async function POST(request: Request) {
         try {
           if (r.provider === "inboxing") {
             let id = r.provider_domain_id;
-            if (!id) id = (await inboxing.findDomainByName(r.domain))?.id ?? null;
+            // Domains live on either Inboxing login — resolve across both.
+            let account = isInboxingAccount(r.inboxing_account) ? r.inboxing_account : DEFAULT_INBOXING_ACCOUNT;
+            if (!id) {
+              const hit = await inboxing.findDomainAnyAccount(r.domain);
+              id = hit?.id ?? null;
+              if (hit) account = hit.account;
+            }
             if (!id) { results.push({ ...key(r), status: "skipped", reason: "no Inboxing domain id" }); continue; }
-            await inboxing.updateRedirect(id, null);
+            await inboxing.updateRedirect(id, null, account);
           } else if (r.provider === "milkbox") {
             const id = r.provider_domain_id ?? milkboxByName.get(r.domain.toLowerCase()) ?? null;
             if (!id) { results.push({ ...key(r), status: "skipped", reason: "no MilkBox domain id" }); continue; }

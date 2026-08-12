@@ -2,6 +2,16 @@ import type {
   CreateOrderInput,
   ProviderStatusResult,
 } from "@/types/inbox-order";
+import {
+  DEFAULT_INBOXING_ACCOUNT, inboxingAccountConfigured, inboxingAuth,
+  inboxingCloudflareCredential, inboxingRedirectType, type InboxingAccount,
+} from "@/lib/inboxing-accounts";
+
+/** Accounts usable right now, default (legacy) account first. */
+export function configuredInboxingAccounts(): InboxingAccount[] {
+  const all: InboxingAccount[] = [DEFAULT_INBOXING_ACCOUNT, "regular"];
+  return [...new Set(all)].filter(inboxingAccountConfigured);
+}
 
 // Read-only Inboxing calls (GET, redirect PATCH, DELETE, etc) only need the
 // API key + base URL. The registrar + cloudflare credential IDs are used
@@ -9,13 +19,8 @@ import type {
 // cron work even on environments where the create-time credentials weren't
 // configured (which was the root cause of ~2842/2902 rows failing on the
 // first cron run — env() throwing before the API was ever hit).
-function envRead() {
-  const key = process.env.INBOXING_API_KEY;
-  const base = process.env.INBOXING_BASE_URL || "https://v2.inboxing.com/api/v2";
-  if (!key) {
-    throw new Error("Inboxing env missing (INBOXING_API_KEY)");
-  }
-  return { key, base };
+function envRead(account: InboxingAccount = DEFAULT_INBOXING_ACCOUNT) {
+  return inboxingAuth(account);
 }
 
 function sleep(ms: number): Promise<void> {
@@ -34,9 +39,10 @@ async function call<T>(
   // Bulk-write ops set patient=true: Inboxing's rate window is per-minute,
   // and the default exponential backoff (caps at 15s) can burn every attempt
   // inside one throttled window. Patient mode waits 15s, 25s, 35s… instead.
-  patient = false
+  patient = false,
+  account: InboxingAccount = DEFAULT_INBOXING_ACCOUNT
 ): Promise<T> {
-  const { key, base } = envRead();
+  const { key, base } = envRead(account);
   const init: RequestInit = {
     method,
     headers: {
@@ -97,11 +103,12 @@ export interface InboxingCreateOrderResult {
 export async function createDomain(
   input: CreateOrderInput,
   credentials?: { registrarCredentialId?: string | null; cloudflareCredentialId?: string | null },
+  account: InboxingAccount = DEFAULT_INBOXING_ACCOUNT,
 ): Promise<InboxingCreateOrderResult> {
   // Credentials are resolved per-domain (from the domain's Porkbun account) by
   // the caller; fall back to the legacy env vars if not supplied.
   const registrarId = credentials?.registrarCredentialId || process.env.INBOXING_REGISTRAR_CREDENTIAL_ID;
-  const cloudflareId = credentials?.cloudflareCredentialId || process.env.INBOXING_CLOUDFLARE_CREDENTIAL_ID;
+  const cloudflareId = credentials?.cloudflareCredentialId || inboxingCloudflareCredential(account);
   if (!registrarId || !cloudflareId) {
     throw new Error("Inboxing createDomain: missing registrar/cloudflare credential for this domain's Porkbun account");
   }
@@ -122,13 +129,15 @@ export async function createDomain(
     domain: input.domain,
     names,
     user_count: 49,
+    // Spencer 2026-08-12: Cloudflare Domain Masking is the default on BOTH
+    // accounts; jan-pro.com destinations stay a plain redirect.
     ...(input.redirectUrl
-      ? { redirect_url: input.redirectUrl, redirect_type: "REGULAR" as const }
+      ? { redirect_url: input.redirectUrl, redirect_type: inboxingRedirectType(input.redirectUrl) }
       : { redirect_type: "NONE" as const }),
     cloudflare_credential_id: cloudflareId,
     registrar_credential_id: registrarId,
   };
-  const result = await call<InboxingDomain>("POST", "/domains", body);
+  const result = await call<InboxingDomain>("POST", "/domains", body, false, account);
   if (!result.id) {
     throw new Error("Inboxing createDomain: response missing id");
   }
@@ -169,16 +178,17 @@ function deriveStatus(raw: InboxingStatus | null): ProviderStatusResult {
   return { status: "pending", rawStatus: norm, setupStage: stage, failureReason: null, completed: false };
 }
 
-export async function getDomainStatus(domainId: string): Promise<ProviderStatusResult> {
-  const result = await call<InboxingStatus>("GET", `/domains/${encodeURIComponent(domainId)}/status`);
+export async function getDomainStatus(domainId: string, account: InboxingAccount = DEFAULT_INBOXING_ACCOUNT): Promise<ProviderStatusResult> {
+  const result = await call<InboxingStatus>("GET", `/domains/${encodeURIComponent(domainId)}/status`, undefined, false, account);
   return deriveStatus(result);
 }
 
 /** Raw Inboxing status incl. the latest upload job — for move diagnostics. */
 export async function getDomainStatusRaw(
   domainId: string,
+  account: InboxingAccount = DEFAULT_INBOXING_ACCOUNT,
 ): Promise<{ status: string; setupStage: string | null; failureReason: string | null; latestJobStatus: string | null; csvAvailable: boolean | null }> {
-  const r = await call<InboxingStatus>("GET", `/domains/${encodeURIComponent(domainId)}/status`);
+  const r = await call<InboxingStatus>("GET", `/domains/${encodeURIComponent(domainId)}/status`, undefined, false, account);
   return {
     status: (r?.status || "").toLowerCase(),
     setupStage: r?.setup_stage || null,
@@ -188,11 +198,15 @@ export async function getDomainStatusRaw(
   };
 }
 
-export async function updateRedirect(domainId: string, redirectUrl: string | null): Promise<void> {
+export async function updateRedirect(
+  domainId: string,
+  redirectUrl: string | null,
+  account: InboxingAccount = DEFAULT_INBOXING_ACCOUNT,
+): Promise<void> {
   const body = redirectUrl
-    ? { redirect_type: "REGULAR" as const, redirect_url: redirectUrl }
+    ? { redirect_type: inboxingRedirectType(redirectUrl), redirect_url: redirectUrl }
     : { redirect_type: "NONE" as const };
-  await call("PUT", `/domains/${encodeURIComponent(domainId)}/redirect`, body);
+  await call("PUT", `/domains/${encodeURIComponent(domainId)}/redirect`, body, false, account);
 }
 
 /**
@@ -204,14 +218,36 @@ export async function updateRedirect(domainId: string, redirectUrl: string | nul
  */
 export async function findDomainByName(
   name: string,
+  account: InboxingAccount = DEFAULT_INBOXING_ACCOUNT,
 ): Promise<{ id: string; domain: string } | null> {
   const target = name.toLowerCase();
   const result = await call<{
     data?: Array<{ id: string; domain: string }>;
-  }>("GET", `/domains?search=${encodeURIComponent(name)}&per_page=50`);
+  }>("GET", `/domains?search=${encodeURIComponent(name)}&per_page=50`, undefined, false, account);
   for (const d of result.data || []) {
     if ((d.domain || "").toLowerCase() === target) {
       return { id: String(d.id), domain: d.domain };
+    }
+  }
+  return null;
+}
+
+/**
+ * Same lookup, but across every Inboxing account that has a key configured
+ * (default account first). Domain-level callers — bulk change-redirect,
+ * fix-na-redirects, the replacement move flow — only know a domain NAME, and
+ * since Aug 2026 that domain may live on either login. Searching one account
+ * would make every Regular-Tenants domain look like it doesn't exist.
+ */
+export async function findDomainAnyAccount(
+  name: string,
+): Promise<{ id: string; domain: string; account: InboxingAccount } | null> {
+  for (const account of configuredInboxingAccounts()) {
+    try {
+      const hit = await findDomainByName(name, account);
+      if (hit) return { ...hit, account };
+    } catch {
+      // key missing / account down — try the next one
     }
   }
   return null;
@@ -235,13 +271,13 @@ export interface InboxingListedDomainWithLifecycle {
  * instead of ~5800 — well within Inboxing's rate ceiling with the retry
  * helper doing its job on the occasional 429.
  */
-export async function listDomainsWithLifecycle(): Promise<InboxingListedDomainWithLifecycle[]> {
+export async function listDomainsWithLifecycle(account: InboxingAccount = DEFAULT_INBOXING_ACCOUNT): Promise<InboxingListedDomainWithLifecycle[]> {
   const out: InboxingListedDomainWithLifecycle[] = [];
   const perPage = 100;
   for (let page = 1; page < 500; page++) {
     const result = await call<{
       data?: Array<{ id: string | number; domain: string; status?: string }>;
-    }>("GET", `/domains?per_page=${perPage}&page=${page}`);
+    }>("GET", `/domains?per_page=${perPage}&page=${page}`, undefined, false, account);
     const rows = result.data || [];
     for (const d of rows) {
       if (d?.id === undefined || !d?.domain) continue;
@@ -257,8 +293,8 @@ export async function listDomainsWithLifecycle(): Promise<InboxingListedDomainWi
   return out;
 }
 
-export async function deleteDomain(domainId: string): Promise<void> {
-  await call("DELETE", `/domains/${encodeURIComponent(domainId)}`);
+export async function deleteDomain(domainId: string, account: InboxingAccount = DEFAULT_INBOXING_ACCOUNT): Promise<void> {
+  await call("DELETE", `/domains/${encodeURIComponent(domainId)}`, undefined, false, account);
 }
 
 export interface InboxingSlots {
@@ -268,11 +304,11 @@ export interface InboxingSlots {
   canProvision: number;
 }
 
-export async function getSlots(): Promise<InboxingSlots> {
+export async function getSlots(account: InboxingAccount = DEFAULT_INBOXING_ACCOUNT): Promise<InboxingSlots> {
   const result = await call<{
     slots: { total: number; used: number; remaining: number };
     system: { can_provision: number };
-  }>("GET", "/slots");
+  }>("GET", "/slots", undefined, false, account);
   return {
     total: result.slots.total,
     used: result.slots.used,
@@ -287,11 +323,11 @@ export async function getSlots(): Promise<InboxingSlots> {
 export const INBOXING_MAX_TAGS = 10;
 
 /** Replace ALL tags on an Inboxing domain (PUT /domains/{id}/tags). */
-export async function setDomainTags(domainId: string, tags: string[]): Promise<void> {
+export async function setDomainTags(domainId: string, tags: string[], account: InboxingAccount = DEFAULT_INBOXING_ACCOUNT): Promise<void> {
   if (tags.length > INBOXING_MAX_TAGS) {
     throw new Error(`Inboxing caps tags at ${INBOXING_MAX_TAGS} per domain (got ${tags.length})`);
   }
-  await call("PUT", `/domains/${encodeURIComponent(domainId)}/tags`, { tags }, true);
+  await call("PUT", `/domains/${encodeURIComponent(domainId)}/tags`, { tags }, true, account);
 }
 
 export interface InboxingPlatformConnection {
@@ -316,7 +352,9 @@ export async function inboxingRawGet(path: string): Promise<{ status: number; bo
 }
 
 /** All configured sequencer connections (GET /platform-connections). */
-export async function listPlatformConnections(): Promise<InboxingPlatformConnection[]> {
+export async function listPlatformConnections(
+  account: InboxingAccount = DEFAULT_INBOXING_ACCOUNT,
+): Promise<InboxingPlatformConnection[]> {
   const result = await call<{
     data?: Array<{
       id: string;
@@ -325,7 +363,7 @@ export async function listPlatformConnections(): Promise<InboxingPlatformConnect
       verification_status?: string;
       verification_error?: string | null;
     }>;
-  }>("GET", "/platform-connections");
+  }>("GET", "/platform-connections", undefined, false, account);
   return (result.data || []).map((c) => ({
     id: String(c.id),
     name: c.name || "",
@@ -398,6 +436,7 @@ export async function uploadEmailsToPlatform(
 export async function uploadDomainToPlatform(
   domainId: string,
   platformConnectionId: string,
+  account: InboxingAccount = DEFAULT_INBOXING_ACCOUNT,
 ): Promise<InboxingUploadResult> {
   const result = await call<{
     success?: boolean;
@@ -409,7 +448,7 @@ export async function uploadDomainToPlatform(
     enable_warmup: true,
     skip_verified: true,
     sync_tags: true,
-  }, true);
+  }, true, account);
   return {
     jobsCreated: result.jobs_created ?? 0,
     connectionName: result.connection_name || "",

@@ -4,6 +4,7 @@ import * as scaledmail from "@/lib/scaledmail";
 import * as milkbox from "@/lib/milkbox";
 import * as inboxing from "@/lib/inboxing";
 import { meansNoRedirect } from "@/lib/deliverability/redirect-normalize";
+import { DEFAULT_INBOXING_ACCOUNT, isInboxingAccount, type InboxingAccount } from "@/lib/inboxing-accounts";
 
 export const maxDuration = 300;
 
@@ -45,6 +46,8 @@ interface DomainRouting {
   tags: string[];
   provider: ProviderSlug | null;
   providerDomainId: string | null;
+  /** Inboxing only: which login holds the domain (null → the original one). */
+  inboxingAccount: InboxingAccount | null;
   skipReason: string | null;
 }
 
@@ -79,7 +82,7 @@ async function callProviderUpdateRedirect(
   }
   if (routing.provider === "inboxing") {
     if (!routing.providerDomainId) throw new Error("Missing Inboxing provider_domain_id");
-    await inboxing.updateRedirect(routing.providerDomainId, newUrl);
+    await inboxing.updateRedirect(routing.providerDomainId, newUrl, routing.inboxingAccount ?? DEFAULT_INBOXING_ACCOUNT);
     return;
   }
   if (routing.provider === "scaledmail") {
@@ -134,12 +137,16 @@ async function buildRouting(
   // Pull all orders for the relevant providers + domains in one shot.
   const { data: orderRows } = await supabase
     .from("inbox_orders")
-    .select("provider, domain, provider_domain_id, redirect_url")
+    .select("provider, domain, provider_domain_id, redirect_url, inboxing_account")
     .in("domain", domains)
     .in("provider", ["milkbox", "inboxing", "scaledmail"]);
   const providerIdByKey = new Map<string, string | null>();
-  for (const r of (orderRows ?? []) as { provider: string; domain: string; provider_domain_id: string | null }[]) {
+  const inboxingAccountByDomain = new Map<string, InboxingAccount>();
+  for (const r of (orderRows ?? []) as { provider: string; domain: string; provider_domain_id: string | null; inboxing_account?: string | null }[]) {
     providerIdByKey.set(`${r.provider}:${r.domain}`, r.provider_domain_id);
+    if (r.provider === "inboxing" && isInboxingAccount(r.inboxing_account)) {
+      inboxingAccountByDomain.set(r.domain, r.inboxing_account);
+    }
   }
 
   // Build initial routing. Both MilkBox and Inboxing's PUT redirect endpoints
@@ -157,6 +164,7 @@ async function buildRouting(
       tags,
       provider,
       providerDomainId,
+      inboxingAccount: provider === "inboxing" ? inboxingAccountByDomain.get(domain) ?? null : null,
       skipReason,
     };
   });
@@ -199,9 +207,11 @@ async function buildRouting(
       while (idx < inboxingNeedsLookup.length) {
         const r = inboxingNeedsLookup[idx++];
         try {
-          const match = await inboxing.findDomainByName(r.domain);
-          if (match) r.providerDomainId = match.id;
-          else r.skipReason = "Domain not found on Inboxing";
+          const match = await inboxing.findDomainAnyAccount(r.domain);
+          if (match) {
+            r.providerDomainId = match.id;
+            r.inboxingAccount = match.account;
+          } else r.skipReason = "Domain not found on Inboxing";
         } catch (e) {
           r.skipReason = `Inboxing lookup failed: ${e instanceof Error ? e.message : "unknown"}`;
         }
