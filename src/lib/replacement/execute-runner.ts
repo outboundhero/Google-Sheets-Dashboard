@@ -59,6 +59,17 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 export type FetchLike = (input: string, init?: RequestInit) => Promise<Response>;
 const defaultFetch: FetchLike = (input, init) => fetch(input, init);
 
+/** "domain (reason), domain (reason)" — trimmed to fit an event detail. */
+function describeFails(domains: string[], reasons: Map<string, string>): string {
+  return domains
+    .map((d) => {
+      const why = (reasons.get(d) || "").trim();
+      return why ? `${d} (${why.slice(0, 120)})` : d;
+    })
+    .join("; ")
+    .slice(0, 900);
+}
+
 async function callJsonWith(f: FetchLike, url: string, body: unknown, retries = RETRY): Promise<{ ok: boolean; data: unknown; error?: string }> {
   let lastErr = "";
   for (let i = 0; i < retries; i++) {
@@ -158,15 +169,27 @@ export async function runExecution(
       domains: crossMoves.map((m) => m.domain),
       targetInstance: instance, platformConnectionId: connId,
     });
-    const subData = (sub.data || {}) as { results?: { domain: string; status: string; sourceInstance?: string; expected?: number; error?: string }[] };
+    const subData = (sub.data || {}) as { results?: { domain: string; status: string; stage?: string; skipReason?: string; sourceInstance?: string; expected?: number; error?: string }[] };
+    // Why each donor failed — without this the run only ever recorded "failed
+    // for all N domain(s)", which is unusable when it happens unattended.
+    const failReason = new Map<string, string>();
     if (!sub.ok) {
-      failedMoves.push(...crossMoves.map((m) => m.domain));
+      const why = sub.error || "move-domains submit failed";
+      for (const m of crossMoves) { failedMoves.push(m.domain); failReason.set(m.domain, why); }
     } else {
       for (const r of subData.results || []) {
         const src = crossMoves.find((m) => m.domain === r.domain)?.fromInstance || r.sourceInstance || "";
         if (r.status === "uploading") inflight.push({ domain: r.domain, sourceInstance: src, expected: r.expected ?? 1 });
         else if (r.status === "done") verified.push({ domain: r.domain, fromInstance: src });
-        else failedMoves.push(r.domain);
+        else {
+          failedMoves.push(r.domain);
+          failReason.set(r.domain, [r.stage, r.error || r.skipReason || r.status].filter(Boolean).join(": "));
+        }
+      }
+      // A donor the route never reported on at all is still a failure.
+      for (const m of crossMoves) {
+        const seen = (subData.results || []).some((r) => r.domain === m.domain);
+        if (!seen) { failedMoves.push(m.domain); failReason.set(m.domain, "no result returned by move-domains"); }
       }
     }
     const moveDeadline = Date.now() + (opts.moveDeadlineMs ?? 10 * 60 * 1000);
@@ -187,7 +210,10 @@ export async function runExecution(
       setStep("crossmove", { state: "running", note: `${verified.length} landed · ${inflight.length} uploading` });
     }
     // Anything still in-flight at the deadline = NOT verified → drop from run.
-    failedMoves.push(...inflight.map((f) => f.domain));
+    for (const f of inflight) {
+      failedMoves.push(f.domain);
+      failReason.set(f.domain, `still uploading when the ${Math.round((opts.moveDeadlineMs ?? 10 * 60 * 1000) / 60000)}min verify deadline hit`);
+    }
     // Schedule the donor copies' 24h auto-delete + flag partials (Slack + panel).
     if (verified.length > 0 || inflight.length > 0) {
       await callJson("/api/deliverability/move-finalize", {
@@ -205,10 +231,10 @@ export async function runExecution(
       setStep("crossmove", { state: "done", note: `${verified.length} moved + verified` });
     } else if (verified.length > 0) {
       setStep("crossmove", { state: "degraded", note: `${verified.length} verified · ${failedMoves.length} dropped (move incomplete — retry later)` });
-      record({ events: [{ instance, clientTag, eventType: "error", detail: `Donor move incomplete — dropped: ${failedMoves.join(", ")}` }] });
+      record({ events: [{ instance, clientTag, eventType: "error", detail: `Donor move incomplete — dropped: ${describeFails(failedMoves, failReason)}` }] });
     } else {
       setStep("crossmove", { state: "failed", note: "no donor move verified — replacements dropped" });
-      record({ events: [{ instance, clientTag, eventType: "error", detail: `Donor move failed for all ${crossMoves.length} domain(s)` }] });
+      record({ events: [{ instance, clientTag, eventType: "error", detail: `Donor move failed for all ${crossMoves.length} domain(s) — ${describeFails(failedMoves, failReason)}` }] });
     }
   }
 
