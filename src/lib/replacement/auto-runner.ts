@@ -24,7 +24,26 @@ import { inboxingConnectionFor } from "./inboxing-connections";
 
 const RECENT_HOURS = 20;
 const MAX_CROSS_MOVES = 2;
-const MOVE_DEADLINE_MS = 4 * 60 * 1000;
+// Match the UI's 10min (execute-runner's default). At 4min all three donor
+// moves ever attempted — CWSLC/GSC/JPSAN, 2026-08-12 — failed at exactly
+// 4m06s: submit accepted both donors, then the deadline swept the uploads
+// that were still in flight into "failed for all N domain(s)". An Inboxing
+// platform upload routinely outlives 4 minutes. Affordable inside the cron's
+// 800s budget because cross-moves are capped at MAX_CROSS_MOVES and only
+// arise on small B2C top-ups (the 15-replace clients are all same-instance).
+const MOVE_DEADLINE_MS = 10 * 60 * 1000;
+// The cron route's own ceiling (maxDuration = 800s) and what we keep back for
+// the tag → redirect → attach → sheet → remove chain that follows a move.
+// Being killed mid-chain leaves a half-applied client, which is worse than a
+// move that gives up cleanly, so the move never eats the whole budget.
+const CRON_BUDGET_MS = 800 * 1000;
+const POST_MOVE_RESERVE_MS = 4 * 60 * 1000;
+
+/** Move budget: the full 10min unless this invocation has already used time. */
+function moveBudgetMs(runStartedAt: number): number {
+  const left = CRON_BUDGET_MS - (Date.now() - runStartedAt) - POST_MOVE_RESERVE_MS;
+  return Math.max(60_000, Math.min(MOVE_DEADLINE_MS, left));
+}
 
 export interface AutoRunResult {
   enabled: boolean;
@@ -42,6 +61,7 @@ export async function runAutoReplacement(
 ): Promise<AutoRunResult> {
   const dryRun = opts.dryRun ?? false;
   const maxClients = Math.max(1, Math.min(opts.maxClients ?? 1, 3));
+  const runStartedAt = Date.now();
 
   const settings = await getSettings();
   const result: AutoRunResult = {
@@ -176,7 +196,7 @@ export async function runAutoReplacement(
     let lastSteps: ExecStep[] = [];
     const { ok } = await runExecution(inputs, (s) => { lastSteps = s; }, {
       fetchImpl: internalFetch,
-      moveDeadlineMs: MOVE_DEADLINE_MS,
+      moveDeadlineMs: moveBudgetMs(runStartedAt),
     });
     result.executed.push({
       clientTag: g.clientTag, instance: g.instance, ok,
