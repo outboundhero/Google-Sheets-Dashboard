@@ -21,9 +21,13 @@ const FETCH_TIMEOUT_MS = 60_000; // Bison's sender search can legitimately take 
 const MAX_ATTEMPTS = 5;      // per-request retry attempts on transient errors (429/5xx/network)
 const MAX_SWEEPS = 4;        // delete → re-verify passes before giving up
 const SEARCH_MAX_PAGES = 40; // safety cap when paging the domain search
-// Per-search wall-clock cap. Deleting must never be starved by verification:
-// the DELETE calls are the useful work, the search is only bookkeeping.
+// Per-search wall-clock caps. Deleting must never be starved by verification:
+// the DELETE calls are the useful work, the seed search is only discovery.
+// The FINAL verify gets a much bigger slice — it's the one that decides whether
+// the domain is finished, and a domain that keeps failing to verify is what
+// leaves rows looping in the queue.
 const SEARCH_BUDGET_MS = 45_000;
+const VERIFY_BUDGET_MS = 150_000;
 
 interface SenderLite { id: number; email: string }
 
@@ -53,21 +57,37 @@ export interface DeleteDomainResult {
   verifyIncomplete: boolean;
 }
 
-/** GET a Bison path with patient retry on 429/5xx. */
-async function bisonGetWithRetry(instance: BisonInstanceSlug, path: string): Promise<Response | null> {
+/**
+ * GET a Bison path with patient retry on 429/5xx, bounded by `deadline`.
+ *
+ * The deadline is load-bearing: facilityreach's sender search can simply HANG,
+ * and 5 attempts × a 60s request timeout burns 300s inside what the caller
+ * thinks is a 45s budget — that is what killed whole delete rows on "row
+ * timeout" before anything was deleted. Each attempt is capped at whatever
+ * time is actually left.
+ */
+async function bisonGetWithRetry(
+  instance: BisonInstanceSlug,
+  path: string,
+  deadline = Infinity,
+): Promise<Response | null> {
   for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+    const left = deadline - Date.now();
+    if (left <= 1000) return null;
     try {
-      const res = await bisonFetch(instance, path, { signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
+      const res = await bisonFetch(instance, path, {
+        signal: AbortSignal.timeout(Math.min(FETCH_TIMEOUT_MS, left)),
+      });
       if (res.ok) return res;
       if (res.status === 429 || res.status >= 500) {
         const ra = parseInt(res.headers.get("retry-after") || "", 10);
         const wait = Number.isFinite(ra) && ra > 0 ? ra * 1000 : Math.min(15_000, 600 * 2 ** attempt);
-        await delay(wait + Math.floor(Math.random() * 400));
+        await delay(Math.min(wait + Math.floor(Math.random() * 400), Math.max(0, deadline - Date.now())));
         continue;
       }
       return res; // non-transient (e.g. 404/422) — caller stops
     } catch {
-      await delay(Math.min(15_000, 600 * 2 ** attempt));
+      await delay(Math.min(15_000, 600 * 2 ** attempt, Math.max(0, deadline - Date.now())));
     }
   }
   return null;
@@ -97,7 +117,7 @@ async function listBisonSenders(
     // per_page=100 (Bison accepts it — campaigns sync uses the same): the old
     // per_page=15 meant up to 40 paged calls per verify; on a rate-limited
     // instance that blew the cron's whole time budget on a single domain.
-    const res = await bisonGetWithRetry(instance, `/sender-emails?search=${encodeURIComponent(domain)}&page=${page}&per_page=100`);
+    const res = await bisonGetWithRetry(instance, `/sender-emails?search=${encodeURIComponent(domain)}&page=${page}&per_page=100`, deadline);
     if (!res || !res.ok) { complete = false; break; }
     const json = await res.json().catch(() => null);
     const payload = Array.isArray(json) ? json[0] : json;
@@ -279,7 +299,7 @@ export async function deleteDomainFromInstance(
 
   let finalRemaining: SenderLite[] = [];
   if (!confirmedZero) {
-    const fin = await listBisonSenders(instance, dom);
+    const fin = await listBisonSenders(instance, dom, VERIFY_BUDGET_MS);
     finalRemaining = fin.senders;
     finalVerifyComplete = fin.complete;
   }
