@@ -394,7 +394,13 @@ export async function POST(request: Request) {
         if (!dom || !isInstanceSlug(f.sourceInstance)) { results.push({ domain: dom, status: "failed", error: "bad in-flight entry" }); continue; }
         const expected = Number(f.expected) > 0 ? Number(f.expected) : 1;
         const cnt = counts[i];
-        if (cnt >= expected && cnt > 0) {
+        // cnt < 0 means the fast probe timed out, NOT that nothing landed. Left
+        // as-is that's indistinguishable from "still uploading", so a target
+        // whose search is consistently slow can never verify. Fall through to
+        // the (paged, separately timeout-guarded) full fetch and let the real
+        // sender list decide.
+        const probeTimedOut = cnt < 0;
+        if ((cnt >= expected && cnt > 0) || probeTimedOut) {
           try {
             const senders = await fetchSendersOnInstance(target, dom);
             if (senders.length >= expected && senders.length > 0) {
@@ -404,14 +410,13 @@ export async function POST(request: Request) {
               results.push({ domain: dom, status: "done", sourceInstance: f.sourceInstance as BisonInstanceSlug, landed: senders.length, detail: `${senders.length} inboxes now on ${target}` });
               anyArrived = true;
             } else {
-              results.push({ domain: dom, status: "uploading", landed: senders.length, expected, detail: "finalizing" });
+              results.push({ domain: dom, status: "uploading", landed: senders.length, expected, detail: probeTimedOut ? "probe timed out — full fetch short" : "finalizing" });
             }
           } catch (e) {
             results.push({ domain: dom, status: "uploading", expected, error: e instanceof Error ? e.message : "finalize failed" });
           }
         } else {
-          // cnt < 0 = the target search was too slow this cycle → retry next.
-          results.push({ domain: dom, status: "uploading", landed: cnt < 0 ? undefined : cnt, expected, detail: cnt < 0 ? "target search slow — retrying" : "landing" });
+          results.push({ domain: dom, status: "uploading", landed: cnt, expected, detail: "landing" });
         }
       }
       if (anyArrived) { try { await supabase.rpc("rebuild_domain_stats"); } catch { /* best-effort */ } }
@@ -468,7 +473,15 @@ export async function POST(request: Request) {
       // Stage: platform upload (async on Inboxing's side).
       try {
         const up = await uploadDomainToPlatform(inboxingId, connectionId, ref.account);
-        const expected = up.jobsCreated > 0 ? up.jobsCreated : (src.inbox_count || 1);
+        // What has to ARRIVE is what the source holds — jobsCreated is Inboxing's
+        // internal task count and can exceed the mailbox count (we upload with
+        // warmup + tag sync on), which makes `landed >= expected` unreachable and
+        // strands the domain as "uploading" until the deadline even though every
+        // inbox is already on the target. Trust the source count; fall back to
+        // jobsCreated only when we have no count for the source row.
+        const expected = src.inbox_count && src.inbox_count > 0
+          ? src.inbox_count
+          : (up.jobsCreated > 0 ? up.jobsCreated : 1);
         inFlight.push({ domain, source: src.instance, expected });
       } catch (e) {
         results.push({ domain, status: "failed", stage: "upload", error: e instanceof Error ? e.message : "failed" });
