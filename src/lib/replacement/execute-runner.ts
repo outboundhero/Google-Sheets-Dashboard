@@ -193,17 +193,32 @@ export async function runExecution(
       }
     }
     const moveDeadline = Date.now() + (opts.moveDeadlineMs ?? 10 * 60 * 1000);
+    // What the LAST poll actually saw per domain. Without this every non-"done"
+    // outcome — probe timed out (-1), count short of expected, finalize threw —
+    // collapses into the same "still uploading" and the deadline reason is
+    // unusable: on 2026-08-12 the mailboxes were live on the target ~96s after
+    // submit and the runner still never registered them.
+    const lastPoll = new Map<string, string>();
+    let pollError: string | null = null;
     while (inflight.length > 0 && Date.now() < moveDeadline) {
       await sleep(12_000);
       const pr = await callJson("/api/deliverability/move-domains", { mode: "poll", dryRun: false, inflight, targetInstance: instance });
-      const prData = (pr.data || {}) as { results?: { domain: string; status: string }[] };
+      const prData = (pr.data || {}) as {
+        results?: { domain: string; status: string; landed?: number; expected?: number; detail?: string; error?: string }[];
+      };
+      if (!pr.ok) pollError = pr.error || "poll request failed";
       if (pr.ok && Array.isArray(prData.results)) {
+        pollError = null;
         const still: typeof inflight = [];
         for (const r of prData.results) {
           const f = inflight.find((x) => x.domain === r.domain);
           if (!f) continue;
           if (r.status === "done") verified.push({ domain: f.domain, fromInstance: f.sourceInstance });
-          else still.push(f);
+          else {
+            still.push(f);
+            const seen = typeof r.landed === "number" ? `saw ${r.landed}/${r.expected ?? f.expected}` : `expected ${r.expected ?? f.expected}`;
+            lastPoll.set(f.domain, [r.status, seen, r.error || r.detail].filter(Boolean).join(" · "));
+          }
         }
         inflight = still;
       }
@@ -212,7 +227,9 @@ export async function runExecution(
     // Anything still in-flight at the deadline = NOT verified → drop from run.
     for (const f of inflight) {
       failedMoves.push(f.domain);
-      failReason.set(f.domain, `still uploading when the ${Math.round((opts.moveDeadlineMs ?? 10 * 60 * 1000) / 60000)}min verify deadline hit`);
+      const mins = Math.round((opts.moveDeadlineMs ?? 10 * 60 * 1000) / 60000);
+      const last = lastPoll.get(f.domain) || pollError;
+      failReason.set(f.domain, `unverified at the ${mins}min deadline${last ? ` — last poll: ${last}` : " — no poll result"}`);
     }
     // Schedule the donor copies' 24h auto-delete + flag partials (Slack + panel).
     if (verified.length > 0 || inflight.length > 0) {
