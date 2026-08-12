@@ -16,13 +16,18 @@ import { deleteDomainFromInstance } from "@/lib/deliverability/delete-domain";
 // daily run retries it (the delete is idempotent).
 
 const MAX_PER_RUN = 15; // stay comfortably inside maxDuration; overflow waits for the next run
-// Hard guarantee against Vercel's 300s FUNCTION_INVOCATION_TIMEOUT (which returns
-// an HTML 504 — no JSON, no per-row progress banked, exactly the "still stuck"
-// symptom): never START a row after RUN_BUDGET_MS, and cap any single row at
-// ROW_TIMEOUT_MS. Worst case = start at 139.9s + run 130s = ~270s < 300s.
-const RUN_BUDGET_MS = 140_000; // don't start a new row past this — leaves room for one full ROW_TIMEOUT_MS row + the trailing count query
-const ROW_TIMEOUT_MS = 130_000; // a row beyond this is wedged (or on a very slow instance) — rotate it to the back; its deletes usually already landed, so the requeued retry verifies-clean fast
+// Budgets sized for the routes' 800s Fluid maxDuration, never START a row past
+// RUN_BUDGET_MS, and cap any single row at ROW_TIMEOUT_MS (worst case ~600s +
+// 260s is still under 800s + the trailing count query). The previous 140s/130s
+// pair was sized for a 300s function and was far too tight for facilityreach,
+// where ONE rate-limited sender search can burn ~60s: rows died on "row timeout
+// after 130s" having deleted nothing, requeued +6h, and repeated forever.
+const RUN_BUDGET_MS = 600_000;
+const ROW_TIMEOUT_MS = 260_000;
 const REQUEUE_DELAY_MS = 6 * 3600_000;
+// A row whose deletes ran but whose verification was throttled comes back in
+// minutes, not 6 hours — it's usually one clean re-verify away from done.
+const REQUEUE_SOON_MS = 20 * 60_000;
 
 // Any row that didn't fully complete rotates to the back (+6h) instead of
 // re-heading the oldest-first queue — one wedged domain can otherwise starve
@@ -31,23 +36,34 @@ const REQUEUE_DELAY_MS = 6 * 3600_000;
 async function requeueToBack(
   supabase: ReturnType<typeof getSupabaseAdmin>,
   row: { instance: string; domain: string },
+  delayMs = REQUEUE_DELAY_MS,
 ): Promise<void> {
   await supabase
     .from("duplicate_domain_deletions")
-    .update({ scheduled_at: new Date(Date.now() + REQUEUE_DELAY_MS).toISOString() })
+    .update({ scheduled_at: new Date(Date.now() + delayMs).toISOString() })
     .eq("instance", row.instance)
     .eq("domain", row.domain);
 }
 
-export async function runScheduledDeletions(limit = MAX_PER_RUN): Promise<NextResponse> {
+/**
+ * `force` (Spencer 2026-08-12: "can you please force these through?") ignores
+ * the grace period and works the oldest pending rows regardless of
+ * scheduled_at. Nothing else changes — same executor, same verification.
+ */
+export async function runScheduledDeletions(
+  limit = MAX_PER_RUN,
+  opts: { force?: boolean } = {},
+): Promise<NextResponse> {
   const supabase = getSupabaseAdmin();
   const nowIso = new Date().toISOString();
+  const force = opts.force === true;
 
-  const { data: due, error } = await supabase
+  let query = supabase
     .from("duplicate_domain_deletions")
     .select("instance, domain, scheduled_at, status")
-    .eq("status", "pending")
-    .lte("scheduled_at", nowIso)
+    .eq("status", "pending");
+  if (!force) query = query.lte("scheduled_at", nowIso);
+  const { data: due, error } = await query
     .order("scheduled_at", { ascending: true })
     .limit(limit);
   if (error) {
@@ -70,13 +86,22 @@ export async function runScheduledDeletions(limit = MAX_PER_RUN): Promise<NextRe
         deleteDomainFromInstance(row.instance, row.domain),
         new Promise<never>((_, reject) => setTimeout(() => reject(new Error(`row timeout after ${ROW_TIMEOUT_MS / 1000}s`)), ROW_TIMEOUT_MS)),
       ]);
-      const done = r.remainingInBison === 0 && r.failed === 0;
+      // "0 remaining" only counts when the verification search actually finished.
+      const done = r.remainingInBison === 0 && r.failed === 0 && !r.verifyIncomplete;
       if (done) {
         await supabase.from("duplicate_domain_deletions").update({ status: "done" }).eq("instance", row.instance).eq("domain", row.domain);
       } else {
-        await requeueToBack(supabase, row);
+        // deletes landed but verification was throttled → come back in minutes
+        const soon = r.verifyIncomplete && r.failed === 0;
+        await requeueToBack(supabase, row, soon ? REQUEUE_SOON_MS : REQUEUE_DELAY_MS);
       }
-      results.push({ instance: row.instance, domain: row.domain, deleted: r.inboxesDeleted, notFound: r.notFound, failed: r.failed, remainingInBison: r.remainingInBison, done });
+      results.push({
+        instance: row.instance, domain: row.domain, deleted: r.inboxesDeleted, notFound: r.notFound,
+        failed: r.failed, remainingInBison: r.remainingInBison, done,
+        error: done ? undefined : r.verifyIncomplete
+          ? "Bison rate-limited the verification — deletes submitted, re-verifying shortly"
+          : r.failures[0]?.error,
+      });
     } catch (e) {
       await requeueToBack(supabase, row);
       const msg = e instanceof Error ? e.message : String(e);
@@ -89,12 +114,13 @@ export async function runScheduledDeletions(limit = MAX_PER_RUN): Promise<NextRe
 
   // How many pending rows are still due (past their grace) after this batch —
   // lets a manual runner loop until the backlog is drained.
-  const { count: dueRemaining } = await supabase
+  let remainingQuery = supabase
     .from("duplicate_domain_deletions")
     .select("instance", { count: "exact", head: true })
-    .eq("status", "pending")
-    .lte("scheduled_at", new Date().toISOString());
+    .eq("status", "pending");
+  if (!force) remainingQuery = remainingQuery.lte("scheduled_at", new Date().toISOString());
+  const { count: dueRemaining } = await remainingQuery;
 
-  console.log(`[cron/fire-scheduled-deletions] due=${rows.length} completed=${fired} retryNext=${rows.length - fired} dueRemaining=${dueRemaining ?? 0}`);
-  return NextResponse.json({ due: rows.length, completed: fired, retryNext: rows.length - fired, dueRemaining: dueRemaining ?? 0, results });
+  console.log(`[cron/fire-scheduled-deletions] force=${force} due=${rows.length} completed=${fired} retryNext=${rows.length - fired} dueRemaining=${dueRemaining ?? 0}`);
+  return NextResponse.json({ force, due: rows.length, completed: fired, retryNext: rows.length - fired, dueRemaining: dueRemaining ?? 0, results });
 }

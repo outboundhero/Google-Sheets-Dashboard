@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import {
-  getDuplicateDomains, getPendingDeletions, scheduleDeletions, cancelDeletion,
+  getDuplicateDomains, getPendingDeletions, scheduleDeletions, cancelDeletion, forceDeletionsNow,
 } from "@/lib/replacement/duplicate-domains";
 
 export const maxDuration = 60;
@@ -26,7 +26,16 @@ export async function POST(request: Request) {
       await cancelDeletion(body.instance, body.domain);
       return NextResponse.json({ ok: true });
     }
-    await scheduleDeletions((body.targets || []) as { instance: string; domain: string }[]);
+    // Drop the remaining grace on pending rows (all, or the given targets) so
+    // the next executor pass fires them.
+    if (body.action === "forceNow") {
+      const moved = await forceDeletionsNow(body.targets as { instance: string; domain: string }[] | undefined);
+      return NextResponse.json({ ok: true, moved });
+    }
+    // graceDays: 0 = delete immediately (no grace) — the card's
+    // "delete immediately" option; omitted keeps the default 3-day grace.
+    const graceDays = typeof body.graceDays === "number" && body.graceDays >= 0 ? body.graceDays : undefined;
+    await scheduleDeletions((body.targets || []) as { instance: string; domain: string }[], { graceDays });
     return NextResponse.json({ ok: true });
   } catch (e) {
     return NextResponse.json({ error: e instanceof Error ? e.message : "Failed" }, { status: 500 });

@@ -7,7 +7,7 @@
 // after a 4-day grace (a cron fires the actual delete). Drag-select chips.
 // Collapsible. Admin-only.
 import { useState, useEffect, useRef, useCallback } from "react";
-import { ChevronDown, ChevronRight, RefreshCw, Loader2, Copy, Trash2, Clock, Check } from "lucide-react";
+import { ChevronDown, ChevronRight, RefreshCw, Loader2, Copy, Trash2, Clock, Check, Zap } from "lucide-react";
 
 interface DupInstance { instance: string; inboxes: number; tags: string[]; createdAt: string | null; sent?: number; replied?: number }
 interface DuplicateDomain { domain: string; instances: DupInstance[] }
@@ -62,7 +62,10 @@ export function DuplicateDomainsCard() {
   const [error, setError] = useState<string | null>(null);
   const [firing, setFiring] = useState(false);
   const [fireMsg, setFireMsg] = useState<string | null>(null);
-  const [fireStuck, setFireStuck] = useState<{ domain: string; instance: string; remainingInBison: number; failed: number }[]>([]);
+  const [fireStuck, setFireStuck] = useState<{ domain: string; instance: string; remainingInBison: number; failed: number; error?: string }[]>([]);
+  // Spencer 2026-08-12: skip the 3-day grace for this batch — schedule at
+  // grace 0 and fire it in the same click.
+  const [deleteNow, setDeleteNow] = useState(false);
 
   const dragging = useRef(false);
   const dragAdd = useRef(true);
@@ -146,40 +149,72 @@ export function DuplicateDomainsCard() {
     if (scheduled.length > 0) {
       await fetch("/api/replacement/duplicate-domains", {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ targets: scheduled }),
+        body: JSON.stringify({ targets: scheduled, ...(deleteNow ? { graceDays: 0 } : {}) }),
       });
     }
     setWorking(false); setProgress(null); setSelected(new Set());
     await load();
+    // "Delete immediately" → don't wait for the hourly cron, drain them now.
+    if (deleteNow && scheduled.length > 0) await runDeletionsNow();
   };
 
   // Fire due scheduled deletions on demand (same executor as the cron), looping
   // small batches until the backlog is drained — or until a batch makes no
   // progress, which means some domains are genuinely stuck (surfaced below).
-  const runDeletionsNow = async () => {
+  // `force` ignores the remaining grace and works the oldest pending rows.
+  const runDeletionsNow = async (force = false) => {
     setFiring(true); setFireMsg("Starting…"); setFireStuck([]);
     let totalFired = 0;
     try {
       for (let i = 0; i < 60; i++) {
-        const res = await fetch("/api/replacement/duplicate-domains/run", { method: "POST" });
+        const res = await fetch("/api/replacement/duplicate-domains/run", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ force }),
+        });
         const d = await res.json();
         if (!res.ok) { setFireMsg(d.error || `HTTP ${res.status}`); break; }
         totalFired += d.completed || 0;
         const stuck = (d.results || [])
           .filter((r: { done: boolean }) => !r.done)
-          .map((r: { domain: string; instance: string; remainingInBison: number; failed: number }) => ({ domain: r.domain, instance: r.instance, remainingInBison: r.remainingInBison, failed: r.failed }));
+          .map((r: { domain: string; instance: string; remainingInBison: number; failed: number; error?: string }) =>
+            ({ domain: r.domain, instance: r.instance, remainingInBison: r.remainingInBison, failed: r.failed, error: r.error }));
         setFireStuck(stuck);
-        setFireMsg(`Fired ${totalFired} · ${d.dueRemaining ?? 0} still due`);
+        setFireMsg(`Fired ${totalFired} · ${d.dueRemaining ?? 0} left${force ? "" : " due"}`);
         await load();
-        if ((d.due ?? 0) === 0) { setFireMsg(`Done — fired ${totalFired}, nothing left due.`); break; }
-        // No progress this batch → the remaining ones are stuck; stop looping.
-        if ((d.completed ?? 0) === 0) { setFireMsg(`Fired ${totalFired}. ${d.dueRemaining ?? 0} stuck — see below.`); break; }
+        if ((d.due ?? 0) === 0) { setFireMsg(`Done — fired ${totalFired}, nothing left${force ? " pending" : " due"}.`); break; }
+        // No progress this batch → the rest need another pass (Bison throttling)
+        // or are genuinely stuck; either way stop and show why.
+        if ((d.completed ?? 0) === 0) {
+          setFireMsg(`Fired ${totalFired}. ${d.dueRemaining ?? 0} not finished this pass — see below (they retry automatically).`);
+          break;
+        }
       }
     } catch (e) {
       setFireMsg(e instanceof Error ? e.message : "Run failed");
     } finally {
       setFiring(false);
     }
+  };
+
+  // Spencer's "force these through": drop the grace on every pending row, then
+  // immediately start draining. Confirm-gated — this deletes senders in Bison.
+  const forceAllNow = async () => {
+    if (!window.confirm(
+      `Force ${pending.length} pending deletion(s) through now?\n\nThis skips the remaining grace period and permanently deletes those domains' sender accounts from their instance. Cannot be undone.`,
+    )) return;
+    setFiring(true); setFireMsg("Dropping grace…");
+    try {
+      const res = await fetch("/api/replacement/duplicate-domains", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "forceNow" }),
+      });
+      const d = await res.json();
+      if (!res.ok) { setFireMsg(d.error || `HTTP ${res.status}`); setFiring(false); return; }
+      setFireMsg(`${d.moved ?? 0} moved to due — firing…`);
+    } catch (e) {
+      setFireMsg(e instanceof Error ? e.message : "Force failed"); setFiring(false); return;
+    }
+    await runDeletionsNow(true);
   };
 
   const cancelPending = async (p: PendingDeletion) => {
@@ -230,15 +265,22 @@ export function DuplicateDomainsCard() {
             <p className="text-sm text-emerald-600 dark:text-emerald-400">No duplicate domains across instances. ✓</p>
           ) : dups.length > 0 && (
             <>
-              <div className="flex items-center justify-between text-xs">
+              <div className="flex items-center justify-between text-xs gap-2 flex-wrap">
                 <span className="text-muted-foreground">{selected.size} selected</span>
+                <label
+                  className="flex items-center gap-1.5 ml-auto cursor-pointer text-muted-foreground"
+                  title="Skip the 3-day grace: schedule and delete these copies in this same click."
+                >
+                  <input type="checkbox" checked={deleteNow} onChange={(e) => setDeleteNow(e.target.checked)} />
+                  Delete immediately (no 3-day grace)
+                </label>
                 <button
                   onClick={cleanSelected}
                   disabled={working || selected.size === 0}
                   className="flex items-center gap-1.5 rounded-md bg-destructive/90 text-destructive-foreground px-2.5 py-1.5 hover:bg-destructive disabled:opacity-40"
                 >
                   {working ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Trash2 className="h-3.5 w-3.5" />}
-                  Remove + schedule delete
+                  {deleteNow ? "Remove + delete now" : "Remove + schedule delete"}
                 </button>
               </div>
 
@@ -308,23 +350,35 @@ export function DuplicateDomainsCard() {
             <div className="space-y-1.5">
               <div className="flex items-center justify-between gap-2">
                 <div className="flex items-center gap-1.5 text-[11px] text-amber-500"><Clock className="h-3 w-3" /> Pending deletion (after 3-day grace)</div>
-                <button
-                  onClick={runDeletionsNow}
-                  disabled={firing}
-                  title="Fire all deletions whose 4-day grace has already passed, now"
-                  className="flex items-center gap-1.5 text-[11px] rounded-md border px-2 py-1 hover:bg-muted/50 disabled:opacity-50"
-                >
-                  {firing ? <Loader2 className="h-3 w-3 animate-spin" /> : <Trash2 className="h-3 w-3" />}
-                  Run due deletions now
-                </button>
+                <div className="flex items-center gap-1.5 shrink-0">
+                  <button
+                    onClick={() => runDeletionsNow(false)}
+                    disabled={firing}
+                    title="Fire only the deletions whose grace has already passed"
+                    className="flex items-center gap-1.5 text-[11px] rounded-md border px-2 py-1 hover:bg-muted/50 disabled:opacity-50"
+                  >
+                    {firing ? <Loader2 className="h-3 w-3 animate-spin" /> : <Trash2 className="h-3 w-3" />}
+                    Run due deletions now
+                  </button>
+                  <button
+                    onClick={forceAllNow}
+                    disabled={firing}
+                    title="Skip the remaining grace on every pending row and delete them now"
+                    className="flex items-center gap-1.5 text-[11px] rounded-md border border-destructive/40 text-destructive px-2 py-1 hover:bg-destructive/10 disabled:opacity-50"
+                  >
+                    <Zap className="h-3 w-3" />
+                    Force all {pending.length} now
+                  </button>
+                </div>
               </div>
               {fireMsg && <div className="text-[11px] text-muted-foreground">{fireMsg}</div>}
               {fireStuck.length > 0 && (
                 <div className="rounded-md border border-destructive/30 bg-destructive/5 px-2 py-1.5 space-y-0.5 max-h-32 overflow-y-auto">
-                  <div className="text-[10px] font-medium text-destructive">Stuck ({fireStuck.length}) — Bison still reports senders / delete failing:</div>
+                  <div className="text-[10px] font-medium text-destructive">Not finished this pass ({fireStuck.length}) — they retry automatically:</div>
                   {fireStuck.map((s) => (
                     <div key={`${s.instance}:${s.domain}`} className="text-[10px] text-muted-foreground">
                       {s.domain} <span className="opacity-70">{short[s.instance] ?? s.instance}</span> · {s.remainingInBison < 0 ? "errored" : `${s.remainingInBison} left in Bison`}{s.failed > 0 ? `, ${s.failed} failed` : ""}
+                      {s.error && <span className="opacity-70"> — {s.error}</span>}
                     </div>
                   ))}
                 </div>

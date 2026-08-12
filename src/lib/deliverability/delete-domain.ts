@@ -21,6 +21,9 @@ const FETCH_TIMEOUT_MS = 60_000; // Bison's sender search can legitimately take 
 const MAX_ATTEMPTS = 5;      // per-request retry attempts on transient errors (429/5xx/network)
 const MAX_SWEEPS = 4;        // delete → re-verify passes before giving up
 const SEARCH_MAX_PAGES = 40; // safety cap when paging the domain search
+// Per-search wall-clock cap. Deleting must never be starved by verification:
+// the DELETE calls are the useful work, the search is only bookkeeping.
+const SEARCH_BUDGET_MS = 45_000;
 
 interface SenderLite { id: number; email: string }
 
@@ -42,6 +45,12 @@ export interface DeleteDomainResult {
   failures: DeleteFailure[];
   remainingInBison: number; // senders Bison still reports for the domain (0 = fully clean)
   domainRowRemoved: boolean;
+  /**
+   * true = the final Bison verification search was cut short (rate limits /
+   * budget), so `remainingInBison: 0` is UNCONFIRMED. Callers must not treat
+   * the domain as finished; retry instead.
+   */
+  verifyIncomplete: boolean;
 }
 
 /** GET a Bison path with patient retry on 429/5xx. */
@@ -64,16 +73,32 @@ async function bisonGetWithRetry(instance: BisonInstanceSlug, path: string): Pro
   return null;
 }
 
-/** Every sender Bison currently reports whose email domain is EXACTLY `domain`. */
-async function listBisonSenders(instance: BisonInstanceSlug, domain: string): Promise<SenderLite[]> {
+/**
+ * Every sender Bison currently reports whose email domain is EXACTLY `domain`.
+ *
+ * Time-budgeted: on a rate-limited instance (facilityreach 429s constantly) a
+ * single page can cost ~60s of retry backoff, so an unbounded page walk used to
+ * eat the caller's entire row budget and abort the whole delete before it had
+ * deleted anything ("row timeout after 130s", 0 deleted — Spencer 2026-08-12).
+ * `complete: false` means the walk was cut short, so a zero/short result must
+ * NOT be read as "Bison is clean".
+ */
+async function listBisonSenders(
+  instance: BisonInstanceSlug,
+  domain: string,
+  budgetMs = SEARCH_BUDGET_MS,
+): Promise<{ senders: SenderLite[]; complete: boolean }> {
   const found = new Map<number, SenderLite>();
+  const deadline = Date.now() + budgetMs;
+  let complete = true;
   let page = 1;
   while (page <= SEARCH_MAX_PAGES) {
+    if (Date.now() > deadline) { complete = false; break; }
     // per_page=100 (Bison accepts it — campaigns sync uses the same): the old
     // per_page=15 meant up to 40 paged calls per verify; on a rate-limited
     // instance that blew the cron's whole time budget on a single domain.
     const res = await bisonGetWithRetry(instance, `/sender-emails?search=${encodeURIComponent(domain)}&page=${page}&per_page=100`);
-    if (!res || !res.ok) break;
+    if (!res || !res.ok) { complete = false; break; }
     const json = await res.json().catch(() => null);
     const payload = Array.isArray(json) ? json[0] : json;
     const data: { id: number; email: string }[] = payload?.data || [];
@@ -84,9 +109,10 @@ async function listBisonSenders(instance: BisonInstanceSlug, domain: string): Pr
     }
     const lastPage = payload?.meta?.last_page || 1;
     if (page >= lastPage) break;
+    if (page >= SEARCH_MAX_PAGES) { complete = false; break; }
     page++;
   }
-  return [...found.values()];
+  return { senders: [...found.values()], complete };
 }
 
 /** DELETE one sender with patient retry. */
@@ -219,7 +245,8 @@ export async function deleteDomainFromInstance(
   for (const r of (sbRows || []) as { id: number; email: string | null }[]) {
     candidates.set(r.id, r.email || `#${r.id}`);
   }
-  for (const s of await listBisonSenders(instance, dom)) candidates.set(s.id, s.email);
+  const seed = await listBisonSenders(instance, dom);
+  for (const s of seed.senders) candidates.set(s.id, s.email);
 
   // 2. Delete → re-verify sweeps until Bison reports zero (or budget exhausted).
   const removedIds = new Set<number>();
@@ -228,6 +255,9 @@ export async function deleteDomainFromInstance(
   let notFound = 0;
   let toDelete: SenderLite[] = [...candidates.entries()].map(([id, email]) => ({ id, email }));
 
+  // Reliability of the LAST verification, not of every search: a complete
+  // search returning 0 is authoritative even if the seed walk was cut short.
+  let finalVerifyComplete = false;
   let confirmedZero = false; // a sweep's re-verify already reported 0 → skip the extra final search (each search is 30–60s on slow instances like facilityreach)
   for (let sweep = 0; sweep < MAX_SWEEPS && toDelete.length > 0; sweep++) {
     const r = await deleteBatch(instance, dom, toDelete);
@@ -238,12 +268,22 @@ export async function deleteDomainFromInstance(
 
     // Ask Bison what's actually left; those become the next sweep's targets.
     if (sweep < MAX_SWEEPS - 1) await delay(500);
-    const survivors = await listBisonSenders(instance, dom);
-    if (survivors.length === 0) { toDelete = []; confirmedZero = true; break; }
-    toDelete = survivors;
+    const sweepRes = await listBisonSenders(instance, dom);
+    if (sweepRes.senders.length === 0) {
+      toDelete = [];
+      if (sweepRes.complete) { confirmedZero = true; finalVerifyComplete = true; }
+      break; // nothing more to delete either way; completeness decides "done"
+    }
+    toDelete = sweepRes.senders;
   }
 
-  const finalRemaining = confirmedZero ? [] : await listBisonSenders(instance, dom);
+  let finalRemaining: SenderLite[] = [];
+  if (!confirmedZero) {
+    const fin = await listBisonSenders(instance, dom);
+    finalRemaining = fin.senders;
+    finalVerifyComplete = fin.complete;
+  }
+  const verifyIncomplete = !finalVerifyComplete;
   const remainingIds = new Set(finalRemaining.map((s) => s.id));
   // Anything Bison no longer reports is gone — clear it from the failure list.
   for (const id of [...failureMap.keys()]) if (!remainingIds.has(id)) failureMap.delete(id);
@@ -252,7 +292,7 @@ export async function deleteDomainFromInstance(
   // 3. LeadSync cleanup. If Bison is fully clean, drop the whole (instance,
   //    domain) footprint; otherwise remove only what's confirmed gone + reconcile.
   let domainRowRemoved = false;
-  if (finalRemaining.length === 0) {
+  if (finalRemaining.length === 0 && finalVerifyComplete) {
     await supabase.from("deliverability_inboxes").delete().eq("instance", instance).eq("domain", dom);
     await supabase.from("deliverability_domains").delete().eq("instance", instance).eq("domain", dom);
     await supabase.from("deliverability_domain_carryover").delete().eq("instance", instance).eq("domain", dom);
@@ -271,5 +311,6 @@ export async function deleteDomainFromInstance(
     failures,
     remainingInBison: finalRemaining.length,
     domainRowRemoved,
+    verifyIncomplete,
   };
 }

@@ -90,6 +90,40 @@ export async function getPendingDeletions(): Promise<PendingDeletion[]> {
   return (data || []).map((r) => ({ instance: r.instance, domain: r.domain, scheduledAt: r.scheduled_at, status: r.status }));
 }
 
+/**
+ * Drop the remaining grace on pending rows so the executor picks them up on its
+ * next pass (Spencer 2026-08-12: "force these through"). Deliberately only
+ * moves the clock — the actual deleting stays with the one verified executor
+ * (fire-scheduled-deletions), which is why this is safe to call on hundreds of
+ * rows at once. `targets` limits it; omitted = every pending duplicate/move row.
+ */
+export async function forceDeletionsNow(
+  targets?: { instance: string; domain: string }[],
+): Promise<number> {
+  const supabase = getSupabaseAdmin();
+  const nowIso = new Date().toISOString();
+  if (targets && targets.length > 0) {
+    let moved = 0;
+    for (const t of targets) {
+      const { data } = await supabase
+        .from("duplicate_domain_deletions")
+        .update({ scheduled_at: nowIso })
+        .eq("instance", t.instance).eq("domain", t.domain).eq("status", "pending")
+        .select("domain");
+      moved += (data || []).length;
+    }
+    return moved;
+  }
+  const { data } = await supabase
+    .from("duplicate_domain_deletions")
+    .update({ scheduled_at: nowIso })
+    .eq("status", "pending")
+    .in("source", ["duplicate", "move"])
+    .gt("scheduled_at", nowIso)
+    .select("domain");
+  return (data || []).length;
+}
+
 export async function cancelDeletion(instance: string, domain: string): Promise<void> {
   await getSupabaseAdmin().from("duplicate_domain_deletions").delete().eq("instance", instance).eq("domain", domain);
 }
