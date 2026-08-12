@@ -12,7 +12,7 @@ import {
 import {
   DEFAULT_INBOXING_ACCOUNT,
   inboxingConnectionFor,
-  isInboxingAccount,
+  toInboxingAccount,
   type InboxingAccount,
 } from "@/lib/inboxing-accounts";
 
@@ -131,7 +131,7 @@ async function loadInboxingIds(domains: string[]): Promise<Map<string, InboxingR
       if (r.provider_domain_id) {
         map.set(r.domain.toLowerCase(), {
           id: r.provider_domain_id,
-          account: isInboxingAccount(r.inboxing_account) ? r.inboxing_account : DEFAULT_INBOXING_ACCOUNT,
+          account: toInboxingAccount(r.inboxing_account) ?? DEFAULT_INBOXING_ACCOUNT,
         });
       }
     }

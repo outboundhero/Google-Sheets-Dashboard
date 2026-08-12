@@ -44,6 +44,7 @@ import {
   DEFAULT_INBOXING_ACCOUNT,
   INBOXING_ACCOUNT_LABEL,
   INBOXING_ACCOUNT_LOGIN,
+  INBOXING_ACCOUNT_ORDER,
   INBOXING_ACCOUNT_REGION,
   type InboxingAccount,
 } from "@/lib/inboxing-accounts";
@@ -389,7 +390,7 @@ export function BulkCreateInboxOrdersDialog({
               >
                 <SelectTrigger><SelectValue /></SelectTrigger>
                 <SelectContent>
-                  {(["regular", "premium"] as InboxingAccount[]).map((acc) => (
+                  {INBOXING_ACCOUNT_ORDER.map((acc) => (
                     <SelectItem key={acc} value={acc}>
                       {INBOXING_ACCOUNT_LABEL[acc]} — {INBOXING_ACCOUNT_REGION[acc]}
                     </SelectItem>

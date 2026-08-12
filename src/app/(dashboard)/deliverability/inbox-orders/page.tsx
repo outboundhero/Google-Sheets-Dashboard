@@ -42,7 +42,9 @@ import {
   DEFAULT_INBOXING_ACCOUNT,
   INBOXING_ACCOUNT_LABEL,
   INBOXING_ACCOUNT_LOGIN,
+  INBOXING_ACCOUNT_ORDER,
   INBOXING_ACCOUNT_REGION,
+  toInboxingAccount,
   type InboxingAccount,
 } from "@/lib/inboxing-accounts";
 
@@ -412,7 +414,7 @@ function InboxOrdersPageInner() {
                   {PROVIDER_LABEL[order.provider]}
                   {order.provider === "inboxing" && (
                     <div className="text-[10px] text-muted-foreground">
-                      {order.inboxing_account === "regular" ? "Regular Tenants" : "Premium Tenants"}
+                      {INBOXING_ACCOUNT_LABEL[toInboxingAccount(order.inboxing_account) ?? DEFAULT_INBOXING_ACCOUNT].replace("Inboxing – ", "")}
                     </div>
                   )}
                 </td>
@@ -542,7 +544,7 @@ function InboxOrdersPageInner() {
                 <Select value={inboxingAccount} onValueChange={(v) => setInboxingAccount(v as InboxingAccount)}>
                   <SelectTrigger><SelectValue /></SelectTrigger>
                   <SelectContent>
-                    {(["regular", "premium"] as InboxingAccount[]).map((acc) => (
+                    {INBOXING_ACCOUNT_ORDER.map((acc) => (
                       <SelectItem key={acc} value={acc}>
                         {INBOXING_ACCOUNT_LABEL[acc]} — {INBOXING_ACCOUNT_REGION[acc]}
                       </SelectItem>

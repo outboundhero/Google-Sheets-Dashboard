@@ -3,14 +3,15 @@ import type {
   ProviderStatusResult,
 } from "@/types/inbox-order";
 import {
-  DEFAULT_INBOXING_ACCOUNT, inboxingAccountConfigured, inboxingAuth,
+  DEFAULT_INBOXING_ACCOUNT, INBOXING_ACCOUNT_ORDER, inboxingAccountConfigured, inboxingAuth,
   inboxingCloudflareCredential, inboxingRedirectType, type InboxingAccount,
 } from "@/lib/inboxing-accounts";
 
 /** Accounts usable right now, default (legacy) account first. */
 export function configuredInboxingAccounts(): InboxingAccount[] {
-  const all: InboxingAccount[] = [DEFAULT_INBOXING_ACCOUNT, "regular"];
-  return [...new Set(all)].filter(inboxingAccountConfigured);
+  return INBOXING_ACCOUNT_ORDER.slice()
+    .sort((a, b) => Number(b === DEFAULT_INBOXING_ACCOUNT) - Number(a === DEFAULT_INBOXING_ACCOUNT))
+    .filter(inboxingAccountConfigured);
 }
 
 // Read-only Inboxing calls (GET, redirect PATCH, DELETE, etc) only need the
@@ -107,7 +108,10 @@ export async function createDomain(
 ): Promise<InboxingCreateOrderResult> {
   // Credentials are resolved per-domain (from the domain's Porkbun account) by
   // the caller; fall back to the legacy env vars if not supplied.
-  const registrarId = credentials?.registrarCredentialId || process.env.INBOXING_REGISTRAR_CREDENTIAL_ID;
+  const registrarId =
+    credentials?.registrarCredentialId ||
+    // Legacy single-registrar env — only valid for the account it belongs to.
+    (account === DEFAULT_INBOXING_ACCOUNT ? process.env.INBOXING_REGISTRAR_CREDENTIAL_ID : undefined);
   const cloudflareId = credentials?.cloudflareCredentialId || inboxingCloudflareCredential(account);
   if (!registrarId || !cloudflareId) {
     throw new Error("Inboxing createDomain: missing registrar/cloudflare credential for this domain's Porkbun account");

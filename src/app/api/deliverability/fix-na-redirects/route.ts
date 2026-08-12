@@ -4,7 +4,7 @@ import * as inboxing from "@/lib/inboxing";
 import * as milkbox from "@/lib/milkbox";
 import * as scaledmail from "@/lib/scaledmail";
 import { isBogusStoredRedirect } from "@/lib/deliverability/redirect-normalize";
-import { DEFAULT_INBOXING_ACCOUNT, isInboxingAccount } from "@/lib/inboxing-accounts";
+import { DEFAULT_INBOXING_ACCOUNT, toInboxingAccount } from "@/lib/inboxing-accounts";
 
 export const maxDuration = 300;
 
@@ -125,7 +125,7 @@ export async function POST(request: Request) {
           if (r.provider === "inboxing") {
             let id = r.provider_domain_id;
             // Domains live on either Inboxing login — resolve across both.
-            let account = isInboxingAccount(r.inboxing_account) ? r.inboxing_account : DEFAULT_INBOXING_ACCOUNT;
+            let account = toInboxingAccount(r.inboxing_account) ?? DEFAULT_INBOXING_ACCOUNT;
             if (!id) {
               const hit = await inboxing.findDomainAnyAccount(r.domain);
               id = hit?.id ?? null;

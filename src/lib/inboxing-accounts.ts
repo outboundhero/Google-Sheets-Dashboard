@@ -4,36 +4,55 @@
 // change, tags, platform upload, delete) must use the SAME account's key or
 // Inboxing answers 404.
 //
-//   premium = spencer@outboundhero.co      — Asia-based IPs  (the original)
-//   regular = spencer@spencersellstech.com — US-based IPs    (added Aug 2026)
+//   ohco = spencer@outboundhero.co      — Asia-based IPs (the original)
+//   sst  = spencer@spencersellstech.com — US-based IPs   (added Aug 2026)
 //
-// "premium" keeps the legacy INBOXING_* env vars untouched so every existing
-// order, cron and dashboard read keeps working exactly as before.
+// The slugs name the LOGIN, deliberately. Spencer first labelled sst "Regular
+// Tenants" and ohco "Premium", then corrected it to the opposite (2026-08-13,
+// matching the badge Inboxing itself shows) — so the tier wording is display
+// text that can flip, never an identifier. `ohco` keeps the legacy INBOXING_*
+// env vars untouched so every existing order, cron and dashboard read behaves
+// exactly as before.
 import type { BisonInstanceSlug } from "@/lib/bison-instances";
 
-export type InboxingAccount = "premium" | "regular";
+export type InboxingAccount = "ohco" | "sst";
 
 /** Legacy behaviour: anything that doesn't name an account is the old one. */
-export const DEFAULT_INBOXING_ACCOUNT: InboxingAccount = "premium";
+export const DEFAULT_INBOXING_ACCOUNT: InboxingAccount = "ohco";
 
-/** Spencer's wording — used verbatim in the UI. */
+/** Spencer's wording (corrected 2026-08-13) — used verbatim in the UI. */
 export const INBOXING_ACCOUNT_LABEL: Record<InboxingAccount, string> = {
-  regular: "Inboxing – Regular Tenants",
-  premium: "Inboxing – Premium Tenants",
+  sst: "Inboxing – Premium Tenants",
+  ohco: "Inboxing – Regular Tenants",
 };
 
 export const INBOXING_ACCOUNT_LOGIN: Record<InboxingAccount, string> = {
-  regular: "spencer@spencersellstech.com",
-  premium: "spencer@outboundhero.co",
+  sst: "spencer@spencersellstech.com",
+  ohco: "spencer@outboundhero.co",
 };
 
 export const INBOXING_ACCOUNT_REGION: Record<InboxingAccount, string> = {
-  regular: "US-based IPs",
-  premium: "Asia-based IPs",
+  sst: "US-based IPs",
+  ohco: "Asia-based IPs",
 };
 
+/** Order the picker lists them in: the account with free slots first. */
+export const INBOXING_ACCOUNT_ORDER: InboxingAccount[] = ["sst", "ohco"];
+
+// "premium"/"regular" were the slugs for the few hours before Spencer's
+// correction; accept them on read so any row written in that window still
+// resolves to the right login.
+const LEGACY_SLUGS: Record<string, InboxingAccount> = { premium: "ohco", regular: "sst" };
+
 export function isInboxingAccount(v: unknown): v is InboxingAccount {
-  return v === "premium" || v === "regular";
+  return v === "ohco" || v === "sst";
+}
+
+/** Normalize a stored value (incl. the short-lived legacy slugs) to an account. */
+export function toInboxingAccount(v: unknown): InboxingAccount | null {
+  if (isInboxingAccount(v)) return v;
+  if (typeof v === "string" && LEGACY_SLUGS[v]) return LEGACY_SLUGS[v];
+  return null;
 }
 
 /** Porkbun account (domain_inventory.source) → that account's registrar credential. */
@@ -52,23 +71,23 @@ interface AccountConfig {
 // /cloudflare-credentials, /platform-connections — all verified). Env vars
 // override so a re-created credential never needs a deploy.
 function config(account: InboxingAccount): AccountConfig {
-  if (account === "regular") {
+  if (account === "sst") {
     return {
-      apiKey: process.env.INBOXING_REGULAR_API_KEY,
-      baseUrl: process.env.INBOXING_REGULAR_BASE_URL || "https://v2.inboxing.com/api/v2",
+      apiKey: process.env.INBOXING_SST_API_KEY || process.env.INBOXING_REGULAR_API_KEY,
+      baseUrl: process.env.INBOXING_SST_BASE_URL || process.env.INBOXING_REGULAR_BASE_URL || "https://v2.inboxing.com/api/v2",
       cloudflareCredentialId:
-        process.env.INBOXING_REGULAR_CLOUDFLARE_CREDENTIAL_ID || "cmsnu46vd0005oasck0yfpahm",
+        process.env.INBOXING_SST_CLOUDFLARE_CREDENTIAL_ID || process.env.INBOXING_REGULAR_CLOUDFLARE_CREDENTIAL_ID || "cmsnu46vd0005oasck0yfpahm",
       registrars: {
         porkbun_outboundhero:
-          process.env.INBOXING_REGULAR_REGISTRAR_OUTBOUNDHERO || "cmsnu46v70003oasc15rbh1et",
+          process.env.INBOXING_SST_REGISTRAR_OUTBOUNDHERO || process.env.INBOXING_REGULAR_REGISTRAR_OUTBOUNDHERO || "cmsnu46v70003oasc15rbh1et",
         porkbun_spencersellstech:
-          process.env.INBOXING_REGULAR_REGISTRAR_SPENCERSELLSTECH || "cmsnu46v30001oascb19z1hqj",
+          process.env.INBOXING_SST_REGISTRAR_SPENCERSELLSTECH || process.env.INBOXING_REGULAR_REGISTRAR_SPENCERSELLSTECH || "cmsnu46v30001oascb19z1hqj",
       },
       connections: {
-        outboundhero: process.env.INBOXING_REGULAR_CONNECTION_OUTBOUNDHERO || "cmsnu46vo0009oascrgec6d7e",
-        cleaningoutbound: process.env.INBOXING_REGULAR_CONNECTION_CLEANINGOUTBOUND || "cmsnu46vs000boasck05tdlwt",
-        facilityreach: process.env.INBOXING_REGULAR_CONNECTION_FACILITYREACH || "cmsnu46vw000doascpqevkpdl",
-        outboundclean: process.env.INBOXING_REGULAR_CONNECTION_OUTBOUNDCLEAN || "cmsnu46w0000foascx2aeo3yo",
+        outboundhero: process.env.INBOXING_SST_CONNECTION_OUTBOUNDHERO || process.env.INBOXING_REGULAR_CONNECTION_OUTBOUNDHERO || "cmsnu46vo0009oascrgec6d7e",
+        cleaningoutbound: process.env.INBOXING_SST_CONNECTION_CLEANINGOUTBOUND || process.env.INBOXING_REGULAR_CONNECTION_CLEANINGOUTBOUND || "cmsnu46vs000boasck05tdlwt",
+        facilityreach: process.env.INBOXING_SST_CONNECTION_FACILITYREACH || process.env.INBOXING_REGULAR_CONNECTION_FACILITYREACH || "cmsnu46vw000doascpqevkpdl",
+        outboundclean: process.env.INBOXING_SST_CONNECTION_OUTBOUNDCLEAN || process.env.INBOXING_REGULAR_CONNECTION_OUTBOUNDCLEAN || "cmsnu46w0000foascx2aeo3yo",
       },
     };
   }
@@ -95,8 +114,8 @@ export function inboxingAuth(account: InboxingAccount = DEFAULT_INBOXING_ACCOUNT
   const c = config(account);
   if (!c.apiKey) {
     throw new Error(
-      account === "regular"
-        ? "Inboxing env missing (INBOXING_REGULAR_API_KEY) — add it in Vercel to use the Regular Tenants account"
+      account === "sst"
+        ? "Inboxing env missing (INBOXING_SST_API_KEY / INBOXING_REGULAR_API_KEY) — add it in Vercel to use the spencersellstech account"
         : "Inboxing env missing (INBOXING_API_KEY)",
     );
   }

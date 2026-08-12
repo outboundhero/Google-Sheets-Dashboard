@@ -4,7 +4,7 @@ import * as scaledmail from "@/lib/scaledmail";
 import * as milkbox from "@/lib/milkbox";
 import * as inboxing from "@/lib/inboxing";
 import { meansNoRedirect } from "@/lib/deliverability/redirect-normalize";
-import { DEFAULT_INBOXING_ACCOUNT, isInboxingAccount, type InboxingAccount } from "@/lib/inboxing-accounts";
+import { DEFAULT_INBOXING_ACCOUNT, toInboxingAccount, type InboxingAccount } from "@/lib/inboxing-accounts";
 
 export const maxDuration = 300;
 
@@ -144,9 +144,8 @@ async function buildRouting(
   const inboxingAccountByDomain = new Map<string, InboxingAccount>();
   for (const r of (orderRows ?? []) as { provider: string; domain: string; provider_domain_id: string | null; inboxing_account?: string | null }[]) {
     providerIdByKey.set(`${r.provider}:${r.domain}`, r.provider_domain_id);
-    if (r.provider === "inboxing" && isInboxingAccount(r.inboxing_account)) {
-      inboxingAccountByDomain.set(r.domain, r.inboxing_account);
-    }
+    const acc = r.provider === "inboxing" ? toInboxingAccount(r.inboxing_account) : null;
+    if (acc) inboxingAccountByDomain.set(r.domain, acc);
   }
 
   // Build initial routing. Both MilkBox and Inboxing's PUT redirect endpoints

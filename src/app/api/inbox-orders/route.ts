@@ -6,7 +6,7 @@ import * as milkbox from "@/lib/milkbox";
 import * as inboxing from "@/lib/inboxing";
 import { resolveDomainOrders, milkboxSequencerFor } from "@/lib/inbox-order-accounts";
 import { meansNoRedirect } from "@/lib/deliverability/redirect-normalize";
-import { DEFAULT_INBOXING_ACCOUNT, isInboxingAccount, inboxingRegistrarCredential } from "@/lib/inboxing-accounts";
+import { DEFAULT_INBOXING_ACCOUNT, toInboxingAccount, inboxingRegistrarCredential } from "@/lib/inboxing-accounts";
 import type {
   CreateOrderInput,
   InboxOrderProvider,
@@ -57,12 +57,10 @@ export async function POST(request: Request) {
   try {
     const body = await request.json().catch(() => ({}));
     const provider = body?.provider;
-    // Which Inboxing login this order belongs to (Spencer 2026-08-12): the
-    // Regular Tenants account is US-IP, Premium is Asia-IP. Stored on the row
-    // so every later call about this domain uses the SAME account's key.
-    const inboxingAccount = isInboxingAccount(body?.inboxingAccount)
-      ? body.inboxingAccount
-      : DEFAULT_INBOXING_ACCOUNT;
+    // Which Inboxing login this order belongs to (Spencer 2026-08-12): sst is
+    // US-IP ("Premium Tenants"), ohco is Asia-IP ("Regular Tenants"). Stored on
+    // the row so every later call about this domain uses the SAME account's key.
+    const inboxingAccount = toInboxingAccount(body?.inboxingAccount) ?? DEFAULT_INBOXING_ACCOUNT;
     const instance = isInstanceSlug(body?.instance) ? body.instance : DEFAULT_INSTANCE;
     const domain = typeof body?.domain === "string" ? body.domain.trim().toLowerCase() : "";
     const tag = typeof body?.tag === "string" ? body.tag.slice(0, 20) : null;
