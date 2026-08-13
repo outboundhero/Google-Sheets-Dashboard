@@ -174,11 +174,11 @@ async function deleteBatch(
   instance: BisonInstanceSlug,
   domain: string,
   senders: SenderLite[],
-): Promise<{ deleted: number; notFound: number; removedIds: number[]; failures: DeleteFailure[] }> {
+): Promise<{ deletedIds: number[]; notFoundIds: number[]; removedIds: number[]; failures: DeleteFailure[] }> {
   const removedIds: number[] = [];
+  const deletedIds: number[] = [];
+  const notFoundIds: number[] = [];
   const failures: DeleteFailure[] = [];
-  let deleted = 0;
-  let notFound = 0;
   for (let i = 0; i < senders.length; i += DELETE_CONC) {
     const batch = senders.slice(i, i + DELETE_CONC);
     const results = await Promise.all(
@@ -189,12 +189,12 @@ async function deleteBatch(
         failures.push({ id: s.id, email: s.email || `#${s.id}`, domain, instance, status: result.status, error: result.error });
         continue;
       }
-      if (result.outcome === "deleted") deleted++;
-      else notFound++;
+      if (result.outcome === "deleted") deletedIds.push(s.id);
+      else notFoundIds.push(s.id);
       removedIds.push(s.id);
     }
   }
-  return { deleted, notFound, removedIds, failures };
+  return { deletedIds, notFoundIds, removedIds, failures };
 }
 
 /** Remove sender IDs from LeadSync's inbox table (chunked). */
@@ -213,12 +213,16 @@ async function purgeInboxIds(instance: BisonInstanceSlug, ids: number[]): Promis
 /** Re-aggregate the (instance, domain) row from whatever inboxes remain. */
 async function reconcileDomain(instance: BisonInstanceSlug, domain: string): Promise<void> {
   const supabase = getSupabaseAdmin();
-  const { data: remaining } = await supabase
+  const { data: remaining, error } = await supabase
     .from("deliverability_inboxes")
     .select("tags, type, emails_sent_count, total_replied_count, bounced_count")
     .eq("instance", instance)
     .eq("domain", domain);
-  if (!remaining || remaining.length === 0) return;
+  // A read error means we don't know the truth — leave the row alone. Zero rows
+  // is a real answer though: bailing out there left the domain row frozen at its
+  // pre-delete count, so the UI kept showing the instance chip with 49 inboxes
+  // long after every inbox was gone.
+  if (error || !remaining) return;
   const tagSet = new Set<string>();
   let sent = 0, replied = 0, bounced = 0, outlook = 0, google = 0;
   for (const inbox of remaining as { tags?: { name?: string }[]; type?: string; emails_sent_count?: number; total_replied_count?: number; bounced_count?: number }[]) {
@@ -271,8 +275,12 @@ export async function deleteDomainFromInstance(
   // 2. Delete → re-verify sweeps until Bison reports zero (or budget exhausted).
   const removedIds = new Set<number>();
   const failureMap = new Map<number, DeleteFailure>();
-  let deleted = 0;
-  let notFound = 0;
+  // Counted as SETS of sender ids, not running totals. Bison's sender search
+  // lags its own deletes, so a sweep re-lists senders we already deleted and
+  // deletes them again (200 again) — summing per-sweep counts reported ~4x the
+  // real number ("781 inboxes deleted" for 4×49 senders).
+  const deletedIds = new Set<number>();
+  const notFoundIds = new Set<number>();
   let toDelete: SenderLite[] = [...candidates.entries()].map(([id, email]) => ({ id, email }));
 
   // Reliability of the LAST verification, not of every search: a complete
@@ -281,8 +289,10 @@ export async function deleteDomainFromInstance(
   let confirmedZero = false; // a sweep's re-verify already reported 0 → skip the extra final search (each search is 30–60s on slow instances like facilityreach)
   for (let sweep = 0; sweep < MAX_SWEEPS && toDelete.length > 0; sweep++) {
     const r = await deleteBatch(instance, dom, toDelete);
-    deleted += r.deleted;
-    notFound += r.notFound;
+    for (const id of r.deletedIds) { deletedIds.add(id); notFoundIds.delete(id); }
+    // Only "not found" if we never got a successful delete for it — a 404 on a
+    // later sweep just means the earlier delete finally propagated.
+    for (const id of r.notFoundIds) if (!deletedIds.has(id)) notFoundIds.add(id);
     for (const id of r.removedIds) { removedIds.add(id); failureMap.delete(id); }
     for (const f of r.failures) failureMap.set(f.id, f);
 
@@ -325,8 +335,8 @@ export async function deleteDomainFromInstance(
   return {
     instance,
     domain: dom,
-    inboxesDeleted: deleted,
-    notFound,
+    inboxesDeleted: deletedIds.size,
+    notFound: notFoundIds.size,
     failed: failures.length,
     failures,
     remainingInBison: finalRemaining.length,
