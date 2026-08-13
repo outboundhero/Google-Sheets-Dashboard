@@ -49,7 +49,7 @@ export interface WarmupForecast {
 
 export async function buildWarmupForecast(): Promise<WarmupForecast> {
   const supabase = getSupabaseAdmin();
-  const allowSurbl = (await getSettings()).allowSurblReserves;
+  const { allowSurblReserves: allowSurbl, allowInfoReserves: allowInfo } = await getSettings();
   const today = pstDateString(new Date());
   const todayMs = Date.parse(`${today}T00:00:00Z`);
 
@@ -100,7 +100,9 @@ export async function buildWarmupForecast(): Promise<WarmupForecast> {
       daysLeft: Math.max(0, WARMUP_DAYS - ageDays),
       pullable:
         (provider === "outlook" || provider === "google") &&
-        !d.domain.toLowerCase().endsWith(".info") &&
+        // .info reusable while the setting is on (Spencer Aug-13) — same rule
+        // the planner's reserve pool applies, so the two counts agree.
+        (allowInfo || !d.domain.toLowerCase().endsWith(".info")) &&
         // SURBL-listed allowed while the setting is on (Nick+Spencer Aug-10);
         // Spamhaus stays a hard block either way.
         (allowSurbl || d.blacklisted !== true) &&

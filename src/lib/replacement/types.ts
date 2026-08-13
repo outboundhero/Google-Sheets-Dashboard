@@ -25,6 +25,15 @@ export interface ReplacementSettings {
    * once inventory recovers — no code change needed.
    */
   allowSurblReserves: boolean;
+  /**
+   * Allow `.info` domains to be pulled as replacements (Spencer Aug-13: "let's
+   * start reusing .info domains going forward and enabling it"). We had refused
+   * them on purpose while migrating off `.info`; that stock is now the bulk of
+   * what's available. `.info` reserves are consumed LAST within their pool, and
+   * are still excluded entirely when the plan is built in `.info`-migration mode
+   * (replacing a `.info` with a `.info` would be pointless).
+   */
+  allowInfoReserves: boolean;
   /** How many signals must be true simultaneously to confirm burnt. */
   minSignals: number;
   lookbackWindow: LookbackWindow;
@@ -39,6 +48,7 @@ export const DEFAULT_SETTINGS: ReplacementSettings = {
   flagOnSurbl: true,
   flagOnSpamhaus: true,
   allowSurblReserves: true,
+  allowInfoReserves: true,
   minSignals: 2,
   lookbackWindow: "30",
   minSent: 50,

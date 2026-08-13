@@ -97,8 +97,9 @@ export interface ClientAuditRow {
 
 // One row of reserve inventory — an untagged domain that has finished warmup
 // (≥ 21 days). `pullable` tells the UI whether replacement can actually use
-// this one as a like-for-like replacement (pure Outlook or Google, non-.info,
-// non-blacklisted, not itself burnt) or whether it's inventory-only for now.
+// this one as a like-for-like replacement (pure Outlook or Google, non-blacklisted,
+// not itself burnt, and — unless allowInfoReserves is on — non-.info) or whether
+// it's inventory-only for now.
 export interface ReserveDomain {
   instance: BisonInstanceSlug;
   domain: string;
@@ -278,13 +279,17 @@ export async function buildReplacementPlan(
 
   // 5) reserve-ready pools per (instance, provider) — consumable. Ready =
   //    unassigned (no client tag) + pure provider + Complete (>=21d) + SURBL &
-  //    Spamhaus clean + NOT itself burnt + NOT a .info (we are migrating OFF
-  //    .info, so never pull one as a replacement).
+  //    Spamhaus clean + NOT itself burnt.
+  //    `.info` is allowed while cfg.allowInfoReserves is on (Spencer, Aug-13:
+  //    "let's start reusing .info domains going forward"). In .info-MIGRATION
+  //    mode we still refuse them regardless of the setting — that mode exists to
+  //    replace .info domains, so handing one back as the replacement is a no-op.
+  const allowInfo = cfg.allowInfoReserves && !infoMigration;
   const reservePool = new Map<string, string[]>(); // key: `${instance}:${provider}`
   for (const e of enriched) {
     if (e.tag !== null) continue;
     if (e.provider !== "outlook" && e.provider !== "google") continue;
-    if (isInfo(e.d.domain)) continue;
+    if (!allowInfo && isInfo(e.d.domain)) continue;
     if (ageDays(e.d.domain_created_at, nowMs) < WARMUP_DAYS) continue;
     // SURBL-listed reserves: allowed while cfg.allowSurblReserves is on (Nick +
     // Spencer, Aug-10: "allow SURBL blacklist for now" — it's what's available;
@@ -316,12 +321,15 @@ export async function buildReplacementPlan(
   // ever usable in the instance they already sit in. Inboxing sorts last so that
   // stock stays free for the cross-instance donor pull below. Keying off the same
   // `inboxingMovable` set the donor picker uses means what we conserve here is
-  // exactly what the mover can spend. SURBL-clean still wins inside each group.
+  // exactly what the mover can spend. SURBL-clean still wins inside each group,
+  // and `.info` sorts last of all — reusable now, but only once the better
+  // stock in that pool is gone.
   for (const [key, list] of reservePool) {
     const inst = key.split(":")[0];
     list.sort((a, b) =>
       Number(inboxingMovable.has(`${inst}:${a}`)) - Number(inboxingMovable.has(`${inst}:${b}`))
       || Number(surblListed.has(`${inst}:${a}`)) - Number(surblListed.has(`${inst}:${b}`))
+      || Number(isInfo(a)) - Number(isInfo(b))
       || a.localeCompare(b));
   }
 

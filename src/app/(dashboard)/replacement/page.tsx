@@ -404,6 +404,10 @@ export default function ReplacementPage() {
                   <input type="checkbox" checked={settings.allowSurblReserves} onChange={(e) => set("allowSurblReserves", e.target.checked)} />
                   Allow SURBL-listed domains as replacements
                 </label>
+                <label className="flex items-center gap-2 text-sm" title="Spencer Aug-13: start reusing .info domains. They are pulled last within each pool — only once the better stock is gone — and never while the plan is built in .info-migration mode.">
+                  <input type="checkbox" checked={settings.allowInfoReserves} onChange={(e) => set("allowInfoReserves", e.target.checked)} />
+                  Allow .info domains as replacements
+                </label>
                 <label className="flex items-center gap-2 text-sm ml-auto">
                   <span className="text-xs text-muted-foreground">Mode</span>
                   <select
