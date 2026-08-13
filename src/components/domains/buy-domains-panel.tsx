@@ -94,6 +94,13 @@ export function BuyDomainsPanel() {
     });
   };
 
+  // Select-first-N (Nick Aug-13): "I want to buy 200" shouldn't mean 200 clicks.
+  const [selectCount, setSelectCount] = useState("");
+  const selectFirstN = () => {
+    const n = Math.min(Math.max(0, parseInt(selectCount, 10) || 0), filtered.length);
+    if (n > 0) setSelected(new Set(filtered.slice(0, n).map((d) => d.domain)));
+  };
+
   const enqueueSelected = useCallback(async () => {
     const list = Array.from(selected);
     if (list.length === 0) return;
@@ -344,6 +351,25 @@ export function BuyDomainsPanel() {
 
         {enqueueMsg && (
           <div className="px-4 py-2 text-xs text-muted-foreground border-b bg-muted/20">{enqueueMsg}</div>
+        )}
+
+        {/* Select first N of the current filtered set */}
+        {isAdmin && filtered.length > 0 && (
+          <div className="flex items-center gap-2 px-4 py-2 text-xs border-b bg-muted/10">
+            <span className="text-muted-foreground">Select first</span>
+            <input
+              type="number"
+              min={1}
+              max={filtered.length}
+              value={selectCount}
+              onChange={(e) => setSelectCount(e.target.value)}
+              onKeyDown={(e) => { if (e.key === "Enter") selectFirstN(); }}
+              placeholder="50"
+              className="h-7 w-20 rounded-md border bg-background px-2 text-xs"
+            />
+            <span className="text-muted-foreground">of {filtered.length} available</span>
+            <Button variant="outline" size="sm" className="h-7 text-xs" onClick={selectFirstN}>Select</Button>
+          </div>
         )}
 
         {selected.size > 0 && isAdmin && (
