@@ -15,7 +15,12 @@ import { SavedSearchesBar } from "./saved-searches-bar";
 
 const PAGE_SIZE = 100;
 
-type SortKey = "domain" | "source" | "inUse" | "provider" | "expireDate";
+type SortKey = "domain" | "source" | "inUse" | "provider" | "expireDate" | "autoRenew" | "surbl" | "spamhaus";
+
+// Tri-state flags (listed / clean / never checked) need an explicit order —
+// Number(null) is 0, which would silently rank "unchecked" as "clean" and make
+// a true/false sort useless. Ascending puts unchecked first, listed last.
+const flagRank = (v: boolean | null | undefined) => (v == null ? -1 : v ? 1 : 0);
 
 const PROVIDER_BADGE: Record<string, string> = {
   google: "bg-blue-500/10 text-blue-600 border-blue-500/20",
@@ -108,6 +113,11 @@ export function AllDomainsTable() {
       else if (sortKey === "inUse") cmp = Number(a.inUse) - Number(b.inUse);
       else if (sortKey === "provider") cmp = a.provider.localeCompare(b.provider);
       else if (sortKey === "expireDate") cmp = (a.expireDate || "").localeCompare(b.expireDate || "");
+      else if (sortKey === "autoRenew") cmp = flagRank(a.autoRenew) - flagRank(b.autoRenew);
+      else if (sortKey === "surbl") cmp = flagRank(a.surblListed) - flagRank(b.surblListed);
+      else if (sortKey === "spamhaus") cmp = flagRank(a.spamhausListed) - flagRank(b.spamhausListed);
+      // Ties fall back to domain so paging through a flag sort is stable.
+      if (cmp === 0 && sortKey !== "domain") cmp = a.domain.localeCompare(b.domain);
       return sortDir === "asc" ? cmp : -cmp;
     });
     return out;
@@ -132,6 +142,15 @@ export function AllDomainsTable() {
   // Select-all applies to the whole matched set (both sections, across pages).
   const allFilteredSelected = matched.length > 0 && matched.every((r) => selected.has(r.domain));
   const toggleAll = () => setSelected(allFilteredSelected ? new Set() : new Set(matched.map((r) => r.domain)));
+
+  // Select-first-N (Nick Aug-13): ordering a fixed batch ("give me 50") meant
+  // click-dragging across pages. Takes the CURRENT sort + filters, so e.g.
+  // sort SURBL desc → "select 50" grabs the 50 worst, not an arbitrary 50.
+  const [selectCount, setSelectCount] = useState("");
+  const selectFirstN = () => {
+    const n = Math.min(Math.max(0, parseInt(selectCount, 10) || 0), matched.length);
+    if (n > 0) setSelected(new Set(matched.slice(0, n).map((r) => r.domain)));
+  };
   const selectedList = useMemo(() => Array.from(selected), [selected]);
   const clearAllFilters = () => { setSearch(""); setSourceFilter("all"); setInUseFilter("all"); setProviderFilter("all"); setConditions([]); setPage(0); };
 
@@ -219,6 +238,25 @@ export function AllDomainsTable() {
       {isAdmin && <SavedSearchesBar scope="all-domains" snapshot={buildSnapshot} onApply={applySnapshot} />}
       <DomainFilterBuilder fields={filterFields} conditions={conditions} setConditions={(c) => { setConditions(c); setPage(0); }} mode={filterMode} setMode={setFilterMode} />
 
+      {/* Select first N of the current filtered + sorted set */}
+      {isAdmin && matched.length > 0 && (
+        <div className="flex items-center gap-2 text-xs">
+          <span className="text-muted-foreground">Select first</span>
+          <input
+            type="number"
+            min={1}
+            max={matched.length}
+            value={selectCount}
+            onChange={(e) => setSelectCount(e.target.value)}
+            onKeyDown={(e) => { if (e.key === "Enter") selectFirstN(); }}
+            placeholder="50"
+            className="h-7 w-20 rounded-md border bg-background px-2 text-xs"
+          />
+          <span className="text-muted-foreground">of {matched.length} filtered</span>
+          <Button variant="outline" size="sm" className="h-7 text-xs" onClick={selectFirstN}>Select</Button>
+        </div>
+      )}
+
       {/* Selection action bar */}
       {isAdmin && selected.size > 0 && (
         <div className="sticky top-0 z-30 flex flex-wrap items-center justify-between gap-2 rounded-xl border bg-card/95 backdrop-blur px-4 py-2.5 shadow-sm">
@@ -279,9 +317,9 @@ export function AllDomainsTable() {
                   <SortableTh label="In use" k="inUse" sortKey={sortKey} onClick={toggleSort} className="text-left w-[100px]" />
                   <SortableTh label="Provider" k="provider" sortKey={sortKey} onClick={toggleSort} className="text-left w-[130px]" />
                   <SortableTh label="Expiry" k="expireDate" sortKey={sortKey} onClick={toggleSort} className="text-right w-[130px]" />
-                  <th className="text-right font-medium px-3 py-2.5 w-[90px]">Auto-renew</th>
-                  <th className="text-center font-medium px-3 py-2.5 w-[80px]">SURBL</th>
-                  <th className="text-center font-medium px-3 py-2.5 w-[90px]">Spamhaus</th>
+                  <SortableTh label="Auto-renew" k="autoRenew" sortKey={sortKey} onClick={toggleSort} className="text-right w-[90px]" />
+                  <SortableTh label="SURBL" k="surbl" sortKey={sortKey} onClick={toggleSort} className="text-center w-[80px]" />
+                  <SortableTh label="Spamhaus" k="spamhaus" sortKey={sortKey} onClick={toggleSort} className="text-center w-[90px]" />
                 </tr>
               </thead>
               <tbody className="divide-y">

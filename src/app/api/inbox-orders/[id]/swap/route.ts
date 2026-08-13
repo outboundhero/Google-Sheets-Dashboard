@@ -78,7 +78,7 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
     // the SAME Inboxing login as the domain it replaces — the two accounts have
     // separate slot pools, so silently swapping across them would drain the
     // wrong one.
-    const inboxingAccount = typed.inboxing_account ?? DEFAULT_INBOXING_ACCOUNT;
+    let inboxingAccount = typed.inboxing_account ?? DEFAULT_INBOXING_ACCOUNT;
     if (typed.provider_domain_id) {
       try {
         await inboxing.deleteDomain(typed.provider_domain_id, inboxingAccount);
@@ -102,6 +102,8 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
       },
       inboxingAccount,
     );
+    // Adopted domains can live on the other login — follow where it actually is.
+    if (created.account) inboxingAccount = created.account;
     // Mark old row deleted, insert new row as the replacement.
     await supabase.from("inbox_orders").update({ status: "swapped" }).eq("id", id);
     const { data: inserted, error: insertErr } = await supabase

@@ -60,7 +60,7 @@ export async function POST(request: Request) {
     // Which Inboxing login this order belongs to (Spencer 2026-08-12): sst is
     // US-IP ("Premium Tenants"), ohco is Asia-IP ("Regular Tenants"). Stored on
     // the row so every later call about this domain uses the SAME account's key.
-    const inboxingAccount = toInboxingAccount(body?.inboxingAccount) ?? DEFAULT_INBOXING_ACCOUNT;
+    let inboxingAccount = toInboxingAccount(body?.inboxingAccount) ?? DEFAULT_INBOXING_ACCOUNT;
     const instance = isInstanceSlug(body?.instance) ? body.instance : DEFAULT_INSTANCE;
     const domain = typeof body?.domain === "string" ? body.domain.trim().toLowerCase() : "";
     const tag = typeof body?.tag === "string" ? body.tag.slice(0, 20) : null;
@@ -158,6 +158,9 @@ export async function POST(request: Request) {
       );
       providerDomainId = r.domainId;
       providerStatusRaw = r.raw.status || null;
+      // An adopted domain may sit on the OTHER Inboxing login — record where it
+      // actually is, or the status poller queries the wrong account and 404s.
+      if (r.account) inboxingAccount = r.account;
     }
 
     const supabase = getSupabaseAdmin();

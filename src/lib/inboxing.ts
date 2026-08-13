@@ -100,6 +100,10 @@ interface InboxingDomain {
 export interface InboxingCreateOrderResult {
   domainId: string;
   raw: InboxingDomain;
+  /** Account the domain actually lives on — differs from the requested one when adopted. */
+  account?: InboxingAccount;
+  /** True when Inboxing already held this domain and we adopted it instead of creating. */
+  reused?: boolean;
 }
 
 export async function createDomain(
@@ -145,11 +149,28 @@ export async function createDomain(
     cloudflare_credential_id: cloudflareId,
     registrar_credential_id: registrarId,
   };
-  const result = await call<InboxingDomain>("POST", "/domains", body, false, account);
+  let result: InboxingDomain;
+  try {
+    result = await call<InboxingDomain>("POST", "/domains", body, false, account);
+  } catch (e) {
+    // "Domain already exists" means Inboxing IS holding this domain — from an
+    // earlier attempt in the same batch, or on the other login. Failing the row
+    // just made an operator re-order it by hand (Nick Aug-13), so adopt the
+    // existing record instead. Any other 4xx still fails loudly.
+    if (!/already exists/i.test(e instanceof Error ? e.message : String(e))) throw e;
+    const hit = await findDomainAnyAccount(input.domain);
+    if (!hit) throw e;
+    return {
+      domainId: hit.id,
+      account: hit.account,
+      reused: true,
+      raw: { id: hit.id, domain: hit.domain, status: "existing" },
+    };
+  }
   if (!result.id) {
     throw new Error("Inboxing createDomain: response missing id");
   }
-  return { domainId: result.id, raw: result };
+  return { domainId: result.id, account, raw: result };
 }
 
 interface InboxingStatus {
