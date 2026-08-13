@@ -2,7 +2,8 @@ import { NextResponse } from "next/server";
 import { buildWeeklyReport, sendClientReport } from "@/lib/cron/client-reports";
 import { pstDateString } from "@/lib/date-utils";
 
-export const maxDuration = 300;
+// See client-report-daily: 800s so a quota-throttled read pass can't kill the run.
+export const maxDuration = 800;
 
 // Weekly client performance recap + underperformance flags. Scheduled Friday
 // 12:00 PM PT (see vercel.json). `?date=` sets the window end; `?preview=1`

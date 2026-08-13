@@ -44,7 +44,22 @@ function tierBucketFromPlan(plan: string): TierBucket | null {
   return null; // PPQM / PPQL / blank → not a tiered client
 }
 
-export interface TrackerEntry { plan: string; status: string; bucket: TierBucket | null }
+export interface TrackerEntry {
+  plan: string;
+  status: string;
+  bucket: TierBucket | null;
+  startDate: string;   // raw tracker cell, "M/D/YYYY" — "" when blank
+  churnDate: string;   // raw tracker cell, "M/D/YYYY" — "" when blank
+}
+
+// Tracker dates render as M/D/YYYY (FORMATTED_VALUE). Compare as PST date
+// strings rather than Date objects so a client starting "today" counts from
+// midnight PST, not from whatever instant the cron happens to run at.
+function trackerDateToPst(cell: string): string | null {
+  const m = String(cell || "").trim().match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+  if (!m) return null;
+  return `${m[3]}-${m[1].padStart(2, "0")}-${m[2].padStart(2, "0")}`;
+}
 
 // Read Client Tracker → map of UPPERCASE Client Abbreviation → tier/status.
 export async function getClientTierMap(): Promise<Map<string, TrackerEntry>> {
@@ -60,12 +75,20 @@ export async function getClientTierMap(): Promise<Map<string, TrackerEntry>> {
   const abbrI = hdr.findIndex((h: string) => h.includes("abbrev"));
   const planI = hdr.indexOf("plan");
   const statusI = hdr.indexOf("status");
+  const startI = hdr.findIndex((h: string) => h.includes("start date"));
+  const churnI = hdr.findIndex((h: string) => h.includes("churn date"));
   const map = new Map<string, TrackerEntry>();
   for (const r of rows.slice(1)) {
     const abbrCell = String(r[abbrI] || "").trim();
     if (!abbrCell) continue;
     const plan = String(r[planI] || "").trim();
-    const entry: TrackerEntry = { plan, status: String(r[statusI] || "").trim(), bucket: tierBucketFromPlan(plan) };
+    const entry: TrackerEntry = {
+      plan,
+      status: String(r[statusI] || "").trim(),
+      bucket: tierBucketFromPlan(plan),
+      startDate: startI >= 0 ? String(r[startI] || "").trim() : "",
+      churnDate: churnI >= 0 ? String(r[churnI] || "").trim() : "",
+    };
     // Register the whole cell AND each individual market abbreviation, so a
     // combined tracker client like "DBSM & DBSA & DBSF" or "JPCHI & JPCIN"
     // also matches a lead sheet tagged "DBSM / DBSA / …" or "JPCIN / JPCHI".
@@ -151,6 +174,7 @@ interface LeadUniverse {
   clients: ReportClient[];
   unmapped: { clientTag: string; name: string }[];   // no tier match
   inactive: number;                                   // resolved but not Active
+  notLive: { clientTag: string; reason: string }[];    // churned or not started yet (excluded)
   failedSheets: string[];                             // could not be read (excluded — run is incomplete)
 }
 
@@ -193,10 +217,11 @@ async function readSheetWithRetry(
 
 // Read every tracked sheet fresh (so daily counts aren't stale vs the 2-day
 // lead-sync cron), then attach each to its tier. Active clients only.
-async function buildLeadUniverse(): Promise<LeadUniverse> {
+async function buildLeadUniverse(asOf: string): Promise<LeadUniverse> {
   const [config, tierMap] = await Promise.all([getConfig(), getClientTierMap()]);
   const clients: ReportClient[] = [];
   const unmapped: { clientTag: string; name: string }[] = [];
+  const notLive: { clientTag: string; reason: string }[] = [];
   const failedSheets: string[] = [];
   let inactive = 0;
 
@@ -218,6 +243,23 @@ async function buildLeadUniverse(): Promise<LeadUniverse> {
         continue;
       }
       if (!/active/i.test(entry.status)) { inactive++; continue; }
+      // Spencer 2026-08-13: count a client only while it is actually live —
+      // past its Start Date and not yet at its Churn Date. Both are judged
+      // against the report's own date, so a back-dated run reflects who was
+      // live THEN. A client that hasn't started contributes 0 leads but a full
+      // tier target, which is what was dragging the report "below pace".
+      const churn = trackerDateToPst(entry.churnDate);
+      if (churn && churn <= asOf) {
+        notLive.push({ clientTag: s.clientTag || s.name, reason: `churned ${entry.churnDate}` });
+        continue;
+      }
+      const start = trackerDateToPst(entry.startDate);
+      // Blank/unparseable Start Date → include. Dropping a client over a
+      // formatting quirk in one cell is the worse failure of the two.
+      if (start && start > asOf) {
+        notLive.push({ clientTag: s.clientTag || s.name, reason: `starts ${entry.startDate}` });
+        continue;
+      }
       const read = results[j];
       if (read.leads === null) {
         // Read failed after retries — exclude rather than count as 0, and flag
@@ -230,7 +272,7 @@ async function buildLeadUniverse(): Promise<LeadUniverse> {
     }
     if (i + BATCH < config.sheets.length) await sleep(BATCH_INTERVAL_MS);
   }
-  return { clients, unmapped, inactive, failedSheets };
+  return { clients, unmapped, inactive, notLive, failedSheets };
 }
 
 function fmt(n: number): string {
@@ -270,7 +312,7 @@ function calloutRed(text: string): string {
 export interface DailyReport { subject: string; text: string; html: string; date: string }
 
 export async function buildDailyReport(dateStr: string): Promise<DailyReport> {
-  const { clients, unmapped, failedSheets } = await buildLeadUniverse();
+  const { clients, unmapped, notLive, failedSheets } = await buildLeadUniverse(dateStr);
   const weekend = isWeekend(dateStr);
   const niceDate = new Date(`${dateStr}T12:00:00Z`).toLocaleDateString("en-US", {
     weekday: "long", month: "long", day: "numeric", year: "numeric", timeZone: "UTC",
@@ -306,6 +348,10 @@ export async function buildDailyReport(dateStr: string): Promise<DailyReport> {
     lines.push("");
     lines.push(`⚠️ ${unmapped.length} client sheet(s) have no tier in the Client Tracker (not counted): ${unmapped.map((u) => u.clientTag).join(", ")}`);
   }
+  if (notLive.length) {
+    lines.push("");
+    lines.push(`ℹ️ ${notLive.length} client(s) not live on this date (not counted): ${notLive.map((n) => `${n.clientTag} — ${n.reason}`).join(", ")}`);
+  }
 
   // HTML body
   const cards = buckets.map((b) => `
@@ -319,7 +365,8 @@ export async function buildDailyReport(dateStr: string): Promise<DailyReport> {
   const totalHtml = `<div style="margin-top:4px;padding-top:12px;border-top:1px solid #e5e7eb;font-size:15px;"><b>Total meeting-ready delivered today:</b> ${grandActual}</div>`;
   const failedHtml = failedSheets.length ? calloutRed(`${failedSheets.length} sheet(s) could not be read this run — totals may be incomplete: ${failedSheets.join(", ")}`) : "";
   const unmappedHtml = unmapped.length ? callout(`${unmapped.length} client sheet(s) have no tier in the Client Tracker (not counted): ${unmapped.map((u) => u.clientTag).join(", ")}`) : "";
-  const html = htmlShell("Daily Meeting-Ready Lead Report", `${niceDate} (PST)${weekend ? " · weekend targets at 10%" : ""}`, cards + totalHtml + failedHtml + unmappedHtml);
+  const notLiveHtml = notLive.length ? callout(`${notLive.length} client(s) not live on this date (not counted): ${notLive.map((n) => `${n.clientTag} — ${n.reason}`).join(", ")}`) : "";
+  const html = htmlShell("Daily Meeting-Ready Lead Report", `${niceDate} (PST)${weekend ? " · weekend targets at 10%" : ""}`, cards + totalHtml + failedHtml + unmappedHtml + notLiveHtml);
 
   return { subject: `Daily Lead Report — ${niceDate}`, text: lines.join("\n"), html, date: dateStr };
 }
@@ -328,7 +375,7 @@ export async function buildDailyReport(dateStr: string): Promise<DailyReport> {
 export interface WeeklyReport { subject: string; text: string; html: string; startDate: string; endDate: string; flaggedCount: number }
 
 export async function buildWeeklyReport(endDateStr: string): Promise<WeeklyReport> {
-  const { clients, unmapped, failedSheets } = await buildLeadUniverse();
+  const { clients, unmapped, notLive, failedSheets } = await buildLeadUniverse(endDateStr);
 
   // 7-day window ending on endDateStr (inclusive).
   const end = new Date(`${endDateStr}T12:00:00Z`);
@@ -403,6 +450,10 @@ export async function buildWeeklyReport(endDateStr: string): Promise<WeeklyRepor
     lines.push("");
     lines.push(`⚠️ ${unmapped.length} client sheet(s) unmapped to a tier (excluded — please add to Client Tracker): ${unmapped.map((u) => u.clientTag).join(", ")}`);
   }
+  if (notLive.length) {
+    lines.push("");
+    lines.push(`ℹ️ ${notLive.length} client(s) not live in this window (excluded): ${notLive.map((n) => `${n.clientTag} — ${n.reason}`).join(", ")}`);
+  }
 
   // HTML body
   const summaryCards = bucketTotals.map((b) => `
@@ -435,7 +486,8 @@ export async function buildWeeklyReport(endDateStr: string): Promise<WeeklyRepor
   const flaggedHeader = `<div style="font-size:15px;font-weight:700;margin:18px 0 8px;">Flagged clients <span style="color:#dc2626;">(${flagged.length})</span><div style="font-weight:400;color:#9ca3af;font-size:12px;margin-top:2px;">≥25% behind weekly pace on meeting-ready or quality leads</div></div>`;
   const failedHtml = failedSheets.length ? calloutRed(`${failedSheets.length} sheet(s) could not be read this run — totals may be incomplete: ${failedSheets.join(", ")}`) : "";
   const unmappedHtml = unmapped.length ? callout(`${unmapped.length} client sheet(s) unmapped to a tier (excluded — please add to Client Tracker): ${unmapped.map((u) => u.clientTag).join(", ")}`) : "";
-  const html = htmlShell("Weekly Lead Performance Report", `${range} (PST) · last 7 days`, summaryCards + flaggedHeader + flaggedHtml + failedHtml + unmappedHtml);
+  const notLiveHtml = notLive.length ? callout(`${notLive.length} client(s) not live in this window (excluded): ${notLive.map((n) => `${n.clientTag} — ${n.reason}`).join(", ")}`) : "";
+  const html = htmlShell("Weekly Lead Performance Report", `${range} (PST) · last 7 days`, summaryCards + flaggedHeader + flaggedHtml + failedHtml + unmappedHtml + notLiveHtml);
 
   return { subject: `Weekly Lead Report — ${range}`, text: lines.join("\n"), html, startDate: startDateStr, endDate: endDateStr, flaggedCount: flagged.length };
 }

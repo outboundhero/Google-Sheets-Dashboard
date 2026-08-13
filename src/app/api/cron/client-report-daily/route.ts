@@ -2,7 +2,11 @@ import { NextResponse } from "next/server";
 import { buildDailyReport, sendClientReport } from "@/lib/cron/client-reports";
 import { pstDateString } from "@/lib/date-utils";
 
-export const maxDuration = 300;
+// 800s (same ceiling auto-runner already uses). The read pacing alone spends
+// ~165s of it; a run that hits Google's per-minute quota then backs off 20s a
+// sheet, which could blow a 300s budget and kill the whole report. Headroom is
+// cheaper than a missing report.
+export const maxDuration = 800;
 
 // Daily client meeting-ready report. Scheduled 4:30 PM PT (see vercel.json).
 // `?date=YYYY-MM-DD` allows manual re-sends. `?preview=1` builds without sending.
