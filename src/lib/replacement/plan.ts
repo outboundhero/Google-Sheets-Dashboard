@@ -300,7 +300,7 @@ export async function buildReplacementPlan(
     reservePool.get(key)!.push(e.d.domain);
   }
   // Prefer CLEAN reserves: each pool consumes non-SURBL domains before
-  // SURBL-listed ones (listed are allowed, just last in line).
+  // SURBL-listed ones (listed are allowed, just later in line).
   const surblListed = new Set(
     enriched.filter((e) => e.d.blacklisted === true).map((e) => `${e.d.instance}:${e.d.domain}`),
   );
@@ -311,9 +311,18 @@ export async function buildReplacementPlan(
       .filter((e) => (e.d.tags || []).some((t) => String(t).trim().toLowerCase().startsWith("inboxing")))
       .map((e) => `${e.d.instance}:${e.d.domain}`),
   );
+  // Consumption order (Nick Aug-13): spend the reserves that CANNOT move between
+  // instances first — ScaledMail and MilkBox have no move API, so they are only
+  // ever usable in the instance they already sit in. Inboxing sorts last so that
+  // stock stays free for the cross-instance donor pull below. Keying off the same
+  // `inboxingMovable` set the donor picker uses means what we conserve here is
+  // exactly what the mover can spend. SURBL-clean still wins inside each group.
   for (const [key, list] of reservePool) {
     const inst = key.split(":")[0];
-    list.sort((a, b) => Number(surblListed.has(`${inst}:${a}`)) - Number(surblListed.has(`${inst}:${b}`)) || a.localeCompare(b));
+    list.sort((a, b) =>
+      Number(inboxingMovable.has(`${inst}:${a}`)) - Number(inboxingMovable.has(`${inst}:${b}`))
+      || Number(surblListed.has(`${inst}:${a}`)) - Number(surblListed.has(`${inst}:${b}`))
+      || a.localeCompare(b));
   }
 
   // Broader "total reserve" per instance — untagged + ≥ 21 days old, nothing
