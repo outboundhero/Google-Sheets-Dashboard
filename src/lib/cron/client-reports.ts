@@ -1,4 +1,4 @@
-import { getConfig } from "@/lib/sheets-config";
+import { getConfig, resolveSpreadsheetId } from "@/lib/sheets-config";
 import { getLeadsFromSheet, getSheetsClient } from "@/lib/google-sheets";
 import { pstDateString } from "@/lib/date-utils";
 import type { Lead } from "@/types/lead";
@@ -160,25 +160,35 @@ const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 // callers MUST treat null as "unknown", never as "zero leads", otherwise a
 // transient read failure would silently undercount and mis-flag a client.
 async function readSheetWithRetry(
-  s: { id: string; sheetName?: string; clientTag: string },
+  s: { id: string; spreadsheetId?: string; sheetName?: string; clientTag: string },
   retries = 4,
-): Promise<Lead[] | null> {
+): Promise<{ leads: Lead[] } | { leads: null; reason: string }> {
+  // A tracked sheet's `id` is NOT always the raw Google spreadsheet id — newer
+  // records store it as `<spreadsheetId>::<tab>`. Handing that composite string
+  // to the Sheets API 404s every single time, which is why the same 26 clients
+  // dropped out of every report. sync-leads.ts always resolved it; this path
+  // did not.
+  const spreadsheetId = resolveSpreadsheetId(s);
+  let last = "unknown error";
   for (let attempt = 0; attempt <= retries; attempt++) {
     try {
-      return await getLeadsFromSheet(s.id, s.sheetName || "Leads", s.clientTag);
+      return { leads: await getLeadsFromSheet(spreadsheetId, s.sheetName || "Leads", s.clientTag) };
     } catch (err) {
-      if (attempt === retries) return null;
       const msg = err instanceof Error ? err.message : String(err);
+      const code = (err as { code?: number })?.code;
+      last = code ? `${code}: ${msg}` : msg;
+      if (attempt === retries) return { leads: null, reason: last };
       const quota =
-        (err as { code?: number })?.code === 429 ||
-        /quota|rate.?limit|RESOURCE_EXHAUSTED|\b429\b/i.test(msg);
+        code === 429 || /quota|rate.?limit|RESOURCE_EXHAUSTED|\b429\b/i.test(msg);
+      // A 404 is deterministic — the doc or tab genuinely isn't there, so
+      // retrying only burns the cron's time budget. Fail it straight away.
+      if (code === 404) return { leads: null, reason: last };
       // Google's read quota is enforced per ROLLING MINUTE — a short backoff
-      // lands in the same throttled window and fails again (this was why ~25
-      // sheets dropped each run). Wait out the window on quota errors.
+      // lands in the same throttled window and fails again. Wait out the window.
       await sleep(quota ? 20_000 + attempt * 10_000 : 1_200 * (attempt + 1));
     }
   }
-  return null;
+  return { leads: null, reason: last };
 }
 
 // Read every tracked sheet fresh (so daily counts aren't stale vs the 2-day
@@ -208,13 +218,15 @@ async function buildLeadUniverse(): Promise<LeadUniverse> {
         continue;
       }
       if (!/active/i.test(entry.status)) { inactive++; continue; }
-      const leads = results[j];
-      if (leads === null) {
-        // Read failed after retries — exclude rather than count as 0, and flag the run.
-        failedSheets.push(s.clientTag || s.name);
+      const read = results[j];
+      if (read.leads === null) {
+        // Read failed after retries — exclude rather than count as 0, and flag
+        // the run WITH the reason, so a recurring failure is diagnosable from
+        // the email itself instead of needing a re-run to find out why.
+        failedSheets.push(`${s.clientTag || s.name} (${read.reason})`);
         continue;
       }
-      clients.push({ clientTag: s.clientTag, name: s.name, bucket: entry.bucket, leads });
+      clients.push({ clientTag: s.clientTag, name: s.name, bucket: entry.bucket, leads: read.leads });
     }
     if (i + BATCH < config.sheets.length) await sleep(BATCH_INTERVAL_MS);
   }
