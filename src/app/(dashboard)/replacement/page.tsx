@@ -367,6 +367,13 @@ export default function ReplacementPage() {
         </div>
       )}
 
+      {/* Failed execution steps with one-click retry. First thing on the page
+          (Spencer Aug-13: "push error section to top of Replacement") — a failed
+          step is the only thing here that needs acting on today, and it was
+          sitting below five cards. Renders nothing when there is nothing to
+          retry, so it costs no space on a clean day. */}
+      <RetryCard />
+
       {/* Guardrail settings */}
       <Card>
         <CardContent className="p-5 space-y-4">
@@ -449,9 +456,6 @@ export default function ReplacementPage() {
 
       {/* Wrong-instance flag + per-client Run (moves domains to the correct instance) */}
       <WrongInstanceCard />
-
-      {/* Failed execution steps with one-click retry (hidden when none) */}
-      <RetryCard />
 
       {/* End-of-day report — what replacement did (audit log, per PST day) */}
       <DailyReportCard />
