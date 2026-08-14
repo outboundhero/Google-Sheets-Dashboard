@@ -1,0 +1,368 @@
+// True-up (Nick 2026-08-13): every client should sit at EXACTLY the domain
+// count its tier calls for — "nothing more and nothing less".
+//
+//   below cap → FILL   : pull warmed reserves in until the client hits cap
+//   above cap → TRIM   : untag the worst performers back into reserve
+//   at cap    → nothing
+//
+// Today's replacement already refuses to over-fill (the TOP-UP-TO-CAP model in
+// plan.ts), but it can only ever add one replacement per BURNT domain, so a
+// client sitting well under cap with nothing burnt never climbs back up; and
+// nothing anywhere trims a client that is over cap. This module computes both
+// halves.
+//
+// OBSERVE-ONLY. Nothing here tags, untags, moves or deletes — it returns what
+// true-up *would* do so the numbers can be checked against reality before any
+// of it is wired into the auto-runner. Deliberately standalone (its own reads)
+// so the live replacement path is untouched.
+import { getSupabaseAdmin } from "@/lib/supabase";
+import { ALL_INSTANCE_SLUGS, getInstance, type BisonInstanceSlug } from "@/lib/bison-instances";
+import { pstDateString } from "@/lib/date-utils";
+import { capFor, getClientTiers, type ClientTier } from "./client-tiers";
+import { deriveCampaignMap, getActiveCampaignKeys } from "./campaigns";
+import { getHandledDomains, getSettings } from "./store";
+import { getSkipSet, skipKey } from "./skips";
+import { evaluateSegments, type DomainMetrics, type ThresholdConfig } from "./threshold-groups";
+import { getThresholdConfig } from "./threshold-groups-store";
+
+const WARMUP_DAYS = 21; // matches plan.ts — a domain is usable once it's ≥ 21d old
+
+/**
+ * Tags that look like clients (they carry a tier and campaigns) but are ours,
+ * not a customer's. True-up skips them entirely — `OH` alone would otherwise be
+ * the single biggest trim in the system.
+ *
+ * PENDING Nick's confirmation (asked 2026-08-14); `SC`, `DM4PM` and `SI` also
+ * have their own empty threshold segments and may belong here too.
+ */
+export const INTERNAL_TAGS = new Set(["OH"]);
+
+export interface TrimRankingConfig {
+  /**
+   * A domain below this lifetime send count is never trimmed. Not enough
+   * behind it to judge fairly, and ranking it as "worst" would trim exactly
+   * the domains that have only just started working.
+   */
+  minSentToTrim: number;
+  /**
+   * 0 = rank on reply rate alone. Above 0, a domain's score is
+   * `reply − bounceWeight × bounce`, so a good reply rate with a bad bounce
+   * rate sorts lower.
+   */
+  bounceWeight: number;
+}
+
+/** Defaults pending Nick's answer on the ranking metric. */
+export const DEFAULT_TRIM_RANKING: TrimRankingConfig = { minSentToTrim: 500, bounceWeight: 0 };
+
+export interface TrimCandidate {
+  domain: string;
+  sent: number;
+  reply: number | null;   // the figure actually ranked on (30d, else 15d)
+  replyWindow: "30" | "15" | null;
+  bounce: number | null;
+  score: number;
+}
+
+export interface TrueUpRow {
+  clientTag: string;
+  instance: BisonInstanceSlug;
+  tier: ClientTier;
+  cap: number;
+  /** Domains that STAY — tagged, not already handled, not burnt this build. */
+  staying: number;
+  /** Flagged burnt this build; replacement removes these on its own. */
+  burnt: number;
+  /** What replacement will already pull back in (its 1-per-burnt ceiling). */
+  replacementPulls: number;
+  /** Extra adds true-up needs ON TOP of what replacement already does. */
+  fillNeeded: number;
+  /** Reserve domains actually available for those adds. */
+  fillCandidates: string[];
+  /** fillNeeded − fillCandidates.length. > 0 = no stock for this client. */
+  fillShort: number;
+  /** Domains to untag back into reserve (staying − cap). */
+  trimNeeded: number;
+  /** Worst-first, already limited to trimNeeded. */
+  trimCandidates: TrimCandidate[];
+  /** Over cap but held back by the send-volume floor / missing data. */
+  trimProtected: number;
+  hasActiveCampaign: boolean;
+  hasEligibleCampaign: boolean;
+  /** Why a fill can't run even where stock exists. */
+  blockers: string[];
+}
+
+export interface TrueUpResult {
+  generatedFor: string;
+  ranking: TrimRankingConfig;
+  rows: TrueUpRow[];
+  totals: {
+    tagsAtCap: number;
+    tagsUnderCap: number;
+    tagsOverCap: number;
+    fillNeeded: number;
+    fillAvailable: number;
+    fillShort: number;
+    trimNeeded: number;
+  };
+  /** Per instance, so it's obvious where the stock shortage actually is. */
+  byInstance: Record<string, { fillNeeded: number; fillAvailable: number; fillShort: number; trimNeeded: number }>;
+  /** Tags skipped and why — internal tags, no tier, no live campaign. */
+  skipped: { clientTag: string; instance: string; reason: string }[];
+}
+
+interface DomRow {
+  instance: BisonInstanceSlug;
+  domain: string;
+  tags: string[] | null;
+  total_sent: number | null;
+  total_replied: number | null;
+  total_bounced: number | null;
+  blacklisted: boolean | null;
+  spamhaus_dbl: boolean | null;
+  domain_created_at: string | null;
+  outlook_count: number | null;
+  google_count: number | null;
+}
+
+interface RateRow {
+  instance: BisonInstanceSlug; domain: string;
+  reply_10: number | null; reply_15: number | null; reply_30: number | null;
+  bounce_10: number | null; bounce_15: number | null; bounce_30: number | null;
+}
+
+type Provider = "outlook" | "google" | "mixed" | "unknown";
+
+function providerOf(d: DomRow): Provider {
+  const o = d.outlook_count ?? 0, g = d.google_count ?? 0;
+  if (o > 0 && g > 0) return "mixed";
+  if (o > 0) return "outlook";
+  if (g > 0) return "google";
+  return "unknown";
+}
+
+const isInfo = (dom: string) => dom.toLowerCase().endsWith(".info");
+const ageDays = (created: string | null, nowMs: number) =>
+  created ? Math.floor((nowMs - new Date(created).getTime()) / 86_400_000) : 0;
+
+export async function computeTrueUp(
+  opts: { ranking?: Partial<TrimRankingConfig>; groupConfig?: ThresholdConfig } = {},
+): Promise<TrueUpResult> {
+  const ranking: TrimRankingConfig = { ...DEFAULT_TRIM_RANKING, ...opts.ranking };
+  const supabase = getSupabaseAdmin();
+  const today = pstDateString(new Date());
+  const nowMs = new Date(today).getTime();
+
+  const cfg = await getSettings();
+  const groupConfig = opts.groupConfig ?? (await getThresholdConfig());
+  const handled = await getHandledDomains();
+  const skipSet = await getSkipSet();
+  const tiers = await getClientTiers();
+  const activeKeys = await getActiveCampaignKeys();
+  const campaignMap = await deriveCampaignMap();
+
+  // A tag only counts as a client tag if something else in the system knows it
+  // — same rule the plan uses, so the two agree on what a "client" is.
+  const redirectByTag = new Map<string, string>();
+  const { data: redirectRows } = await supabase.from("client_redirects").select("client_tag,redirect_url");
+  for (const r of (redirectRows || []) as { client_tag: string; redirect_url: string }[]) {
+    redirectByTag.set(r.client_tag.toUpperCase(), r.redirect_url);
+  }
+  const knownTags = new Set<string>(redirectByTag.keys());
+  const eligibleKeys = new Set<string>();
+  for (const m of campaignMap.matches) {
+    knownTags.add(m.clientTag);
+    if (m.eligible.length > 0) eligibleKeys.add(`${m.clientTag}:${m.instance}`);
+  }
+  const clientTagOf = (tags: string[] | null): string | null => {
+    if (!tags) return null;
+    for (const t of tags) { const u = String(t).trim().toUpperCase(); if (knownTags.has(u)) return u; }
+    return null;
+  };
+
+  // 1) every domain
+  const domains: DomRow[] = [];
+  let off = 0;
+  while (true) {
+    const { data, error } = await supabase
+      .from("deliverability_domains")
+      .select("instance,domain,tags,total_sent,total_replied,total_bounced,blacklisted,spamhaus_dbl,domain_created_at,outlook_count,google_count")
+      .in("instance", ALL_INSTANCE_SLUGS)
+      .range(off, off + 999);
+    if (error) throw new Error(error.message);
+    if (!data || data.length === 0) break;
+    for (const d of data as DomRow[]) if (!handled.has(`${d.instance}:${d.domain}`)) domains.push(d);
+    if (data.length < 1000) break;
+    off += 1000;
+  }
+
+  // 2) trailing windows (PostgREST caps a single response at 1000 rows — page it)
+  const rateByKey = new Map<string, RateRow>();
+  let roff = 0;
+  while (true) {
+    const { data, error } = await supabase
+      .rpc("trailing_domain_rates", { p_instances: ALL_INSTANCE_SLUGS, p_today: today })
+      .range(roff, roff + 999);
+    if (error) throw new Error(error.message);
+    if (!data || data.length === 0) break;
+    for (const r of data as RateRow[]) rateByKey.set(`${r.instance}:${r.domain}`, r);
+    if ((data as RateRow[]).length < 1000) break;
+    roff += 1000;
+  }
+
+  // 3) burnt verdict — same detector the live plan runs on
+  const enriched = domains.map((d) => {
+    const r = rateByKey.get(`${d.instance}:${d.domain}`);
+    const m: DomainMetrics = {
+      sent: d.total_sent ?? 0,
+      reply_10: r?.reply_10 ?? null, reply_15: r?.reply_15 ?? null, reply_30: r?.reply_30 ?? null,
+      bounce_10: r?.bounce_10 ?? null, bounce_15: r?.bounce_15 ?? null, bounce_30: r?.bounce_30 ?? null,
+      surbl: d.blacklisted, spamhaus: d.spamhaus_dbl,
+    };
+    const skipped = skipSet.has(skipKey(d.instance, d.domain));
+    const tagsUpper = new Set((d.tags || []).map((t) => String(t).trim().toUpperCase()));
+    const burnt = !skipped && evaluateSegments(m, tagsUpper, groupConfig).burnt;
+    return { d, m, provider: providerOf(d), tag: clientTagOf(d.tags), burnt, skipped };
+  });
+
+  // 4) reserve pools, gated exactly like plan.ts so the counts agree
+  const reservePool = new Map<string, string[]>(); // `${instance}:${provider}`
+  for (const e of enriched) {
+    if (e.tag !== null) continue;
+    if (e.provider !== "outlook" && e.provider !== "google") continue;
+    if (!cfg.allowInfoReserves && isInfo(e.d.domain)) continue;
+    if (ageDays(e.d.domain_created_at, nowMs) < WARMUP_DAYS) continue;
+    if (e.d.spamhaus_dbl === true) continue;
+    if (!cfg.allowSurblReserves && e.d.blacklisted === true) continue;
+    if (e.burnt || e.skipped) continue;
+    const key = `${e.d.instance}:${e.provider}`;
+    if (!reservePool.has(key)) reservePool.set(key, []);
+    reservePool.get(key)!.push(e.d.domain);
+  }
+  for (const list of reservePool.values()) list.sort();
+
+  // 5) group the tagged, staying domains per (tag, instance)
+  interface Acc {
+    staying: typeof enriched;
+    burnt: number;
+    outlook: number;
+    google: number;
+  }
+  const groups = new Map<string, Acc>();
+  for (const e of enriched) {
+    if (!e.tag) continue;
+    const k = `${e.tag}:${e.d.instance}`;
+    let a = groups.get(k);
+    if (!a) { a = { staying: [], burnt: 0, outlook: 0, google: 0 }; groups.set(k, a); }
+    if (e.burnt) { a.burnt++; continue; }
+    a.staying.push(e);
+    if (e.provider === "outlook") a.outlook++; else if (e.provider === "google") a.google++;
+  }
+
+  // 6) evaluate each group. Fill allocation walks the groups in a fixed order
+  //    and consumes a shared pool, so two clients never claim the same reserve
+  //    and `fillShort` is a real "there is nothing left for this client".
+  const skipped: TrueUpResult["skipped"] = [];
+  const rows: TrueUpRow[] = [];
+  const orderedKeys = [...groups.keys()].sort();
+
+  for (const key of orderedKeys) {
+    const sep = key.lastIndexOf(":");
+    const clientTag = key.slice(0, sep);
+    const instance = key.slice(sep + 1) as BisonInstanceSlug;
+    const acc = groups.get(key)!;
+
+    if (INTERNAL_TAGS.has(clientTag)) {
+      skipped.push({ clientTag, instance, reason: "internal tag — not a client" });
+      continue;
+    }
+    const tier = tiers.get(clientTag);
+    if (!tier) {
+      skipped.push({ clientTag, instance, reason: "no tier in the Client Tracker" });
+      continue;
+    }
+    const hasEligibleCampaign = eligibleKeys.has(key);
+    const hasActiveCampaign = activeKeys.has(key);
+    if (!hasEligibleCampaign) {
+      skipped.push({ clientTag, instance, reason: "no live campaign in this instance" });
+      continue;
+    }
+
+    const it = getInstance(instance).tier;
+    const cap = capFor(it, tier);
+    const staying = acc.staying.length;
+
+    // What replacement already does on its own: one reserve per burnt domain,
+    // never past cap. True-up only owns whatever is still missing after that.
+    const replacementPulls = Math.min(acc.burnt, Math.max(0, cap - staying));
+    const fillNeeded = Math.max(0, cap - staying - replacementPulls);
+
+    // Like-for-like: follow whichever provider the client already runs on.
+    const provider: "outlook" | "google" = acc.google > acc.outlook ? "google" : "outlook";
+    const pool = reservePool.get(`${instance}:${provider}`) ?? [];
+    const fillCandidates = pool.splice(0, fillNeeded);
+    const fillShort = fillNeeded - fillCandidates.length;
+
+    const blockers: string[] = [];
+    if (fillNeeded > 0) {
+      if (!redirectByTag.get(clientTag)) blockers.push("no redirect URL for tag");
+      if (fillShort > 0) blockers.push(`no ready ${provider} reserve in this instance`);
+      if (!hasActiveCampaign) blockers.push("no actively-sending campaign (dormant)");
+    }
+
+    // Trim: rank the stayers worst-first, protecting anything without enough
+    // history to judge. Sits at 0 whenever the client is at or under cap.
+    const trimNeeded = Math.max(0, staying - cap);
+    let trimCandidates: TrimCandidate[] = [];
+    let trimProtected = 0;
+    if (trimNeeded > 0) {
+      const scored: TrimCandidate[] = [];
+      for (const e of acc.staying) {
+        const sent = e.d.total_sent ?? 0;
+        const reply = e.m.reply_30 ?? e.m.reply_15;
+        const window = e.m.reply_30 != null ? "30" : e.m.reply_15 != null ? "15" : null;
+        if (sent < ranking.minSentToTrim || reply == null) { trimProtected++; continue; }
+        const bounce = e.m.bounce_30 ?? e.m.bounce_15;
+        scored.push({
+          domain: e.d.domain, sent, reply, replyWindow: window, bounce,
+          score: reply - ranking.bounceWeight * (bounce ?? 0),
+        });
+      }
+      scored.sort((a, b) => a.score - b.score || a.domain.localeCompare(b.domain));
+      trimCandidates = scored.slice(0, trimNeeded);
+    }
+
+    rows.push({
+      clientTag, instance, tier, cap, staying, burnt: acc.burnt, replacementPulls,
+      fillNeeded, fillCandidates, fillShort,
+      trimNeeded, trimCandidates, trimProtected,
+      hasActiveCampaign, hasEligibleCampaign, blockers,
+    });
+  }
+
+  const totals = { tagsAtCap: 0, tagsUnderCap: 0, tagsOverCap: 0, fillNeeded: 0, fillAvailable: 0, fillShort: 0, trimNeeded: 0 };
+  const byInstance: TrueUpResult["byInstance"] = {};
+  for (const inst of ALL_INSTANCE_SLUGS) byInstance[inst] = { fillNeeded: 0, fillAvailable: 0, fillShort: 0, trimNeeded: 0 };
+  for (const r of rows) {
+    if (r.fillNeeded > 0) totals.tagsUnderCap++;
+    else if (r.trimNeeded > 0) totals.tagsOverCap++;
+    else totals.tagsAtCap++;
+    totals.fillNeeded += r.fillNeeded;
+    totals.fillAvailable += r.fillCandidates.length;
+    totals.fillShort += r.fillShort;
+    totals.trimNeeded += r.trimNeeded;
+    const b = byInstance[r.instance];
+    b.fillNeeded += r.fillNeeded;
+    b.fillAvailable += r.fillCandidates.length;
+    b.fillShort += r.fillShort;
+    b.trimNeeded += r.trimNeeded;
+  }
+
+  rows.sort((a, b) =>
+    (b.fillShort - a.fillShort)
+    || (b.fillNeeded + b.trimNeeded) - (a.fillNeeded + a.trimNeeded)
+    || a.clientTag.localeCompare(b.clientTag));
+
+  return { generatedFor: today, ranking, rows, totals, byInstance, skipped };
+}

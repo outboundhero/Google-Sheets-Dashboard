@@ -10,7 +10,7 @@ import { getSettings, getHandledDomains } from "./store";
 import { evaluateDomain, type DomainSignals } from "./detect";
 import { evaluateSegments, type ThresholdConfig, type DomainMetrics } from "./threshold-groups";
 import { deriveCampaignMap, type CampaignRef } from "./campaigns";
-import { INSTANCE_CAP } from "./types";
+import { capFor, getClientTiers } from "./client-tiers";
 import { getSkipSet, skipKey } from "./skips";
 import { recordFirstFlagged } from "./first-flagged";
 
@@ -192,6 +192,14 @@ export async function buildReplacementPlan(
     redirectByTag.set(row.client_tag.toUpperCase(), row.redirect_url);
   }
   const campaignMap = await deriveCampaignMap();
+  // Caps are per CLIENT TIER, not per instance (Nick 2026-08-13: Tier 0.5/1 =
+  // 20 b2b + 5 b2c, Tier 2 = 40 b2b + 10 b2c). This used to read a flat
+  // INSTANCE_CAP of 20/5, which silently held Tier 2 clients to half their
+  // allowance. An unknown tag falls back to tier 1 inside `capFor`'s caller
+  // contract — the conservative low cap, so a missing tier never over-fills.
+  const clientTiers = await getClientTiers();
+  const capForTag = (tag: string | null, instance: BisonInstanceSlug) =>
+    capFor(getInstance(instance).tier, (tag && clientTiers.get(tag)) || "1");
   const campaignsByKey = new Map<string, CampaignRef[]>();
   const knownTags = new Set<string>(redirectByTag.keys());
   for (const m of campaignMap.matches) {
@@ -399,7 +407,7 @@ export async function buildReplacementPlan(
     return {
       clientTag, instance, ...a,
       staying: stayingAssigned.get(k) ?? 0,   // matches the plan's healthy count (mode-aware)
-      capMax: INSTANCE_CAP[getInstance(instance).tier],
+      capMax: capForTag(clientTag, instance),
     };
   }).sort((x, y) => y.total - x.total);
 
@@ -420,7 +428,7 @@ export async function buildReplacementPlan(
   for (const e of replaceableTagged) {
     const d = e.d, tag = e.tag!, provider = e.provider;
     const groupKey = `${tag}:${d.instance}`;
-    const capMax = INSTANCE_CAP[getInstance(d.instance).tier];
+    const capMax = capForTag(tag, d.instance);
     const healthy = stayingAssigned.get(groupKey) ?? 0;        // domains that STAY
     const need = Math.max(0, capMax - healthy);                // top-up target, never beyond cap
     const already = assignedInGroup.get(groupKey) ?? 0;

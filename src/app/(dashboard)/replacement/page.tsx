@@ -12,6 +12,7 @@ import { ThresholdGroupsEditor } from "@/components/replacement/threshold-groups
 import { GroupPlanCard } from "@/components/replacement/group-plan-card";
 import { FlaggedDomainsCard } from "@/components/replacement/flagged-domains-card";
 import { ShortfallCard } from "@/components/replacement/shortfall-card";
+import { TrueUpCard } from "@/components/replacement/true-up-card";
 import { WrongInstanceCard } from "@/components/replacement/wrong-instance-card";
 import { DailyReportCard } from "@/components/replacement/daily-report-card";
 import { RetryCard } from "@/components/replacement/retry-card";
@@ -453,6 +454,9 @@ export default function ReplacementPage() {
 
       {/* Tier-aware shortfall — how many domains to add per b2b/b2c instance per tag */}
       <ShortfallCard />
+
+      {/* True-up — fill to cap / trim over cap, and which tags have no reserve left */}
+      <TrueUpCard />
 
       {/* Wrong-instance flag + per-client Run (moves domains to the correct instance) */}
       <WrongInstanceCard />
