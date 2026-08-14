@@ -19,7 +19,7 @@ import { getSupabaseAdmin } from "@/lib/supabase";
 import { ALL_INSTANCE_SLUGS, getInstance, type BisonInstanceSlug } from "@/lib/bison-instances";
 import { pstDateString } from "@/lib/date-utils";
 import { capFor, getClientTiers, type ClientTier } from "./client-tiers";
-import { deriveCampaignMap, getActiveCampaignKeys } from "./campaigns";
+import { deriveCampaignMap, getActiveCampaignKeys, type CampaignRef } from "./campaigns";
 import { getHandledDomains, getSettings } from "./store";
 import { getSkipSet, skipKey } from "./skips";
 import { evaluateSegments, type DomainMetrics, type ThresholdConfig } from "./threshold-groups";
@@ -102,6 +102,9 @@ export interface TrueUpRow {
   trimUnproven: number;
   hasActiveCampaign: boolean;
   hasEligibleCampaign: boolean;
+  /** Everything the execution runner needs, so the fill can run off this row. */
+  redirectUrl: string | null;
+  targetCampaigns: CampaignRef[];
   /** Why a fill can't run even where stock exists. */
   blockers: string[];
 }
@@ -184,9 +187,13 @@ export async function computeTrueUp(
   }
   const knownTags = new Set<string>(redirectByTag.keys());
   const eligibleKeys = new Set<string>();
+  const campaignsByKey = new Map<string, CampaignRef[]>();
   for (const m of campaignMap.matches) {
     knownTags.add(m.clientTag);
-    if (m.eligible.length > 0) eligibleKeys.add(`${m.clientTag}:${m.instance}`);
+    if (m.eligible.length > 0) {
+      eligibleKeys.add(`${m.clientTag}:${m.instance}`);
+      campaignsByKey.set(`${m.clientTag}:${m.instance}`, m.eligible);
+    }
   }
   const clientTagOf = (tags: string[] | null): string | null => {
     if (!tags) return null;
@@ -380,6 +387,8 @@ export async function computeTrueUp(
       fillNeeded, fillCandidates, fillShort,
       trimNeeded, trimCandidates, trimUnproven,
       hasActiveCampaign, hasEligibleCampaign, blockers,
+      redirectUrl: redirectByTag.get(clientTag) ?? null,
+      targetCampaigns: campaignsByKey.get(key) ?? [],
     });
   }
 

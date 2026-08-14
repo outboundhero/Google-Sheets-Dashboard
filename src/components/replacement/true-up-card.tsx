@@ -13,7 +13,7 @@
 //          ranking is still provisional (waiting on Nick's answer on which
 //          number defines "better performing"), which is why it only reports.
 import { useState, useEffect, useCallback, useMemo } from "react";
-import { RefreshCw, Scale, ChevronRight, Copy, Check } from "lucide-react";
+import { RefreshCw, Scale, ChevronRight, Copy, Check, Play, AlertTriangle } from "lucide-react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -59,6 +59,16 @@ interface Resp {
   error?: string;
 }
 
+interface FillPreview {
+  clientTag: string; instance: string; cap: number; staying: number;
+  adding: number; stillShort: number; domains: string[]; campaigns: string[];
+}
+interface FillResult {
+  ranClients: number;
+  addedTotal: number;
+  executed: { clientTag: string; instance: string; ok: boolean; added: number }[];
+}
+
 type Filter = "no-stock" | "fill" | "trim" | "all";
 
 const FILTERS: { key: Filter; label: string }[] = [
@@ -79,6 +89,12 @@ export function TrueUpCard() {
   const [filter, setFilter] = useState<Filter>("no-stock");
   const [open, setOpen] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+
+  // Fill is confirm-first: the preview has to be fetched before the run button
+  // appears, so nothing is added to a live client on a single mis-click.
+  const [preview, setPreview] = useState<FillPreview[] | null>(null);
+  const [busy, setBusy] = useState<"preview" | "run" | null>(null);
+  const [ran, setRan] = useState<FillResult | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true); setErr(null);
@@ -124,6 +140,25 @@ export function TrueUpCard() {
     setTimeout(() => setCopied(false), 1500);
   }, [data]);
 
+  const callFill = useCallback(async (dryRun: boolean) => {
+    setBusy(dryRun ? "preview" : "run"); setErr(null);
+    try {
+      const res = await fetch("/api/replacement/true-up/fill", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ all: true, dryRun }),
+      });
+      const json = await res.json();
+      if (!res.ok || json.error) throw new Error(json.error || "Failed");
+      if (dryRun) { setPreview(json.wouldRun as FillPreview[]); setRan(null); }
+      else { setRan(json as FillResult); setPreview(null); await load(); }
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : "Failed");
+    } finally {
+      setBusy(null);
+    }
+  }, [load]);
+
   useEffect(() => { const id = setTimeout(load, 0); return () => clearTimeout(id); }, [load]);
 
   return (
@@ -143,7 +178,19 @@ export function TrueUpCard() {
             </div>
           </div>
           <div className="flex items-center gap-2">
-            <Button size="sm" variant="outline" onClick={load} disabled={loading} className="gap-2">
+            {data && data.totals.fillAvailable > 0 && (
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => callFill(true)}
+                disabled={busy !== null || loading}
+                className="gap-2"
+              >
+                <Play className="h-4 w-4" />
+                {busy === "preview" ? "Checking…" : "Preview fill"}
+              </Button>
+            )}
+            <Button size="sm" variant="outline" onClick={load} disabled={loading || busy !== null} className="gap-2">
               <RefreshCw className={`h-4 w-4 ${loading ? "animate-spin" : ""}`} />
               {loading ? "Calculating…" : "Calculate"}
             </Button>
@@ -151,6 +198,72 @@ export function TrueUpCard() {
         </div>
 
         {err && <div className="rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive">{err}</div>}
+
+        {/* Confirm-first fill. This is the only thing on the card that changes
+            anything — everything else reports. */}
+        {preview && (
+          <div className="rounded-lg border border-amber-500/30 bg-amber-500/5 px-3 py-3 space-y-2">
+            <div className="flex items-center gap-2 text-sm font-medium text-amber-500">
+              <AlertTriangle className="h-4 w-4" />
+              This will add domains to live clients
+            </div>
+            {preview.length === 0 ? (
+              <div className="text-xs text-muted-foreground">
+                Nothing runnable — every under-cap client is either out of reserve, missing a redirect, or has no
+                eligible campaign.
+              </div>
+            ) : (
+              <>
+                <div className="text-[11px] text-muted-foreground">
+                  {preview.length} client{preview.length === 1 ? "" : "s"} ·{" "}
+                  {preview.reduce((s, p) => s + p.adding, 0)} domains. Tags them, sets the client redirect, attaches
+                  them to the client&rsquo;s campaigns and whitelists them. Nothing is removed or deleted.
+                </div>
+                <div className="rounded border divide-y max-h-56 overflow-y-auto bg-background">
+                  {preview.map((p) => (
+                    <div key={`${p.clientTag}:${p.instance}`} className="px-3 py-2 text-[11px]">
+                      <div className="flex items-center justify-between">
+                        <span className="font-medium">
+                          {p.clientTag} <span className="text-muted-foreground">{label(p.instance)}</span>
+                        </span>
+                        <span className="tabular-nums text-muted-foreground">
+                          {p.staying} → {p.staying + p.adding} of {p.cap}
+                          {p.stillShort > 0 && <span className="text-destructive"> · still {p.stillShort} short</span>}
+                        </span>
+                      </div>
+                      <div className="text-muted-foreground break-all">{p.domains.join(", ")}</div>
+                      <div className="text-muted-foreground">→ {p.campaigns.join(", ")}</div>
+                    </div>
+                  ))}
+                </div>
+                <div className="flex gap-2">
+                  <Button size="sm" onClick={() => callFill(false)} disabled={busy !== null} className="gap-2">
+                    <Play className="h-4 w-4" />
+                    {busy === "run" ? "Running…" : `Run it — ${preview.reduce((s, p) => s + p.adding, 0)} domains`}
+                  </Button>
+                  <Button size="sm" variant="ghost" onClick={() => setPreview(null)} disabled={busy !== null}>
+                    Cancel
+                  </Button>
+                </div>
+              </>
+            )}
+          </div>
+        )}
+
+        {ran && (
+          <div className="rounded-lg border border-emerald-500/30 bg-emerald-500/5 px-3 py-2 text-xs space-y-1">
+            <div className="font-medium text-emerald-500">
+              Added {ran.addedTotal} domain{ran.addedTotal === 1 ? "" : "s"} across {ran.ranClients} client
+              {ran.ranClients === 1 ? "" : "s"}
+            </div>
+            {ran.executed.map((e) => (
+              <div key={`${e.clientTag}:${e.instance}`} className="text-muted-foreground">
+                {e.ok ? "✓" : "✗"} {e.clientTag} {label(e.instance)} — {e.added}
+                {!e.ok && <span className="text-destructive"> · check the queue for the failed step</span>}
+              </div>
+            ))}
+          </div>
+        )}
 
         {data && (
           <>
