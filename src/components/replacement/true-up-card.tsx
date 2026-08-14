@@ -25,6 +25,7 @@ interface TrimCandidate {
   reply: number | null;
   replyWindow: "30" | "15" | null;
   bounce: number | null;
+  bucket: "unproven" | "ranked";
   score: number;
 }
 interface Row {
@@ -40,7 +41,7 @@ interface Row {
   fillShort: number;
   trimNeeded: number;
   trimCandidates: TrimCandidate[];
-  trimProtected: number;
+  trimUnproven: number;
   blockers: string[];
 }
 interface Resp {
@@ -248,9 +249,9 @@ export function TrueUpCard() {
                         <span className="text-right tabular-nums">
                           {r.trimNeeded > 0 ? (
                             <>
-                              <b className="text-sky-500">{r.trimCandidates.length}</b>
-                              {r.trimProtected > 0 && (
-                                <span className="text-muted-foreground text-[10px]"> /{r.trimNeeded}</span>
+                              <b className="text-sky-500">{r.trimNeeded}</b>
+                              {r.trimUnproven > 0 && (
+                                <span className="text-muted-foreground text-[10px]"> ({r.trimUnproven} unproven)</span>
                               )}
                             </>
                           ) : <span className="text-muted-foreground">—</span>}
@@ -265,20 +266,33 @@ export function TrueUpCard() {
                           {r.trimCandidates.length > 0 && (
                             <div className="space-y-1">
                               <div className="text-[10px] text-muted-foreground uppercase tracking-wide">
-                                Would untag back to reserve — worst first
-                                {r.trimProtected > 0 && (
-                                  <span className="normal-case tracking-normal">
-                                    {" "}· {r.trimProtected} held back (under {data.ranking.minSentToTrim} sent or no reply data)
-                                  </span>
-                                )}
+                                Would untag back to reserve — in trim order
+                                <span className="normal-case tracking-normal">
+                                  {" "}· unproven first (under {data.ranking.minSentToTrim.toLocaleString()} sent or no
+                                  reply figure), then lowest reply rate
+                                </span>
                               </div>
                               {r.trimCandidates.map((c) => (
-                                <div key={c.domain} className="grid grid-cols-[1fr_90px_110px_90px] gap-2 text-[11px] tabular-nums">
+                                <div key={c.domain} className="grid grid-cols-[1fr_74px_84px_112px_84px] gap-2 text-[11px] tabular-nums items-center">
                                   <span className="truncate">{c.domain}</span>
+                                  <span className="text-right">
+                                    <Badge
+                                      variant="outline"
+                                      className={`text-[9px] ${c.bucket === "unproven" ? "border-amber-500/30 text-amber-500" : "border-sky-500/30 text-sky-500"}`}
+                                    >
+                                      {c.bucket}
+                                    </Badge>
+                                  </span>
                                   <span className="text-right text-muted-foreground">{c.sent.toLocaleString()} sent</span>
                                   <span className="text-right">
                                     {c.reply == null ? <span className="text-muted-foreground">no reply data</span> : `${c.reply.toFixed(2)}% reply`}
-                                    {c.replyWindow && <span className="text-muted-foreground text-[10px]"> ({c.replyWindow}d)</span>}
+                                    {/* which window it was ranked on — a 15d rate is noisier and can
+                                        read high next to a 30d one, so never hide the difference */}
+                                    {c.replyWindow && (
+                                      <span className={c.replyWindow === "15" ? "text-amber-500 text-[10px]" : "text-muted-foreground text-[10px]"}>
+                                        {" "}({c.replyWindow}d)
+                                      </span>
+                                    )}
                                   </span>
                                   <span className="text-right text-muted-foreground">
                                     {c.bounce == null ? "—" : `${c.bounce.toFixed(2)}% bnc`}
@@ -305,8 +319,9 @@ export function TrueUpCard() {
 
             <div className="text-[10px] text-muted-foreground">
               {data.rows.length} client tag × instance pairs · {data.skipped.length} skipped (internal tag, no tier, or no
-              live campaign) · trim ranked on 30-day reply rate, falling back to 15-day, protecting anything under{" "}
-              {data.ranking.minSentToTrim.toLocaleString()} sent.
+              live campaign) · trim order: burnt (handled by replacement) → unproven, under{" "}
+              {data.ranking.minSentToTrim.toLocaleString()} sent → lowest reply rate, 30-day where there is one, else
+              15-day. Reply rate only; bounce is not scored here because it is already its own flagging threshold.
             </div>
           </>
         )}

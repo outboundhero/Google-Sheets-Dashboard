@@ -39,15 +39,17 @@ export const INTERNAL_TAGS = new Set(["OH"]);
 
 export interface TrimRankingConfig {
   /**
-   * A domain below this lifetime send count is never trimmed. Not enough
-   * behind it to judge fairly, and ranking it as "worst" would trim exactly
-   * the domains that have only just started working.
+   * Lifetime sends below which a domain counts as UNPROVEN — no track record
+   * to judge it on. Unproven domains are trimmed first, ahead of anything with
+   * history. Nick 2026-08-14 set this at 500: 1,000 leaves too much unrankable
+   * while send rates are throttled.
    */
   minSentToTrim: number;
   /**
-   * 0 = rank on reply rate alone. Above 0, a domain's score is
-   * `reply − bounceWeight × bounce`, so a good reply rate with a bad bounce
-   * rate sorts lower.
+   * 0 = rank on reply rate alone, which is what Nick asked for. Above 0, the
+   * score becomes `reply − bounceWeight × bounce`. Only here for what-ifs —
+   * bounce is already its own flagging threshold, so weighting it again would
+   * double-count it.
    */
   bounceWeight: number;
 }
@@ -61,6 +63,13 @@ export interface TrimCandidate {
   reply: number | null;   // the figure actually ranked on (30d, else 15d)
   replyWindow: "30" | "15" | null;
   bounce: number | null;
+  /**
+   * Which pass picked it. "unproven" = no track record, trimmed first;
+   * "ranked" = has history and lost on reply rate. Worth showing separately —
+   * a 15-day rate is noisier than a 30-day one and can look inflated next to
+   * it, so it should be obvious when the two are being compared.
+   */
+  bucket: "unproven" | "ranked";
   score: number;
 }
 
@@ -83,10 +92,10 @@ export interface TrueUpRow {
   fillShort: number;
   /** Domains to untag back into reserve (staying − cap). */
   trimNeeded: number;
-  /** Worst-first, already limited to trimNeeded. */
+  /** In trim order, already limited to trimNeeded. */
   trimCandidates: TrimCandidate[];
-  /** Over cap but held back by the send-volume floor / missing data. */
-  trimProtected: number;
+  /** How many of those are unproven (no track record) rather than out-ranked. */
+  trimUnproven: number;
   hasActiveCampaign: boolean;
   hasEligibleCampaign: boolean;
   /** Why a fill can't run even where stock exists. */
@@ -311,32 +320,48 @@ export async function computeTrueUp(
       if (!hasActiveCampaign) blockers.push("no actively-sending campaign (dormant)");
     }
 
-    // Trim: rank the stayers worst-first, protecting anything without enough
-    // history to judge. Sits at 0 whenever the client is at or under cap.
+    // Trim, in Nick's order (2026-08-14): burnt first (replacement already does
+    // that), then UNPROVEN domains, then the worst-replying proven ones.
+    //
+    // Unproven goes first deliberately. Protecting them inverts the whole
+    // point: a client 13 over cap with 15 unproven domains would have to take
+    // all 13 out of the 18 it has proof on, trading performers for unknowns
+    // every cycle. An unproven domain is the cheapest thing to give up — it
+    // returns to reserve with its warm-up intact and gets reassigned.
     const trimNeeded = Math.max(0, staying - cap);
     let trimCandidates: TrimCandidate[] = [];
-    let trimProtected = 0;
+    let trimUnproven = 0;
     if (trimNeeded > 0) {
-      const scored: TrimCandidate[] = [];
+      const unproven: TrimCandidate[] = [];
+      const proven: TrimCandidate[] = [];
       for (const e of acc.staying) {
         const sent = e.d.total_sent ?? 0;
         const reply = e.m.reply_30 ?? e.m.reply_15;
         const window = e.m.reply_30 != null ? "30" : e.m.reply_15 != null ? "15" : null;
-        if (sent < ranking.minSentToTrim || reply == null) { trimProtected++; continue; }
         const bounce = e.m.bounce_30 ?? e.m.bounce_15;
-        scored.push({
+        // No track record = under the send floor, or no reply figure at all.
+        const isUnproven = sent < ranking.minSentToTrim || reply == null;
+        (isUnproven ? unproven : proven).push({
           domain: e.d.domain, sent, reply, replyWindow: window, bounce,
-          score: reply - ranking.bounceWeight * (bounce ?? 0),
+          bucket: isUnproven ? "unproven" : "ranked",
+          // bounceWeight is 0 by default: bounce is already a flagging
+          // threshold, so scoring it here would double-count it (and bounce
+          // has been noisy — one connection error once spiked a whole
+          // instance). Kept configurable for what-ifs only.
+          score: (reply ?? 0) - ranking.bounceWeight * (bounce ?? 0),
         });
       }
-      scored.sort((a, b) => a.score - b.score || a.domain.localeCompare(b.domain));
-      trimCandidates = scored.slice(0, trimNeeded);
+      // Least-invested unproven first, then proven from the bottom up.
+      unproven.sort((a, b) => a.sent - b.sent || a.domain.localeCompare(b.domain));
+      proven.sort((a, b) => a.score - b.score || a.domain.localeCompare(b.domain));
+      trimCandidates = [...unproven, ...proven].slice(0, trimNeeded);
+      trimUnproven = trimCandidates.filter((c) => c.bucket === "unproven").length;
     }
 
     rows.push({
       clientTag, instance, tier, cap, staying, burnt: acc.burnt, replacementPulls,
       fillNeeded, fillCandidates, fillShort,
-      trimNeeded, trimCandidates, trimProtected,
+      trimNeeded, trimCandidates, trimUnproven,
       hasActiveCampaign, hasEligibleCampaign, blockers,
     });
   }
