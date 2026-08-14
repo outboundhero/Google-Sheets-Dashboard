@@ -20,8 +20,15 @@ export const maxDuration = 60;
 export async function GET(request: Request) {
   try {
     const { searchParams } = new URL(request.url);
-    const minSent = Number(searchParams.get("minSent"));
-    const bounceWeight = Number(searchParams.get("bounceWeight"));
+    // An absent param must leave the default alone. `Number(null)` is 0, which
+    // passed the `>= 0` check and silently pinned the send floor to zero on
+    // every plain page load — nothing counted as unproven except missing data.
+    const num = (key: string) => {
+      const raw = searchParams.get(key);
+      return raw === null || raw.trim() === "" ? NaN : Number(raw);
+    };
+    const minSent = num("minSent");
+    const bounceWeight = num("bounceWeight");
 
     const result = await computeTrueUp({
       ranking: {
