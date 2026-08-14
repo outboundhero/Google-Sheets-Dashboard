@@ -80,6 +80,8 @@ export interface TrueUpRow {
   cap: number;
   /** Domains that STAY — tagged, not already handled, not burnt this build. */
   staying: number;
+  /** How many of those have no track record at all (the trim-first group). */
+  stayingUnproven: number;
   /** Flagged burnt this build; replacement removes these on its own. */
   burnt: number;
   /** What replacement will already pull back in (its 1-per-burnt ceiling). */
@@ -331,7 +333,8 @@ export async function computeTrueUp(
     const trimNeeded = Math.max(0, staying - cap);
     let trimCandidates: TrimCandidate[] = [];
     let trimUnproven = 0;
-    if (trimNeeded > 0) {
+    let stayingUnproven = 0;
+    {
       const unproven: TrimCandidate[] = [];
       const proven: TrimCandidate[] = [];
       for (const e of acc.staying) {
@@ -351,6 +354,7 @@ export async function computeTrueUp(
           score: (reply ?? 0) - ranking.bounceWeight * (bounce ?? 0),
         });
       }
+      stayingUnproven = unproven.length;
       // Least-invested unproven first, then proven from the bottom up.
       unproven.sort((a, b) => a.sent - b.sent || a.domain.localeCompare(b.domain));
       proven.sort((a, b) => a.score - b.score || a.domain.localeCompare(b.domain));
@@ -359,7 +363,7 @@ export async function computeTrueUp(
     }
 
     rows.push({
-      clientTag, instance, tier, cap, staying, burnt: acc.burnt, replacementPulls,
+      clientTag, instance, tier, cap, staying, stayingUnproven, burnt: acc.burnt, replacementPulls,
       fillNeeded, fillCandidates, fillShort,
       trimNeeded, trimCandidates, trimUnproven,
       hasActiveCampaign, hasEligibleCampaign, blockers,

@@ -34,6 +34,7 @@ interface Row {
   tier: string;
   cap: number;
   staying: number;
+  stayingUnproven: number;
   burnt: number;
   replacementPulls: number;
   fillNeeded: number;
@@ -269,7 +270,8 @@ export function TrueUpCard() {
                                 Would untag back to reserve — in trim order
                                 <span className="normal-case tracking-normal">
                                   {" "}· unproven first (under {data.ranking.minSentToTrim.toLocaleString()} sent or no
-                                  reply figure), then lowest reply rate
+                                  reply figure), then lowest reply rate · {r.stayingUnproven} of {r.staying} on this tag
+                                  have no track record
                                 </span>
                               </div>
                               {r.trimCandidates.map((c) => (
