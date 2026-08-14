@@ -25,6 +25,7 @@ interface TrimCandidate {
   reply: number | null;
   replyWindow: "30" | "15" | null;
   bounce: number | null;
+  ageDays: number;
   bucket: "unproven" | "ranked";
   score: number;
 }
@@ -270,12 +271,12 @@ export function TrueUpCard() {
                                 Would untag back to reserve — in trim order
                                 <span className="normal-case tracking-normal">
                                   {" "}· unproven first (under {data.ranking.minSentToTrim.toLocaleString()} sent or no
-                                  reply figure), then lowest reply rate · {r.stayingUnproven} of {r.staying} on this tag
-                                  have no track record
+                                  reply figure, oldest of those first), then lowest reply rate · {r.stayingUnproven} of{" "}
+                                  {r.staying} on this tag have no track record
                                 </span>
                               </div>
                               {r.trimCandidates.map((c) => (
-                                <div key={c.domain} className="grid grid-cols-[1fr_74px_84px_112px_84px] gap-2 text-[11px] tabular-nums items-center">
+                                <div key={c.domain} className="grid grid-cols-[1fr_74px_66px_84px_112px_84px] gap-2 text-[11px] tabular-nums items-center">
                                   <span className="truncate">{c.domain}</span>
                                   <span className="text-right">
                                     <Badge
@@ -285,6 +286,7 @@ export function TrueUpCard() {
                                       {c.bucket}
                                     </Badge>
                                   </span>
+                                  <span className="text-right text-muted-foreground">{c.ageDays}d old</span>
                                   <span className="text-right text-muted-foreground">{c.sent.toLocaleString()} sent</span>
                                   <span className="text-right">
                                     {c.reply == null ? <span className="text-muted-foreground">no reply data</span> : `${c.reply.toFixed(2)}% reply`}

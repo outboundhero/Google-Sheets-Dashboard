@@ -63,6 +63,8 @@ export interface TrimCandidate {
   reply: number | null;   // the figure actually ranked on (30d, else 15d)
   replyWindow: "30" | "15" | null;
   bounce: number | null;
+  /** Days since the domain was created — the tiebreak inside the unproven pool. */
+  ageDays: number;
   /**
    * Which pass picked it. "unproven" = no track record, trimmed first;
    * "ranked" = has history and lost on reply rate. Worth showing separately —
@@ -346,6 +348,7 @@ export async function computeTrueUp(
         const isUnproven = sent < ranking.minSentToTrim || reply == null;
         (isUnproven ? unproven : proven).push({
           domain: e.d.domain, sent, reply, replyWindow: window, bounce,
+          ageDays: ageDays(e.d.domain_created_at, nowMs),
           bucket: isUnproven ? "unproven" : "ranked",
           // bounceWeight is 0 by default: bounce is already a flagging
           // threshold, so scoring it here would double-count it (and bounce
@@ -356,7 +359,17 @@ export async function computeTrueUp(
       }
       stayingUnproven = unproven.length;
       // Least-invested unproven first, then proven from the bottom up.
-      unproven.sort((a, b) => a.sent - b.sent || a.domain.localeCompare(b.domain));
+      //
+      // The unproven pool is usually far bigger than the number to trim — a
+      // client 5 over cap can have 21 domains all sitting at zero sends. Send
+      // count can't separate those, so age breaks the tie: OLDEST first. A
+      // domain that has had months and still sent nothing is the one that has
+      // most clearly failed to get going; a three-week-old one simply hasn't
+      // ramped yet and deserves to keep its slot. Without this the pick fell
+      // through to alphabetical order, which is no reason at all.
+      unproven.sort(
+        (a, b) => a.sent - b.sent || b.ageDays - a.ageDays || a.domain.localeCompare(b.domain),
+      );
       proven.sort((a, b) => a.score - b.score || a.domain.localeCompare(b.domain));
       trimCandidates = [...unproven, ...proven].slice(0, trimNeeded);
       trimUnproven = trimCandidates.filter((c) => c.bucket === "unproven").length;
