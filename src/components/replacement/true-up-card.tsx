@@ -95,6 +95,9 @@ export function TrueUpCard() {
   const [preview, setPreview] = useState<FillPreview[] | null>(null);
   const [busy, setBusy] = useState<"preview" | "run" | null>(null);
   const [ran, setRan] = useState<FillResult | null>(null);
+  // Set when the preview came from a single row's button, so the run that
+  // follows stays on that one client instead of falling back to the batch.
+  const [scope, setScope] = useState<{ clientTag: string; instance: string } | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true); setErr(null);
@@ -140,24 +143,28 @@ export function TrueUpCard() {
     setTimeout(() => setCopied(false), 1500);
   }, [data]);
 
-  const callFill = useCallback(async (dryRun: boolean) => {
+  // `target` scopes the run to one client — the safe way to try a single one
+  // before letting it loose on the whole batch.
+  const callFill = useCallback(async (dryRun: boolean, target?: { clientTag: string; instance: string }) => {
     setBusy(dryRun ? "preview" : "run"); setErr(null);
+    if (dryRun) setScope(target ?? null);
     try {
+      const scoped = dryRun ? target ?? null : scope;
       const res = await fetch("/api/replacement/true-up/fill", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ all: true, dryRun }),
+        body: JSON.stringify(scoped ? { ...scoped, dryRun } : { all: true, dryRun }),
       });
       const json = await res.json();
       if (!res.ok || json.error) throw new Error(json.error || "Failed");
       if (dryRun) { setPreview(json.wouldRun as FillPreview[]); setRan(null); }
-      else { setRan(json as FillResult); setPreview(null); await load(); }
+      else { setRan(json as FillResult); setPreview(null); setScope(null); await load(); }
     } catch (e) {
       setErr(e instanceof Error ? e.message : "Failed");
     } finally {
       setBusy(null);
     }
-  }, [load]);
+  }, [load, scope]);
 
   useEffect(() => { const id = setTimeout(load, 0); return () => clearTimeout(id); }, [load]);
 
@@ -205,7 +212,9 @@ export function TrueUpCard() {
           <div className="rounded-lg border border-amber-500/30 bg-amber-500/5 px-3 py-3 space-y-2">
             <div className="flex items-center gap-2 text-sm font-medium text-amber-500">
               <AlertTriangle className="h-4 w-4" />
-              This will add domains to live clients
+              {scope
+                ? `This will add domains to ${scope.clientTag} (${label(scope.instance)})`
+                : "This will add domains to live clients"}
             </div>
             {preview.length === 0 ? (
               <div className="text-xs text-muted-foreground">
@@ -241,7 +250,12 @@ export function TrueUpCard() {
                     <Play className="h-4 w-4" />
                     {busy === "run" ? "Running…" : `Run it — ${preview.reduce((s, p) => s + p.adding, 0)} domains`}
                   </Button>
-                  <Button size="sm" variant="ghost" onClick={() => setPreview(null)} disabled={busy !== null}>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    onClick={() => { setPreview(null); setScope(null); }}
+                    disabled={busy !== null}
+                  >
                     Cancel
                   </Button>
                 </div>
@@ -420,8 +434,25 @@ export function TrueUpCard() {
                           )}
                           {r.fillCandidates.length > 0 && (
                             <div className="space-y-1">
-                              <div className="text-[10px] text-muted-foreground uppercase tracking-wide">
-                                Reserve earmarked for this tag
+                              <div className="flex items-center justify-between gap-2">
+                                <div className="text-[10px] text-muted-foreground uppercase tracking-wide">
+                                  Reserve earmarked for this tag
+                                </div>
+                                {/* One client at a time — the batch button runs up to
+                                    5, which is too much to eyeball on a first run. */}
+                                <Button
+                                  size="sm"
+                                  variant="outline"
+                                  className="h-6 gap-1.5 text-[10px]"
+                                  disabled={busy !== null || loading}
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    callFill(true, { clientTag: r.clientTag, instance: r.instance });
+                                  }}
+                                >
+                                  <Play className="h-3 w-3" />
+                                  Fill just {r.clientTag}
+                                </Button>
                               </div>
                               <div className="text-[11px] text-muted-foreground break-all">{r.fillCandidates.join(", ")}</div>
                             </div>
