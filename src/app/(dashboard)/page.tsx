@@ -32,6 +32,7 @@ import { CrossTagAuditCard } from "@/components/dashboard/cross-tag-audit-card";
 import { DuplicateDomainsCard } from "@/components/dashboard/duplicate-domains-card";
 import { NurtureDraftsCard } from "@/components/dashboard/nurture-drafts-card";
 import { AttachFailuresCard } from "@/components/dashboard/attach-failures-card";
+import { BurntReviewCard } from "@/components/dashboard/burnt-review-card";
 import { ReplacementStatusWidget } from "@/components/dashboard/replacement-status-widget";
 import { PendingOffboardingsCard } from "@/components/dashboard/pending-offboardings-card";
 import { OffboardingProgressCard, type OffboardingPlan } from "@/components/dashboard/offboarding-progress-card";
@@ -436,6 +437,10 @@ export default function DashboardPage() {
           </div>
         </div>
       )}
+
+      {/* Burnt domains awaiting deletion — approve/reject before the vendor
+          cancellation fires. Admin only; self-hides when the queue is empty. */}
+      {isAdmin && <BurntReviewCard />}
 
       {/* Replacement status — what auto-replacement did (24h default) + retry. */}
       {isAdmin && <ReplacementStatusWidget />}
