@@ -1,0 +1,274 @@
+import { NextResponse } from "next/server";
+import { computeTrueUp } from "@/lib/replacement/true-up";
+import { internalFetch } from "@/lib/replacement/internal-fetch";
+import { logEvents } from "@/lib/replacement/store";
+import { ALL_INSTANCE_SLUGS, type BisonInstanceSlug } from "@/lib/bison-instances";
+import { inboxingConnectionFor, DEFAULT_INBOXING_ACCOUNT } from "@/lib/inboxing-accounts";
+
+export const maxDuration = 300;
+
+// POST /api/replacement/true-up/move-fill — covers a starving instance from a
+// sibling that has spare reserve.
+//
+// Nick asked for this three times (2026-08-17, 12:10 / 12:12 / 12:16):
+//   "if B2B 2 has domains to move over then move those domains over to the
+//    instance that needs domains then the system would tag and change redirect
+//    and add to campaigns"
+//
+// The gap it closes: the fill only ever draws from the reserve of the SAME
+// instance, so B2B #1 can be ~149 short while B2B #2 sits on spare stock and
+// nothing connects the two.
+//
+// Flow per batch:
+//   1. read the true-up → who is short, and which instances have reserve left
+//   2. pick donor domains from a same-TIER instance (B2B→B2B, B2C→B2C)
+//   3. POST /api/deliverability/move-domains (Inboxing Platform Upload)
+//   4. the caller re-runs the FILL once the senders land on the target
+//
+// Deliberately TWO steps, not one. The move is asynchronous — Inboxing queues
+// an upload job and senders appear on the target minutes later. Tagging and
+// attaching before they exist would silently no-op, which is exactly the class
+// of bug that made the JPWC attach look complete when it wasn't. So this route
+// moves and reports; the fill (which already tags, sets the redirect, attaches
+// campaigns and whitelists) runs after, against domains that are really there.
+//
+// Only Inboxing-provisioned domains can move — move-domains rides Inboxing's
+// upload API because Bison exposes neither mailbox passwords nor OAuth
+// creation. Anything else is reported as unmovable rather than half-attempted.
+//
+// Body:
+//   { dryRun: true }                  plan only (default when omitted)
+//   { targetInstance }                limit to one starving instance
+//   { maxDomains }                    cap the batch (default 20)
+
+const DEFAULT_MAX_DOMAINS = 20;
+
+interface Body {
+  targetInstance?: string;
+  dryRun?: boolean;
+  maxDomains?: number;
+}
+
+/** B2B instances pair with B2B, B2C with B2C — a B2C domain is no use to a
+ *  B2B client's cap and vice versa. */
+const TIER_OF: Record<string, "b2b" | "b2c"> = {
+  outboundhero: "b2b",
+  facilityreach: "b2b",
+  cleaningoutbound: "b2c",
+  outboundclean: "b2c",
+};
+
+export async function POST(request: Request) {
+  try {
+    const body = (await request.json().catch(() => ({}))) as Body;
+    const dryRun = body.dryRun !== false;
+    const maxDomains = Math.max(1, Math.min(100, body.maxDomains ?? DEFAULT_MAX_DOMAINS));
+
+    const trueUp = await computeTrueUp();
+
+    // How short each instance is, once its own reserve has been spent.
+    const shortByInstance = new Map<string, number>();
+    for (const slug of ALL_INSTANCE_SLUGS) {
+      const b = trueUp.byInstance[slug];
+      if (b && b.fillShort > 0) shortByInstance.set(slug, b.fillShort);
+    }
+
+    // Spare stock per instance, flattened across providers.
+    const spareByInstance = new Map<string, { domain: string; provider: string }[]>();
+    for (const [key, domains] of Object.entries(trueUp.reserveLeft)) {
+      const sep = key.lastIndexOf(":");
+      const inst = key.slice(0, sep);
+      const provider = key.slice(sep + 1);
+      const list = spareByInstance.get(inst) ?? [];
+      for (const d of domains) list.push({ domain: d, provider });
+      spareByInstance.set(inst, list);
+    }
+
+    let targets = [...shortByInstance.entries()].sort((a, b) => b[1] - a[1]);
+    if (body.targetInstance) {
+      targets = targets.filter(([slug]) => slug === body.targetInstance);
+      if (targets.length === 0) {
+        return NextResponse.json(
+          { error: `${body.targetInstance} is not short on domains` },
+          { status: 400 },
+        );
+      }
+    }
+
+    if (targets.length === 0) {
+      return NextResponse.json({
+        dryRun,
+        plan: [],
+        note: "No instance is short once its own reserve is counted.",
+      });
+    }
+
+    // Build the plan: for each starving instance, draw from same-tier donors.
+    const claimed = new Set<string>();
+    const plan: {
+      targetInstance: string;
+      short: number;
+      moving: { domain: string; fromInstance: string; provider: string }[];
+      stillShort: number;
+      donorsExhausted: boolean;
+    }[] = [];
+
+    for (const [target, short] of targets) {
+      const tier = TIER_OF[target];
+      const moving: { domain: string; fromInstance: string; provider: string }[] = [];
+
+      const donors = [...spareByInstance.entries()]
+        .filter(([slug]) => slug !== target && TIER_OF[slug] === tier)
+        // deepest reserve first
+        .sort((a, b) => b[1].length - a[1].length);
+
+      for (const [donor, list] of donors) {
+        for (const item of list) {
+          if (moving.length >= Math.min(short, maxDomains)) break;
+          const k = `${donor}:${item.domain}`;
+          if (claimed.has(k)) continue;
+          claimed.add(k);
+          moving.push({ domain: item.domain, fromInstance: donor, provider: item.provider });
+        }
+        if (moving.length >= Math.min(short, maxDomains)) break;
+      }
+
+      plan.push({
+        targetInstance: target,
+        short,
+        moving,
+        stillShort: Math.max(0, short - moving.length),
+        donorsExhausted: moving.length < Math.min(short, maxDomains),
+      });
+    }
+
+    if (dryRun) {
+      return NextResponse.json({
+        dryRun: true,
+        plan,
+        totalMoving: plan.reduce((s, p) => s + p.moving.length, 0),
+        note:
+          "Move only. After the senders land on the target, run the fill to tag, set the redirect and attach campaigns.",
+      });
+    }
+
+    // Execute. One move-domains call per (donor → target) pair.
+    const results: {
+      targetInstance: string;
+      fromInstance: string;
+      requested: number;
+      moved: string[];
+      uploading: string[];
+      skipped: { domain: string; reason: string }[];
+      error?: string;
+    }[] = [];
+
+    for (const p of plan) {
+      const byDonor = new Map<string, string[]>();
+      for (const m of p.moving) {
+        const list = byDonor.get(m.fromInstance) ?? [];
+        list.push(m.domain);
+        byDonor.set(m.fromInstance, list);
+      }
+
+      for (const [donor, domains] of byDonor) {
+        await logEvents([
+          {
+            instance: p.targetInstance as BisonInstanceSlug,
+            clientTag: null,
+            eventType: "proposed",
+            detail: `cross-instance move: pulling ${domains.length} from ${donor} to cover ${p.short} short`,
+          },
+        ]).catch(() => {});
+
+        try {
+          // move-domains requires a non-empty platformConnectionId even though
+          // it re-resolves the real one per domain from that domain's Inboxing
+          // account. Pass the target's default for the primary account.
+          const connectionId = inboxingConnectionFor(
+            p.targetInstance as BisonInstanceSlug,
+            DEFAULT_INBOXING_ACCOUNT,
+          );
+          if (!connectionId) {
+            results.push({
+              targetInstance: p.targetInstance,
+              fromInstance: donor,
+              requested: domains.length,
+              moved: [],
+              uploading: [],
+              skipped: [],
+              error: `no Inboxing platform connection configured for ${p.targetInstance}`,
+            });
+            continue;
+          }
+
+          const res = await internalFetch("/api/deliverability/move-domains", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              dryRun: false,
+              domains,
+              targetInstance: p.targetInstance,
+              platformConnectionId: connectionId,
+            }),
+          });
+          const json = await res.json().catch(() => ({}));
+          if (!res.ok || json?.error) {
+            results.push({
+              targetInstance: p.targetInstance,
+              fromInstance: donor,
+              requested: domains.length,
+              moved: [],
+              uploading: [],
+              skipped: [],
+              error: json?.error || `HTTP ${res.status}`,
+            });
+            continue;
+          }
+
+          const rows = (json.results || []) as { domain: string; status: string; error?: string }[];
+          results.push({
+            targetInstance: p.targetInstance,
+            fromInstance: donor,
+            requested: domains.length,
+            moved: rows.filter((r) => r.status === "done").map((r) => r.domain),
+            uploading: rows.filter((r) => r.status === "uploading").map((r) => r.domain),
+            skipped: rows
+              .filter((r) => r.status === "skipped" || r.status === "failed")
+              .map((r) => ({ domain: r.domain, reason: r.error || r.status })),
+          });
+        } catch (e) {
+          results.push({
+            targetInstance: p.targetInstance,
+            fromInstance: donor,
+            requested: domains.length,
+            moved: [],
+            uploading: [],
+            skipped: [],
+            error: e instanceof Error ? e.message : "move failed",
+          });
+        }
+      }
+    }
+
+    const movedTotal = results.reduce((s, r) => s + r.moved.length, 0);
+    const uploadingTotal = results.reduce((s, r) => s + r.uploading.length, 0);
+
+    return NextResponse.json({
+      results,
+      movedTotal,
+      uploadingTotal,
+      // The source copy is left in place on purpose — move-domains never
+      // deletes. Nick asked (12:13) that the old copy go once the move is
+      // confirmed; that is move-finalize's job, which auto-deletes a fully
+      // verified source copy after its grace period.
+      note:
+        uploadingTotal > 0
+          ? `${uploadingTotal} still uploading — re-run to finish those, then run the fill.`
+          : "Run the fill next to tag, set redirects and attach campaigns.",
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "move-fill failed";
+    return NextResponse.json({ error: message }, { status: 500 });
+  }
+}
