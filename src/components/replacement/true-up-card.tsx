@@ -13,7 +13,7 @@
 //          ranking is still provisional (waiting on Nick's answer on which
 //          number defines "better performing"), which is why it only reports.
 import { useState, useEffect, useCallback, useMemo } from "react";
-import { RefreshCw, Scale, ChevronRight, Copy, Check, Play, AlertTriangle } from "lucide-react";
+import { RefreshCw, Scale, ChevronRight, Copy, Check, Play, AlertTriangle, Scissors, ArrowLeftRight } from "lucide-react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -69,6 +69,35 @@ interface FillResult {
   executed: { clientTag: string; instance: string; ok: boolean; added: number }[];
 }
 
+interface TrimPreview {
+  clientTag: string; instance: string; cap: number; staying: number;
+  trimming: number; unproven: number; domains: string[];
+}
+interface TrimResult {
+  ranClients: number;
+  trimmedTotal: number;
+  note?: string;
+  executed: {
+    clientTag: string; instance: string; ok: boolean; trimmed: number;
+    steps: { label: string; state: string; note?: string }[];
+  }[];
+}
+
+interface MovePlan {
+  targetInstance: string; short: number; stillShort: number; donorsExhausted: boolean;
+  moving: { domain: string; fromInstance: string; provider: string }[];
+}
+interface MoveResult {
+  movedTotal: number;
+  uploadingTotal: number;
+  note?: string;
+  results: {
+    targetInstance: string; fromInstance: string; requested: number;
+    moved: string[]; uploading: string[];
+    skipped: { domain: string; reason: string }[]; error?: string;
+  }[];
+}
+
 type Filter = "no-stock" | "fill" | "trim" | "all";
 
 const FILTERS: { key: Filter; label: string }[] = [
@@ -98,6 +127,19 @@ export function TrueUpCard() {
   // Set when the preview came from a single row's button, so the run that
   // follows stays on that one client instead of falling back to the batch.
   const [scope, setScope] = useState<{ clientTag: string; instance: string } | null>(null);
+
+  // Trim mirrors fill exactly — confirm-first, same scoping. Kept in its own
+  // state so a staged trim preview can never be run by the fill button.
+  const [trimPreview, setTrimPreview] = useState<TrimPreview[] | null>(null);
+  const [trimBusy, setTrimBusy] = useState<"preview" | "run" | null>(null);
+  const [trimRan, setTrimRan] = useState<TrimResult | null>(null);
+  const [trimScope, setTrimScope] = useState<{ clientTag: string; instance: string } | null>(null);
+
+  // Cross-instance move — covers a starving instance from a sibling that has
+  // spare reserve. Same confirm-first shape as fill and trim.
+  const [movePlan, setMovePlan] = useState<MovePlan[] | null>(null);
+  const [moveBusy, setMoveBusy] = useState<"preview" | "run" | null>(null);
+  const [moveRan, setMoveRan] = useState<MoveResult | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true); setErr(null);
@@ -166,6 +208,51 @@ export function TrueUpCard() {
     }
   }, [load, scope]);
 
+  // Same shape as callFill. The trim hands domains back to the reserve — it
+  // never schedules a vendor delete, so this is reversible by re-filling.
+  const callTrim = useCallback(async (dryRun: boolean, target?: { clientTag: string; instance: string }) => {
+    setTrimBusy(dryRun ? "preview" : "run"); setErr(null);
+    if (dryRun) setTrimScope(target ?? null);
+    try {
+      const scoped = dryRun ? target ?? null : trimScope;
+      const res = await fetch("/api/replacement/true-up/trim", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(scoped ? { ...scoped, dryRun } : { all: true, dryRun }),
+      });
+      const json = await res.json();
+      if (!res.ok || json.error) throw new Error(json.error || "Failed");
+      if (dryRun) { setTrimPreview(json.wouldRun as TrimPreview[]); setTrimRan(null); }
+      else { setTrimRan(json as TrimResult); setTrimPreview(null); setTrimScope(null); await load(); }
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : "Failed");
+    } finally {
+      setTrimBusy(null);
+    }
+  }, [load, trimScope]);
+
+  // Move is deliberately two-step: it only relocates domains. Tagging, the
+  // redirect and campaign attach happen when the fill runs afterwards, against
+  // senders that have actually landed on the target.
+  const callMove = useCallback(async (dryRun: boolean) => {
+    setMoveBusy(dryRun ? "preview" : "run"); setErr(null);
+    try {
+      const res = await fetch("/api/replacement/true-up/move-fill", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ dryRun }),
+      });
+      const json = await res.json();
+      if (!res.ok || json.error) throw new Error(json.error || "Failed");
+      if (dryRun) { setMovePlan(json.plan as MovePlan[]); setMoveRan(null); }
+      else { setMoveRan(json as MoveResult); setMovePlan(null); await load(); }
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : "Failed");
+    } finally {
+      setMoveBusy(null);
+    }
+  }, [load]);
+
   useEffect(() => { const id = setTimeout(load, 0); return () => clearTimeout(id); }, [load]);
 
   return (
@@ -197,7 +284,31 @@ export function TrueUpCard() {
                 {busy === "preview" ? "Checking…" : "Preview fill"}
               </Button>
             )}
-            <Button size="sm" variant="outline" onClick={load} disabled={loading || busy !== null} className="gap-2">
+            {data && data.totals.fillShort > 0 && (
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => callMove(true)}
+                disabled={moveBusy !== null || trimBusy !== null || busy !== null || loading}
+                className="gap-2"
+              >
+                <ArrowLeftRight className="h-4 w-4" />
+                {moveBusy === "preview" ? "Checking…" : "Preview move"}
+              </Button>
+            )}
+            {data && data.totals.trimNeeded > 0 && (
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => callTrim(true)}
+                disabled={trimBusy !== null || busy !== null || loading}
+                className="gap-2"
+              >
+                <Scissors className="h-4 w-4" />
+                {trimBusy === "preview" ? "Checking…" : "Preview trim"}
+              </Button>
+            )}
+            <Button size="sm" variant="outline" onClick={load} disabled={loading || busy !== null || trimBusy !== null} className="gap-2">
               <RefreshCw className={`h-4 w-4 ${loading ? "animate-spin" : ""}`} />
               {loading ? "Calculating…" : "Calculate"}
             </Button>
@@ -261,6 +372,168 @@ export function TrueUpCard() {
                 </div>
               </>
             )}
+          </div>
+        )}
+
+        {/* Cross-instance move. Relocates stock only — the fill does the
+            tagging and attaching once the senders land. */}
+        {movePlan && (
+          <div className="rounded-lg border border-violet-500/30 bg-violet-500/5 px-3 py-3 space-y-2">
+            <div className="flex items-center gap-2 text-sm font-medium text-violet-500">
+              <ArrowLeftRight className="h-4 w-4" />
+              Move reserve between instances
+            </div>
+            {movePlan.length === 0 || movePlan.every((p) => p.moving.length === 0) ? (
+              <div className="text-xs text-muted-foreground">
+                Nothing to move — no sibling instance has spare reserve for the ones that are short.
+              </div>
+            ) : (
+              <>
+                <div className="text-[11px] text-muted-foreground">
+                  Moves domains only. They land on the target untagged, then the fill tags them, sets
+                  the client redirect and attaches campaigns. Only Inboxing-provisioned domains can
+                  move; the source copy stays until it is verified, then auto-deletes.
+                </div>
+                <div className="rounded border divide-y max-h-56 overflow-y-auto bg-background">
+                  {movePlan.filter((p) => p.moving.length > 0).map((p) => {
+                    const byDonor = new Map<string, string[]>();
+                    for (const m of p.moving) {
+                      byDonor.set(m.fromInstance, [...(byDonor.get(m.fromInstance) ?? []), m.domain]);
+                    }
+                    return (
+                      <div key={p.targetInstance} className="px-3 py-2 text-[11px] space-y-1">
+                        <div className="flex items-center justify-between">
+                          <span className="font-medium">
+                            → {label(p.targetInstance)}
+                            <span className="text-muted-foreground"> needs {p.short}</span>
+                          </span>
+                          <span className="tabular-nums text-muted-foreground">
+                            moving {p.moving.length}
+                            {p.stillShort > 0 && (
+                              <span className="text-destructive"> · still {p.stillShort} short</span>
+                            )}
+                          </span>
+                        </div>
+                        {[...byDonor].map(([donor, doms]) => (
+                          <div key={donor} className="text-muted-foreground break-all">
+                            from {label(donor)} ({doms.length}): {doms.join(", ")}
+                          </div>
+                        ))}
+                      </div>
+                    );
+                  })}
+                </div>
+                <div className="flex gap-2">
+                  <Button size="sm" onClick={() => callMove(false)} disabled={moveBusy !== null} className="gap-2">
+                    <ArrowLeftRight className="h-4 w-4" />
+                    {moveBusy === "run"
+                      ? "Moving…"
+                      : `Move ${movePlan.reduce((s, p) => s + p.moving.length, 0)} domains`}
+                  </Button>
+                  <Button size="sm" variant="ghost" onClick={() => setMovePlan(null)} disabled={moveBusy !== null}>
+                    Cancel
+                  </Button>
+                </div>
+              </>
+            )}
+          </div>
+        )}
+
+        {moveRan && (
+          <div className="rounded-lg border border-violet-500/30 bg-violet-500/5 px-3 py-2 text-xs space-y-1">
+            <div className="font-medium text-violet-500">
+              Moved {moveRan.movedTotal} domain{moveRan.movedTotal === 1 ? "" : "s"}
+              {moveRan.uploadingTotal > 0 && ` · ${moveRan.uploadingTotal} still uploading`}
+            </div>
+            {moveRan.results.map((r, i) => (
+              <div key={`${r.fromInstance}:${r.targetInstance}:${i}`} className="text-muted-foreground">
+                {r.error ? "✗" : "✓"} {label(r.fromInstance)} → {label(r.targetInstance)} —{" "}
+                {r.moved.length}/{r.requested}
+                {r.uploading.length > 0 && ` · ${r.uploading.length} uploading`}
+                {r.skipped.length > 0 && (
+                  <span className="text-destructive"> · {r.skipped.length} skipped</span>
+                )}
+                {r.error && <span className="text-destructive"> · {r.error}</span>}
+              </div>
+            ))}
+            {moveRan.note && <div className="text-muted-foreground">{moveRan.note}</div>}
+          </div>
+        )}
+
+        {/* Confirm-first trim. Reversible — trimmed domains go back to the
+            reserve rather than to the vendor-delete queue. */}
+        {trimPreview && (
+          <div className="rounded-lg border border-sky-500/30 bg-sky-500/5 px-3 py-3 space-y-2">
+            <div className="flex items-center gap-2 text-sm font-medium text-sky-500">
+              <Scissors className="h-4 w-4" />
+              {trimScope
+                ? `This will take domains off ${trimScope.clientTag} (${label(trimScope.instance)})`
+                : "This will take domains off live clients"}
+            </div>
+            {trimPreview.length === 0 ? (
+              <div className="text-xs text-muted-foreground">Nothing over cap right now.</div>
+            ) : (
+              <>
+                <div className="text-[11px] text-muted-foreground">
+                  {trimPreview.length} client{trimPreview.length === 1 ? "" : "s"} ·{" "}
+                  {trimPreview.reduce((s, p) => s + p.trimming, 0)} domains. Detaches them from the
+                  client&rsquo;s campaigns, removes the tag and clears the redirect. They go back to the
+                  reserve untagged — nothing is deleted or cancelled, so a re-fill undoes this.
+                </div>
+                <div className="rounded border divide-y max-h-56 overflow-y-auto bg-background">
+                  {trimPreview.map((p) => (
+                    <div key={`${p.clientTag}:${p.instance}`} className="px-3 py-2 text-[11px]">
+                      <div className="flex items-center justify-between">
+                        <span className="font-medium">
+                          {p.clientTag} <span className="text-muted-foreground">{label(p.instance)}</span>
+                        </span>
+                        <span className="tabular-nums text-muted-foreground">
+                          {p.staying} → {p.staying - p.trimming} of {p.cap}
+                          {p.unproven > 0 && <span> · {p.unproven} unproven</span>}
+                        </span>
+                      </div>
+                      <div className="text-muted-foreground break-all">{p.domains.join(", ")}</div>
+                    </div>
+                  ))}
+                </div>
+                <div className="flex gap-2">
+                  <Button size="sm" onClick={() => callTrim(false)} disabled={trimBusy !== null} className="gap-2">
+                    <Scissors className="h-4 w-4" />
+                    {trimBusy === "run"
+                      ? "Running…"
+                      : `Run it — ${trimPreview.reduce((s, p) => s + p.trimming, 0)} domains`}
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    onClick={() => { setTrimPreview(null); setTrimScope(null); }}
+                    disabled={trimBusy !== null}
+                  >
+                    Cancel
+                  </Button>
+                </div>
+              </>
+            )}
+          </div>
+        )}
+
+        {trimRan && (
+          <div className="rounded-lg border border-sky-500/30 bg-sky-500/5 px-3 py-2 text-xs space-y-1">
+            <div className="font-medium text-sky-500">
+              Trimmed {trimRan.trimmedTotal} domain{trimRan.trimmedTotal === 1 ? "" : "s"} across{" "}
+              {trimRan.ranClients} client{trimRan.ranClients === 1 ? "" : "s"}
+            </div>
+            {trimRan.executed.map((e) => (
+              <div key={`${e.clientTag}:${e.instance}`} className="text-muted-foreground">
+                {e.ok ? "✓" : "✗"} {e.clientTag} {label(e.instance)} — {e.trimmed}
+                {!e.ok && (
+                  <span className="text-destructive">
+                    {" "}· {e.steps.filter((s) => s.state === "failed").map((s) => s.label).join(", ")}
+                  </span>
+                )}
+              </div>
+            ))}
+            {trimRan.note && <div className="text-muted-foreground">{trimRan.note}</div>}
           </div>
         )}
 
@@ -394,13 +667,30 @@ export function TrueUpCard() {
                           )}
                           {r.trimCandidates.length > 0 && (
                             <div className="space-y-1">
-                              <div className="text-[10px] text-muted-foreground uppercase tracking-wide">
-                                Would untag back to reserve — in trim order
-                                <span className="normal-case tracking-normal">
-                                  {" "}· unproven first (under {data.ranking.minSentToTrim.toLocaleString()} sent or no
-                                  reply figure, oldest of those first), then lowest reply rate · {r.stayingUnproven} of{" "}
-                                  {r.staying} on this tag have no track record
-                                </span>
+                              <div className="flex items-start justify-between gap-2">
+                                <div className="text-[10px] text-muted-foreground uppercase tracking-wide">
+                                  Would untag back to reserve — in trim order
+                                  <span className="normal-case tracking-normal">
+                                    {" "}· unproven first (under {data.ranking.minSentToTrim.toLocaleString()} sent or no
+                                    reply figure, oldest of those first), then lowest reply rate · {r.stayingUnproven} of{" "}
+                                    {r.staying} on this tag have no track record
+                                  </span>
+                                </div>
+                                {r.trimNeeded > 0 && (
+                                  <Button
+                                    size="sm"
+                                    variant="outline"
+                                    className="h-6 gap-1.5 text-[10px] shrink-0"
+                                    disabled={trimBusy !== null || busy !== null || loading}
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      callTrim(true, { clientTag: r.clientTag, instance: r.instance });
+                                    }}
+                                  >
+                                    <Scissors className="h-3 w-3" />
+                                    Trim just {r.clientTag}
+                                  </Button>
+                                )}
                               </div>
                               {r.trimCandidates.map((c) => (
                                 <div key={c.domain} className="grid grid-cols-[1fr_74px_66px_84px_112px_84px] gap-2 text-[11px] tabular-nums items-center">
