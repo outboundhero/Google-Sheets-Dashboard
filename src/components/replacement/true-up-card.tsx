@@ -139,6 +139,7 @@ export function TrueUpCard() {
   // Cross-instance move — covers a starving instance from a sibling that has
   // spare reserve. Same confirm-first shape as fill and trim.
   const [movePlan, setMovePlan] = useState<MovePlan[] | null>(null);
+  const [moveUnmovable, setMoveUnmovable] = useState(0);
   const [moveBusy, setMoveBusy] = useState<"preview" | "run" | null>(null);
   const [moveRan, setMoveRan] = useState<MoveResult | null>(null);
 
@@ -270,7 +271,7 @@ export function TrueUpCard() {
       });
       const json = await res.json();
       if (!res.ok || json.error) throw new Error(json.error || "Failed");
-      if (dryRun) { setMovePlan(json.plan as MovePlan[]); setMoveRan(null); }
+      if (dryRun) { setMovePlan(json.plan as MovePlan[]); setMoveUnmovable(json.unmovable ?? 0); setMoveRan(null); }
       else { setMoveRan(json as MoveResult); setMovePlan(null); await load(); }
     } catch (e) {
       setErr(e instanceof Error ? e.message : "Failed");
@@ -419,6 +420,8 @@ export function TrueUpCard() {
                   Moves domains only. They land on the target untagged, then the fill tags them, sets
                   the client redirect and attaches campaigns. Only Inboxing-provisioned domains can
                   move; the source copy stays until it is verified, then auto-deletes.
+                  {moveUnmovable > 0 &&
+                    ` ${moveUnmovable} reserve domain${moveUnmovable === 1 ? "" : "s"} can't move (not Inboxing, or mid-move) and ${moveUnmovable === 1 ? "was" : "were"} left out of this plan.`}
                 </div>
                 <div className="rounded border divide-y max-h-56 overflow-y-auto bg-background">
                   {movePlan.filter((p) => p.moving.length > 0).map((p) => {

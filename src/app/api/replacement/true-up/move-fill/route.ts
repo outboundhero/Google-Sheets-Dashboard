@@ -4,6 +4,7 @@ import { internalFetch } from "@/lib/replacement/internal-fetch";
 import { logEvents } from "@/lib/replacement/store";
 import { ALL_INSTANCE_SLUGS, type BisonInstanceSlug } from "@/lib/bison-instances";
 import { inboxingConnectionFor, DEFAULT_INBOXING_ACCOUNT } from "@/lib/inboxing-accounts";
+import { getSupabaseAdmin } from "@/lib/supabase";
 
 export const maxDuration = 300;
 
@@ -58,6 +59,10 @@ const TIER_OF: Record<string, "b2b" | "b2c"> = {
   outboundclean: "b2c",
 };
 
+/** Same test move-domains applies before it will touch a domain. */
+const hasInboxingTag = (tags: string[] | null) =>
+  (tags || []).some((t) => (t || "").trim().toLowerCase().startsWith("inboxing"));
+
 export async function POST(request: Request) {
   try {
     const body = (await request.json().catch(() => ({}))) as Body;
@@ -82,6 +87,40 @@ export async function POST(request: Request) {
       const list = spareByInstance.get(inst) ?? [];
       for (const d of domains) list.push({ domain: d, provider });
       spareByInstance.set(inst, list);
+    }
+
+    // Drop candidates move-domains would refuse anyway: non-Inboxing domains
+    // (Bison exposes no passwords, so only Inboxing's upload API can move
+    // them) and domains already present on more than one instance (mid-move).
+    // Without this the plan re-picks the same dead candidates every run — the
+    // first live batch burned 11 of its 20 slots on .info domains, and each
+    // completed move adds another dead slot, so repeat runs would stall
+    // before the shortfall is covered.
+    const supabase = getSupabaseAdmin();
+    const allCandidates = [...new Set([...spareByInstance.values()].flat().map((c) => c.domain))];
+    const rowsByDomain = new Map<string, { instance: string; tags: string[] | null }[]>();
+    for (let i = 0; i < allCandidates.length; i += 200) {
+      const chunk = allCandidates.slice(i, i + 200);
+      const { data, error } = await supabase
+        .from("deliverability_domains")
+        .select("instance, domain, tags")
+        .in("domain", chunk);
+      if (error) throw new Error(`candidate lookup failed: ${error.message}`);
+      for (const r of data || []) {
+        const list = rowsByDomain.get(r.domain) ?? [];
+        list.push({ instance: r.instance, tags: r.tags as string[] | null });
+        rowsByDomain.set(r.domain, list);
+      }
+    }
+    let unmovable = 0;
+    for (const [inst, list] of spareByInstance) {
+      const movable = list.filter((item) => {
+        const rows = rowsByDomain.get(item.domain) ?? [];
+        if (rows.length !== 1) return false; // on 2+ instances (or unknown) — move-domains skips these
+        return rows[0].instance === inst && hasInboxingTag(rows[0].tags);
+      });
+      unmovable += list.length - movable.length;
+      spareByInstance.set(inst, movable);
     }
 
     let targets = [...shortByInstance.entries()].sort((a, b) => b[1] - a[1]);
@@ -147,8 +186,10 @@ export async function POST(request: Request) {
         dryRun: true,
         plan,
         totalMoving: plan.reduce((s, p) => s + p.moving.length, 0),
+        unmovable,
         note:
-          "Move only. After the senders land on the target, run the fill to tag, set the redirect and attach campaigns.",
+          "Move only. After the senders land on the target, run the fill to tag, set the redirect and attach campaigns." +
+          (unmovable > 0 ? ` ${unmovable} reserve domain${unmovable === 1 ? "" : "s"} can't move (not Inboxing-provisioned, or mid-move).` : ""),
       });
     }
 
