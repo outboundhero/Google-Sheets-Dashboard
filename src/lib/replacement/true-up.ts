@@ -32,10 +32,10 @@ const WARMUP_DAYS = 21; // matches plan.ts — a domain is usable once it's ≥ 
  * not a customer's. True-up skips them entirely — `OH` alone would otherwise be
  * the single biggest trim in the system.
  *
- * PENDING Nick's confirmation (asked 2026-08-14); `SC`, `DM4PM` and `SI` also
- * have their own empty threshold segments and may belong here too.
+ * Nick confirmed 2026-08-17: exclude every non-commercial-cleaning tag, which
+ * is these four. They are the same four that carry empty threshold segments.
  */
-export const INTERNAL_TAGS = new Set(["OH"]);
+export const INTERNAL_TAGS = new Set(["OH", "SC", "DM4PM", "SI"]);
 
 export interface TrimRankingConfig {
   /**
@@ -126,6 +126,13 @@ export interface TrueUpResult {
   byInstance: Record<string, { fillNeeded: number; fillAvailable: number; fillShort: number; trimNeeded: number }>;
   /** Tags skipped and why — internal tags, no tier, no live campaign. */
   skipped: { clientTag: string; instance: string; reason: string }[];
+  /**
+   * Unspent reserve after the fill has earmarked what it can, keyed
+   * `${instance}:${provider}`. The fill only ever draws from its own instance,
+   * so an instance can sit on spare stock while another starves — this is what
+   * the cross-instance move reads to find donors.
+   */
+  reserveLeft: Record<string, string[]>;
 }
 
 interface DomRow {
@@ -415,5 +422,10 @@ export async function computeTrueUp(
     || (b.fillNeeded + b.trimNeeded) - (a.fillNeeded + a.trimNeeded)
     || a.clientTag.localeCompare(b.clientTag));
 
-  return { generatedFor: today, ranking, rows, totals, byInstance, skipped };
+  // `fillCandidates` splices out of `reservePool`, so whatever is left here is
+  // genuinely unspent after every client in that instance took its share.
+  const reserveLeft: Record<string, string[]> = {};
+  for (const [key, list] of reservePool) if (list.length > 0) reserveLeft[key] = [...list];
+
+  return { generatedFor: today, ranking, rows, totals, byInstance, skipped, reserveLeft };
 }
