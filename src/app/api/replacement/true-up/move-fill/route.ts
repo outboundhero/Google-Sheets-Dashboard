@@ -42,7 +42,11 @@ export const maxDuration = 300;
 //   { targetInstance }                limit to one starving instance
 //   { maxDomains }                    cap the batch (default 20)
 
-const DEFAULT_MAX_DOMAINS = 20;
+// 20 made the first live run take ~7 rounds for a 140-domain shortfall; the
+// route already caps the body override at 100, so default to the cap. Each
+// domain is still its own Inboxing upload job — the batch size only decides
+// how many get queued per click.
+const DEFAULT_MAX_DOMAINS = 100;
 
 interface Body {
   targetInstance?: string;
