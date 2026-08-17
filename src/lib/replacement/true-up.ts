@@ -100,6 +100,8 @@ export interface TrueUpRow {
   trimCandidates: TrimCandidate[];
   /** How many of those are unproven (no track record) rather than out-ranked. */
   trimUnproven: number;
+  /** Domains on this tag that are on hold, so exempt from the trim entirely. */
+  trimHeld: number;
   hasActiveCampaign: boolean;
   hasEligibleCampaign: boolean;
   /** Everything the execution runner needs, so the fill can run off this row. */
@@ -349,11 +351,18 @@ export async function computeTrueUp(
     const trimNeeded = Math.max(0, staying - cap);
     let trimCandidates: TrimCandidate[] = [];
     let trimUnproven = 0;
+    let trimHeld = 0;
     let stayingUnproven = 0;
     {
       const unproven: TrimCandidate[] = [];
       const proven: TrimCandidate[] = [];
       for (const e of acc.staying) {
+        // A held domain is never trimmed. Nick 2026-08-17 approved the picks
+        // but reserved the right to hold one the ranking can't see a reason
+        // for — a client winding down, a domain bought for something specific,
+        // a campaign about to launch on it. Skips already block burnt removal
+        // and reserve reuse; this extends the same hold to the trim.
+        if (e.skipped) continue;
         const sent = e.d.total_sent ?? 0;
         const reply = e.m.reply_30 ?? e.m.reply_15;
         const window = e.m.reply_30 != null ? "30" : e.m.reply_15 != null ? "15" : null;
@@ -387,12 +396,21 @@ export async function computeTrueUp(
       proven.sort((a, b) => a.score - b.score || a.domain.localeCompare(b.domain));
       trimCandidates = [...unproven, ...proven].slice(0, trimNeeded);
       trimUnproven = trimCandidates.filter((c) => c.bucket === "unproven").length;
+      // Held domains still occupy a slot against the cap, so holding enough of
+      // them can leave a client over cap with nothing left to trim. Say so
+      // rather than quietly reporting a smaller trim than the row implies.
+      trimHeld = acc.staying.length - (unproven.length + proven.length);
+      if (trimHeld > 0 && trimCandidates.length < trimNeeded) {
+        blockers.push(
+          `${trimNeeded - trimCandidates.length} of the trim is held (${trimHeld} domain${trimHeld === 1 ? "" : "s"} on hold)`,
+        );
+      }
     }
 
     rows.push({
       clientTag, instance, tier, cap, staying, stayingUnproven, burnt: acc.burnt, replacementPulls,
       fillNeeded, fillCandidates, fillShort,
-      trimNeeded, trimCandidates, trimUnproven,
+      trimNeeded, trimCandidates, trimUnproven, trimHeld,
       hasActiveCampaign, hasEligibleCampaign, blockers,
       redirectUrl: redirectByTag.get(clientTag) ?? null,
       targetCampaigns: campaignsByKey.get(key) ?? [],

@@ -43,6 +43,7 @@ interface Row {
   fillShort: number;
   trimNeeded: number;
   trimCandidates: TrimCandidate[];
+  trimHeld: number;
   trimUnproven: number;
   blockers: string[];
 }
@@ -141,6 +142,10 @@ export function TrueUpCard() {
   const [moveBusy, setMoveBusy] = useState<"preview" | "run" | null>(null);
   const [moveRan, setMoveRan] = useState<MoveResult | null>(null);
 
+  // Per-domain hold. Writes to the same replacement_skips the burnt flagging
+  // already respects, so holding here also stops the domain being auto-removed.
+  const [holding, setHolding] = useState<string | null>(null);
+
   const load = useCallback(async () => {
     setLoading(true); setErr(null);
     try {
@@ -184,6 +189,27 @@ export function TrueUpCard() {
     setCopied(true);
     setTimeout(() => setCopied(false), 1500);
   }, [data]);
+
+  const holdDomain = useCallback(async (instance: string, domain: string) => {
+    setHolding(`${instance}:${domain}`); setErr(null);
+    try {
+      const res = await fetch("/api/replacement/skips", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action: "add",
+          entries: [{ instance, domain, reason: "held from true-up trim" }],
+        }),
+      });
+      const json = await res.json();
+      if (!res.ok || json.error) throw new Error(json.error || "Failed");
+      await load();
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : "Failed");
+    } finally {
+      setHolding(null);
+    }
+  }, [load]);
 
   // `target` scopes the run to one client — the safe way to try a single one
   // before letting it loose on the whole batch.
@@ -674,6 +700,9 @@ export function TrueUpCard() {
                                     {" "}· unproven first (under {data.ranking.minSentToTrim.toLocaleString()} sent or no
                                     reply figure, oldest of those first), then lowest reply rate · {r.stayingUnproven} of{" "}
                                     {r.staying} on this tag have no track record
+                                    {r.trimHeld > 0 && (
+                                      <span className="text-amber-500"> · {r.trimHeld} on hold, exempt</span>
+                                    )}
                                   </span>
                                 </div>
                                 {r.trimNeeded > 0 && (
@@ -693,7 +722,7 @@ export function TrueUpCard() {
                                 )}
                               </div>
                               {r.trimCandidates.map((c) => (
-                                <div key={c.domain} className="grid grid-cols-[1fr_74px_66px_84px_112px_84px] gap-2 text-[11px] tabular-nums items-center">
+                                <div key={c.domain} className="grid grid-cols-[1fr_74px_66px_84px_112px_84px_52px] gap-2 text-[11px] tabular-nums items-center">
                                   <span className="truncate">{c.domain}</span>
                                   <span className="text-right">
                                     <Badge
@@ -718,6 +747,16 @@ export function TrueUpCard() {
                                   <span className="text-right text-muted-foreground">
                                     {c.bounce == null ? "—" : `${c.bounce.toFixed(2)}% bnc`}
                                   </span>
+                                  {/* Hold a pick the ranking can't see a reason for. Also
+                                      exempts it from burnt removal — same skip list. */}
+                                  <button
+                                    className="text-[10px] text-muted-foreground hover:text-foreground disabled:opacity-40"
+                                    disabled={holding !== null}
+                                    onClick={(e) => { e.stopPropagation(); holdDomain(r.instance, c.domain); }}
+                                    title="Exempt this domain from the trim"
+                                  >
+                                    {holding === `${r.instance}:${c.domain}` ? "…" : "Hold"}
+                                  </button>
                                 </div>
                               ))}
                             </div>
