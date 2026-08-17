@@ -480,6 +480,14 @@ export function TrueUpCard() {
                   <span className="text-destructive"> · {r.skipped.length} skipped</span>
                 )}
                 {r.error && <span className="text-destructive"> · {r.error}</span>}
+                {/* The reason decides what happens next — "not an Inboxing
+                    domain" means it can never move, so show it, don't bury it
+                    in a count. */}
+                {r.skipped.map((s) => (
+                  <div key={s.domain} className="pl-4 text-destructive/80">
+                    {s.domain} — {s.reason}
+                  </div>
+                ))}
               </div>
             ))}
             {moveRan.note && <div className="text-muted-foreground">{moveRan.note}</div>}
