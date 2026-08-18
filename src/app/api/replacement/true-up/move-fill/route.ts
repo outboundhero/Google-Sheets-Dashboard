@@ -42,11 +42,12 @@ export const maxDuration = 300;
 //   { targetInstance }                limit to one starving instance
 //   { maxDomains }                    cap the batch (default 20)
 
-// 20 made the first live run take ~7 rounds for a 140-domain shortfall; the
-// route already caps the body override at 100, so default to the cap. Each
-// domain is still its own Inboxing upload job — the batch size only decides
-// how many get queued per click.
-const DEFAULT_MAX_DOMAINS = 100;
+// Sized to the 300s function limit: submit costs ~3 Inboxing calls per domain
+// (resolve, tag sync, upload), so 40 keeps a click comfortably inside it. 100
+// in one request is what blew the limit on the first live batch — the batch
+// only decides how many uploads get QUEUED per click; landing is async and
+// the next click finalizes whatever has arrived.
+const DEFAULT_MAX_DOMAINS = 40;
 
 interface Body {
   targetInstance?: string;
@@ -102,25 +103,51 @@ export async function POST(request: Request) {
     // before the shortfall is covered.
     const supabase = getSupabaseAdmin();
     const allCandidates = [...new Set([...spareByInstance.values()].flat().map((c) => c.domain))];
-    const rowsByDomain = new Map<string, { instance: string; tags: string[] | null }[]>();
+    const rowsByDomain = new Map<
+      string,
+      { instance: string; tags: string[] | null; inbox_count: number }[]
+    >();
     for (let i = 0; i < allCandidates.length; i += 200) {
       const chunk = allCandidates.slice(i, i + 200);
       const { data, error } = await supabase
         .from("deliverability_domains")
-        .select("instance, domain, tags")
+        .select("instance, domain, tags, inbox_count")
         .in("domain", chunk);
       if (error) throw new Error(`candidate lookup failed: ${error.message}`);
       for (const r of data || []) {
         const list = rowsByDomain.get(r.domain) ?? [];
-        list.push({ instance: r.instance, tags: r.tags as string[] | null });
+        list.push({
+          instance: r.instance,
+          tags: r.tags as string[] | null,
+          inbox_count: (r.inbox_count as number | null) ?? 0,
+        });
         rowsByDomain.set(r.domain, list);
       }
     }
+    // Mid-move domains: reserve on the donor AND a second, still-empty row on
+    // another instance — an upload was queued but never finalized (a previous
+    // run timed out, or the senders hadn't landed yet). The next execute polls
+    // these to completion instead of stranding them; a legit long-standing
+    // duplicate has inboxes on both sides and is left alone.
+    const midMove: { domain: string; source: string; target: string; expected: number }[] = [];
     let unmovable = 0;
     for (const [inst, list] of spareByInstance) {
       const movable = list.filter((item) => {
         const rows = rowsByDomain.get(item.domain) ?? [];
-        if (rows.length !== 1) return false; // on 2+ instances (or unknown) — move-domains skips these
+        if (rows.length === 2) {
+          const here = rows.find((r) => r.instance === inst);
+          const there = rows.find((r) => r.instance !== inst);
+          if (here && there && there.inbox_count === 0 && hasInboxingTag(here.tags)) {
+            midMove.push({
+              domain: item.domain,
+              source: inst,
+              target: there.instance,
+              expected: here.inbox_count > 0 ? here.inbox_count : 1,
+            });
+          }
+          return false;
+        }
+        if (rows.length !== 1) return false; // on 3+ instances (or unknown) — move-domains skips these
         return rows[0].instance === inst && hasInboxingTag(rows[0].tags);
       });
       unmovable += list.length - movable.length;
@@ -191,13 +218,24 @@ export async function POST(request: Request) {
         plan,
         totalMoving: plan.reduce((s, p) => s + p.moving.length, 0),
         unmovable,
+        finalizePending: midMove.length,
         note:
           "Move only. After the senders land on the target, run the fill to tag, set the redirect and attach campaigns." +
-          (unmovable > 0 ? ` ${unmovable} reserve domain${unmovable === 1 ? "" : "s"} can't move (not Inboxing-provisioned, or mid-move).` : ""),
+          (midMove.length > 0
+            ? ` ${midMove.length} earlier upload${midMove.length === 1 ? "" : "s"} will be checked and finalized first.`
+            : "") +
+          (unmovable > midMove.length
+            ? ` ${unmovable - midMove.length} reserve domain${unmovable - midMove.length === 1 ? "" : "s"} can't move (not Inboxing-provisioned).`
+            : ""),
       });
     }
 
-    // Execute. One move-domains call per (donor → target) pair.
+    // Execute — submit + poll, never the legacy combined mode. Combined waits
+    // in-request for Inboxing uploads to land, which blew the 300s function
+    // limit on the first 100-domain batch and lost the in-flight set. Submit
+    // returns as soon as the uploads are queued; the arrival check happens on
+    // the NEXT click via the poll pass below, which re-discovers in-flight
+    // domains from the DB instead of trusting anyone to have kept a list.
     const results: {
       targetInstance: string;
       fromInstance: string;
@@ -208,6 +246,55 @@ export async function POST(request: Request) {
       error?: string;
     }[] = [];
 
+    // Pass 1 — finalize earlier uploads that have landed (recovery included).
+    const pollPairs = new Map<string, typeof midMove>();
+    for (const m of midMove) {
+      const k = `${m.source}→${m.target}`;
+      pollPairs.set(k, [...(pollPairs.get(k) ?? []), m]);
+    }
+    for (const group of pollPairs.values()) {
+      const { source, target } = group[0];
+      try {
+        const res = await internalFetch("/api/deliverability/move-domains", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            mode: "poll",
+            targetInstance: target,
+            inflight: group.map((m) => ({
+              domain: m.domain,
+              sourceInstance: m.source,
+              expected: m.expected,
+            })),
+          }),
+        });
+        const json = await res.json().catch(() => ({}));
+        const rows = (json.results || []) as { domain: string; status: string; error?: string }[];
+        results.push({
+          targetInstance: target,
+          fromInstance: source,
+          requested: group.length,
+          moved: rows.filter((r) => r.status === "done").map((r) => r.domain),
+          uploading: rows.filter((r) => r.status === "uploading").map((r) => r.domain),
+          skipped: rows
+            .filter((r) => r.status === "skipped" || r.status === "failed")
+            .map((r) => ({ domain: r.domain, reason: r.error || r.status })),
+          ...(!res.ok || json?.error ? { error: json?.error || `HTTP ${res.status}` } : {}),
+        });
+      } catch (e) {
+        results.push({
+          targetInstance: target,
+          fromInstance: source,
+          requested: group.length,
+          moved: [],
+          uploading: [],
+          skipped: [],
+          error: e instanceof Error ? e.message : "finalize poll failed",
+        });
+      }
+    }
+
+    // Pass 2 — queue this batch's uploads.
     for (const p of plan) {
       const byDonor = new Map<string, string[]>();
       for (const m of p.moving) {
@@ -251,6 +338,7 @@ export async function POST(request: Request) {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
+              mode: "submit",
               dryRun: false,
               domains,
               targetInstance: p.targetInstance,
@@ -309,7 +397,7 @@ export async function POST(request: Request) {
       // verified source copy after its grace period.
       note:
         uploadingTotal > 0
-          ? `${uploadingTotal} still uploading — re-run to finish those, then run the fill.`
+          ? `${uploadingTotal} uploading — press Move again in a few minutes to finalize what has landed, then run the fill.`
           : "Run the fill next to tag, set redirects and attach campaigns.",
     });
   } catch (error) {
