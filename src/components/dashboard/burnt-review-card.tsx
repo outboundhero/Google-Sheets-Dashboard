@@ -26,6 +26,8 @@ interface Cancellation {
   reason: string | null;
   scheduledAt: string;
   status: string;
+  /** Lifetime sending stats — Nick wants to judge each domain before approving. */
+  stats?: { sent: number; replied: number; bounced: number };
 }
 
 const INSTANCE_LABEL: Record<string, string> = {
@@ -145,6 +147,15 @@ export function BurntReviewCard() {
                   </span>
                   {r.provider && (
                     <span className="text-[11px] text-muted-foreground">{r.provider}</span>
+                  )}
+                  {r.stats && (
+                    <span className="text-[11px] text-muted-foreground tabular-nums">
+                      {r.stats.sent.toLocaleString()} sent · {r.stats.replied} replies ·{" "}
+                      {r.stats.bounced} bounces
+                      {r.stats.sent > 0 && (
+                        <> · {((r.stats.replied / r.stats.sent) * 100).toFixed(1)}% reply</>
+                      )}
+                    </span>
                   )}
                   <span className="ml-auto flex items-center gap-2 text-[11px]">
                     {r.status !== "pending" && (
