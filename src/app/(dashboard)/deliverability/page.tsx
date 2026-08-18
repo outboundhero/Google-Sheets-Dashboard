@@ -944,7 +944,21 @@ function DeliverabilityPageInner() {
   interface SpamhausCheckJob { status: "running" | "done" | "error"; checked: number; total: number; listed: number; inconclusive: number; error?: string }
   const [spamhausCheckJob, setSpamhausCheckJob] = useState<SpamhausCheckJob | null>(null);
   const [limitInput, setLimitInput] = useState("");
-  interface LimitJob { type: "daily" | "warmup"; limit: number; status: "running" | "done" | "error"; updated?: number; total?: number; error?: string }
+  interface LimitJob {
+    type: "daily" | "warmup";
+    limit: number;
+    status: "running" | "done" | "error";
+    updated?: number;
+    total?: number;
+    error?: string;
+    /** Progress across chunks — one whole selection no longer goes in one request. */
+    domainsDone?: number;
+    domainsTotal?: number;
+    /** Exactly which inboxes didn't take the limit, so Retry hits only those. */
+    failedInboxes?: { instance: string; id: number }[];
+    /** Domains whose chunk never completed (timeout/network) — retried whole. */
+    failedDomains?: string[];
+  }
   const [limitJob, setLimitJob] = useState<LimitJob | null>(null);
 
   // Drag-to-select state
@@ -2317,23 +2331,149 @@ function DeliverabilityPageInner() {
     setTimeout(() => { setExportCopied(false); setShowExportMenu(false); }, 1500);
   }, [selectedDomains]);
 
+  // Spencer 2026-08-18: one request for the whole selection blew the 300s
+  // function limit (the failure showed as "Unexpected token 'A'" — Vercel's
+  // HTML error page, not JSON) and left no way to retry. Now the selection is
+  // walked in small chunks so no single request can time out, a chunk that
+  // does fail only costs those domains, and both kinds of failure — a dead
+  // chunk and individual rejected inboxes — are kept for a targeted retry.
+  const LIMIT_CHUNK = 25;
+
   const startBulkLimitUpdate = useCallback(async (type: "daily" | "warmup", limit: number, domainList: string[]) => {
-    setLimitJob({ type, limit, status: "running" });
+    setLimitJob({ type, limit, status: "running", domainsDone: 0, domainsTotal: domainList.length });
     setSelectedDomains(new Set());
-    try {
-      const res = await fetch("/api/deliverability/bulk-limits", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ domains: domainList, type, limit }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || "Failed");
-      setLimitJob({ type, limit, status: "done", updated: data.updated, total: data.total, error: data.failed > 0 ? `${data.failed} skipped (invalid)` : undefined });
-      loadDomains();
-    } catch (err) {
-      setLimitJob({ type, limit, status: "error", error: err instanceof Error ? err.message : "Failed" });
+
+    let updated = 0;
+    let total = 0;
+    let done = 0;
+    const failedInboxes: { instance: string; id: number }[] = [];
+    const failedDomains: string[] = [];
+    let lastError: string | null = null;
+
+    for (let i = 0; i < domainList.length; i += LIMIT_CHUNK) {
+      const chunk = domainList.slice(i, i + LIMIT_CHUNK);
+      try {
+        const res = await fetch("/api/deliverability/bulk-limits", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ domains: chunk, type, limit }),
+        });
+        // A timed-out request returns Vercel's HTML page, so parsing is what
+        // fails — treat any non-JSON body as a failed chunk, not a crash.
+        const data = await res.json().catch(() => null);
+        if (!res.ok || !data) throw new Error(data?.error || `Request failed (HTTP ${res.status})`);
+        updated += data.updated || 0;
+        total += data.total || 0;
+        if (Array.isArray(data.failedInboxes)) failedInboxes.push(...data.failedInboxes);
+      } catch (err) {
+        failedDomains.push(...chunk);
+        lastError = err instanceof Error ? err.message : "Failed";
+      }
+      done += chunk.length;
+      setLimitJob({ type, limit, status: "running", updated, total, domainsDone: done, domainsTotal: domainList.length });
     }
+
+    const anyFailure = failedInboxes.length > 0 || failedDomains.length > 0;
+    setLimitJob({
+      type,
+      limit,
+      status: updated === 0 && anyFailure ? "error" : "done",
+      updated,
+      total,
+      domainsDone: done,
+      domainsTotal: domainList.length,
+      failedInboxes,
+      failedDomains,
+      error: anyFailure
+        ? [
+            failedInboxes.length > 0 ? `${failedInboxes.length} inbox(es) rejected` : null,
+            failedDomains.length > 0 ? `${failedDomains.length} domain(s) didn't complete${lastError ? ` (${lastError})` : ""}` : null,
+          ].filter(Boolean).join(" · ")
+        : undefined,
+    });
+    loadDomains();
   }, [loadDomains]);
+
+  // Retry only what failed: the exact rejected inbox IDs, plus a re-run of any
+  // domain whose chunk never completed.
+  const retryFailedLimits = useCallback(async () => {
+    const job = limitJob;
+    if (!job || job.status === "running") return;
+    const { type, limit } = job;
+    const badInboxes = job.failedInboxes || [];
+    const badDomains = job.failedDomains || [];
+    if (badInboxes.length === 0 && badDomains.length === 0) return;
+
+    setLimitJob({ ...job, status: "running", error: undefined });
+
+    let updated = 0;
+    let total = 0;
+    const stillFailedInboxes: { instance: string; id: number }[] = [];
+    const stillFailedDomains: string[] = [];
+    let lastError: string | null = null;
+
+    const post = async (body: unknown): Promise<{ ok: boolean; data?: { updated?: number; total?: number; failedInboxes?: { instance: string; id: number }[] }; error?: string }> => {
+      try {
+        const res = await fetch("/api/deliverability/bulk-limits", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        });
+        const data = await res.json().catch(() => null);
+        if (!res.ok || !data) return { ok: false, error: data?.error || `Request failed (HTTP ${res.status})` };
+        return { ok: true, data };
+      } catch (err) {
+        return { ok: false, error: err instanceof Error ? err.message : "Failed" };
+      }
+    };
+
+    // Rejected inboxes, in ID batches.
+    const INBOX_CHUNK = 500;
+    for (let i = 0; i < badInboxes.length; i += INBOX_CHUNK) {
+      const chunk = badInboxes.slice(i, i + INBOX_CHUNK);
+      const r = await post({ inboxIds: chunk, type, limit });
+      if (r.ok && r.data) {
+        updated += r.data.updated || 0;
+        total += r.data.total || 0;
+        if (Array.isArray(r.data.failedInboxes)) stillFailedInboxes.push(...r.data.failedInboxes);
+      } else {
+        stillFailedInboxes.push(...chunk);
+        lastError = r.error || null;
+      }
+    }
+
+    // Domains whose chunk never completed.
+    for (let i = 0; i < badDomains.length; i += LIMIT_CHUNK) {
+      const chunk = badDomains.slice(i, i + LIMIT_CHUNK);
+      const r = await post({ domains: chunk, type, limit });
+      if (r.ok && r.data) {
+        updated += r.data.updated || 0;
+        total += r.data.total || 0;
+        if (Array.isArray(r.data.failedInboxes)) stillFailedInboxes.push(...r.data.failedInboxes);
+      } else {
+        stillFailedDomains.push(...chunk);
+        lastError = r.error || null;
+      }
+    }
+
+    const anyFailure = stillFailedInboxes.length > 0 || stillFailedDomains.length > 0;
+    setLimitJob({
+      type,
+      limit,
+      status: updated === 0 && anyFailure ? "error" : "done",
+      updated,
+      total,
+      failedInboxes: stillFailedInboxes,
+      failedDomains: stillFailedDomains,
+      error: anyFailure
+        ? [
+            stillFailedInboxes.length > 0 ? `${stillFailedInboxes.length} inbox(es) still failing` : null,
+            stillFailedDomains.length > 0 ? `${stillFailedDomains.length} domain(s) still failing${lastError ? ` (${lastError})` : ""}` : null,
+          ].filter(Boolean).join(" · ")
+        : undefined,
+    });
+    loadDomains();
+  }, [limitJob, loadDomains]);
 
   // Sync selected domains — 4 parallel streams
   const startSyncSelected = useCallback(async (domainList: string[]) => {
@@ -3613,6 +3753,12 @@ function DeliverabilityPageInner() {
                     ? `${limitJob.type === "daily" ? "Daily sending" : "Warmup"} limit updated to ${limitJob.limit}`
                     : "Limit update failed"}
               </span>
+              {limitJob.status === "running" && limitJob.domainsTotal ? (
+                <span className="text-xs text-muted-foreground">
+                  {limitJob.domainsDone}/{limitJob.domainsTotal} domains
+                  {limitJob.updated ? ` · ${limitJob.updated} inboxes` : ""}
+                </span>
+              ) : null}
               {limitJob.status === "done" && (
                 <span className="text-xs text-muted-foreground">
                   {limitJob.updated}/{limitJob.total} inboxes
@@ -3623,9 +3769,20 @@ function DeliverabilityPageInner() {
                 <span className="text-xs text-destructive">{limitJob.error}</span>
               )}
             </div>
-            {limitJob.status !== "running" && (
-              <button onClick={() => setLimitJob(null)} className="text-xs text-muted-foreground hover:text-foreground">Dismiss</button>
-            )}
+            <div className="flex items-center gap-3">
+              {limitJob.status !== "running" &&
+                ((limitJob.failedInboxes?.length || 0) > 0 || (limitJob.failedDomains?.length || 0) > 0) && (
+                  <button
+                    onClick={retryFailedLimits}
+                    className="text-xs font-medium text-destructive hover:underline"
+                  >
+                    Retry {(limitJob.failedInboxes?.length || 0) + (limitJob.failedDomains?.length || 0)} failed
+                  </button>
+                )}
+              {limitJob.status !== "running" && (
+                <button onClick={() => setLimitJob(null)} className="text-xs text-muted-foreground hover:text-foreground">Dismiss</button>
+              )}
+            </div>
           </div>
         </div>
       )}
