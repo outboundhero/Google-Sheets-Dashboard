@@ -261,6 +261,8 @@ export async function POST(request: Request) {
           body: JSON.stringify({
             mode: "poll",
             targetInstance: target,
+            // move-domains validates `domains` before it looks at `mode`.
+            domains: group.map((m) => m.domain),
             inflight: group.map((m) => ({
               domain: m.domain,
               sourceInstance: m.source,
