@@ -25,7 +25,7 @@ interface Profile {
 
 export default function SettingsPage() {
   const { sheets, mutate } = useSheets();
-  const { isSyncing, syncProgress, refresh } = useAllLeads();
+  const { isSyncing, syncProgress, refresh, failedSheets, retryFailed, isRetrying } = useAllLeads();
   const { role: currentRole } = useAuth();
 
   // User Management state
@@ -311,7 +311,7 @@ export default function SettingsPage() {
                     Sync all sheets and refresh data
                   </p>
                 </div>
-                <RefreshButton onRefresh={handleRefreshAll} isRefreshing={isSyncing} syncProgress={syncProgress} />
+                <RefreshButton onRefresh={handleRefreshAll} isRefreshing={isSyncing} syncProgress={syncProgress} failedSheets={failedSheets} onRetryFailed={retryFailed} isRetrying={isRetrying} />
               </div>
             </CardContent>
           </Card>

@@ -12,6 +12,12 @@ export interface SyncProgress {
   errors: number;
 }
 
+export interface FailedSheet {
+  sheetId: string;
+  name: string;
+  error: string;
+}
+
 export function useAllLeads() {
   const { data, error, isLoading, isValidating, mutate } = useSWR<Lead[]>(
     "/api/data/all",
@@ -27,10 +33,15 @@ export function useAllLeads() {
 
   const [isSyncing, setIsSyncing] = useState(false);
   const [syncProgress, setSyncProgress] = useState<SyncProgress | null>(null);
+  // Which sheets failed in the last sync — identity, not just the count, so
+  // they can be retried on their own instead of re-running all 136.
+  const [failedSheets, setFailedSheets] = useState<FailedSheet[]>([]);
+  const [isRetrying, setIsRetrying] = useState(false);
 
   const refresh = useCallback(async () => {
     setIsSyncing(true);
     setSyncProgress({ synced: 0, total: 0, errors: 0 });
+    setFailedSheets([]);
 
     try {
       let offset = 0;
@@ -65,6 +76,9 @@ export function useAllLeads() {
           totalSheets = result.totalSheets || totalSheets;
           complete = result.complete;
           offset = result.nextOffset || 0;
+          if (Array.isArray(result.errors) && result.errors.length > 0) {
+            setFailedSheets((prev) => [...prev, ...(result.errors as FailedSheet[])]);
+          }
 
           setSyncProgress({
             synced: totalSynced,
@@ -85,6 +99,28 @@ export function useAllLeads() {
     }
   }, [mutate]);
 
+  const retryFailed = useCallback(async () => {
+    if (failedSheets.length === 0 || isRetrying) return;
+    setIsRetrying(true);
+    try {
+      const res = await fetch("/api/sync/retry", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sheetIds: failedSheets.map((f) => f.sheetId) }),
+      });
+      const result = await res.json();
+      if (res.ok && !result.error) {
+        // Whatever failed AGAIN stays visible for another go.
+        setFailedSheets(Array.isArray(result.failed) ? result.failed : []);
+        await mutate();
+      }
+    } catch {
+      /* keep the failed list — the button stays for another try */
+    } finally {
+      setIsRetrying(false);
+    }
+  }, [failedSheets, isRetrying, mutate]);
+
   return {
     leads: data || [],
     isLoading,
@@ -93,6 +129,9 @@ export function useAllLeads() {
     isSyncing,
     syncProgress,
     refresh,
+    failedSheets,
+    retryFailed,
+    isRetrying,
   };
 }
 

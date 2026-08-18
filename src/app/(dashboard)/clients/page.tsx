@@ -34,7 +34,7 @@ function isDomainFlagged(d: DomainRow): boolean {
 }
 
 export default function ClientsPage() {
-  const { leads, isLoading, isSyncing, syncProgress, refresh } = useAllLeads();
+  const { leads, isLoading, isSyncing, syncProgress, refresh, failedSheets, retryFailed, isRetrying } = useAllLeads();
   const { sheets } = useSheets();
   const { role } = useAuth();
   const isAdmin = role === "admin";
@@ -233,7 +233,7 @@ export default function ClientsPage() {
         description={`${uniqueClients} tracked client${uniqueClients !== 1 ? "s" : ""}`}
       >
         <div className="flex items-center gap-3">
-          {isAdmin && <RefreshButton onRefresh={refresh} isRefreshing={isSyncing} syncProgress={syncProgress} />}
+          {isAdmin && <RefreshButton onRefresh={refresh} isRefreshing={isSyncing} syncProgress={syncProgress} failedSheets={failedSheets} onRetryFailed={retryFailed} isRetrying={isRetrying} />}
           <div className="relative w-64">
             <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
             <Input

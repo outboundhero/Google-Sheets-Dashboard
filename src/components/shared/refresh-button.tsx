@@ -1,14 +1,17 @@
 "use client";
 
-import { RefreshCw } from "lucide-react";
+import { RefreshCw, RotateCcw } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
-import type { SyncProgress } from "@/lib/hooks/use-leads";
+import type { SyncProgress, FailedSheet } from "@/lib/hooks/use-leads";
 
 interface RefreshButtonProps {
   onRefresh: () => void;
   isRefreshing?: boolean;
   syncProgress?: SyncProgress | null;
+  failedSheets?: FailedSheet[];
+  onRetryFailed?: () => void;
+  isRetrying?: boolean;
   className?: string;
 }
 
@@ -16,6 +19,9 @@ export function RefreshButton({
   onRefresh,
   isRefreshing = false,
   syncProgress,
+  failedSheets = [],
+  onRetryFailed,
+  isRetrying = false,
   className,
 }: RefreshButtonProps) {
   return (
@@ -41,6 +47,21 @@ export function RefreshButton({
             </span>
           )}
         </span>
+      )}
+      {!isRefreshing && failedSheets.length > 0 && onRetryFailed && (
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={onRetryFailed}
+          disabled={isRetrying}
+          className="text-destructive border-destructive/40"
+          title={failedSheets.map((f) => `${f.name}: ${f.error}`).join("\n")}
+        >
+          <RotateCcw className={cn("h-4 w-4 mr-2", isRetrying && "animate-spin")} />
+          {isRetrying
+            ? "Retrying..."
+            : `Retry ${failedSheets.length} failed`}
+        </Button>
       )}
     </div>
   );

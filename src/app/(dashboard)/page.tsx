@@ -77,7 +77,7 @@ export default function DashboardPage() {
   const { analytics, isLoading, mutate } = useAnalytics(
     selectedClient || undefined
   );
-  const { isSyncing, syncProgress, refresh } = useAllLeads();
+  const { isSyncing, syncProgress, refresh, failedSheets, retryFailed, isRetrying } = useAllLeads();
   const { sheets } = useSheets();
   const { clients: trackerClients, refresh: refreshTracker } = useClientTracker();
   const [trackerRefreshing, setTrackerRefreshing] = useState(false);
@@ -230,7 +230,7 @@ export default function DashboardPage() {
             ))}
           </SelectContent>
         </Select>
-        <RefreshButton onRefresh={handleRefresh} isRefreshing={isSyncing} syncProgress={syncProgress} />
+        <RefreshButton onRefresh={handleRefresh} isRefreshing={isSyncing} syncProgress={syncProgress} failedSheets={failedSheets} onRetryFailed={retryFailed} isRetrying={isRetrying} />
       </PageHeader>
 
       {/* Pending offboardings — admin only; self-hides when there are none. */}

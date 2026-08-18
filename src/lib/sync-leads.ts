@@ -284,3 +284,82 @@ export async function syncSingleSheet(
     console.error(`[syncSingleSheet] Failed for ${storeId}:`, error);
   }
 }
+
+export interface RetryResult {
+  requested: number;
+  succeeded: { sheetId: string; name: string; leads: number }[];
+  failed: { sheetId: string; name: string; error: string }[];
+}
+
+/**
+ * Re-sync just the named sheets (Spencer 2026-08-18: retry the failed ones
+ * without re-running all 136). Same fetch, same empty-overwrite guard as
+ * syncChunk; on success the sheet is cleared from the stored error list so
+ * the "(N failed)" indicator reflects reality.
+ */
+export async function retryFailedSheets(sheetIds: string[]): Promise<RetryResult> {
+  const config = await getConfig();
+  const byId = new Map(config.sheets.map((s) => [s.id, s]));
+  const succeeded: RetryResult["succeeded"] = [];
+  const failed: RetryResult["failed"] = [];
+
+  let first = true;
+  for (const id of sheetIds) {
+    const s = byId.get(id);
+    if (!s) {
+      failed.push({ sheetId: id, name: id, error: "not a tracked sheet" });
+      continue;
+    }
+    // Sequential with a pause — retries are few, and the original failure may
+    // well have BEEN the rate limit.
+    if (!first) await delay(1500);
+    first = false;
+    try {
+      const leads = await withTimeout(
+        getLeadsFromSheet(resolveSpreadsheetId(s), s.sheetName || "Leads", s.clientTag),
+        SHEET_TIMEOUT_MS,
+        s.name
+      );
+      const trimmed = leads.map(trimLeadForStorage);
+      if (trimmed.length === 0) {
+        const prev = await getStoredSheetLeads(s.id).catch(() => [] as never[]);
+        if (prev.length > 0) {
+          // Same guard as syncChunk: keep the old snapshot over a blank read.
+          succeeded.push({ sheetId: s.id, name: s.name, leads: prev.length });
+          continue;
+        }
+      }
+      await storeSheetLeads(s.id, {
+        sheetId: s.id,
+        clientTag: s.clientTag,
+        sheetName: s.sheetName || "Leads",
+        syncedAt: new Date().toISOString(),
+        leads: trimmed,
+      });
+      succeeded.push({ sheetId: s.id, name: s.name, leads: trimmed.length });
+    } catch (error) {
+      failed.push({
+        sheetId: s.id,
+        name: s.name,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
+  if (succeeded.length > 0) {
+    const meta = await getSyncMetadata();
+    const okIds = new Set(succeeded.map((x) => x.sheetId));
+    meta.errors = (meta.errors || []).filter((e) => !okIds.has(e.sheetId));
+    meta.sheetsError = Math.max(0, (meta.sheetsError || 0) - succeeded.length);
+    meta.sheetsSuccess = (meta.sheetsSuccess || 0) + succeeded.length;
+    for (const ok of succeeded) {
+      const key = `leads-store:sheet:${ok.sheetId}`;
+      if (!meta.sheetKeys.includes(key)) meta.sheetKeys.push(key);
+      meta.totalLeads = (meta.totalLeads || 0) + ok.leads;
+    }
+    meta.lastSyncAt = new Date().toISOString();
+    await storeSyncMetadata(meta);
+  }
+
+  return { requested: sheetIds.length, succeeded, failed };
+}
