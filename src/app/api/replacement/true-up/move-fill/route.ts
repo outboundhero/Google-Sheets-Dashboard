@@ -105,13 +105,18 @@ export async function POST(request: Request) {
     const allCandidates = [...new Set([...spareByInstance.values()].flat().map((c) => c.domain))];
     const rowsByDomain = new Map<
       string,
-      { instance: string; tags: string[] | null; inbox_count: number }[]
+      {
+        instance: string;
+        tags: string[] | null;
+        inbox_count: number;
+        domain_created_at: string | null;
+      }[]
     >();
     for (let i = 0; i < allCandidates.length; i += 200) {
       const chunk = allCandidates.slice(i, i + 200);
       const { data, error } = await supabase
         .from("deliverability_domains")
-        .select("instance, domain, tags, inbox_count")
+        .select("instance, domain, tags, inbox_count, domain_created_at")
         .in("domain", chunk);
       if (error) throw new Error(`candidate lookup failed: ${error.message}`);
       for (const r of data || []) {
@@ -120,6 +125,7 @@ export async function POST(request: Request) {
           instance: r.instance,
           tags: r.tags as string[] | null,
           inbox_count: (r.inbox_count as number | null) ?? 0,
+          domain_created_at: (r.domain_created_at as string | null) ?? null,
         });
         rowsByDomain.set(r.domain, list);
       }
@@ -336,19 +342,33 @@ export async function POST(request: Request) {
             continue;
           }
 
-          const res = await internalFetch("/api/deliverability/move-domains", {
+          const infoOf = (d: string) => rowsByDomain.get(d)?.find((r) => r.instance === donor);
+
+          // Probe the batch on the target BEFORE submitting. An upload queued
+          // by an earlier run leaves no DB trace until finalize, so a plan
+          // candidate may already be mid-flight — submitting it again would
+          // queue a duplicate upload. Landed candidates get registered right
+          // here; partially-landed ones are left to finish; only domains with
+          // nothing on the target get submitted.
+          const pre = await internalFetch("/api/deliverability/move-domains", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
-              mode: "submit",
-              dryRun: false,
-              domains,
+              mode: "poll",
               targetInstance: p.targetInstance,
-              platformConnectionId: connectionId,
+              domains,
+              inflight: domains.map((d) => {
+                const src = infoOf(d);
+                return {
+                  domain: d,
+                  sourceInstance: donor,
+                  expected: src && src.inbox_count > 0 ? src.inbox_count : 1,
+                };
+              }),
             }),
           });
-          const json = await res.json().catch(() => ({}));
-          if (!res.ok || json?.error) {
+          const preJson = await pre.json().catch(() => ({}));
+          if (!pre.ok || preJson?.error) {
             results.push({
               targetInstance: p.targetInstance,
               fromInstance: donor,
@@ -356,21 +376,81 @@ export async function POST(request: Request) {
               moved: [],
               uploading: [],
               skipped: [],
-              error: json?.error || `HTTP ${res.status}`,
+              error: preJson?.error || `pre-submit poll failed (HTTP ${pre.status})`,
             });
             continue;
           }
+          const preRows = (preJson.results || []) as {
+            domain: string;
+            status: string;
+            landed?: number;
+          }[];
+          const moved = preRows.filter((r) => r.status === "done").map((r) => r.domain);
+          const partiallyLanded = preRows
+            .filter((r) => r.status === "uploading" && (r.landed ?? 0) > 0)
+            .map((r) => r.domain);
+          const toSubmit = domains.filter(
+            (d) => !moved.includes(d) && !partiallyLanded.includes(d),
+          );
 
-          const rows = (json.results || []) as { domain: string; status: string; error?: string }[];
+          const uploading: string[] = [...partiallyLanded];
+          const skipped: { domain: string; reason: string }[] = [];
+          let errMsg: string | undefined;
+
+          if (toSubmit.length > 0) {
+            const res = await internalFetch("/api/deliverability/move-domains", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                mode: "submit",
+                domains: toSubmit,
+                targetInstance: p.targetInstance,
+                platformConnectionId: connectionId,
+              }),
+            });
+            const json = await res.json().catch(() => ({}));
+            if (!res.ok || json?.error) {
+              errMsg = json?.error || `HTTP ${res.status}`;
+            } else {
+              const rows = (json.results || []) as { domain: string; status: string; error?: string }[];
+              const queued = rows.filter((r) => r.status === "uploading").map((r) => r.domain);
+              uploading.push(...queued);
+              skipped.push(
+                ...rows
+                  .filter((r) => r.status === "skipped" || r.status === "failed")
+                  .map((r) => ({ domain: r.domain, reason: r.error || r.status })),
+              );
+
+              // Marker rows: registerOnTarget only creates the target row at
+              // finalize, so without this the queued uploads are invisible to
+              // the next run's mid-move detection. ignoreDuplicates — a real
+              // row is never touched; providerOf() reads inbox counts, so a
+              // marker can't sneak into the target's reserve early.
+              if (queued.length > 0) {
+                const nowIso = new Date().toISOString();
+                const { error: markerError } = await supabase.from("deliverability_domains").upsert(
+                  queued.map((d) => ({
+                    instance: p.targetInstance,
+                    domain: d,
+                    domain_created_at: infoOf(d)?.domain_created_at ?? nowIso,
+                    warmup_status: "open",
+                    synced_at: nowIso,
+                  })),
+                  { onConflict: "instance,domain", ignoreDuplicates: true },
+                );
+                if (markerError) console.error("[move-fill] marker upsert failed:", markerError.message);
+              }
+            }
+          }
+
           results.push({
             targetInstance: p.targetInstance,
             fromInstance: donor,
             requested: domains.length,
-            moved: rows.filter((r) => r.status === "done").map((r) => r.domain),
-            uploading: rows.filter((r) => r.status === "uploading").map((r) => r.domain),
-            skipped: rows
-              .filter((r) => r.status === "skipped" || r.status === "failed")
-              .map((r) => ({ domain: r.domain, reason: r.error || r.status })),
+            moved,
+            uploading,
+            skipped,
+            ...(errMsg ? { error: errMsg } : {}),
           });
         } catch (e) {
           results.push({
