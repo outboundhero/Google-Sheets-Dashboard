@@ -109,8 +109,9 @@ export function BurntReviewCard() {
               Burnt domains awaiting deletion — {awaiting.length}
             </h2>
             <p className="text-sm text-red-700 dark:text-red-400 mt-0.5">
-              Approving sends the vendor cancellation and deletes the senders in Bison. Rejecting
-              keeps the domain. Anything left alone still auto-fires when its grace period ends —
+              Approving sends the vendor cancellation and deletes the senders in Bison. Keep
+              releases the domain — untagged back into reserve, never deleted. Anything left
+              alone still auto-fires when its grace period ends —
               full history on the{" "}
               <Link href="/replacement" className="underline font-medium">
                 Replacement
