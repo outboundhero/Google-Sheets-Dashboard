@@ -109,8 +109,25 @@ export async function runExecution(
   // a client's churn date (or after it). Single chokepoint — blocks every path.
   try {
     const g = await f(`/api/replacement/churn-guard?clientTag=${encodeURIComponent(clientTag)}`);
-    const guard = (await g.json().catch(() => null)) as { blocked?: boolean; reason?: string } | null;
-    if (guard?.blocked) {
+    const guard = (await g.json().catch(() => null)) as { blocked?: boolean; reason?: string; error?: string } | null;
+    // A guard that didn't answer is NOT a green light. It used to fail open, so
+    // when the route threw (nextUrl on a plain Request) every automated run
+    // sailed past the blackout. getChurnBlackout already fails open internally
+    // for a Sheets hiccup — that is the right place for it, because there we
+    // know the churn date genuinely couldn't be read.
+    if (!g.ok || guard === null || guard.error || typeof guard.blocked !== "boolean") {
+      const detail = guard?.error || `guard returned HTTP ${g.status}`;
+      const failed: ExecStep = {
+        key: "churn-blackout",
+        label: `Stopped — churn check failed for ${clientTag}`,
+        state: "failed",
+        note: `Could not confirm ${clientTag} is outside its churn blackout: ${detail}`,
+      };
+      emit([failed]);
+      record({ events: [{ instance, clientTag, eventType: "error", detail: `churn guard unavailable — ${detail}` }] });
+      return { ok: false };
+    }
+    if (guard.blocked) {
       const blocked: ExecStep = {
         key: "churn-blackout",
         label: `Skipped — ${clientTag} ${guard.reason || "within churn blackout"}`,
@@ -121,8 +138,18 @@ export async function runExecution(
       record({ events: [{ instance, clientTag, eventType: "skipped", detail: `churn blackout — ${guard.reason || "within 5d of churn"}` }] });
       return { ok: true };
     }
-  } catch {
-    // Fail open: a transient guard error shouldn't block a legitimate run.
+  } catch (e) {
+    // Same reasoning as the !ok branch: if the check itself couldn't run, we
+    // don't know whether this client has churned, so we don't touch it.
+    const detail = e instanceof Error ? e.message : "churn guard threw";
+    emit([{
+      key: "churn-blackout",
+      label: `Stopped — churn check failed for ${clientTag}`,
+      state: "failed",
+      note: `Could not confirm ${clientTag} is outside its churn blackout: ${detail}`,
+    }]);
+    record({ events: [{ instance, clientTag, eventType: "error", detail: `churn guard threw — ${detail}` }] });
+    return { ok: false };
   }
 
   const steps: ExecStep[] = [];
