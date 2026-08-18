@@ -44,10 +44,16 @@ export function normalizeTier(raw: unknown): ClientTier {
 
 // small module-level TTL cache — the tier column changes rarely
 let cache: { at: number; map: Map<string, ClientTier> } | null = null;
+// The last map that actually had rows. Served when a read fails, because a
+// Sheets 429 during the big lead sync used to cache an EMPTY map for 10
+// minutes — and an empty tier map makes the true-up skip all 147 pairs and
+// show every instance as "covered", which is worse than stale data.
+let lastGood: Map<string, ClientTier> | null = null;
 const TTL_MS = 10 * 60_000;
+const FAIL_RETRY_MS = 60_000; // after a failure, try the sheet again sooner
 
-/** clientTag(UPPER) → tier. Best-effort: a read failure yields an empty map,
- *  so callers just fall back to the default (tier 1) caps — never throws. */
+/** clientTag(UPPER) → tier. Best-effort: never throws; on a read failure it
+ *  serves the last good map (retrying after FAIL_RETRY_MS). */
 export async function getClientTiers(): Promise<Map<string, ClientTier>> {
   if (cache && Date.now() - cache.at < TTL_MS) return cache.map;
   const map = new Map<string, ClientTier>();
@@ -73,7 +79,11 @@ export async function getClientTiers(): Promise<Map<string, ClientTier>> {
     }
   } catch (e) {
     console.error("[client-tiers] read failed:", e instanceof Error ? e.message : e);
+    const fallback = lastGood ?? map;
+    cache = { at: Date.now() - TTL_MS + FAIL_RETRY_MS, map: fallback };
+    return fallback;
   }
+  if (map.size > 0) lastGood = map;
   cache = { at: Date.now(), map };
   return map;
 }

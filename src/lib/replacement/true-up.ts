@@ -184,6 +184,16 @@ export async function computeTrueUp(
   const handled = await getHandledDomains();
   const skipSet = await getSkipSet();
   const tiers = await getClientTiers();
+  // An empty tier map is a failed Client Tracker read (Sheets quota, usually
+  // during the big lead sync), never reality. Computing with it would mark
+  // all 147 pairs "no tier" and show every instance as covered — a report
+  // that looks like success. Refuse loudly instead; the card shows this
+  // message and the crons skip the tick.
+  if (tiers.size === 0) {
+    throw new Error(
+      "Client Tracker tier read failed (Sheets quota?) — try again in a minute",
+    );
+  }
   const activeKeys = await getActiveCampaignKeys();
   const campaignMap = await deriveCampaignMap();
 
