@@ -978,9 +978,11 @@ function DeliverabilityPageInner() {
   const [spamhausCheckJob, setSpamhausCheckJob] = useState<SpamhausCheckJob | null>(null);
   const [limitInput, setLimitInput] = useState("");
   interface LimitJob {
+    /** Stable key so a finished job's card doesn't jump when another starts. */
+    id: string;
     type: "daily" | "warmup";
     limit: number;
-    status: "running" | "done" | "error";
+    status: "queued" | "running" | "done" | "error";
     updated?: number;
     total?: number;
     error?: string;
@@ -992,7 +994,13 @@ function DeliverabilityPageInner() {
     /** Domains whose chunk never completed (timeout/network) — retried whole. */
     failedDomains?: string[];
   }
-  const [limitJob, setLimitJob] = useState<LimitJob | null>(null);
+  // Queue, not a single job (Spencer 2026-08-20): starting a warmup update
+  // while a daily update was running replaced it mid-flight, so the first one
+  // silently stopped. Jobs now line up and run one after another — one at a
+  // time on purpose, since they all hammer the same Bison rate limit.
+  const [limitJobs, setLimitJobs] = useState<LimitJob[]>([]);
+  const limitRunning = useRef(false);
+  const limitQueueRef = useRef<{ type: "daily" | "warmup"; limit: number; domains: string[]; id: string }[]>([]);
 
   // Drag-to-select state
   const isDragging = useRef(false);
@@ -1691,7 +1699,8 @@ function DeliverabilityPageInner() {
     setRedirectCheckJob(null);
     setBlacklistCheckJob(null);
     setSpamhausCheckJob(null);
-    setLimitJob(null);
+    // Only clears finished cards — a queued or running job keeps its place.
+    setLimitJobs((prev) => prev.filter((j) => j.status === "queued" || j.status === "running"));
   }, []);
 
   // Fires the same check the daily cron runs — every domain tagged
@@ -2404,72 +2413,106 @@ function DeliverabilityPageInner() {
   // chunk and individual rejected inboxes — are kept for a targeted retry.
   const LIMIT_CHUNK = 25;
 
-  const startBulkLimitUpdate = useCallback(async (type: "daily" | "warmup", limit: number, domainList: string[]) => {
-    setLimitJob({ type, limit, status: "running", domainsDone: 0, domainsTotal: domainList.length });
-    setSelectedDomains(new Set());
+  const patchJob = useCallback((id: string, patch: Partial<LimitJob>) => {
+    setLimitJobs((prev) => prev.map((j) => (j.id === id ? { ...j, ...patch } : j)));
+  }, []);
 
-    let updated = 0;
-    let total = 0;
-    let done = 0;
-    const failedInboxes: { instance: string; id: number }[] = [];
-    const failedDomains: string[] = [];
-    let lastError: string | null = null;
+  /** Run one job's chunks to completion. Never throws — failures land on the job. */
+  const runLimitJob = useCallback(
+    async (job: { id: string; type: "daily" | "warmup"; limit: number; domains: string[] }) => {
+      const { id, type, limit, domains } = job;
+      patchJob(id, { status: "running", domainsDone: 0, domainsTotal: domains.length });
 
-    for (let i = 0; i < domainList.length; i += LIMIT_CHUNK) {
-      const chunk = domainList.slice(i, i + LIMIT_CHUNK);
-      try {
-        const res = await fetch("/api/deliverability/bulk-limits", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ domains: chunk, type, limit }),
-        });
-        // A timed-out request returns Vercel's HTML page, so parsing is what
-        // fails — treat any non-JSON body as a failed chunk, not a crash.
-        const data = await res.json().catch(() => null);
-        if (!res.ok || !data) throw new Error(data?.error || `Request failed (HTTP ${res.status})`);
-        updated += data.updated || 0;
-        total += data.total || 0;
-        if (Array.isArray(data.failedInboxes)) failedInboxes.push(...data.failedInboxes);
-      } catch (err) {
-        failedDomains.push(...chunk);
-        lastError = err instanceof Error ? err.message : "Failed";
+      let updated = 0;
+      let total = 0;
+      let done = 0;
+      const failedInboxes: { instance: string; id: number }[] = [];
+      const failedDomains: string[] = [];
+      let lastError: string | null = null;
+
+      for (let i = 0; i < domains.length; i += LIMIT_CHUNK) {
+        const chunk = domains.slice(i, i + LIMIT_CHUNK);
+        try {
+          const res = await fetch("/api/deliverability/bulk-limits", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ domains: chunk, type, limit }),
+          });
+          // A timed-out request returns Vercel's HTML page, so parsing is what
+          // fails — treat any non-JSON body as a failed chunk, not a crash.
+          const data = await res.json().catch(() => null);
+          if (!res.ok || !data) throw new Error(data?.error || `Request failed (HTTP ${res.status})`);
+          updated += data.updated || 0;
+          total += data.total || 0;
+          if (Array.isArray(data.failedInboxes)) failedInboxes.push(...data.failedInboxes);
+        } catch (err) {
+          failedDomains.push(...chunk);
+          lastError = err instanceof Error ? err.message : "Failed";
+        }
+        done += chunk.length;
+        patchJob(id, { updated, total, domainsDone: done });
       }
-      done += chunk.length;
-      setLimitJob({ type, limit, status: "running", updated, total, domainsDone: done, domainsTotal: domainList.length });
-    }
 
-    const anyFailure = failedInboxes.length > 0 || failedDomains.length > 0;
-    setLimitJob({
-      type,
-      limit,
-      status: updated === 0 && anyFailure ? "error" : "done",
-      updated,
-      total,
-      domainsDone: done,
-      domainsTotal: domainList.length,
-      failedInboxes,
-      failedDomains,
-      error: anyFailure
-        ? [
-            failedInboxes.length > 0 ? `${failedInboxes.length} inbox(es) rejected` : null,
-            failedDomains.length > 0 ? `${failedDomains.length} domain(s) didn't complete${lastError ? ` (${lastError})` : ""}` : null,
-          ].filter(Boolean).join(" · ")
-        : undefined,
-    });
-    loadDomains();
-  }, [loadDomains]);
+      const anyFailure = failedInboxes.length > 0 || failedDomains.length > 0;
+      patchJob(id, {
+        status: updated === 0 && anyFailure ? "error" : "done",
+        updated,
+        total,
+        domainsDone: done,
+        failedInboxes,
+        failedDomains,
+        error: anyFailure
+          ? [
+              failedInboxes.length > 0 ? `${failedInboxes.length} inbox(es) rejected` : null,
+              failedDomains.length > 0 ? `${failedDomains.length} domain(s) didn't complete${lastError ? ` (${lastError})` : ""}` : null,
+            ].filter(Boolean).join(" · ")
+          : undefined,
+      });
+      loadDomains();
+    },
+    [patchJob, loadDomains],
+  );
+
+  /** Drain the queue one job at a time. Safe to call whenever work is added. */
+  const drainLimitQueue = useCallback(async () => {
+    if (limitRunning.current) return;
+    limitRunning.current = true;
+    try {
+      for (;;) {
+        const next = limitQueueRef.current.shift();
+        if (!next) break;
+        await runLimitJob(next);
+      }
+    } finally {
+      limitRunning.current = false;
+    }
+  }, [runLimitJob]);
+
+  const startBulkLimitUpdate = useCallback(
+    (type: "daily" | "warmup", limit: number, domainList: string[]) => {
+      const id = `${type}-${limit}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+      setLimitJobs((prev) => [
+        ...prev,
+        { id, type, limit, status: "queued", domainsDone: 0, domainsTotal: domainList.length },
+      ]);
+      limitQueueRef.current.push({ id, type, limit, domains: domainList });
+      setSelectedDomains(new Set());
+      void drainLimitQueue();
+    },
+    [drainLimitQueue],
+  );
 
   // Retry only what failed: the exact rejected inbox IDs, plus a re-run of any
   // domain whose chunk never completed.
-  const retryFailedLimits = useCallback(async () => {
-    const job = limitJob;
-    if (!job || job.status === "running") return;
+  const retryFailedLimits = useCallback(async (jobId: string) => {
+    const job = limitJobs.find((j) => j.id === jobId);
+    if (!job || job.status === "running" || job.status === "queued") return;
     const { type, limit } = job;
     const badInboxes = job.failedInboxes || [];
     const badDomains = job.failedDomains || [];
     if (badInboxes.length === 0 && badDomains.length === 0) return;
 
-    setLimitJob({ ...job, status: "running", error: undefined });
+    patchJob(jobId, { status: "running", error: undefined });
 
     let updated = 0;
     let total = 0;
@@ -2522,9 +2565,7 @@ function DeliverabilityPageInner() {
     }
 
     const anyFailure = stillFailedInboxes.length > 0 || stillFailedDomains.length > 0;
-    setLimitJob({
-      type,
-      limit,
+    patchJob(jobId, {
       status: updated === 0 && anyFailure ? "error" : "done",
       updated,
       total,
@@ -2538,7 +2579,7 @@ function DeliverabilityPageInner() {
         : undefined,
     });
     loadDomains();
-  }, [limitJob, loadDomains]);
+  }, [limitJobs, patchJob, loadDomains]);
 
   // Sync selected domains — 4 parallel streams
   const startSyncSelected = useCallback(async (domainList: string[]) => {
@@ -3124,7 +3165,7 @@ function DeliverabilityPageInner() {
           (autoRenewProgress ? 1 : 0) +
           (syncProgresses ? 1 : 0) + attachRuns.length + tagCampaignRuns.length + sheetAppendJobs.length +
           (syncSelectedJob ? 1 : 0) + (redirectCheckJob ? 1 : 0) + (blacklistCheckJob ? 1 : 0) +
-          (spamhausCheckJob ? 1 : 0) + (limitJob ? 1 : 0);
+          (spamhausCheckJob ? 1 : 0) + limitJobs.length;
         if (totalPanels < 2) return null;
         return (
           <div className="flex items-center justify-end gap-2">
@@ -3827,54 +3868,83 @@ function DeliverabilityPageInner() {
         </div>
       ))}
 
-      {/* Bulk Limit Update Progress */}
-      {limitJob && (
-        <div className="rounded-lg border bg-muted/30 px-4 py-3">
+      {/* Bulk Limit Update queue — one card per job, oldest first. Jobs run
+          one at a time; queueing a second no longer cancels the first. */}
+      {limitJobs.map((job, idx) => {
+        const queuePos = limitJobs.filter((j, i) => i < idx && j.status === "queued").length + 1;
+        const label = job.type === "daily" ? "daily sending" : "warmup";
+        return (
+        <div key={job.id} className="rounded-lg border bg-muted/30 px-4 py-3">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2 text-sm">
-              {limitJob.status === "running" && <Loader2 className="h-3.5 w-3.5 animate-spin text-primary" />}
-              {limitJob.status === "done" && <CheckCircle2 className="h-3.5 w-3.5 text-emerald-500" />}
-              {limitJob.status === "error" && <AlertTriangle className="h-3.5 w-3.5 text-destructive" />}
+              {job.status === "queued" && <Clock className="h-3.5 w-3.5 text-muted-foreground" />}
+              {job.status === "running" && <Loader2 className="h-3.5 w-3.5 animate-spin text-primary" />}
+              {job.status === "done" && <CheckCircle2 className="h-3.5 w-3.5 text-emerald-500" />}
+              {job.status === "error" && <AlertTriangle className="h-3.5 w-3.5 text-destructive" />}
               <span className="font-medium">
-                {limitJob.status === "running"
-                  ? `Updating ${limitJob.type === "daily" ? "daily sending" : "warmup"} limit to ${limitJob.limit}...`
-                  : limitJob.status === "done"
-                    ? `${limitJob.type === "daily" ? "Daily sending" : "Warmup"} limit updated to ${limitJob.limit}`
-                    : "Limit update failed"}
+                {job.status === "queued"
+                  ? `Queued — ${label} limit to ${job.limit}`
+                  : job.status === "running"
+                    ? `Updating ${label} limit to ${job.limit}...`
+                    : job.status === "done"
+                      ? `${job.type === "daily" ? "Daily sending" : "Warmup"} limit updated to ${job.limit}`
+                      : "Limit update failed"}
               </span>
-              {limitJob.status === "running" && limitJob.domainsTotal ? (
+              {job.status === "queued" && (
                 <span className="text-xs text-muted-foreground">
-                  {limitJob.domainsDone}/{limitJob.domainsTotal} domains
-                  {limitJob.updated ? ` · ${limitJob.updated} inboxes` : ""}
-                </span>
-              ) : null}
-              {limitJob.status === "done" && (
-                <span className="text-xs text-muted-foreground">
-                  {limitJob.updated}/{limitJob.total} inboxes
-                  {limitJob.error && <span className="text-amber-500 ml-2">· {limitJob.error}</span>}
+                  {job.domainsTotal} domains · #{queuePos} in line
                 </span>
               )}
-              {limitJob.status === "error" && (
-                <span className="text-xs text-destructive">{limitJob.error}</span>
+              {job.status === "running" && job.domainsTotal ? (
+                <span className="text-xs text-muted-foreground">
+                  {job.domainsDone}/{job.domainsTotal} domains
+                  {job.updated ? ` · ${job.updated} inboxes` : ""}
+                </span>
+              ) : null}
+              {job.status === "done" && (
+                <span className="text-xs text-muted-foreground">
+                  {job.updated}/{job.total} inboxes
+                  {job.error && <span className="text-amber-500 ml-2">· {job.error}</span>}
+                </span>
+              )}
+              {job.status === "error" && (
+                <span className="text-xs text-destructive">{job.error}</span>
               )}
             </div>
             <div className="flex items-center gap-3">
-              {limitJob.status !== "running" &&
-                ((limitJob.failedInboxes?.length || 0) > 0 || (limitJob.failedDomains?.length || 0) > 0) && (
+              {(job.status === "done" || job.status === "error") &&
+                ((job.failedInboxes?.length || 0) > 0 || (job.failedDomains?.length || 0) > 0) && (
                   <button
-                    onClick={retryFailedLimits}
+                    onClick={() => retryFailedLimits(job.id)}
                     className="text-xs font-medium text-destructive hover:underline"
                   >
-                    Retry {(limitJob.failedInboxes?.length || 0) + (limitJob.failedDomains?.length || 0)} failed
+                    Retry {(job.failedInboxes?.length || 0) + (job.failedDomains?.length || 0)} failed
                   </button>
                 )}
-              {limitJob.status !== "running" && (
-                <button onClick={() => setLimitJob(null)} className="text-xs text-muted-foreground hover:text-foreground">Dismiss</button>
+              {job.status === "queued" && (
+                <button
+                  onClick={() => {
+                    limitQueueRef.current = limitQueueRef.current.filter((q) => q.id !== job.id);
+                    setLimitJobs((prev) => prev.filter((j) => j.id !== job.id));
+                  }}
+                  className="text-xs text-muted-foreground hover:text-foreground"
+                >
+                  Cancel
+                </button>
+              )}
+              {(job.status === "done" || job.status === "error") && (
+                <button
+                  onClick={() => setLimitJobs((prev) => prev.filter((j) => j.id !== job.id))}
+                  className="text-xs text-muted-foreground hover:text-foreground"
+                >
+                  Dismiss
+                </button>
               )}
             </div>
           </div>
         </div>
-      )}
+        );
+      })}
 
       {/* Check Spamhaus Progress */}
       {spamhausCheckJob && (
