@@ -299,6 +299,13 @@ const TABLE_COLUMNS: { field: ColField; label: string; align: string; width: str
   { field: "warmup_days", label: "Status", align: "text-center", width: "90px", toggleable: true },
 ];
 
+// Hidden in the delete-queue view (Nick 2026-08-19): performance data doesn't
+// help decide a deletion — the flagging reason does.
+const DELETE_VIEW_HIDDEN: Set<string> = new Set([
+  "total_sent", "total_replied", "reply_rate", "reply_trailing",
+  "total_bounced", "bounce_rate", "bounce_trailing", "daily_limit",
+]);
+
 interface InstanceSyncProgress {
   slug: BisonInstanceSlug;
   label: string;
@@ -583,6 +590,21 @@ function DeliverabilityPageInner() {
   const searchParams = useSearchParams();
   const { role } = useAuth();
   const isAdmin = role === "admin";
+
+  useEffect(() => {
+    if (!isAdmin) return;
+    fetch("/api/replacement/cancellations?status=pending,held,stale-hold", { cache: "no-store" })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((j) => {
+        if (!j?.cancellations) return;
+        const m = new Map<string, { reason: string | null; status: string; scheduledAt: string }>();
+        for (const c of j.cancellations as { instance: string; domain: string; reason: string | null; status: string; scheduledAt: string }[]) {
+          m.set(`${c.instance}:${c.domain}`, { reason: c.reason, status: c.status, scheduledAt: c.scheduledAt });
+        }
+        setDeleteQueue(m);
+      })
+      .catch(() => { /* view just shows empty */ });
+  }, [isAdmin]);
   const { instancesQuery, instances } = useInstance();
   // Cached Inboxing/MilkBox/ScaledMail lifecycle map by "instance:domain".
   const { statuses: providerStatusMap, mutate: mutateProviderStatus } = useProviderStatus(instancesQuery);
@@ -625,6 +647,12 @@ function DeliverabilityPageInner() {
   const [warmupSearch, setWarmupSearch] = useState("");
   const [typeFilter, setTypeFilter] = useState<"all" | "outlook" | "google">("all");
   const [showFlagged, setShowFlagged] = useState(() => searchParams.get("flagged") === "true");
+  // Delete-queue view: rows narrowed to domains awaiting vendor deletion,
+  // perf columns swapped for the system's reason. Keyed `instance:domain`.
+  const [showDeleteQueue, setShowDeleteQueue] = useState(false);
+  const [deleteQueue, setDeleteQueue] = useState<
+    Map<string, { reason: string | null; status: string; scheduledAt: string }>
+  >(new Map());
   const [showHealthy, setShowHealthy] = useState(() => searchParams.get("healthy") === "true");
   const [showBlacklisted, setShowBlacklisted] = useState(() => searchParams.get("blacklisted") === "true");
   const [showNotBlacklisted, setShowNotBlacklisted] = useState(() => searchParams.get("blacklisted") === "false");
@@ -2785,6 +2813,9 @@ function DeliverabilityPageInner() {
         result = result.filter(isDomainFlagged);
       }
     }
+    if (showDeleteQueue) {
+      result = result.filter((d) => deleteQueue.has(`${d.instance}:${d.domain}`));
+    }
     if (showHealthy) {
       result = result.filter((d) => !isDomainFlagged(d));
     }
@@ -2903,7 +2934,7 @@ function DeliverabilityPageInner() {
       });
     }
     return result;
-  }, [domains, tagFilters, tagMatchMode, domainSearch, domainSearchMode, redirectSearch, typeFilter, showFlagged, flagSubFilter, showHealthy, showBlacklisted, showNotBlacklisted, showSpamhausListed, showSpamhausClean, showReserve, showAssigned, showMultiClient, providerStatusFilter, providerStatusMap, domainInstancesMap, warmupDaysFilter, warmupDaysFrom, warmupDaysTo, filterConditions, filterMatchMode, sortField, sortDir, isDomainFlagged, hasReplyIssue, hasBounceIssue, isDomainReserve, isDomainAssigned, isDomainMultiClient, now]);
+  }, [domains, tagFilters, tagMatchMode, domainSearch, domainSearchMode, redirectSearch, typeFilter, showFlagged, flagSubFilter, showHealthy, showBlacklisted, showNotBlacklisted, showSpamhausListed, showSpamhausClean, showReserve, showAssigned, showMultiClient, providerStatusFilter, providerStatusMap, domainInstancesMap, warmupDaysFilter, warmupDaysFrom, warmupDaysTo, filterConditions, filterMatchMode, sortField, sortDir, isDomainFlagged, hasReplyIssue, hasBounceIssue, isDomainReserve, isDomainAssigned, isDomainMultiClient, now, showDeleteQueue, deleteQueue]);
 
   // Reset the progressive-render windows whenever the visible lists change
   // (filters, sort, instance switch, data reload).
@@ -2927,11 +2958,32 @@ function DeliverabilityPageInner() {
   useEffect(() => {
     try { localStorage.setItem("deliverabilityColumns", JSON.stringify(columnVisibility)); } catch { /* ignore */ }
   }, [columnVisibility]);
-  const isColVisible = useCallback((field: string) => columnVisibility[field] !== false, [columnVisibility]);
-  const visibleColumns = useMemo(
-    () => TABLE_COLUMNS.filter((c) => !c.toggleable || columnVisibility[c.field] !== false),
-    [columnVisibility],
+  const isColVisible = useCallback(
+    (field: string) => {
+      if (showDeleteQueue && DELETE_VIEW_HIDDEN.has(field)) return false;
+      return columnVisibility[field] !== false;
+    },
+    [columnVisibility, showDeleteQueue],
   );
+  const visibleColumns = useMemo(() => {
+    const cols = TABLE_COLUMNS.filter(
+      (c) =>
+        (!c.toggleable || columnVisibility[c.field] !== false) &&
+        !(showDeleteQueue && DELETE_VIEW_HIDDEN.has(c.field)),
+    );
+    if (showDeleteQueue) {
+      // Synthetic column: the system's reason for flagging the domain for
+      // deletion. Sorting on it is a no-op (no case in the sort switch).
+      cols.push({
+        field: "reason" as ColField,
+        label: "Deletion reason",
+        align: "text-left",
+        width: "300px",
+        toggleable: false,
+      });
+    }
+    return cols;
+  }, [columnVisibility, showDeleteQueue]);
   const gridTemplateColumns = useMemo(
     () => `28px ${visibleColumns.map((c) => c.width).join(" ")}`,
     [visibleColumns],
@@ -4253,6 +4305,29 @@ function DeliverabilityPageInner() {
               )}
             </button>
 
+            {/* Delete-queue view (Nick): only domains awaiting vendor deletion,
+                perf columns swapped for the flagging reason. */}
+            {isAdmin && (
+              <button
+                onClick={() => setShowDeleteQueue(!showDeleteQueue)}
+                className={`text-xs px-3 py-1.5 rounded-full border transition-colors flex items-center gap-1.5 ${
+                  showDeleteQueue
+                    ? "bg-destructive text-destructive-foreground border-destructive"
+                    : "border-border text-muted-foreground hover:border-foreground hover:text-foreground"
+                }`}
+              >
+                <Trash2 className="h-3 w-3" />
+                Delete queue
+                {deleteQueue.size > 0 && (
+                  <span className={`text-[10px] font-medium rounded-full px-1.5 ${
+                    showDeleteQueue ? "bg-destructive-foreground/20" : "bg-destructive/15 text-destructive"
+                  }`}>
+                    {deleteQueue.size}
+                  </span>
+                )}
+              </button>
+            )}
+
             {/* Healthy filter — opposite of Flagged */}
             <button
               onClick={() => {
@@ -5165,6 +5240,27 @@ function DeliverabilityPageInner() {
                       )}
                     </div>
                     )}
+                    {showDeleteQueue && (() => {
+                      const cx = deleteQueue.get(`${d.instance}:${d.domain}`);
+                      const flag = getFlagReasons(d)[0];
+                      const due = cx?.scheduledAt ? new Date(cx.scheduledAt) : null;
+                      return (
+                        <div className="text-left text-[11px] leading-snug min-w-0">
+                          <div className="text-destructive font-medium truncate" title={cx?.reason || undefined}>
+                            {cx?.reason || "flagged for deletion"}
+                            {cx && (
+                              <span className="text-muted-foreground font-normal">
+                                {" "}· {cx.status}
+                                {due && !Number.isNaN(due.getTime()) && <> · due {due.toLocaleDateString()}</>}
+                              </span>
+                            )}
+                          </div>
+                          {flag && (
+                            <div className="text-muted-foreground truncate" title={flag}>{flag}</div>
+                          )}
+                        </div>
+                      );
+                    })()}
                   </div>
                 );
               })}
