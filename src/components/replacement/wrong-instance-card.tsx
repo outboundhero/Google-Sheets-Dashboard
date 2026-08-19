@@ -10,7 +10,7 @@
 // their error and get a Re-run button. The source copy stays until removed via
 // the Delete Domains flow.
 import { useState, useEffect, useCallback, useRef } from "react";
-import { RefreshCw, ArrowRightLeft, AlertTriangle, Play, Loader2, CheckCircle2, ListPlus, RotateCcw, XCircle } from "lucide-react";
+import { RefreshCw, ArrowRightLeft, AlertTriangle, Play, Loader2, CheckCircle2, ListPlus, RotateCcw, XCircle, Eye, EyeOff } from "lucide-react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -25,6 +25,8 @@ interface FlaggedClient {
   clientTag: string; allocatedGroup: number;
   misplacedDomains: number; inboxingDomains: number; inboxCount: number;
   groups: MoveGroup[];
+  /** Parked by an operator — listed separately, restorable. */
+  hidden?: boolean;
 }
 interface Resp {
   checkedAt: string; clientsFlagged: number; domainsMisplaced: number;
@@ -55,6 +57,7 @@ export function WrongInstanceCard() {
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [confirming, setConfirming] = useState<string | null>(null);
+  const [showHidden, setShowHidden] = useState(false);
   const [progress, setProgress] = useState<Record<string, Prog>>({});
   const [queue, setQueue] = useState<QItem[]>([]);
   const queueRef = useRef<QItem[]>([]);
@@ -175,7 +178,30 @@ export function WrongInstanceCard() {
     done: queue.filter((q) => q.status === "done").length,
     failed: queue.filter((q) => q.status === "failed").length,
   };
-  const runnable = (data?.flagged ?? []).filter((c) => c.inboxingDomains > 0);
+  // Hidden clients (Spencer 2026-08-20) are still returned by the detector —
+  // the card files them under a collapsed section so a deliberate mismatch
+  // stops nagging without disappearing entirely.
+  const visibleFlagged = (data?.flagged ?? []).filter((c) => !c.hidden);
+  const hiddenFlagged = (data?.flagged ?? []).filter((c) => c.hidden);
+  const runnable = visibleFlagged.filter((c) => c.inboxingDomains > 0);
+
+  const toggleHidden = useCallback(async (clientTag: string, hide: boolean) => {
+    // Optimistic: flip locally, then re-scan so counts come from the server.
+    setData((prev) =>
+      prev
+        ? { ...prev, flagged: prev.flagged.map((c) => (c.clientTag === clientTag ? { ...c, hidden: hide } : c)) }
+        : prev,
+    );
+    try {
+      await fetch("/api/replacement/tag-skips", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: hide ? "hide" : "unhide", tags: [clientTag] }),
+      });
+    } catch {
+      /* next Scan re-syncs the truth */
+    }
+  }, []);
 
   return (
     <Card>
@@ -238,7 +264,7 @@ export function WrongInstanceCard() {
             </div>
           ) : (
             <div className="rounded-lg border divide-y max-h-[460px] overflow-y-auto">
-              {data.flagged.map((c) => {
+              {visibleFlagged.map((c) => {
                 const prog = progress[c.clientTag];
                 const q = qFor(c.clientTag);
                 const isConfirming = confirming === c.clientTag;
@@ -277,6 +303,16 @@ export function WrongInstanceCard() {
                           title={canRun ? "Queue a move to the correct instance" : "No Inboxing domains to auto-move — handle manually"}
                         >
                           <Play className="h-3.5 w-3.5" /> Run
+                        </Button>
+                      )}
+                      {!q && !isConfirming && (
+                        <Button
+                          size="sm" variant="ghost"
+                          className="h-7 gap-1.5 shrink-0 text-muted-foreground hover:text-foreground"
+                          onClick={() => toggleHidden(c.clientTag, true)}
+                          title="Hide this client from the list — you can restore it below"
+                        >
+                          <EyeOff className="h-3.5 w-3.5" /> Hide
                         </Button>
                       )}
                     </div>
@@ -329,6 +365,42 @@ export function WrongInstanceCard() {
               })}
             </div>
           )
+        )}
+
+        {/* Hidden clients — parked deliberately, one click to bring back. */}
+        {hiddenFlagged.length > 0 && (
+          <div className="rounded-lg border bg-muted/20 px-3 py-2 space-y-1.5">
+            <button
+              onClick={() => setShowHidden((v) => !v)}
+              className="flex items-center gap-1.5 text-[11px] text-muted-foreground hover:text-foreground"
+            >
+              <EyeOff className="h-3.5 w-3.5" />
+              {hiddenFlagged.length} hidden client{hiddenFlagged.length === 1 ? "" : "s"}
+              <span className="underline">{showHidden ? "collapse" : "show"}</span>
+            </button>
+            {showHidden && (
+              <div className="space-y-1">
+                {hiddenFlagged.map((c) => (
+                  <div key={c.clientTag} className="flex items-center justify-between gap-2 text-[11px]">
+                    <span className="min-w-0">
+                      <span className="font-medium">{c.clientTag}</span>
+                      <span className="text-muted-foreground ml-1.5">Group {c.allocatedGroup}</span>
+                      <span className="text-muted-foreground ml-1.5">
+                        {c.misplacedDomains} domain{c.misplacedDomains === 1 ? "" : "s"} misplaced
+                      </span>
+                    </span>
+                    <Button
+                      size="sm" variant="ghost"
+                      className="h-6 px-2 gap-1.5 text-[11px] shrink-0"
+                      onClick={() => toggleHidden(c.clientTag, false)}
+                    >
+                      <Eye className="h-3 w-3" /> Restore
+                    </Button>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
         )}
       </CardContent>
     </Card>

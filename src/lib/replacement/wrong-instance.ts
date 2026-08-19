@@ -9,6 +9,7 @@
 import { getSupabaseAdmin } from "@/lib/supabase";
 import { getAllocations } from "@/lib/client-tag-allocations";
 import { getKnownClientTags } from "./cross-tag-audit";
+import { getHiddenTagSet } from "./tag-skips";
 import { inboxingConnectionFor } from "./inboxing-connections";
 import {
   ALL_INSTANCE_SLUGS, getInstance, INSTANCE_SHORT_LABELS,
@@ -38,12 +39,15 @@ export interface WrongFlaggedClient {
   inboxingDomains: number;           // total auto-movable across groups
   inboxCount: number;
   groups: WrongMoveGroup[];
+  /** Hidden by an operator — still computed, filed separately by the card. */
+  hidden?: boolean;
 }
 export interface WrongInstanceResult {
   checkedAt: string;
-  clientsFlagged: number;
-  domainsMisplaced: number;
-  flagged: WrongFlaggedClient[];
+  clientsFlagged: number;            // excludes hidden clients
+  domainsMisplaced: number;          // excludes hidden clients
+  flagged: WrongFlaggedClient[];     // includes hidden ones, marked
+  hiddenCount: number;
 }
 
 /** The instance in `group` with the given tier (b2b/b2c), or null if none. */
@@ -122,10 +126,19 @@ export async function detectWrongInstance(): Promise<WrongInstanceResult> {
   }
   flagged.sort((a, z) => z.misplacedDomains - a.misplacedDomains || a.clientTag.localeCompare(z.clientTag));
 
+  // Hidden tags stay in `flagged` (so the card can offer them back) but are
+  // left out of the headline counts — that's the point of hiding them.
+  const hiddenTags = await getHiddenTagSet();
+  for (const c of flagged) {
+    if (hiddenTags.has(c.clientTag.trim().toUpperCase())) c.hidden = true;
+  }
+  const visible = flagged.filter((c) => !c.hidden);
+
   return {
     checkedAt: new Date().toISOString(),
-    clientsFlagged: flagged.length,
-    domainsMisplaced: flagged.reduce((s, c) => s + c.misplacedDomains, 0),
+    clientsFlagged: visible.length,
+    domainsMisplaced: visible.reduce((s, c) => s + c.misplacedDomains, 0),
     flagged,
+    hiddenCount: flagged.length - visible.length,
   };
 }
