@@ -93,6 +93,7 @@ export function ChangeRedirectDialog({
   const [result, setResult] = useState<ApplyResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [newUrl, setNewUrl] = useState("");
+  const [mask, setMask] = useState(true);
 
   // Plan once when dialog opens. We intentionally DON'T depend on
   // selectedDomains here: the parent rebuilds that array on every render
@@ -134,6 +135,9 @@ export function ChangeRedirectDialog({
   }, [open]);
 
   const urlValid = useMemo(() => /^https?:\/\/.+/i.test(newUrl.trim()), [newUrl]);
+  // JAN-PRO's site can't be framed, so masking isn't offered for it. Mirrors
+  // the server rule in inboxingRedirectType — the API enforces it regardless.
+  const cannotMask = useMemo(() => newUrl.toLowerCase().includes("jan-pro.com"), [newUrl]);
 
   const actionableCount = useMemo(
     () => plan?.routing.filter((r) => !r.skipReason && r.provider).length ?? 0,
@@ -152,6 +156,7 @@ export function ChangeRedirectDialog({
           dryRun: false,
           domains: selectedDomains,
           newUrl: newUrl.trim(),
+          mask: cannotMask ? false : mask,
         }),
       });
       const data = await res.json();
@@ -222,6 +227,38 @@ export function ChangeRedirectDialog({
                 <p className="text-xs text-red-400">Must start with http:// or https://</p>
               )}
             </div>
+
+            {/* Masking — Inboxing only. Defaults to masked; JAN-PRO can't be
+                framed, so the control locks itself off for those URLs. */}
+            {plan.counts.byProvider.inboxing > 0 && (
+              <div className="space-y-1.5">
+                <label className="text-xs font-medium">Mask the redirect</label>
+                <div className="flex items-center gap-2">
+                  <select
+                    value={cannotMask ? "no" : mask ? "yes" : "no"}
+                    onChange={(e) => setMask(e.target.value === "yes")}
+                    disabled={cannotMask}
+                    className="h-9 rounded-md border bg-background px-2 text-sm disabled:opacity-60"
+                  >
+                    <option value="yes">Yes — mask (visitor keeps seeing the domain)</option>
+                    <option value="no">No — plain redirect</option>
+                  </select>
+                  <span className="text-xs text-muted-foreground">
+                    {plan.counts.byProvider.inboxing} Inboxing domain
+                    {plan.counts.byProvider.inboxing === 1 ? "" : "s"}
+                  </span>
+                </div>
+                {cannotMask ? (
+                  <p className="text-xs text-amber-500">
+                    JAN-PRO can&apos;t be masked — these will be set as a plain redirect.
+                  </p>
+                ) : (
+                  <p className="text-xs text-muted-foreground">
+                    MilkBox and ScaledMail domains ignore this — they have no masking option.
+                  </p>
+                )}
+              </div>
+            )}
 
             {/* Per-domain preview */}
             <div className="flex-1 overflow-y-auto rounded-md border min-h-[140px]">

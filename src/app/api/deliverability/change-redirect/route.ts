@@ -74,6 +74,7 @@ function detectProvider(tags: string[]): { provider: ProviderSlug | null; skipRe
 async function callProviderUpdateRedirect(
   routing: DomainRouting,
   newUrl: string | null,
+  mask = true,
 ): Promise<void> {
   if (routing.provider === "milkbox") {
     if (!routing.providerDomainId) throw new Error("Missing MilkBox provider_domain_id");
@@ -82,7 +83,12 @@ async function callProviderUpdateRedirect(
   }
   if (routing.provider === "inboxing") {
     if (!routing.providerDomainId) throw new Error("Missing Inboxing provider_domain_id");
-    await inboxing.updateRedirect(routing.providerDomainId, newUrl, routing.inboxingAccount ?? DEFAULT_INBOXING_ACCOUNT);
+    await inboxing.updateRedirect(
+      routing.providerDomainId,
+      newUrl,
+      routing.inboxingAccount ?? DEFAULT_INBOXING_ACCOUNT,
+      mask,
+    );
     return;
   }
   if (routing.provider === "scaledmail") {
@@ -237,6 +243,13 @@ export async function POST(request: Request) {
     const clearRedirect = body?.clearRedirect === true || (rawNewUrl !== "" && meansNoRedirect(rawNewUrl));
     const newUrl: string | null = clearRedirect ? null : rawNewUrl;
 
+    // Masking (Spencer 2026-08-20): Inboxing domains are masked by default —
+    // EXCEPT jan-pro.com, whose site can't be framed. `mask` lets the caller
+    // turn masking off for a batch; it can never turn it ON for a destination
+    // that can't be masked, so the JAN-PRO rule stays enforced server-side no
+    // matter what the UI sends. Only Inboxing supports this.
+    const maskRequested = body?.mask === false ? false : true;
+
     if (inputDomains.length === 0) {
       return NextResponse.json({ error: "domains required" }, { status: 400 });
     }
@@ -279,7 +292,7 @@ export async function POST(request: Request) {
           continue;
         }
 
-        const attempt = await withRetry(() => callProviderUpdateRedirect(r, newUrl), 3);
+        const attempt = await withRetry(() => callProviderUpdateRedirect(r, newUrl, maskRequested), 3);
         if (attempt.ok) {
           results[idx] = { domain: r.domain, provider: r.provider, status: "updated", attempts: attempt.attempts };
           // Best-effort cache updates — don't fail the result if either errors.

@@ -231,9 +231,14 @@ export async function updateRedirect(
   domainId: string,
   redirectUrl: string | null,
   account: InboxingAccount = DEFAULT_INBOXING_ACCOUNT,
+  /** false → force a plain redirect. Cannot force masking ON: a destination
+   *  that can't be framed (JAN-PRO) stays REGULAR whatever the caller asks. */
+  mask = true,
 ): Promise<void> {
+  const autoType = inboxingRedirectType(redirectUrl);
+  const type = mask ? autoType : autoType === "MASKED" ? "REGULAR" : autoType;
   const body = redirectUrl
-    ? { redirect_type: inboxingRedirectType(redirectUrl), redirect_url: redirectUrl }
+    ? { redirect_type: type, redirect_url: redirectUrl }
     : { redirect_type: "NONE" as const };
   await call("PUT", `/domains/${encodeURIComponent(domainId)}/redirect`, body, false, account);
 }
