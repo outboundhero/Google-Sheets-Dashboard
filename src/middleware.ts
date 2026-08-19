@@ -9,6 +9,9 @@ const VIEWER_API_GETS = [
   "/api/sheets",
   "/api/analytics",
   "/api/client-tracker",
+  // Read-only threshold config — the deliverability page's flag chips need it
+  // for viewers too, or they'd silently fall back to the old static rule.
+  "/api/replacement/threshold-groups",
   "/api/deliverability/domains",
   "/api/deliverability/tags",
   "/api/deliverability/bulk-tags",
