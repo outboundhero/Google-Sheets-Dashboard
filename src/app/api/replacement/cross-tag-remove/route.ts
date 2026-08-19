@@ -276,6 +276,39 @@ export async function POST(request: Request) {
   try {
     const body = await request.json();
 
+    // ── Action: archive fully-contaminated campaigns ─────────────────────
+    // Bison won't remove a campaign's LAST senders, so when every sender in a
+    // campaign belongs to the flagged domains there is no removal that can
+    // succeed — retrying just re-earns the same 422 forever. Archiving stops
+    // the campaign sending, which is the outcome the removal was after, and
+    // an archived campaign is INERT so the next audit won't re-flag it.
+    if (body?.action === "archiveCampaigns") {
+      const campaigns = (body.campaigns || []) as { instance: string; id: number; name?: string }[];
+      const results: JobResult[] = [];
+      for (const c of campaigns) {
+        if (!isInstanceSlug(c.instance) || !c.id) continue;
+        const name = c.name || String(c.id);
+        try {
+          const res = await bisonWithRetry(c.instance, `/campaigns/${c.id}/archive`, { method: "PATCH" });
+          if (!res.ok) {
+            const t = await res.text().catch(() => "");
+            results.push({
+              instance: c.instance, campaignId: c.id, name, ok: false, removed: 0,
+              error: `archive: HTTP ${res.status} ${t.slice(0, 120)}`,
+            });
+            continue;
+          }
+          results.push({ instance: c.instance, campaignId: c.id, name, ok: true, removed: 0, note: "archived" });
+        } catch (e) {
+          results.push({
+            instance: c.instance, campaignId: c.id, name, ok: false, removed: 0,
+            error: e instanceof Error ? e.message : "archive failed",
+          });
+        }
+      }
+      return NextResponse.json({ archived: results.filter((r) => r.ok).length, results });
+    }
+
     // ── Action: bulk-clear cleaned domains from the audit table ──────────
     if (body?.action === "clearDomains") {
       const domains = (body.domains || []) as { instance: string; domain: string }[];

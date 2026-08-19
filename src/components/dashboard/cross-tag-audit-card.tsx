@@ -11,7 +11,7 @@
 // "Retry failed" re-runs ONLY the failed slices — never the whole audit or
 // removal from scratch.
 import { useState, useEffect, useRef, useCallback } from "react";
-import { ChevronDown, ChevronRight, RefreshCw, Loader2, AlertTriangle, Trash2, RotateCcw } from "lucide-react";
+import { ChevronDown, ChevronRight, RefreshCw, Loader2, AlertTriangle, Trash2, RotateCcw, Archive } from "lucide-react";
 
 interface WrongCampaign { id: number; name: string; status: string; clientTag: string; instance: string }
 interface FlaggedDomain { instance: string; domain: string; clientTag: string; wrongCampaigns: WrongCampaign[] }
@@ -77,6 +77,11 @@ export function CrossTagAuditCard() {
   // Per-campaign failures from the last removal run — rendered as a clean
   // dismissible list instead of being silently folded into a counter.
   const [failures, setFailures] = useState<{ name: string; instance: string; error: string }[]>([]);
+  // Campaigns Bison can never clean by removal (every sender belongs to the
+  // flagged domains — it refuses to strip the last senders). Retry re-earns
+  // the same 422 forever, so these are offered Archive instead.
+  const [contaminated, setContaminated] = useState<Job[]>([]);
+  const [archiving, setArchiving] = useState(false);
   // What failed last time, kept so Retry re-runs ONLY these (Spencer Aug-11).
   const [failedAuditBatches, setFailedAuditBatches] = useState<{ instance: string; domain: string }[][]>([]);
   const [failedJobs, setFailedJobs] = useState<Job[]>([]);
@@ -159,6 +164,7 @@ export function CrossTagAuditCard() {
   const executeJobs = async (jobList: Job[]) => {
     const failedJobKeys = new Set<string>();
     const failedJobList: Job[] = [];
+    const contaminatedList: Job[] = [];
     const collectedFailures: { name: string; instance: string; error: string }[] = [];
     const chunkErrors: string[] = [];
     let removedTotal = 0;
@@ -177,7 +183,10 @@ export function CrossTagAuditCard() {
           if (!res.ok) {
             failedJobKeys.add(`${res.instance}:${res.campaignId}`);
             const j = batch.find((b) => b.instance === res.instance && b.id === res.campaignId);
-            if (j) failedJobList.push(j);
+            // "fully contaminated" is terminal — no retry can clear it, so it
+            // goes to the archive list instead of the retry list.
+            const isContaminated = (res.error || "").startsWith("fully contaminated");
+            if (j) (isContaminated ? contaminatedList : failedJobList).push(j);
             collectedFailures.push({ name: res.name, instance: res.instance, error: res.error || "failed" });
           }
         }
@@ -197,7 +206,7 @@ export function CrossTagAuditCard() {
         current: `${removedTotal.toLocaleString()} inbox removals queued · ${eta}${collectedFailures.length ? ` · ${collectedFailures.length} campaigns failed` : ""}`,
       });
     }
-    return { failedJobKeys, failedJobList, collectedFailures, chunkErrors, removedTotal };
+    return { failedJobKeys, failedJobList, contaminatedList, collectedFailures, chunkErrors, removedTotal };
   };
 
   // Clear domains whose every wrong campaign succeeded; failures stay flagged
@@ -223,7 +232,7 @@ export function CrossTagAuditCard() {
   const removeSelected = async () => {
     const targets = flagged.filter((f) => selected.has(key(f)));
     if (targets.length === 0) return;
-    setRemoving(true); setError(null); setFailures([]); setFailedJobs([]);
+    setRemoving(true); setError(null); setFailures([]); setFailedJobs([]); setContaminated([]);
 
     // Group by unique (instance, campaign).
     const jobMap = new Map<string, Job>();
@@ -242,6 +251,7 @@ export function CrossTagAuditCard() {
       setRemoveProgress({ done: jobList.length, total: jobList.length, current: "clearing cleaned domains…" });
       await clearCleaned(targets, out.failedJobKeys);
       setFailedJobs(out.failedJobList);
+      setContaminated(out.contaminatedList);
       if (out.chunkErrors.length) setError(out.chunkErrors.join(" · "));
       setFailures(out.collectedFailures);
     } finally {
@@ -251,6 +261,49 @@ export function CrossTagAuditCard() {
     }
     setSelected(new Set());
     await load();
+  };
+
+  // Archive the fully-contaminated campaigns. Removal can never clear these
+  // (Bison refuses to strip a campaign's last senders), so archiving is the
+  // way out of the retry loop: it stops the campaign sending, and an archived
+  // campaign is inert so the next audit won't flag it again.
+  const archiveContaminated = async () => {
+    if (contaminated.length === 0 || archiving) return;
+    if (!window.confirm(
+      `Archive ${contaminated.length} fully-contaminated campaign${contaminated.length === 1 ? "" : "s"}?\n\n` +
+      `Every sender in ${contaminated.length === 1 ? "this campaign belongs" : "these campaigns belongs"} to the flagged domains, so Bison will not remove them — retrying keeps failing. Archiving stops the campaign sending.`,
+    )) return;
+    setArchiving(true); setError(null);
+    try {
+      const done = new Set<string>();
+      for (let i = 0; i < contaminated.length; i += CAMPAIGN_BATCH) {
+        const batch = contaminated.slice(i, i + CAMPAIGN_BATCH);
+        const r = await postJsonRetry("/api/replacement/cross-tag-remove", {
+          action: "archiveCampaigns",
+          campaigns: batch.map((c) => ({ instance: c.instance, id: c.id, name: c.name })),
+        });
+        if (!r.ok) { setError(`Archive failed: ${r.why}`); break; }
+        const d = r.data as { results?: { instance: string; campaignId: number; ok: boolean }[] };
+        for (const res of d.results || []) if (res.ok) done.add(`${res.instance}:${res.campaignId}`);
+      }
+      // Domains whose every wrong campaign is now archived or cleaned are done.
+      const targets = flagged.filter((f) => f.wrongCampaigns.some((c) => done.has(`${f.instance}:${c.id}`)));
+      await clearCleaned(
+        targets,
+        new Set(
+          flagged.flatMap((f) => f.wrongCampaigns
+            .filter((c) => !done.has(`${f.instance}:${c.id}`))
+            .map((c) => `${f.instance}:${c.id}`)),
+        ),
+      );
+      setContaminated((prev) => prev.filter((c) => !done.has(`${c.instance}:${c.id}`)));
+      setFailures((prev) => prev.filter((f) => !contaminated.some(
+        (c) => done.has(`${c.instance}:${c.id}`) && c.name === f.name && c.instance === f.instance,
+      )));
+      await load();
+    } finally {
+      setArchiving(false);
+    }
   };
 
   // Re-run ONLY the campaigns that failed last time — no re-audit, no
@@ -267,6 +320,13 @@ export function CrossTagAuditCard() {
       const targets = flagged.filter((f) => f.wrongCampaigns.every((c) => retriedKeys.has(`${f.instance}:${c.id}`)));
       await clearCleaned(targets, out.failedJobKeys);
       setFailedJobs(out.failedJobList);
+      // Retry only covers `jobs`, so merge rather than replace — a contaminated
+      // campaign found in an earlier pass must not fall off the archive list.
+      setContaminated((prev) => {
+        const retried = new Set(jobs.map((j) => `${j.instance}:${j.id}`));
+        const kept = prev.filter((c) => !retried.has(`${c.instance}:${c.id}`));
+        return [...kept, ...out.contaminatedList];
+      });
       if (out.chunkErrors.length) setError(out.chunkErrors.join(" · "));
       setFailures(out.collectedFailures);
     } finally {
@@ -337,13 +397,30 @@ export function CrossTagAuditCard() {
               <div className="flex items-center gap-2 px-3 py-1.5 text-xs text-destructive font-medium">
                 <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
                 {failures.length} campaign{failures.length === 1 ? "" : "s"} failed — their domains stay flagged
-                {failedJobs.length > 0 && !busy && (
+                {failedJobs.length > 0 && !busy && !archiving && (
                   <button onClick={retryFailedJobs} className="flex items-center gap-1 rounded border border-destructive/40 px-2 py-0.5 hover:bg-destructive/10">
                     <RotateCcw className="h-3 w-3" /> Retry {failedJobs.length} failed
                   </button>
                 )}
+                {/* Retry can never clear these — archiving is the only exit. */}
+                {contaminated.length > 0 && !busy && (
+                  <button
+                    onClick={archiveContaminated}
+                    disabled={archiving}
+                    title="Every sender in these campaigns belongs to the flagged domains, so Bison refuses to remove them. Archiving stops them sending and clears the flag."
+                    className="flex items-center gap-1 rounded border border-amber-500/50 text-amber-500 px-2 py-0.5 hover:bg-amber-500/10 disabled:opacity-50"
+                  >
+                    {archiving ? <Loader2 className="h-3 w-3 animate-spin" /> : <Archive className="h-3 w-3" />}
+                    Archive {contaminated.length} unfixable
+                  </button>
+                )}
                 <button onClick={() => setFailures([])} className="ml-auto opacity-60 hover:opacity-100" title="Dismiss">✕</button>
               </div>
+              {contaminated.length > 0 && (
+                <div className="px-3 pb-1.5 text-[11px] text-amber-500/90">
+                  {contaminated.length} of these {contaminated.length === 1 ? "is" : "are"} fully contaminated — every sender belongs to the flagged domains, so Bison refuses to remove them and retrying will keep failing. Archive them instead.
+                </div>
+              )}
               <div className="max-h-36 overflow-y-auto divide-y divide-destructive/10 border-t border-destructive/20">
                 {failures.slice(0, 30).map((f, i) => (
                   <div key={i} className="flex items-center gap-2 px-3 py-1 text-[11px]">
