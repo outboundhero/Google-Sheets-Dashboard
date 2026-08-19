@@ -176,6 +176,7 @@ export async function runExecution(
   if (removeDomains.length > 0) {
     steps.push({ key: "discover", label: `Find campaigns for ${removeDomains.length} burnt domain(s)`, state: "queued" });
     steps.push({ key: "remove", label: "Remove burnt domains from campaigns", state: "queued" });
+    steps.push({ key: "untag", label: `Remove ${clientTag} tag from burnt domain(s)`, state: "queued" });
     steps.push({ key: "schedule", label: "Schedule vendor cancellation (+5 days)", state: "queued" });
   }
   emit([...steps]);
@@ -441,9 +442,26 @@ export async function runExecution(
       setStep("remove", { state: "skipped", note: "no campaigns to remove from" });
     }
 
+    // Untag (Nick 2026-08-19): a flagged-for-deletion domain should stop
+    // counting against the client the moment it's pulled — leaving the tag on
+    // made client counts read 38/20 while the true-up correctly said 20.
+    // Reserve safety: the lifecycle write below puts the domain in state
+    // "removed", which getHandledDomains() excludes from every pool — an
+    // untagged burnt domain can NOT come back as someone's fill.
+    setStep("untag", { state: "running" });
+    const utRes = await callJson("/api/deliverability/bulk-tags", {
+      action: "remove",
+      tagNames: [clientTag],
+      domains: removeDomains,
+    });
+    setStep("untag", { state: utRes.ok ? "done" : "failed", note: utRes.ok ? undefined : utRes.error });
+    if (!utRes.ok) {
+      record({ events: [{ instance, clientTag, eventType: "error", detail: `Untag failed: ${utRes.error}` }] });
+    }
+
     setStep("schedule", { state: "running" });
     await record({
-      events: removeDomains.map((d) => ({ instance, domain: d, clientTag, eventType: "removed" as const, detail: "removed from campaigns; vendor-delete scheduled +5d" })),
+      events: removeDomains.map((d) => ({ instance, domain: d, clientTag, eventType: "removed" as const, detail: "removed from campaigns, untagged; vendor-delete scheduled +5d" })),
       lifecycle: removeDomains.map((d) => ({ instance, domain: d, state: "removed" as const, clientTag })),
       cancellations: removeDomains.map((d) => ({ instance, domain: d, clientTag, reason: "burnt — replaced" })),
     });
