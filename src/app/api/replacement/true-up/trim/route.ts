@@ -137,14 +137,29 @@ export async function POST(request: Request) {
         }
       };
 
-      // 1. Detach from the client's campaigns. `discover: true` finds which
-      //    campaigns actually hold them rather than trusting our own map.
-      const det = await callJson(`/api/deliverability/remove-from-campaigns?${instancesQuery}`, {
+      // 1. Detach from the client's campaigns. TWO calls by contract:
+      //    `discover: true` only returns the plan (which campaigns hold which
+      //    inboxes); the removal happens when that plan is posted back as
+      //    `campaigns`. The first live runs made only the discover call, so
+      //    "detached" domains stayed in their campaigns until Bison's own
+      //    tag-driven membership caught up.
+      const plan = await callJson(`/api/deliverability/remove-from-campaigns?${instancesQuery}`, {
         domains,
         discover: true,
       });
+      const planCampaigns =
+        plan.ok && Array.isArray((plan.json as { campaigns?: unknown[] })?.campaigns)
+          ? (plan.json as { campaigns: unknown[] }).campaigns
+          : [];
+      const det =
+        planCampaigns.length > 0
+          ? await callJson(`/api/deliverability/remove-from-campaigns?${instancesQuery}`, {
+              domains,
+              campaigns: planCampaigns,
+            })
+          : plan;
       steps.push({
-        label: `Detach ${domains.length} domain(s) from campaigns`,
+        label: `Detach ${domains.length} domain(s) from ${planCampaigns.length} campaign(s)`,
         state: det.ok ? "done" : "failed",
         note: det.ok ? undefined : det.error,
       });

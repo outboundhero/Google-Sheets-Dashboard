@@ -98,7 +98,7 @@ export async function POST(request: Request) {
         });
         const json = await res.json().catch(() => ({}));
         if (!res.ok || json?.error) return { ok: false as const, error: json?.error || `HTTP ${res.status}` };
-        return { ok: true as const };
+        return { ok: true as const, json: json as Record<string, unknown> };
       } catch (e) {
         return { ok: false as const, error: e instanceof Error ? e.message : "request failed" };
       }
@@ -145,10 +145,21 @@ export async function POST(request: Request) {
       const [instance, clientTag] = key.split("|");
       const domains = group.map((g) => g.domain);
 
-      const detach = await callInternal(
+      // Two calls by contract: discover returns the plan, posting the plan
+      // back as `campaigns` performs the removal.
+      const plan = await callInternal(
         `/api/deliverability/remove-from-campaigns?instances=${instance}`,
         { domains, discover: true },
       );
+      const planCampaigns =
+        plan.ok && Array.isArray(plan.json?.campaigns) ? (plan.json.campaigns as unknown[]) : [];
+      const detach =
+        planCampaigns.length > 0
+          ? await callInternal(`/api/deliverability/remove-from-campaigns?instances=${instance}`, {
+              domains,
+              campaigns: planCampaigns,
+            })
+          : plan;
       const untag = clientTag
         ? await callInternal("/api/deliverability/bulk-tags", {
             action: "remove",
