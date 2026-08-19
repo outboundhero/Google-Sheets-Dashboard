@@ -68,9 +68,16 @@ export async function syncChunk(offset: number = 0): Promise<SyncResult> {
     };
   }
 
-  const sheetsToProcess = config.sheets.slice(offset, offset + CHUNK_SIZE);
+  // Master data views are push targets, not sources (Spencer 2026-08-20:
+  // "a lead tracking sheet that's not tracked, just for pushing leads in").
+  // Reading them would count the same lead twice — once from the client's own
+  // tab and again from the combined sheet — inflating every meeting-ready
+  // number. The offset walks this filtered list, so paging stays correct.
+  const syncable = config.sheets.filter((s) => !s.masterView);
+
+  const sheetsToProcess = syncable.slice(offset, offset + CHUNK_SIZE);
   const nextOffset = offset + sheetsToProcess.length;
-  const complete = nextOffset >= config.sheets.length;
+  const complete = nextOffset >= syncable.length;
 
   // Mark sync as in progress on first chunk
   if (offset === 0) {
@@ -243,7 +250,7 @@ export async function syncChunk(offset: number = 0): Promise<SyncResult> {
     sheetsSuccess,
     sheetsError,
     sheetsProcessed: sheetsToProcess.length,
-    totalSheets: config.sheets.length,
+    totalSheets: syncable.length,
     durationMs: Date.now() - startTime,
     complete,
     nextOffset: complete ? 0 : nextOffset,
@@ -299,7 +306,8 @@ export interface RetryResult {
  */
 export async function retryFailedSheets(sheetIds: string[]): Promise<RetryResult> {
   const config = await getConfig();
-  const byId = new Map(config.sheets.map((s) => [s.id, s]));
+  // Same rule as syncChunk: master views are never read.
+  const byId = new Map(config.sheets.filter((s) => !s.masterView).map((s) => [s.id, s]));
   const succeeded: RetryResult["succeeded"] = [];
   const failed: RetryResult["failed"] = [];
 

@@ -179,8 +179,10 @@ export function AddSheetDialog({ onSuccess }: Props) {
                 Master data view
               </label>
               <p className="text-xs text-muted-foreground">
-                A combined sheet covering several clients. It won&apos;t appear in the
-                &quot;clients with no leads in 4 days&quot; panel.
+                A combined sheet that leads get pushed into. It isn&apos;t read back
+                or counted anywhere — the clients it covers keep being tracked
+                individually from their own tabs, including in the &quot;no leads in
+                4 days&quot; panel.
               </p>
               {masterView && (
                 <div className="space-y-1.5 pt-1">

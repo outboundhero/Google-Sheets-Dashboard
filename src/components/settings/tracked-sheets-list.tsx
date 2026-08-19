@@ -108,7 +108,7 @@ export function TrackedSheetsList({ sheets, onRemoved }: Props) {
                     className="text-[10px] bg-sky-500/15 text-sky-500 px-1.5 py-0.5 rounded font-medium"
                     title={
                       sheet.clientTags?.length
-                        ? `Covers exactly: ${sheet.clientTags.join(", ")} — excluded from the no-leads-in-4-days panel`
+                        ? `Push target for exactly: ${sheet.clientTags.join(", ")}. Not read back or counted — those clients are still tracked individually from their own tabs.`
                         : "Excluded from the no-leads-in-4-days panel"
                     }
                   >
