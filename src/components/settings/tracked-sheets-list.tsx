@@ -103,6 +103,18 @@ export function TrackedSheetsList({ sheets, onRemoved }: Props) {
                     tab: {sheet.sheetName}
                   </span>
                 )}
+                {sheet.masterView && (
+                  <span
+                    className="text-[10px] bg-sky-500/15 text-sky-500 px-1.5 py-0.5 rounded font-medium"
+                    title={
+                      sheet.clientTags?.length
+                        ? `Covers exactly: ${sheet.clientTags.join(", ")} — excluded from the no-leads-in-4-days panel`
+                        : "Excluded from the no-leads-in-4-days panel"
+                    }
+                  >
+                    master view{sheet.clientTags?.length ? ` · ${sheet.clientTags.length} tags` : ""}
+                  </span>
+                )}
                 <span className="text-[10px] text-muted-foreground">
                   {new Date(sheet.addedAt).toLocaleDateString()}
                 </span>

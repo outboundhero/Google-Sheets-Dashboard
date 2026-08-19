@@ -11,6 +11,16 @@ export interface TrackedSheet {
   // on legacy records (derived from `id` via resolveSpreadsheetId).
   spreadsheetId?: string;
   addedAt: string;
+  /**
+   * Master data view (Spencer 2026-08-20): a combined sheet that receives the
+   * leads of SEVERAL client tags at once, for viewing only. Two consequences:
+   *   - `clientTags` holds the exact tags it covers (exact match, no prefix
+   *     matching — "DBS" must never pull DBSNJ/DBSA/DBSF)
+   *   - it is excluded from the "clients with no leads in 4 days" alert, since
+   *     it isn't a client and would otherwise show up as one perpetually
+   */
+  masterView?: boolean;
+  clientTags?: string[];
 }
 
 export interface SheetConfig {

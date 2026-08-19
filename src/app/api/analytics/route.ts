@@ -2,17 +2,25 @@ import { NextResponse } from "next/server";
 import { getStoredLeadsWithFreshness, getSyncMetadata } from "@/lib/leads-store";
 import { computeAnalytics } from "@/lib/analytics";
 import { getClientTrackerData } from "@/lib/google-sheets";
+import { getConfig } from "@/lib/sheets-config";
 
 export async function GET(request: Request) {
   try {
     const { searchParams } = new URL(request.url);
     const client = searchParams.get("client") || undefined;
 
-    const [{ leads, syncedAtByClient }, trackerData, syncMeta] = await Promise.all([
+    const [{ leads, syncedAtByClient }, trackerData, syncMeta, sheetConfig] = await Promise.all([
       getStoredLeadsWithFreshness(),
       getClientTrackerData().catch(() => []),
       getSyncMetadata().catch(() => null),
+      getConfig().catch(() => ({ sheets: [] })),
     ]);
+
+    // Master data views are combined sheets, not clients — keep them out of
+    // the "no leads in 4 days" panel (Spencer 2026-08-20).
+    const masterViewTags = sheetConfig.sheets
+      .filter((s) => s.masterView)
+      .map((s) => s.clientTag);
 
     // Exclude clients whose churn date has already passed
     const now = new Date();
@@ -37,7 +45,13 @@ export async function GET(request: Request) {
       }
     }
 
-    const analytics = computeAnalytics(leads, client, churnedClients, billingStartDate, syncedAtByClient);
+    const analytics = computeAnalytics(
+      leads,
+      client,
+      [...churnedClients, ...masterViewTags],
+      billingStartDate,
+      syncedAtByClient,
+    );
     return NextResponse.json({
       ...analytics,
       leadsLastFullCycleAt: syncMeta?.lastFullCycleAt ?? null,

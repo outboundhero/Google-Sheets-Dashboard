@@ -35,6 +35,10 @@ export function AddSheetDialog({ onSuccess }: Props) {
   const [sheetTitle, setSheetTitle] = useState("");
   const [loading, setLoading] = useState(false);
   const [step, setStep] = useState<"input" | "selectSheet">("input");
+  // Master data view (Spencer 2026-08-20): one combined sheet fed by several
+  // client tags, kept out of the "no leads in 4 days" panel.
+  const [masterView, setMasterView] = useState(false);
+  const [clientTagsRaw, setClientTagsRaw] = useState("");
 
   const handleValidate = async () => {
     if (!url.trim() || !clientTag.trim()) return;
@@ -76,6 +80,10 @@ export function AddSheetDialog({ onSuccess }: Props) {
           url: url.trim(),
           clientTag: clientTag.trim(),
           sheetName: selectedSheet,
+          masterView,
+          clientTags: masterView
+            ? clientTagsRaw.split(",").map((t) => t.trim()).filter(Boolean)
+            : undefined,
         }),
       });
       const data = await res.json();
@@ -90,6 +98,8 @@ export function AddSheetDialog({ onSuccess }: Props) {
       setSelectedSheet("");
       setSheetTitle("");
       setStep("input");
+      setMasterView(false);
+      setClientTagsRaw("");
       setOpen(false);
       onSuccess();
     } catch {
@@ -108,6 +118,8 @@ export function AddSheetDialog({ onSuccess }: Props) {
       setSelectedSheet("");
       setSheetTitle("");
       setStep("input");
+      setMasterView(false);
+      setClientTagsRaw("");
     }
     setOpen(newOpen);
   };
@@ -154,6 +166,37 @@ export function AddSheetDialog({ onSuccess }: Props) {
               <p className="text-xs text-muted-foreground">
                 Sheets with the same Client Tag will have their data merged.
               </p>
+            </div>
+
+            <div className="space-y-2 rounded-lg border p-3">
+              <label className="flex items-center gap-2 text-sm font-medium cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={masterView}
+                  onChange={(e) => setMasterView(e.target.checked)}
+                  className="h-4 w-4"
+                />
+                Master data view
+              </label>
+              <p className="text-xs text-muted-foreground">
+                A combined sheet covering several clients. It won&apos;t appear in the
+                &quot;clients with no leads in 4 days&quot; panel.
+              </p>
+              {masterView && (
+                <div className="space-y-1.5 pt-1">
+                  <label className="text-xs font-medium">
+                    Client tags it covers <span className="text-destructive">*</span>
+                  </label>
+                  <Input
+                    placeholder="DBSNJ, DBSA, DBSF"
+                    value={clientTagsRaw}
+                    onChange={(e) => setClientTagsRaw(e.target.value)}
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    Comma-separated, matched exactly — &quot;DBS&quot; will not pull in DBSNJ.
+                  </p>
+                </div>
+              )}
             </div>
             <div className="rounded-lg bg-muted/50 border p-3">
               <p className="text-xs text-muted-foreground">

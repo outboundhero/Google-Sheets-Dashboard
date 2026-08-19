@@ -25,10 +25,12 @@ export async function GET() {
 export async function POST(request: Request) {
   try {
     const body = await request.json();
-    const { url, clientTag, sheetName } = body as {
+    const { url, clientTag, sheetName, masterView, clientTags } = body as {
       url: string;
       clientTag: string;
       sheetName?: string;
+      masterView?: boolean;
+      clientTags?: string[];
     };
 
     if (!url || !clientTag) {
@@ -62,6 +64,11 @@ export async function POST(request: Request) {
 
     // Composite identity so two tabs of one spreadsheet track separately.
     const compositeId = `${sheetId}::${sheetName}`;
+    // Master views cover several tags by exact match — normalise here so
+    // storage never holds blanks or stray whitespace.
+    const coveredTags = (clientTags || [])
+      .map((t) => String(t).trim())
+      .filter(Boolean);
     const sheet = {
       id: compositeId,
       name: metadata.title,
@@ -69,6 +76,7 @@ export async function POST(request: Request) {
       sheetName,
       spreadsheetId: sheetId,
       addedAt: new Date().toISOString(),
+      ...(masterView ? { masterView: true, clientTags: coveredTags } : {}),
     };
 
     await addSheet(sheet);
