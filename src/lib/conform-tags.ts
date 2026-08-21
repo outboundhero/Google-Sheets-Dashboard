@@ -149,6 +149,38 @@ async function loadInboxes(instances: BisonInstanceSlug[]): Promise<InboxRow[]> 
   return out;
 }
 
+// Domains the replacement system has removed. Their rollup row can still list
+// the client tag (the untag may predate the untag-at-removal fix, or have
+// failed on disconnected inboxes) — conforming from that stale rollup re-tags
+// a domain the system just took away. Fail-open: an error here must not stop
+// the conform run, it only loses this one guard.
+async function loadRemovedDomainKeys(instances: BisonInstanceSlug[]): Promise<Set<string>> {
+  const keys = new Set<string>();
+  try {
+    const supabase = getSupabaseAdmin();
+    const PAGE = 1000;
+    let offset = 0;
+    while (true) {
+      const { data, error } = await supabase
+        .from("domain_replacement_state")
+        .select("instance, domain")
+        .eq("state", "removed")
+        .in("instance", instances)
+        .range(offset, offset + PAGE - 1);
+      if (error) throw new Error(error.message);
+      if (!data || data.length === 0) break;
+      for (const r of data as { instance: string; domain: string }[]) {
+        keys.add(`${r.instance}::${r.domain}`);
+      }
+      if (data.length < PAGE) break;
+      offset += PAGE;
+    }
+  } catch (e) {
+    console.error("[CONFORM-TAGS] removed-domain read failed (guard skipped):", e);
+  }
+  return keys;
+}
+
 async function loadDomainWantedMap(
   instances: BisonInstanceSlug[],
 ): Promise<{ byKey: Map<string, Set<string>>; scannedByInstance: Map<BisonInstanceSlug, number> }> {
@@ -164,7 +196,10 @@ async function loadDomainWantedMap(
   for (const inst of instances) scannedByInstance.set(inst, 0);
   // churned clients' tags are never "wanted" — conform must not resurrect them
   const offboarded = await getOffboardedClientTags();
+  // and a removed domain's tags are never "wanted" at all
+  const removed = await loadRemovedDomainKeys(instances);
   for (const r of rows) {
+    if (removed.has(`${r.instance}::${r.domain}`)) continue;
     if (!Array.isArray(r.tags) || r.tags.length === 0) continue;
     const wanted = new Set<string>();
     for (const t of r.tags) {

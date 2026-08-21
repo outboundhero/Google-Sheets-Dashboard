@@ -64,6 +64,8 @@
 
     { "path": "/api/cron/true-up-move",                    "schedule": "7,37 * * * *" },
 
-    { "path": "/api/cron/redirect-conform",                "schedule": "40 9 * * *" }
+    { "path": "/api/cron/redirect-conform",                "schedule": "40 9 * * *" },
+
+    { "path": "/api/cron/strip-removed-tags",   "schedule": "50 * * * *" }
   ]
 }
