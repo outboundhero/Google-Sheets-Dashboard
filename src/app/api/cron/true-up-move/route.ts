@@ -39,8 +39,19 @@ const call = async (
   return res.json().catch(() => ({}));
 };
 
-export async function GET() {
+export async function GET(request: Request) {
   try {
+    // ?tag=&instance= runs ONE targeted trim and stops — the bulk queue is
+    // ordered by overage, so a specific client someone is waiting on could
+    // otherwise sit behind bigger overages for hours.
+    const params = new URL(request.url).searchParams;
+    const targetTag = (params.get("tag") || "").trim();
+    const targetInstance = (params.get("instance") || "").trim();
+    if (targetTag && targetInstance) {
+      const targeted = await call(trim, { clientTag: targetTag, instance: targetInstance });
+      return NextResponse.json({ targeted: true, trim: targeted });
+    }
+
     // Trim first, so domains freed here are in the reserve before the fill
     // runs. Trim was a button for its first cycles, same as the fill was —
     // but fill on a cron with trim manual meant clients only ever drifted UP:
