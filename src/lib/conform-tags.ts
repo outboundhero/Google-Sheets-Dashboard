@@ -185,12 +185,21 @@ async function loadDomainWantedMap(
   instances: BisonInstanceSlug[],
 ): Promise<{ byKey: Map<string, Set<string>>; scannedByInstance: Map<BisonInstanceSlug, number> }> {
   const supabase = getSupabaseAdmin();
-  const { data, error } = await supabase
-    .from("deliverability_domains")
-    .select("instance, domain, tags")
-    .in("instance", instances);
-  if (error) throw new Error(`domains read: ${error.message}`);
-  const rows = (data || []) as DomainRow[];
+  // Paginated like loadInboxes — an unpaged select caps at 1000 rows, which
+  // silently limited conform to the first ~1000 of ~3,450 domains.
+  const rows: DomainRow[] = [];
+  const PAGE = 1000;
+  for (let offset = 0; ; offset += PAGE) {
+    const { data, error } = await supabase
+      .from("deliverability_domains")
+      .select("instance, domain, tags")
+      .in("instance", instances)
+      .range(offset, offset + PAGE - 1);
+    if (error) throw new Error(`domains read: ${error.message}`);
+    if (!data || data.length === 0) break;
+    rows.push(...(data as DomainRow[]));
+    if (data.length < PAGE) break;
+  }
   const byKey = new Map<string, Set<string>>();
   const scannedByInstance = new Map<BisonInstanceSlug, number>();
   for (const inst of instances) scannedByInstance.set(inst, 0);
