@@ -1,11 +1,12 @@
 import { NextResponse } from "next/server";
 import { POST as moveFill } from "@/app/api/replacement/true-up/move-fill/route";
 import { POST as fill } from "@/app/api/replacement/true-up/fill/route";
+import { POST as trim } from "@/app/api/replacement/true-up/trim/route";
 
 export const maxDuration = 300;
 
-// GET /api/cron/true-up-move — every 30 minutes: one cross-instance move
-// round, then an incremental fill.
+// GET /api/cron/true-up-move — every 30 minutes: one trim round, one
+// cross-instance move round, then an incremental fill.
 //
 // Nick asked (2026-08-17, 12:12/12:16) for the system to move spare domains
 // from an instance that has them to one that is short, then tag, set the
@@ -40,6 +41,15 @@ const call = async (
 
 export async function GET() {
   try {
+    // Trim first, so domains freed here are in the reserve before the fill
+    // runs. Trim was a button for its first cycles, same as the fill was —
+    // but fill on a cron with trim manual meant clients only ever drifted UP:
+    // SBTB/BHS/CCGLA all sat 9-10 over cap until someone was asked to click
+    // (Nick, 2026-08-21, third such request — "so I don't have to come back
+    // to you guys"). The route only ever returns HEALTHY domains to reserve;
+    // burnt ones stay with the replacement runner's delete path.
+    const trimmed = await call(trim, { all: true, maxClients: 2 });
+
     // One move round: finalize whatever has landed, queue the next batch.
     const move = await call(moveFill, { dryRun: false, maxDomains: 40 });
 
@@ -48,6 +58,11 @@ export async function GET() {
     const filled = await call(fill, { all: true, maxClients: 3 });
 
     return NextResponse.json({
+      trim: {
+        ranClients: (trimmed.ranClients as number) ?? 0,
+        trimmed: (trimmed.trimmedTotal as number) ?? 0,
+        ...(trimmed.error ? { error: trimmed.error } : {}),
+      },
       move: {
         moved: (move.movedTotal as number) ?? 0,
         uploading: (move.uploadingTotal as number) ?? 0,
