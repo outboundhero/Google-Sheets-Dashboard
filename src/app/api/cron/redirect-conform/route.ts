@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { getSupabaseAdmin } from "@/lib/supabase";
 import { internalFetch } from "@/lib/replacement/internal-fetch";
 import { getHandledDomains, logEvents } from "@/lib/replacement/store";
+import { readClientTracker } from "@/lib/replacement/redirect-audit";
 import type { BisonInstanceSlug } from "@/lib/bison-instances";
 
 export const maxDuration = 300;
@@ -26,14 +27,15 @@ export const maxDuration = 300;
 //   - normalized comparison (protocol / www / trailing slash / case) so
 //     "https://jan-pro.com/x/" vs "http://www.jan-pro.com/x" is NOT drift
 //   - capped per run; the daily cadence converges the backlog
-//   - AUDIT-ONLY unless ?apply= names tags (or "all"). The first full audit
-//     showed several client_redirects entries are themselves stale (JPET says
-//     chattanooga while all 15 domains point at knoxville; SBTB says the bare
-//     root while domains carry /locations/tampa) — auto-"fixing" against a
-//     stale expectation would break correct redirects fleet-wide, so applying
-//     stays opt-in until the expected list is confirmed per tag.
+//   - expectations come from the Client Tracker's Website column, with
+//     client_redirects only as fallback for tags without a Website cell.
+//     Nick 2026-08-22: "The system always needs to read the client tracker
+//     sheet tab... That is the source of truth for redirect URLs." That
+//     wholesale confirmation is also why applying is now the DEFAULT — the
+//     earlier audit-only stance existed because the client_redirects list
+//     itself was stale (JPET said chattanooga, SBTB the bare root).
 //
-// ?apply=all | ?apply=TAG1,TAG2 — fix; anything else just reports.
+// ?dry=1 — audit only; ?apply=TAG1,TAG2 — restrict fixes to those tags.
 
 const MAX_FIXES_PER_RUN = 100;
 
@@ -47,12 +49,14 @@ function normalizeUrl(raw: string | null | undefined): string {
 
 export async function GET(request: Request) {
   try {
-    const applyParam = (new URL(request.url).searchParams.get("apply") || "").trim();
-    const applyAll = applyParam.toLowerCase() === "all";
+    const params = new URL(request.url).searchParams;
+    const applyParam = (params.get("apply") || "").trim();
     const applyTags = new Set(
-      applyAll ? [] : applyParam.split(",").map((t) => t.trim().toUpperCase()).filter(Boolean),
+      applyParam && applyParam.toLowerCase() !== "all"
+        ? applyParam.split(",").map((t) => t.trim().toUpperCase()).filter(Boolean)
+        : [],
     );
-    const dry = !applyAll && applyTags.size === 0;
+    const dry = params.get("dry") === "1";
     const supabase = getSupabaseAdmin();
 
     const { data: redirectRows, error: rErr } = await supabase
@@ -63,6 +67,19 @@ export async function GET(request: Request) {
     for (const r of redirectRows || []) {
       const url = String(r.redirect_url || "").trim();
       if (url) expectedByTag.set(r.client_tag.toUpperCase(), url);
+    }
+
+    // Sheet wins wherever it has a plausible value. Fail-open: a sheet read
+    // error leaves the run on client_redirects alone rather than skipping it.
+    try {
+      const { websites } = await readClientTracker();
+      for (const [tag, site] of websites) {
+        const s = site.trim();
+        if (!s || /\s/.test(s) || !s.includes(".")) continue; // "n/a", notes, junk
+        expectedByTag.set(tag, /^https?:\/\//i.test(s) ? s : `https://${s}`);
+      }
+    } catch (e) {
+      console.error("[REDIRECT-CONFORM] tracker read failed; using client_redirects only:", e);
     }
 
     const handled = await getHandledDomains();
@@ -111,9 +128,9 @@ export async function GET(request: Request) {
       });
     }
 
-    const toApply = applyAll
-      ? mismatches
-      : mismatches.filter((m) => applyTags.has(m.tag));
+    const toApply = applyTags.size > 0
+      ? mismatches.filter((m) => applyTags.has(m.tag))
+      : mismatches;
 
     if (dry || toApply.length === 0) {
       return NextResponse.json({
