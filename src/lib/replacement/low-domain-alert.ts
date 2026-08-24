@@ -9,6 +9,7 @@
 // burnt — same detector Spencer is testing — otherwise the flat guardrails do.
 import { buildReplacementPlan } from "./plan";
 import { getThresholdConfig } from "./threshold-groups-store";
+import { getActiveCampaignKeys } from "./campaigns";
 import { postSlackMessage } from "@/lib/slack";
 import { getInstance, type BisonInstanceSlug } from "@/lib/bison-instances";
 
@@ -30,6 +31,10 @@ export interface LowDomainAlertResult {
   detector: "groups" | "guardrails";
   clientsChecked: number;
   lowCount: number;
+  /** (tag, instance) pairs under cap but with no active campaign there — ghost
+   *  pairs (leftover setups, wrong-group tags). Hidden from the list so the
+   *  alert reads real shortfalls only (Spencer, 2026-08-24: JPCO double-count). */
+  ghostPairs: number;
   alerted: boolean;
   slackReason?: string;
   low: LowDomainClient[];
@@ -62,7 +67,7 @@ export async function checkLowDomainClients(
     detector === "groups" ? { burntSource: "groups", groupConfig: groupCfg } : {},
   );
 
-  const low: LowDomainClient[] = plan.clientAudit
+  const allLow: LowDomainClient[] = plan.clientAudit
     .map((a) => ({
       clientTag: a.clientTag,
       instance: a.instance,
@@ -75,8 +80,18 @@ export async function checkLowDomainClients(
     .filter((c) => c.short > 0)
     .sort((x, y) => y.short - x.short || x.clientTag.localeCompare(y.clientTag));
 
+  // A pair with no active campaign in that instance isn't short — nothing is
+  // sending there to be short FOR (JPCO's leftover Group-2 copies made the
+  // topline read 78 when the real number was lower). Same rule the buy digest
+  // uses, so the two alerts agree on what counts.
+  const activeKeys = await getActiveCampaignKeys();
+  const low = allLow.filter((c) =>
+    activeKeys.has(`${c.clientTag.trim().toUpperCase()}:${c.instance}`),
+  );
+  const ghostPairs = allLow.length - low.length;
+
   const checkedAt = new Date().toISOString();
-  const base = { checkedAt, detector, clientsChecked: plan.clientAudit.length, lowCount: low.length, low };
+  const base = { checkedAt, detector, clientsChecked: plan.clientAudit.length, lowCount: low.length, ghostPairs, low };
 
   if (low.length === 0 && !opts.force) return { ...base, alerted: false };
   if (opts.dryRun) return { ...base, alerted: false, slackReason: "dry run" };
@@ -96,6 +111,9 @@ export async function checkLowDomainClients(
     main.push(`*${low.length}* client${low.length === 1 ? "" : "s"} below cap (healthy domains after burnt are removed). Worst ${Math.min(TOP_N, low.length)}:`);
     for (const c of low.slice(0, TOP_N)) main.push(line(c));
     if (low.length > TOP_N) main.push(`🧵 Full list of all ${low.length} in the thread`);
+  }
+  if (ghostPairs > 0) {
+    main.push(`_${ghostPairs} pair${ghostPairs === 1 ? "" : "s"} hidden — no active campaigns in that instance (leftover setups, not real shortfalls)_`);
   }
   main.push(`_Detector: ${detector} · observe-only, nothing was changed_`);
 
