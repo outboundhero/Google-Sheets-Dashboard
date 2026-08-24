@@ -33,6 +33,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { PageHeader } from "@/components/shared/page-header";
+import { ShortageBanner } from "@/components/deliverability/shortage-banner";
 import { AttachCampaignsDialog } from "@/components/deliverability/attach-campaigns-dialog";
 import { BulkTagDialog, type TagApplyInfo } from "@/components/deliverability/bulk-tag-dialog";
 import { BulkDeleteDialog } from "@/components/deliverability/bulk-delete-dialog";
@@ -3067,6 +3068,8 @@ function DeliverabilityPageInner() {
 
   return (
     <div className="space-y-6">
+      {/* Spencer's Loom: no-domains-to-allocate must be visible up top here */}
+      <ShortageBanner />
       <PageHeader
         title="Deliverability"
         description={(() => {
