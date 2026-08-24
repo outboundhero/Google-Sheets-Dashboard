@@ -20,6 +20,9 @@ interface MoveGroup {
   targetInstance: string; targetLabel: string;
   tier: string; platformConnectionId: string;
   domains: string[]; inboxingDomains: string[]; otherDomains: string[]; inboxCount: number;
+  duplicateDomains: string[];
+  targetTagged: number; targetCap: number; atCap: boolean;
+  untagDomains: string[];
 }
 interface FlaggedClient {
   clientTag: string; allocatedGroup: number;
@@ -52,12 +55,24 @@ async function postMove(body: unknown): Promise<{ results?: MoveRow[]; error?: s
   } catch { return null; }
 }
 
+async function postUntag(body: unknown): Promise<{ ok?: boolean; error?: string } | null> {
+  try {
+    const res = await fetch("/api/replacement/wrong-instance/untag", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+    });
+    const json = (await res.json().catch(() => null)) as { ok?: boolean; error?: string } | null;
+    if (!res.ok || !json || json.error) return json?.error ? { error: json.error } : null;
+    return json;
+  } catch { return null; }
+}
+
 export function WrongInstanceCard() {
   const [data, setData] = useState<Resp | null>(null);
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [confirming, setConfirming] = useState<string | null>(null);
   const [showHidden, setShowHidden] = useState(false);
+  const [untagBusy, setUntagBusy] = useState<Record<string, string>>({});
   const [progress, setProgress] = useState<Record<string, Prog>>({});
   const [queue, setQueue] = useState<QItem[]>([]);
   const queueRef = useRef<QItem[]>([]);
@@ -156,6 +171,27 @@ export function WrongInstanceCard() {
       load();   // re-detect — moved domains now report on the target instance too
     }
   }, [moveClient, load]);
+
+  // Cap-aware branch (Spencer 2026-08-24): correct group already at cap →
+  // untag back to reserve instead of moving. Duplicates are excluded by the
+  // detector AND re-refused server-side.
+  const untagClient = useCallback(async (c: FlaggedClient) => {
+    const targets = c.groups.filter((g) => g.atCap && g.untagDomains.length > 0);
+    const total = targets.reduce((n, g) => n + g.untagDomains.length, 0);
+    if (total === 0) return;
+    if (!window.confirm(
+      `Untag ${total} ${c.clientTag} domain${total === 1 ? "" : "s"} back to reserve? ` +
+      `They stay on their instance, lose the tag + redirect and leave all campaigns. Nothing is deleted.`,
+    )) return;
+    setUntagBusy((p) => ({ ...p, [c.clientTag]: "untagging…" }));
+    let failed = 0;
+    for (const g of targets) {
+      const r = await postUntag({ clientTag: c.clientTag, sourceInstance: g.sourceInstance, domains: g.untagDomains });
+      if (!r || r.error) failed += g.untagDomains.length;
+    }
+    setUntagBusy((p) => ({ ...p, [c.clientTag]: failed ? `${failed} failed — re-scan and retry` : "returned to reserve ✓" }));
+    load();
+  }, [load]);
 
   const enqueue = useCallback((clients: FlaggedClient[]) => {
     setConfirming(null);
@@ -294,6 +330,22 @@ export function WrongInstanceCard() {
                           <RotateCcw className="h-3.5 w-3.5" /> Re-run
                         </Button>
                       )}
+                      {untagBusy[c.clientTag] && (
+                        <span className={`text-[11px] shrink-0 ${untagBusy[c.clientTag].includes("failed") ? "text-destructive" : untagBusy[c.clientTag].endsWith("✓") ? "text-emerald-500" : "text-sky-500"}`}>
+                          {untagBusy[c.clientTag]}
+                        </span>
+                      )}
+                      {!q && !isConfirming && c.groups.some((g) => g.atCap && g.untagDomains.length > 0) && (
+                        <Button
+                          size="sm" variant="outline"
+                          className="h-7 gap-1.5 shrink-0 border-emerald-500/40 text-emerald-500 hover:text-emerald-400"
+                          onClick={() => untagClient(c)}
+                          disabled={untagBusy[c.clientTag]?.endsWith("…") === true}
+                          title="Correct group is at cap — return these domains to reserve instead of moving them"
+                        >
+                          <RotateCcw className="h-3.5 w-3.5" /> Untag to reserve
+                        </Button>
+                      )}
                       {!q && !isConfirming && (
                         <Button
                           size="sm" variant="outline"
@@ -328,6 +380,16 @@ export function WrongInstanceCard() {
                           {g.otherDomains.length > 0 && (
                             <span className="text-amber-500/80 inline-flex items-center gap-1">
                               <AlertTriangle className="h-3 w-3" />{g.otherDomains.length} non-Inboxing — move manually
+                            </span>
+                          )}
+                          {g.duplicateDomains?.length > 0 && (
+                            <span className="text-sky-400/90">
+                              · {g.duplicateDomains.length} duplicate{g.duplicateDomains.length === 1 ? "" : "s"} — hourly cleanup handles
+                            </span>
+                          )}
+                          {g.atCap && (
+                            <span className="text-emerald-500/90">
+                              · {g.targetLabel} at cap {g.targetTagged}/{g.targetCap} — untag instead
                             </span>
                           )}
                         </div>
