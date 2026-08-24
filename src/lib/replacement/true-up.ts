@@ -340,15 +340,22 @@ export async function computeTrueUp(
     // Like-for-like: follow whichever provider the client already runs on.
     const provider: "outlook" | "google" = acc.google > acc.outlook ? "google" : "outlook";
     const pool = reservePool.get(`${instance}:${provider}`) ?? [];
-    const fillCandidates = pool.splice(0, fillNeeded);
-    const fillShort = fillNeeded - fillCandidates.length;
 
+    // A client that cannot execute a fill must not CLAIM reserves. The splice
+    // used to run before the blocker check, so blocked clients consumed the
+    // shared pool in alphabetical order and runnable clients behind them were
+    // told "no ready reserve" — on outboundclean, four dormant/no-redirect
+    // clients held all 12 spares while JPWC sat 5 short with six active
+    // campaigns (Nick, 2026-08-22). Blockers first, pool only if clear.
     const blockers: string[] = [];
     if (fillNeeded > 0) {
       if (!redirectByTag.get(clientTag)) blockers.push("no redirect URL for tag");
-      if (fillShort > 0) blockers.push(`no ready ${provider} reserve in this instance`);
       if (!hasActiveCampaign) blockers.push("no actively-sending campaign (dormant)");
     }
+    const canFill = fillNeeded > 0 && blockers.length === 0;
+    const fillCandidates = canFill ? pool.splice(0, fillNeeded) : [];
+    const fillShort = fillNeeded - fillCandidates.length;
+    if (canFill && fillShort > 0) blockers.push(`no ready ${provider} reserve in this instance`);
 
     // Trim, in Nick's order (2026-08-14): burnt first (replacement already does
     // that), then UNPROVEN domains, then the worst-replying proven ones.
