@@ -611,7 +611,7 @@ function DeliverabilityPageInner() {
   const { statuses: providerStatusMap, mutate: mutateProviderStatus } = useProviderStatus(instancesQuery);
   // Cross-instance presence: which of the 4 Bison instances each domain
   // exists in (all instances, regardless of the sidebar switcher).
-  const { domainInstancesMap, domainCreatedMap, mutate: mutateDomainInstances } = useDomainInstances();
+  const { domainInstancesMap, domainCreatedMap, domainInboxesMap, mutate: mutateDomainInstances } = useDomainInstances();
   const [bisonTags, setBisonTags] = useState<string[]>([]);
   const [domains, setDomains] = useState<DomainRow[]>([]);
   // Days of snapshot history collected (drives the trailing-rate warm-up note)
@@ -5188,6 +5188,16 @@ function DeliverabilityPageInner() {
                               >
                                 {INSTANCE_SHORT_LABELS[slug as BisonInstanceSlug] ?? slug}
                               </span>
+                              {(() => {
+                                // Per-instance inbox count — matters when the
+                                // domain overlaps instances (Spencer 2026-08-25).
+                                const n = domainInboxesMap[d.domain]?.[slug];
+                                return typeof n === "number" ? (
+                                  <span className="text-[10px] text-sky-400/90 tabular-nums shrink-0" title="Inboxes in this instance">
+                                    {n}
+                                  </span>
+                                ) : null;
+                              })()}
                               <span className="text-[10px] text-muted-foreground tabular-nums whitespace-nowrap" title="Created in this instance">
                                 {fmtInstanceCreated(created)}
                               </span>

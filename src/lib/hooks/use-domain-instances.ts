@@ -8,6 +8,7 @@ const fetcher = (url: string) => fetch(url).then((r) => r.json());
 interface DomainInstancesResponse {
   map: Record<string, BisonInstanceSlug[]>;
   created?: Record<string, Record<string, string | null>>;
+  inboxes?: Record<string, Record<string, number>>;
 }
 
 /**
@@ -33,6 +34,7 @@ export function useDomainInstances() {
   return {
     domainInstancesMap: data?.map ?? {},
     domainCreatedMap: data?.created ?? {},
+    domainInboxesMap: data?.inboxes ?? {},
     isLoading,
     error,
     mutate,
