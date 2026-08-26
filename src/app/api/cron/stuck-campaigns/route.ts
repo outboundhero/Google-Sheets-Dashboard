@@ -239,6 +239,26 @@ export async function GET(request: Request) {
       } else {
         slack = { posted: false, reason: "unchanged, reminder not due" };
       }
+    } else if (params.get("correction") === "1") {
+      // One-off, operator-triggered: the v1 digest over-flagged; say so in the
+      // same channel and show what is now under observation instead.
+      const byInst = new Map<string, string[]>();
+      for (const w of watching) {
+        const inst = w.key.split(":")[0];
+        byInst.set(inst, [...(byInst.get(inst) ?? []), `• ${w.name} — ${w.note}`]);
+      }
+      const lines: string[] = [
+        ":white_check_mark: *Correction to the earlier stuck-campaign alert*",
+        "The first digest over-flagged: two of those campaigns were already deleted in Bison (stale records on our side, now cleaned) and several were nurture batches that had finished their leads and were queued waiting for more. Bison labels all of that \"queued\" — the same as a genuinely stuck launch.",
+        "The check now verifies each campaign live and only calls one stuck when it is queued with leads still to send *and* its send count hasn't moved for 24h. Those 7 alerts are cleared from the dashboard.",
+        `*Currently under observation* (${watching.length} queued, sends being watched):`,
+      ];
+      for (const [inst, items] of byInst) {
+        lines.push(`*${labelOf(inst)}*`, ...items);
+      }
+      lines.push("_A confirmed digest posts automatically once 24h of frozen sends is proven._");
+      const res = await postSlackMessage(lines.join("\n"), pipelineAlertChannel());
+      slack = { posted: res.ok, reason: res.ok ? "correction posted" : `slack failed: ${res.reason}` };
     }
 
     return NextResponse.json({
