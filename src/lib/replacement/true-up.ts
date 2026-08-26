@@ -20,6 +20,7 @@ import { ALL_INSTANCE_SLUGS, getInstance, type BisonInstanceSlug } from "@/lib/b
 import { pstDateString } from "@/lib/date-utils";
 import { capFor, getClientTiers, type ClientTier } from "./client-tiers";
 import { deriveCampaignMap, getActiveCampaignKeys, type CampaignRef } from "./campaigns";
+import { hasBurntTag } from "./burnt-tag";
 import { getHandledDomains, getSettings } from "./store";
 import { getSkipSet, skipKey } from "./skips";
 import { evaluateSegments, type DomainMetrics, type ThresholdConfig } from "./threshold-groups";
@@ -269,6 +270,7 @@ export async function computeTrueUp(
   const reservePool = new Map<string, string[]>(); // `${instance}:${provider}`
   for (const e of enriched) {
     if (e.tag !== null) continue;
+    if (hasBurntTag(e.d.tags)) continue;              // human "Burnt" verdict outranks metrics
     if (e.provider !== "outlook" && e.provider !== "google") continue;
     if (!cfg.allowInfoReserves && isInfo(e.d.domain)) continue;
     if (ageDays(e.d.domain_created_at, nowMs) < WARMUP_DAYS) continue;

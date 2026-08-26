@@ -14,6 +14,7 @@ import { capFor, getClientTiers } from "./client-tiers";
 import { getSkipSet, skipKey } from "./skips";
 import { recordFirstFlagged } from "./first-flagged";
 import { readClientTracker } from "./redirect-audit";
+import { hasBurntTag } from "./burnt-tag";
 
 // Cross-instance donor (Nick Aug-10): B2C instances with no local reserve pull
 // Inboxing-movable reserves from B2B #2. "For now" — single fixed donor.
@@ -323,6 +324,10 @@ export async function buildReplacementPlan(
     if (e.d.spamhaus_dbl === true) continue;
     if (!cfg.allowSurblReserves && e.d.blacklisted === true) continue;
     if (e.burnt) continue;
+    // A hand-applied "Burnt" tag is a human verdict and outranks our metrics
+    // (Vicky 2026-08-27: the first supervised run handed JPCHI a 99-send
+    // .info someone had tagged Burnt — allowed by every rule, wanted by none).
+    if (hasBurntTag(e.d.tags)) continue;
     // A skipped domain hid its burnt verdict above — never pull it as a reserve.
     if (skipSet.has(skipKey(e.d.instance, e.d.domain))) continue;
     const key = `${e.d.instance}:${e.provider}`;

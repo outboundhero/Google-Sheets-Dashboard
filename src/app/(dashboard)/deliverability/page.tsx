@@ -35,6 +35,7 @@ import { Badge } from "@/components/ui/badge";
 import { PageHeader } from "@/components/shared/page-header";
 import { ShortageBanner } from "@/components/deliverability/shortage-banner";
 import { DomainHistoryDialog } from "@/components/deliverability/domain-history-dialog";
+import { hasBurntTag } from "@/lib/replacement/burnt-tag";
 import { History as HistoryIcon } from "lucide-react";
 import { AttachCampaignsDialog } from "@/components/deliverability/attach-campaigns-dialog";
 import { BulkTagDialog, type TagApplyInfo } from "@/components/deliverability/bulk-tag-dialog";
@@ -2320,6 +2321,7 @@ function DeliverabilityPageInner() {
     if (flagMap.get(key)?.flagged) return false;
     if (deleteQueue.has(key)) return false;
     if (handledKeys.has(key)) return false;   // removed/burnt or queued — leaving, not inventory
+    if (hasBurntTag(d.tags)) return false;    // hand-applied "Burnt" tag — a human said no
     return true;
   }, [clientTags, flagMap, deleteQueue, handledKeys]);
 
