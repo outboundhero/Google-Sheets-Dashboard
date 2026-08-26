@@ -19,13 +19,15 @@ export const maxDuration = 60;
 // as status `queued` (verified: the 4 campaigns in his screenshot are stored
 // as queued), with `launching` as the transient step before it.
 //
-// "Since when" = the earlier of (a) the first time THIS check observed the
-// campaign in that state (kept in Redis, so a fresh deploy doesn't reset the
-// clock) and (b) Bison's own updated_at, which moves on status changes and
-// covers campaigns that were already stuck before tracking began. Statuses
-// come from the 6-hourly campaign sync, so detection lags at most ~6h on a
-// 24h threshold. Reasons are bucketed by whole days so Slack re-pings once a
-// day per stuck campaign, not every hour.
+// `queued` alone is NOT enough (first digest, 2026-08-26, over-flagged): it
+// also covers campaigns merely waiting for leads/schedule, and the synced
+// table keeps rows for campaigns since deleted in Bison. Bison's updated_at
+// is useless as a since-marker (it moves while stuck). So each candidate is
+// checked LIVE, and "stuck" means: still queued/launching in Bison, leads
+// left to contact, and emails_sent unchanged for 24h+ from when we first saw
+// it in that state (Redis snapshot; sends moving resets the clock). 404 in
+// Bison → the stale local row is pruned, never alerted. Reasons are bucketed
+// by whole days so Slack re-pings once a day per stuck campaign.
 //
 // ?dry=1 previews without writing.
 
@@ -93,29 +95,70 @@ export async function GET(request: Request) {
     const processing = rows.filter((r) => PROCESSING.has((r.status || "").trim().toLowerCase()));
     const keyOf = (r: { instance: string; id: number }) => `${r.instance}:${r.id}`;
 
-    // First-seen map (Redis); fail-open to Bison's updated_at alone.
+    // First-seen snapshots (Redis): when we first saw the campaign in this
+    // state and how many emails it had sent then. Older entries from the first
+    // version were bare ISO strings — honored as a timestamp with no send count.
+    interface Seen { at: string; emailsSent: number | null }
     const redis = getRedis();
-    let seen: Record<string, string> = {};
+    let seenRaw: Record<string, Seen | string> = {};
     if (redis) {
-      try { seen = (await redis.get<Record<string, string>>(SEEN_KEY)) ?? {}; } catch { seen = {}; }
+      try { seenRaw = (await redis.get<Record<string, Seen | string>>(SEEN_KEY)) ?? {}; } catch { seenRaw = {}; }
     }
-    const nextSeen: Record<string, string> = {};
-    for (const r of processing) {
-      const k = keyOf(r);
-      nextSeen[k] = seen[k] ?? new Date(nowMs).toISOString();
-    }
+    const nextSeen: Record<string, Seen> = {};
 
     const stuck: { key: string; instance: string; id: number; name: string; clientTag: string | null; hours: number; since: string }[] = [];
-    const watching: { key: string; name: string; hours: number }[] = [];
+    const watching: { key: string; name: string; hours: number; note: string }[] = [];
+    const pruned: string[] = [];
+
     for (const r of processing) {
       const k = keyOf(r);
-      const candidates = [nextSeen[k], r.updated_at].filter(Boolean).map((s) => new Date(s as string).getTime()).filter((n) => !Number.isNaN(n));
-      const sinceMs = Math.min(...candidates);
-      const hours = Math.floor((nowMs - sinceMs) / 3_600_000);
+
+      // Live check — the synced status can be hours stale, and a campaign
+      // deleted in Bison keeps its local row until something prunes it.
+      let live: { status: string; emailsSent: number; totalLeads: number; contacted: number } | null = null;
+      let liveHttp = 0;
+      try {
+        const res = await bisonFetch(r.instance as BisonInstanceSlug, `/campaigns/${r.id}`);
+        liveHttp = res.status;
+        const j = await res.json().catch(() => null);
+        const c = j?.data ?? j;
+        if (res.ok && c && typeof c.status === "string") {
+          live = {
+            status: c.status,
+            emailsSent: Number(c.emails_sent) || 0,
+            totalLeads: Number(c.total_leads) || 0,
+            contacted: Number(c.total_leads_contacted) || 0,
+          };
+        }
+      } catch {
+        live = null;
+      }
+
+      if (liveHttp === 404) {
+        // Gone in Bison (JPCL Nurture 2 / JPCNJ Batch 2 on the first run) —
+        // prune the stale row so nothing downstream trusts it, never alert.
+        if (!dryRun) await supabase.from("campaigns").delete().eq("instance", r.instance).eq("id", r.id);
+        pruned.push(`${k} ${r.name}`);
+        continue;
+      }
+      if (!live) { watching.push({ key: k, name: r.name, hours: 0, note: `live check failed (HTTP ${liveHttp})` }); continue; }
+      if (!PROCESSING.has(live.status.trim().toLowerCase())) continue;            // moved on since the sync
+      if (live.totalLeads > 0 && live.contacted >= live.totalLeads) {
+        watching.push({ key: k, name: r.name, hours: 0, note: "queued with nothing left to send — waiting for leads, not stuck" });
+        continue;
+      }
+
+      const prev = seenRaw[k];
+      const prevAt = typeof prev === "string" ? prev : prev?.at;
+      const prevSent = typeof prev === "object" && prev ? prev.emailsSent : null;
+      const sendsMoved = prevSent != null && live.emailsSent > prevSent;
+      const at = prevAt && !sendsMoved ? prevAt : new Date(nowMs).toISOString();
+      nextSeen[k] = { at, emailsSent: live.emailsSent };
+      const hours = Math.floor((nowMs - new Date(at).getTime()) / 3_600_000);
       if (hours >= THRESHOLD_HOURS) {
-        stuck.push({ key: k, instance: r.instance, id: r.id, name: r.name, clientTag: r.client_tag, hours, since: new Date(sinceMs).toISOString() });
+        stuck.push({ key: k, instance: r.instance, id: r.id, name: r.name, clientTag: r.client_tag, hours, since: at });
       } else {
-        watching.push({ key: k, name: r.name, hours });
+        watching.push({ key: k, name: r.name, hours, note: sendsMoved ? "sends moving — clock reset" : `no sends for ${hours}h, under threshold` });
       }
     }
     stuck.sort((a, b) => b.hours - a.hours);
@@ -131,6 +174,7 @@ export async function GET(request: Request) {
         processing: processing.length,
         stuck: stuck.map((s) => ({ instance: s.instance, campaign: s.name, clientTag: s.clientTag, hours: s.hours, since: s.since })),
         watching,
+        wouldPrune: pruned,
         wouldResolve: toResolve.map((a) => a.step),
       });
     }
@@ -195,7 +239,8 @@ export async function GET(request: Request) {
       stuck: stuck.length,
       alerted: stuck.map((s) => `${s.instance}: ${s.name} (${s.hours}h)`),
       resolved: toResolve.length,
-      watching: watching.length,
+      pruned,
+      watching,
       slack,
     });
   } catch (error) {
