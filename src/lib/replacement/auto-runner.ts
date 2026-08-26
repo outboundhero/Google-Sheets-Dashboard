@@ -145,16 +145,16 @@ export async function runAutoReplacement(
       result.skipped.push({ clientTag: g.clientTag, instance: g.instance, reason: `executed within last ${RECENT_HOURS}h` });
       continue;
     }
-    // Runnable: has ready replacements, OR is purely remove-only (every burnt
-    // domain is at/over cap — removal never drops the client below cap, and
-    // this is how an interrupted run finishes its removals next tick). Clients
-    // with BLOCKED below-cap replacements stay manual: auto never strips
-    // capacity without giving back.
-    const allRemoveOnly = g.items.every((i) => i.removeOnly);
-    if (g.ready.length === 0 && !allRemoveOnly) {
-      result.skipped.push({ clientTag: g.clientTag, instance: g.instance, reason: "no ready replacements (blocked) — run manually" });
-      continue;
-    }
+    // Every burnt domain is REMOVED regardless of whether a replacement is
+    // available (Spencer + Nick, 2026-08-26 alignment call: "flagged domains
+    // should be removed regardless… they should not be in the reserve"). Until
+    // then a client whose replacements were blocked (no reserve, no redirect
+    // on file) was skipped entirely, so its burnt domains kept sending and
+    // kept counting — Nick's CCGW/JPCI Vimeo. Now: replacements go in when
+    // ready; when none are, the run is remove-only and the fill cron tops the
+    // client back up as reserve appears. Below-cap after removal is reported,
+    // not hidden.
+    const removeOnlyRun = g.ready.length === 0;
     slots--;
 
     // bound cross-instance moves per run; overflow donors wait for a later pass
@@ -181,7 +181,7 @@ export async function runAutoReplacement(
     if (dryRun) {
       result.executed.push({
         clientTag: g.clientTag, instance: g.instance, ok: true,
-        steps: [{ label: `DRY — would replace ${usedRepl.length} (${cross.length} cross-move) · remove ${g.items.length}`, state: "queued" }],
+        steps: [{ label: `DRY — would replace ${usedRepl.length} (${cross.length} cross-move) · remove ${g.items.length}${removeOnlyRun ? " · REMOVE-ONLY (no ready reserve — fill tops up later)" : ""}`, state: "queued" }],
       });
       continue;
     }
@@ -190,7 +190,7 @@ export async function runAutoReplacement(
     // the invocation dies mid-execution
     await logEvents([{
       instance: g.instance as BisonInstanceSlug, clientTag: g.clientTag, eventType: "proposed",
-      detail: `auto-runner: executing — ${usedRepl.length} replace (${cross.length} cross-move) · ${g.items.length} remove`,
+      detail: `auto-runner: executing — ${usedRepl.length} replace (${cross.length} cross-move) · ${g.items.length} remove${removeOnlyRun ? " · remove-only (no ready reserve; fill tops up later)" : ""}`,
     }]).catch(() => {});
 
     let lastSteps: ExecStep[] = [];

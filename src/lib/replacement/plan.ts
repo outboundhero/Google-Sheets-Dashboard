@@ -13,6 +13,7 @@ import { deriveCampaignMap, type CampaignRef } from "./campaigns";
 import { capFor, getClientTiers } from "./client-tiers";
 import { getSkipSet, skipKey } from "./skips";
 import { recordFirstFlagged } from "./first-flagged";
+import { readClientTracker } from "./redirect-audit";
 
 // Cross-instance donor (Nick Aug-10): B2C instances with no local reserve pull
 // Inboxing-movable reserves from B2B #2. "For now" — single fixed donor.
@@ -190,6 +191,22 @@ export async function buildReplacementPlan(
   const redirectByTag = new Map<string, string>();
   for (const row of (redirectRows || []) as { client_tag: string; redirect_url: string }[]) {
     redirectByTag.set(row.client_tag.toUpperCase(), row.redirect_url);
+  }
+  // Client Tracker "Website" column is the source of truth for redirects (Nick
+  // 2026-08-22) — redirect-conform already reads it; the plan still read only
+  // client_redirects, so tags missing from that table (CCGDA, CCGFLBR, CCGRUT,
+  // AGCS…) sat blocked with "no redirect URL for tag" and their burnt domains
+  // were never replaced. Sheet wins per tag; client_redirects stays the
+  // fallback; a sheet read failure changes nothing (fail-open).
+  try {
+    const { websites } = await readClientTracker();
+    for (const [tag, site] of websites) {
+      const s = site.trim();
+      if (!s || /\s/.test(s) || !s.includes(".")) continue;
+      redirectByTag.set(tag.toUpperCase(), /^https?:\/\//i.test(s) ? s : `https://${s}`);
+    }
+  } catch (e) {
+    console.error("[PLAN] tracker website read failed; using client_redirects only:", e);
   }
   const campaignMap = await deriveCampaignMap();
   // Caps are per CLIENT TIER, not per instance (Nick 2026-08-13: Tier 0.5/1 =
