@@ -146,8 +146,11 @@ export async function scheduleCancellations(
 export async function getHandledDomains(): Promise<Set<string>> {
   const supabase = getSupabaseAdmin();
   const set = new Set<string>();
-  let offset = 0;
-  while (true) {
+  const add = (rows: { instance: string; domain: string }[] | null) => {
+    for (const r of rows || []) set.add(`${r.instance}:${r.domain}`);
+  };
+
+  for (let offset = 0; ; offset += 1000) {
     const { data, error } = await supabase
       .from("domain_replacement_state")
       .select("instance,domain")
@@ -155,10 +158,41 @@ export async function getHandledDomains(): Promise<Set<string>> {
       .range(offset, offset + 999);
     if (error) throw new Error(error.message);
     if (!data || data.length === 0) break;
-    for (const r of data) set.add(`${r.instance}:${r.domain}`);
+    add(data);
     if (data.length < 1000) break;
-    offset += 1000;
   }
+
+  // A domain sitting in ANY deletion/cancellation queue is leaving — it must
+  // not count as reserve or as a client's live domain anywhere (Spencer + Nick
+  // 2026-08-26: "anything in the deletion queue should immediately stop
+  // appearing as usable reserve inventory"). Fail-open per table so a missing
+  // table never blanks the whole set.
+  try {
+    for (let offset = 0; ; offset += 1000) {
+      const { data, error } = await supabase
+        .from("duplicate_domain_deletions")
+        .select("instance,domain")
+        .eq("status", "pending")
+        .range(offset, offset + 999);
+      if (error) throw new Error(error.message);
+      if (!data || data.length === 0) break;
+      add(data);
+      if (data.length < 1000) break;
+    }
+  } catch (e) { console.error("[handled] duplicate_domain_deletions read failed:", e); }
+  try {
+    for (let offset = 0; ; offset += 1000) {
+      const { data, error } = await supabase
+        .from("replacement_cancellations")
+        .select("instance,domain")
+        .in("status", ["pending", "bridged", "held", "stale-hold"])
+        .range(offset, offset + 999);
+      if (error) throw new Error(error.message);
+      if (!data || data.length === 0) break;
+      add(data);
+      if (data.length < 1000) break;
+    }
+  } catch (e) { console.error("[handled] replacement_cancellations read failed:", e); }
   return set;
 }
 

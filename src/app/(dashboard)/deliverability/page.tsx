@@ -2241,11 +2241,70 @@ function DeliverabilityPageInner() {
   };
 
   // Reserve = domain has no client tags (may have other tags like "Cheap Inboxes", "JPTUC", etc.)
+  // Flag computation — ONE pass over the loaded domains, shared by the
+  // filter pipeline, every chip-count memo AND the row renderer.
+  //
+  // Nick 2026-08-19: flagging now runs off the replacement system's threshold
+  // GROUPS (per client tag/category, OR-of-AND rules) instead of the static
+  // low-reply/high-bounce cutoffs set months ago — and the reason names which
+  // OR group tripped (e.g. "1,500–4,499 sent: …"). The static rule remains
+  // only as a fallback while the config is loading or if it's disabled; the
+  // MRL pace cron still uses the static rule (its spec predates the groups).
+  const [thresholdCfg, setThresholdCfg] = useState<ThresholdConfig | null>(null);
+  useEffect(() => {
+    fetch("/api/replacement/threshold-groups")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((cfg) => { if (cfg && !cfg.error) setThresholdCfg(cfg); })
+      .catch(() => { /* fallback to the static rule */ });
+  }, []);
+
+  const flagMap = useMemo(() => {
+    const map = new Map<string, { reasons: string[]; flagged: boolean; replyIssue: boolean; bounceIssue: boolean }>();
+    const useGroups = thresholdCfg?.enabled === true;
+    for (const d of domains) {
+      let reasons: string[];
+      if (useGroups) {
+        const m: DomainMetrics = {
+          sent: d.total_sent || 0,
+          reply_10: d.reply_10 ?? null,
+          reply_15: d.reply_15 ?? null,
+          reply_30: d.reply_30 ?? null,
+          bounce_10: d.bounce_10 ?? null,
+          bounce_15: d.bounce_15 ?? null,
+          bounce_30: d.bounce_30 ?? null,
+          surbl: d.blacklisted ?? null,
+          spamhaus: d.spamhaus_dbl ?? null,
+        };
+        const tagsUpper = new Set((d.tags || []).map((t) => String(t).trim().toUpperCase()));
+        const v = evaluateSegments(m, tagsUpper, thresholdCfg!);
+        reasons = v.burnt ? [`${v.groupName}: ${v.reasons.join(", ")}`] : [];
+      } else {
+        reasons = getDomainFlagReasons(d);
+      }
+      const joined = reasons.join(" ").toLowerCase();
+      map.set(`${d.instance}:${d.domain}`, {
+        reasons,
+        flagged: reasons.length > 0,
+        replyIssue: joined.includes("repl"),
+        bounceIssue: joined.includes("bounce"),
+      });
+    }
+    return map;
+  }, [domains, thresholdCfg]);
+
+  // Reserve = USABLE inventory only (Spencer + Nick, 2026-08-26 alignment
+  // call: "flagged domains should not be in the reserve pool at all"). Untagged
+  // is necessary but not sufficient — a flagged/burnt domain or one already in
+  // a deletion queue is not something anyone may pull for a client.
   const isDomainReserve = useCallback((d: DomainRow) => {
     if (clientTags.size === 0) return false; // not loaded yet
-    if (!d.tags || d.tags.length === 0) return true;
-    return !d.tags.some((t) => clientTags.has(t));
-  }, [clientTags]);
+    const untagged = !d.tags || d.tags.length === 0 || !d.tags.some((t) => clientTags.has(t));
+    if (!untagged) return false;
+    const key = `${d.instance}:${d.domain}`;
+    if (flagMap.get(key)?.flagged) return false;
+    if (deleteQueue.has(key)) return false;
+    return true;
+  }, [clientTags, flagMap, deleteQueue]);
 
   const reserveCount = useMemo(() => domains.filter(isDomainReserve).length, [domains, isDomainReserve]);
   const isDomainAssigned = useCallback((d: DomainRow) => !isDomainReserve(d), [isDomainReserve]);
@@ -2302,56 +2361,7 @@ function DeliverabilityPageInner() {
     [domains, warmupFilter, warmupSearch, showReserve, warmupTypeFilter, tagFilters, tagMatchMode, isDomainReserve, now]
   );
 
-  // Flag computation — ONE pass over the loaded domains, shared by the
-  // filter pipeline, every chip-count memo AND the row renderer.
-  //
-  // Nick 2026-08-19: flagging now runs off the replacement system's threshold
-  // GROUPS (per client tag/category, OR-of-AND rules) instead of the static
-  // low-reply/high-bounce cutoffs set months ago — and the reason names which
-  // OR group tripped (e.g. "1,500–4,499 sent: …"). The static rule remains
-  // only as a fallback while the config is loading or if it's disabled; the
-  // MRL pace cron still uses the static rule (its spec predates the groups).
-  const [thresholdCfg, setThresholdCfg] = useState<ThresholdConfig | null>(null);
-  useEffect(() => {
-    fetch("/api/replacement/threshold-groups")
-      .then((r) => (r.ok ? r.json() : null))
-      .then((cfg) => { if (cfg && !cfg.error) setThresholdCfg(cfg); })
-      .catch(() => { /* fallback to the static rule */ });
-  }, []);
-
-  const flagMap = useMemo(() => {
-    const map = new Map<string, { reasons: string[]; flagged: boolean; replyIssue: boolean; bounceIssue: boolean }>();
-    const useGroups = thresholdCfg?.enabled === true;
-    for (const d of domains) {
-      let reasons: string[];
-      if (useGroups) {
-        const m: DomainMetrics = {
-          sent: d.total_sent || 0,
-          reply_10: d.reply_10 ?? null,
-          reply_15: d.reply_15 ?? null,
-          reply_30: d.reply_30 ?? null,
-          bounce_10: d.bounce_10 ?? null,
-          bounce_15: d.bounce_15 ?? null,
-          bounce_30: d.bounce_30 ?? null,
-          surbl: d.blacklisted ?? null,
-          spamhaus: d.spamhaus_dbl ?? null,
-        };
-        const tagsUpper = new Set((d.tags || []).map((t) => String(t).trim().toUpperCase()));
-        const v = evaluateSegments(m, tagsUpper, thresholdCfg!);
-        reasons = v.burnt ? [`${v.groupName}: ${v.reasons.join(", ")}`] : [];
-      } else {
-        reasons = getDomainFlagReasons(d);
-      }
-      const joined = reasons.join(" ").toLowerCase();
-      map.set(`${d.instance}:${d.domain}`, {
-        reasons,
-        flagged: reasons.length > 0,
-        replyIssue: joined.includes("repl"),
-        bounceIssue: joined.includes("bounce"),
-      });
-    }
-    return map;
-  }, [domains, thresholdCfg]);
+  // (flag computation moved above isDomainReserve — the Reserve view needs it)
 
   const getFlagReasons = useCallback(
     (d: DomainRow): string[] => flagMap.get(`${d.instance}:${d.domain}`)?.reasons ?? [],

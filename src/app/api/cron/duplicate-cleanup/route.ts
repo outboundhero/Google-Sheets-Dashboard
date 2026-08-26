@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { getSupabaseAdmin } from "@/lib/supabase";
-import { getDuplicateDomains, scheduleDeletions, type DupInstance } from "@/lib/replacement/duplicate-domains";
+import { getDuplicateDomains, scheduleDeletions, forceDeletionsNow, type DupInstance } from "@/lib/replacement/duplicate-domains";
 import { getActiveCampaignKeys } from "@/lib/replacement/campaigns";
 import { getKnownClientTags } from "@/lib/replacement/cross-tag-audit";
 import { getAllocations } from "@/lib/client-tag-allocations";
@@ -57,6 +57,14 @@ export async function GET(request: Request) {
     const params = new URL(request.url).searchParams;
     const dryRun = params.get("dry") === "1";
     const onlyDomain = (params.get("domain") || "").trim().toLowerCase();
+    // ?fire-pending=1 — one-off after the 2026-08-26 "immediate, not 3 days"
+    // decision: drop the remaining grace on rows this cron already queued so
+    // the 15-minute executor takes them on its next pass. Duplicate/move rows
+    // only; manual-source rows keep their own flow.
+    if (params.get("fire-pending") === "1") {
+      const moved = await forceDeletionsNow();
+      return NextResponse.json({ firedPending: moved });
+    }
 
     const supabase = getSupabaseAdmin();
     const [dups, activeKeys, knownTags, { map: allocation }] = await Promise.all([
@@ -207,9 +215,14 @@ export async function GET(request: Request) {
     }
 
     if (toSchedule.length > 0) {
+      // Immediate, not a 3-day window: Spencer + Nick 2026-08-26 alignment
+      // call — an overlapping copy is never the one sending, so a wait
+      // protects nothing and they want to wake up to zero duplicates. Grace 0
+      // = the 15-minute fire-scheduled-deletions executor takes it next pass.
+      // Ambiguous cases still never get here (needsHuman above).
       await scheduleDeletions(
         toSchedule.map((v) => ({ instance: v.del, domain: v.domain })),
-        { source: "duplicate" },
+        { source: "duplicate", graceDays: 0 },
       );
       await logEvents(
         toSchedule.map((v) => ({
