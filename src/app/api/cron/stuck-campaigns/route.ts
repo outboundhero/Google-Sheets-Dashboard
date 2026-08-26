@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { Redis } from "@upstash/redis";
 import { getSupabaseAdmin } from "@/lib/supabase";
+import { bisonFetch } from "@/lib/bison";
 import { recordPipelineAlert, listOpenAlerts, resolveAlert, pipelineAlertChannel } from "@/lib/pipeline-alerts";
 import { postSlackMessage } from "@/lib/slack";
 import { ALL_INSTANCE_SLUGS, INSTANCE_SHORT_LABELS, type BisonInstanceSlug } from "@/lib/bison-instances";
@@ -57,7 +58,22 @@ function getRedis(): Redis | null {
 
 export async function GET(request: Request) {
   try {
-    const dryRun = new URL(request.url).searchParams.get("dry") === "1";
+    const params = new URL(request.url).searchParams;
+    const dryRun = params.get("dry") === "1";
+    // ?probe=instance:id — raw Bison campaign JSON, read-only. Used to learn
+    // which field distinguishes a launch stuck in "Processing" from a queued
+    // campaign that is merely waiting for leads/schedule (first digest
+    // over-flagged the latter).
+    const probe = (params.get("probe") || "").trim();
+    if (probe) {
+      const [inst, id] = probe.split(":");
+      if (!ALL_INSTANCE_SLUGS.includes(inst as BisonInstanceSlug) || !id) {
+        return NextResponse.json({ error: "probe=instance:id" }, { status: 400 });
+      }
+      const res = await bisonFetch(inst as BisonInstanceSlug, `/campaigns/${encodeURIComponent(id)}`);
+      const json = await res.json().catch(() => null);
+      return NextResponse.json({ probe, httpStatus: res.status, campaign: json });
+    }
     const supabase = getSupabaseAdmin();
     const nowMs = Date.now();
 
