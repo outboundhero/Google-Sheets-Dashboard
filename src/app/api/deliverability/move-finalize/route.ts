@@ -13,7 +13,14 @@ export const maxDuration = 30;
 //   • partials: domains where not every inbox landed → NOTHING is deleted;
 //     flagged here via Slack ("Domain X: 9 of 49 inboxes didn't move") and by
 //     the dashboard progress panel. Safe to re-run the move to finish them.
-const MOVE_GRACE_DAYS = 1;
+// 0 = immediate (Spencer 2026-08-27: "delete all inboxes without fail once
+// the system reads that all inboxes have been successfully connected to the
+// target instance, instead of waiting 24 hours"). Verification is unchanged
+// and still the gate: only domains where EVERY inbox landed get here;
+// partials are never deleted. The executor picks the row up on its next
+// pass, so "immediate" = minutes, with the row visible (and cancelable) in
+// the delete queue until then.
+const MOVE_GRACE_DAYS = 0;
 
 const CHANNEL = () =>
   process.env.SLACK_OUTBOUND_CHANNEL_ID ||
@@ -46,7 +53,7 @@ export async function POST(request: Request) {
     const lines: string[] = [];
     if (scheduled > 0) {
       lines.push(
-        `:arrows_counterclockwise: Move to ${targetLabel}: *${scheduled}* domain${scheduled === 1 ? "" : "s"} fully verified — source cop${scheduled === 1 ? "y" : "ies"} auto-delete in ${MOVE_GRACE_DAYS * 24}h (cancel from the Duplicate domains card if needed).`,
+        `:arrows_counterclockwise: Move to ${targetLabel}: *${scheduled}* domain${scheduled === 1 ? "" : "s"} fully verified — source cop${scheduled === 1 ? "y" : "ies"} ${MOVE_GRACE_DAYS === 0 ? "queued for immediate deletion (next executor pass)" : `auto-delete in ${MOVE_GRACE_DAYS * 24}h`} (cancel from the Duplicate domains card if needed).`,
       );
     }
     if (partials.length > 0) {
