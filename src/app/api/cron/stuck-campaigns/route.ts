@@ -6,7 +6,9 @@ import { recordPipelineAlert, listOpenAlerts, resolveAlert, pipelineAlertChannel
 import { postSlackMessage } from "@/lib/slack";
 import { ALL_INSTANCE_SLUGS, INSTANCE_SHORT_LABELS, type BisonInstanceSlug } from "@/lib/bison-instances";
 
-export const maxDuration = 60;
+// Live per-campaign Bison checks (~20/run) took the v1 60s budget to a 504.
+export const maxDuration = 300;
+const RUN_BUDGET_MS = 240_000;
 
 // GET /api/cron/stuck-campaigns — hourly: any campaign, on any of the 4 Bison
 // instances, sitting in launch-processing for more than 24h raises a loud
@@ -110,8 +112,13 @@ export async function GET(request: Request) {
     const watching: { key: string; name: string; hours: number; note: string }[] = [];
     const pruned: string[] = [];
 
+    const startedAt = Date.now();
     for (const r of processing) {
       const k = keyOf(r);
+      if (Date.now() - startedAt > RUN_BUDGET_MS) {
+        watching.push({ key: k, name: r.name, hours: 0, note: "not checked — run budget exhausted, next hour" });
+        continue;
+      }
 
       // Live check — the synced status can be hours stale, and a campaign
       // deleted in Bison keeps its local row until something prunes it.
