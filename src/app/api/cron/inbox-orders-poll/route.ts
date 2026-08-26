@@ -3,7 +3,9 @@ import { getSupabaseAdmin } from "@/lib/supabase";
 import * as scaledmail from "@/lib/scaledmail";
 import * as milkbox from "@/lib/milkbox";
 import * as inboxing from "@/lib/inboxing";
-import { DEFAULT_INBOXING_ACCOUNT } from "@/lib/inboxing-accounts";
+import { DEFAULT_INBOXING_ACCOUNT, toInboxingAccount } from "@/lib/inboxing-accounts";
+import { inboxingConnectionFor } from "@/lib/replacement/inboxing-connections";
+import { isInstanceSlug, type BisonInstanceSlug } from "@/lib/bison-instances";
 import type { InboxOrder, ProviderStatusResult } from "@/types/inbox-order";
 
 export const maxDuration = 60;
@@ -56,6 +58,25 @@ export async function GET() {
       };
       if (r.completed && r.status === "active" && !row.completed_at) {
         update.completed_at = new Date().toISOString();
+        // Inboxing: going active is the moment the domain can be uploaded to
+        // its Bison instance. The create call never passes a platform
+        // connection (the 291-domain 2026-08-12 batch sat "active" with
+        // nothing in Bison — Ramon/Spencer), so upload here, to the instance
+        // the order was placed for. inbox-orders-upload retries/verifies hourly.
+        if (row.provider === "inboxing" && row.provider_domain_id && isInstanceSlug(row.instance)) {
+          try {
+            const account = toInboxingAccount(row.inboxing_account) ?? DEFAULT_INBOXING_ACCOUNT;
+            await inboxing.uploadDomainToPlatform(
+              row.provider_domain_id,
+              inboxingConnectionFor(row.instance as BisonInstanceSlug),
+              account,
+            );
+            update.setup_stage = "bison_upload_queued";
+          } catch (e) {
+            update.setup_stage = "bison_upload_failed";
+            update.failure_reason = (e instanceof Error ? e.message : "upload failed").slice(0, 500);
+          }
+        }
       }
       if (r.providerDomainId && !row.provider_domain_id) {
         update.provider_domain_id = r.providerDomainId;
