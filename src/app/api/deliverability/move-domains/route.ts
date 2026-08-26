@@ -15,6 +15,7 @@ import {
   toInboxingAccount,
   type InboxingAccount,
 } from "@/lib/inboxing-accounts";
+import { getHandledDomains } from "@/lib/replacement/store";
 
 export const maxDuration = 300;
 
@@ -433,6 +434,11 @@ export async function POST(request: Request) {
     // Phase 1 — per domain: validate, tag-sync, upload. Fast calls.
     interface InFlight { domain: string; source: BisonInstanceSlug; expected: number; senders?: SenderEmail[] }
     const inFlight: InFlight[] = [];
+    // A domain the system removed as burnt, or one queued for deletion, is
+    // leaving — moving it just plants a burnt copy in another instance where it
+    // looks clean (2026-08-27: ten ex-CWSV/DBSM domains, 12k–34k sends, moved
+    // OH → CO by hand). Refused here so neither the dialog nor the crons can.
+    const handled = await getHandledDomains().catch(() => new Set<string>());
     for (const domain of domains) {
       const rows = rowsByName.get(domain) || [];
       const src = resolveSource(rows, target);
@@ -440,6 +446,10 @@ export async function POST(request: Request) {
       if (rows.length === 1 && rows[0].instance === target) { results.push({ domain, status: "skipped", error: "already on target instance" }); continue; }
       if (!src) { results.push({ domain, status: "skipped", error: "exists on multiple instances — move manually" }); continue; }
       if (!hasInboxingTag(src.tags)) { results.push({ domain, status: "skipped", error: "not an Inboxing domain" }); continue; }
+      if (handled.has(`${src.instance}:${domain}`)) {
+        results.push({ domain, status: "skipped", error: "removed by the system (burnt) or queued for deletion — not movable; it should be deleted, not reused" });
+        continue;
+      }
 
       // Inboxing domain id: cached order id, else resolve by name.
       let ref = inboxingIds.get(domain) ?? null;

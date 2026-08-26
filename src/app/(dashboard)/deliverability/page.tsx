@@ -655,6 +655,18 @@ function DeliverabilityPageInner() {
   const [showDeleteQueue, setShowDeleteQueue] = useState(false);
   // Per-domain history dialog (every action the system took on it, and why).
   const [historyDomain, setHistoryDomain] = useState<string | null>(null);
+  // Domains the system considers LEAVING (removed/replacing/retired, or in a
+  // deletion/cancellation queue) — never reserve, badged so nobody reuses or
+  // moves them by hand. Viewer sessions can't read it → stays empty.
+  const [handledKeys, setHandledKeys] = useState<Set<string>>(() => new Set());
+  useEffect(() => {
+    let alive = true;
+    fetch("/api/replacement/handled", { cache: "no-store" })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((j) => { if (alive && j && Array.isArray(j.keys)) setHandledKeys(new Set<string>(j.keys)); })
+      .catch(() => { /* best-effort */ });
+    return () => { alive = false; };
+  }, []);
   const [deleteQueue, setDeleteQueue] = useState<
     Map<string, { reason: string | null; status: string; scheduledAt: string }>
   >(new Map());
@@ -2307,8 +2319,9 @@ function DeliverabilityPageInner() {
     const key = `${d.instance}:${d.domain}`;
     if (flagMap.get(key)?.flagged) return false;
     if (deleteQueue.has(key)) return false;
+    if (handledKeys.has(key)) return false;   // removed/burnt or queued — leaving, not inventory
     return true;
-  }, [clientTags, flagMap, deleteQueue]);
+  }, [clientTags, flagMap, deleteQueue, handledKeys]);
 
   const reserveCount = useMemo(() => domains.filter(isDomainReserve).length, [domains, isDomainReserve]);
   const isDomainAssigned = useCallback((d: DomainRow) => !isDomainReserve(d), [isDomainReserve]);
@@ -5049,6 +5062,14 @@ function DeliverabilityPageInner() {
                         >
                           <HistoryIcon className="h-3.5 w-3.5" />
                         </button>
+                        {handledKeys.has(`${d.instance}:${d.domain}`) && (
+                          <span
+                            className="shrink-0 text-[10px] px-1.5 py-0.5 rounded-full border border-amber-500/40 text-amber-500"
+                            title="The system removed this domain (burnt) or it is queued for deletion — not reserve, do not move or reuse it. Click History for why."
+                          >
+                            removed · do not reuse
+                          </span>
+                        )}
                         {flagged && (
                           <Tooltip>
                             <TooltipTrigger asChild>
