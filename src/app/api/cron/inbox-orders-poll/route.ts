@@ -3,8 +3,7 @@ import { getSupabaseAdmin } from "@/lib/supabase";
 import * as scaledmail from "@/lib/scaledmail";
 import * as milkbox from "@/lib/milkbox";
 import * as inboxing from "@/lib/inboxing";
-import { DEFAULT_INBOXING_ACCOUNT, toInboxingAccount } from "@/lib/inboxing-accounts";
-import { inboxingConnectionFor } from "@/lib/replacement/inboxing-connections";
+import { DEFAULT_INBOXING_ACCOUNT, toInboxingAccount, inboxingConnectionFor } from "@/lib/inboxing-accounts";
 import { isInstanceSlug, type BisonInstanceSlug } from "@/lib/bison-instances";
 import type { InboxOrder, ProviderStatusResult } from "@/types/inbox-order";
 
@@ -66,11 +65,10 @@ export async function GET() {
         if (row.provider === "inboxing" && row.provider_domain_id && isInstanceSlug(row.instance)) {
           try {
             const account = toInboxingAccount(row.inboxing_account) ?? DEFAULT_INBOXING_ACCOUNT;
-            await inboxing.uploadDomainToPlatform(
-              row.provider_domain_id,
-              inboxingConnectionFor(row.instance as BisonInstanceSlug),
-              account,
-            );
+            // Per-account connection (the Premium login has its own four).
+            const connection = inboxingConnectionFor(row.instance as BisonInstanceSlug, account);
+            if (!connection) throw new Error(`no Inboxing platform connection for ${row.instance} on the ${account} account`);
+            await inboxing.uploadDomainToPlatform(row.provider_domain_id, connection, account);
             update.setup_stage = "bison_upload_queued";
           } catch (e) {
             update.setup_stage = "bison_upload_failed";

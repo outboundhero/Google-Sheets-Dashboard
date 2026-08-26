@@ -1,8 +1,10 @@
 import { NextResponse } from "next/server";
 import { getSupabaseAdmin } from "@/lib/supabase";
 import * as inboxing from "@/lib/inboxing";
-import { DEFAULT_INBOXING_ACCOUNT, toInboxingAccount } from "@/lib/inboxing-accounts";
-import { inboxingConnectionFor } from "@/lib/replacement/inboxing-connections";
+// Account-aware connection map: the Premium ("sst") login has its OWN four
+// platform connections (cmsnu46…), separate from the regular login's — an sst
+// domain 404s under the regular key. Never use the instance-only helper here.
+import { DEFAULT_INBOXING_ACCOUNT, toInboxingAccount, inboxingConnectionFor } from "@/lib/inboxing-accounts";
 import { isInstanceSlug, type BisonInstanceSlug } from "@/lib/bison-instances";
 
 export const maxDuration = 300;
@@ -160,7 +162,13 @@ export async function GET(request: Request) {
     const failed: { domain: string; instance: string; error: string }[] = [];
     for (const o of batch) {
       const account = toInboxingAccount(o.inboxing_account) ?? DEFAULT_INBOXING_ACCOUNT;
-      const connection = inboxingConnectionFor(o.instance as BisonInstanceSlug);
+      const connection = inboxingConnectionFor(o.instance as BisonInstanceSlug, account);
+      if (!connection) {
+        const msg = `no Inboxing platform connection configured for ${o.instance} on the ${account} account`;
+        failed.push({ domain: o.domain, instance: o.instance, error: msg });
+        await supabase.from("inbox_orders").update({ setup_stage: STAGE_FAILED, failure_reason: msg, last_checked_at: new Date().toISOString() }).eq("id", o.id);
+        continue;
+      }
       try {
         const r = await inboxing.uploadDomainToPlatform(o.provider_domain_id!, connection, account);
         uploaded.push({ domain: o.domain, instance: o.instance, jobs: r.jobsCreated });
