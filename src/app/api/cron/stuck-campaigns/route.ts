@@ -165,7 +165,12 @@ export async function GET(request: Request) {
       if (hours >= THRESHOLD_HOURS) {
         stuck.push({ key: k, instance: r.instance, id: r.id, name: r.name, clientTag: r.client_tag, hours, since: at });
       } else {
-        watching.push({ key: k, name: r.name, hours, note: sendsMoved ? "sends moving — clock reset" : `no sends for ${hours}h, under threshold` });
+        watching.push({
+          key: k, name: r.name, hours,
+          note: sendsMoved
+            ? "sends moving — not stuck, clock reset"
+            : `sends frozen ${hours}h of 24h — watching since ${at.slice(11, 16)} UTC ${at.slice(5, 10)}`,
+        });
       }
     }
     stuck.sort((a, b) => b.hours - a.hours);
