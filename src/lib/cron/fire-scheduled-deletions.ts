@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { getSupabaseAdmin } from "@/lib/supabase";
 import { isInstanceSlug } from "@/lib/bison-instances";
 import { deleteDomainFromInstance } from "@/lib/deliverability/delete-domain";
+import { logEvents } from "@/lib/replacement/store";
 
 // Executor for the duplicate-domains "Remove + schedule delete" flow. When a
 // domain is scheduled, the card detaches its senders from that instance's
@@ -90,6 +91,15 @@ export async function runScheduledDeletions(
       const done = r.remainingInBison === 0 && r.failed === 0 && !r.verifyIncomplete;
       if (done) {
         await supabase.from("duplicate_domain_deletions").update({ status: "done" }).eq("instance", row.instance).eq("domain", row.domain);
+        // The final, irreversible step must be in the domain's history too
+        // (Spencer + Nick 2026-08-26: every action recorded with why, and
+        // "confirm the final deletion actually occurred").
+        await logEvents([{
+          instance: row.instance,
+          domain: row.domain,
+          eventType: "removed",
+          detail: `deleted from Bison (executor): ${r.inboxesDeleted} inbox(es) deleted, ${r.notFound} already gone — verified 0 remaining in ${row.instance}`,
+        }]).catch(() => {});
       } else {
         // deletes landed but verification was throttled → come back in minutes
         const soon = r.verifyIncomplete && r.failed === 0;

@@ -14,6 +14,7 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { replay } from "@/components/replacement/retry-card";
 import type { RetryPayload } from "@/lib/replacement/execute-runner";
+import { sourceOf, verbOf } from "@/lib/replacement/event-source";
 
 const INSTANCE_SHORT: Record<string, string> = {
   outboundhero: "OH1", cleaningoutbound: "CO1", facilityreach: "FR2", outboundclean: "OC2",
@@ -52,6 +53,12 @@ export function ReplacementStatusWidget() {
     const id = setTimeout(() => load("24h"), 0);
     return () => clearTimeout(id);
   }, [load]);
+  // Live: Spencer + Nick 2026-08-26 want to "see the bot working" without
+  // asking — refresh every minute while the dashboard is open.
+  useEffect(() => {
+    const id = setInterval(() => load(win), 60_000);
+    return () => clearInterval(id);
+  }, [load, win]);
 
   const pick = (w: Win) => { setWin(w); load(w); };
 
@@ -67,15 +74,18 @@ export function ReplacementStatusWidget() {
     }).catch(() => {});
   };
 
-  if (events !== null && events.length === 0 && win === "24h") return null; // quiet day → no box
-
+  // No self-hiding any more: an empty box that says "quiet" is itself the
+  // information Spencer asked for (is the bot working or not).
   const counts = { tagged: 0, attached: 0, whitelist: 0, removed: 0, errors: 0 };
+  const bySource = new Map<string, number>();
   for (const e of events || []) {
     if (e.eventType === "tagged") counts.tagged++;
     else if (e.eventType === "attached") counts.attached++;
     else if (e.eventType === "removed") counts.removed++;
     else if (e.eventType === "error") counts.errors++;
     if (e.detail?.toLowerCase().includes("whitelist")) counts.whitelist++;
+    const s = sourceOf(e.detail, e.eventType);
+    bySource.set(s, (bySource.get(s) ?? 0) + 1);
   }
 
   return (
@@ -85,11 +95,12 @@ export function ReplacementStatusWidget() {
           <div>
             <div className="flex items-center gap-2 text-sm font-medium">
               <Repeat className="h-4 w-4" />
-              Replacement status
+              System activity
+              <span className="inline-flex items-center gap-1 text-[10px] font-normal text-emerald-500"><span className="h-1.5 w-1.5 rounded-full bg-emerald-500 animate-pulse" /> live</span>
               {counts.errors > 0 && <Badge variant="outline" className="border-destructive/40 text-destructive">{counts.errors} need retry</Badge>}
             </div>
             <div className="text-[11px] text-muted-foreground">
-              What automatic replacement did — tags, campaigns, whitelist, removals. From the audit log.
+              Every automatic action and why — replacement, true-up fill/trim, moves, duplicate cleanup, redirect conform, deletions. Refreshes every minute.
             </div>
           </div>
           <div className="flex items-center gap-1.5">
@@ -113,6 +124,11 @@ export function ReplacementStatusWidget() {
               <span>Removed <b className="text-foreground">{counts.removed}</b></span>
               <span>Errors <b className={counts.errors ? "text-destructive" : "text-foreground"}>{counts.errors}</b></span>
             </div>
+            <div className="flex flex-wrap gap-1.5">
+              {[...bySource.entries()].sort((a, b) => b[1] - a[1]).map(([s, n]) => (
+                <span key={s} className="text-[10px] px-1.5 py-0.5 rounded-full border text-muted-foreground">{s} <b className="text-foreground">{n}</b></span>
+              ))}
+            </div>
             <div className="rounded-lg border divide-y max-h-[260px] overflow-y-auto">
               {(events || []).slice(0, 60).map((e) => (
                 <div key={e.id} className="flex items-center gap-2 px-3 py-1.5 text-xs">
@@ -121,8 +137,9 @@ export function ReplacementStatusWidget() {
                   </span>
                   <span className="font-medium w-[70px] shrink-0 truncate">{e.clientTag ?? "—"}</span>
                   <span className="text-muted-foreground w-[38px] shrink-0">{e.instance ? (INSTANCE_SHORT[e.instance] ?? e.instance) : ""}</span>
-                  <span className={`w-[86px] shrink-0 ${e.eventType === "error" ? "text-destructive" : ["tagged", "attached", "redirect_set"].includes(e.eventType) ? "text-emerald-500" : e.eventType === "removed" ? "text-amber-500" : "text-muted-foreground"}`}>{e.eventType}</span>
-                  <span className="truncate flex-1 text-muted-foreground" title={e.detail ?? ""}>{e.detail}</span>
+                  <span className={`w-[120px] shrink-0 ${e.eventType === "error" ? "text-destructive" : ["tagged", "attached", "redirect_set"].includes(e.eventType) ? "text-emerald-500" : ["removed", "cancel_queued"].includes(e.eventType) ? "text-amber-500" : "text-muted-foreground"}`}>{verbOf(e.eventType)}</span>
+                  <span className="text-[10px] px-1.5 py-0.5 rounded-full border text-muted-foreground shrink-0">{sourceOf(e.detail, e.eventType)}</span>
+                  <span className="truncate flex-1 text-muted-foreground" title={`${e.domain ?? ""} ${e.detail ?? ""}`}>{e.domain ? <span className="text-foreground/80 mr-1">{e.domain}</span> : null}{e.detail}</span>
                   {e.eventType === "error" && e.signals?.retry && (
                     retrying[e.id] && retrying[e.id] !== "running" ? (
                       <span className={retrying[e.id].startsWith("✓") ? "text-emerald-500 shrink-0" : "text-destructive shrink-0"}>{retrying[e.id]}</span>
@@ -138,8 +155,10 @@ export function ReplacementStatusWidget() {
             </div>
           </>
         )}
-        {events && events.length === 0 && win === "all" && (
-          <p className="text-xs text-muted-foreground italic">No replacement activity in the last 7 days.</p>
+        {events && events.length === 0 && (
+          <p className="text-xs text-muted-foreground italic">
+            {win === "24h" ? "Quiet — no automatic actions in the last 24 hours." : "No automatic actions in the last 7 days."}
+          </p>
         )}
       </CardContent>
     </Card>

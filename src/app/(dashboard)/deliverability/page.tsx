@@ -34,6 +34,8 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { PageHeader } from "@/components/shared/page-header";
 import { ShortageBanner } from "@/components/deliverability/shortage-banner";
+import { DomainHistoryDialog } from "@/components/deliverability/domain-history-dialog";
+import { History as HistoryIcon } from "lucide-react";
 import { AttachCampaignsDialog } from "@/components/deliverability/attach-campaigns-dialog";
 import { BulkTagDialog, type TagApplyInfo } from "@/components/deliverability/bulk-tag-dialog";
 import { BulkDeleteDialog } from "@/components/deliverability/bulk-delete-dialog";
@@ -651,6 +653,8 @@ function DeliverabilityPageInner() {
   // Delete-queue view: rows narrowed to domains awaiting vendor deletion,
   // perf columns swapped for the system's reason. Keyed `instance:domain`.
   const [showDeleteQueue, setShowDeleteQueue] = useState(false);
+  // Per-domain history dialog (every action the system took on it, and why).
+  const [historyDomain, setHistoryDomain] = useState<string | null>(null);
   const [deleteQueue, setDeleteQueue] = useState<
     Map<string, { reason: string | null; status: string; scheduledAt: string }>
   >(new Map());
@@ -3080,6 +3084,7 @@ function DeliverabilityPageInner() {
     <div className="space-y-6">
       {/* Spencer's Loom: no-domains-to-allocate must be visible up top here */}
       <ShortageBanner />
+      <DomainHistoryDialog domain={historyDomain} onClose={() => setHistoryDomain(null)} />
       <PageHeader
         title="Deliverability"
         description={(() => {
@@ -5036,6 +5041,14 @@ function DeliverabilityPageInner() {
                       <div className="flex items-center gap-2">
                         <Globe className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
                         <span className="font-medium text-sm truncate">{d.domain}</span>
+                        <button
+                          type="button"
+                          className="shrink-0 text-muted-foreground/60 hover:text-foreground"
+                          title="History — every action the system took on this domain, and why"
+                          onClick={(e) => { e.stopPropagation(); setHistoryDomain(d.domain); }}
+                        >
+                          <HistoryIcon className="h-3.5 w-3.5" />
+                        </button>
                         {flagged && (
                           <Tooltip>
                             <TooltipTrigger asChild>
