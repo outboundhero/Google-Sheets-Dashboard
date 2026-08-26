@@ -74,8 +74,16 @@ export async function GET(request: Request) {
     }
     if (orders.length === 0) return NextResponse.json({ clean: true, active: 0 });
 
-    // Presence per (instance, domain) from the deliverability crawl.
+    // Presence from the deliverability crawl — per (instance, domain) AND per
+    // domain across ALL instances. The all-instances view is the safety rail:
+    // an older order's recorded instance can differ from where the domain
+    // lives today (moved since, or pre-instance-column default), and the
+    // first dry-run showed 488 "absent" that way. Uploading a domain that
+    // already exists in another instance would mint exactly the cross-
+    // instance duplicates the cleanup cron exists to remove — so those are
+    // reported, never uploaded.
     const present = new Set<string>();
+    const presentAnywhere = new Map<string, string[]>();
     const names = [...new Set(orders.map((o) => o.domain))];
     for (let i = 0; i < names.length; i += 200) {
       const { data, error } = await supabase
@@ -83,7 +91,10 @@ export async function GET(request: Request) {
         .select("instance, domain")
         .in("domain", names.slice(i, i + 200));
       if (error) throw new Error(error.message);
-      for (const r of data || []) present.add(`${r.instance}:${r.domain}`);
+      for (const r of data || []) {
+        present.add(`${r.instance}:${r.domain}`);
+        presentAnywhere.set(r.domain, [...(presentAnywhere.get(r.domain) ?? []), r.instance]);
+      }
     }
 
     const nowMs = Date.now();
@@ -91,12 +102,18 @@ export async function GET(request: Request) {
     const markInBison: OrderRow[] = [];
     const awaiting: { domain: string; instance: string; queuedFor: string }[] = [];
     const unresolvable: { domain: string; reason: string }[] = [];
+    const inOtherInstance: { domain: string; orderedFor: string; livesIn: string[] }[] = [];
     let alreadyInBison = 0;
 
     for (const o of orders) {
       const inBison = present.has(`${o.instance}:${o.domain}`);
       if (o.setup_stage === STAGE_IN_BISON) { alreadyInBison++; continue; }
       if (inBison) { markInBison.push(o); continue; }
+      const elsewhere = presentAnywhere.get(o.domain);
+      if (elsewhere && elsewhere.length > 0) {
+        inOtherInstance.push({ domain: o.domain, orderedFor: o.instance, livesIn: elsewhere });
+        continue;
+      }
       if (!isInstanceSlug(o.instance)) { unresolvable.push({ domain: o.domain, reason: `unknown instance ${o.instance}` }); continue; }
       if (!o.provider_domain_id) { unresolvable.push({ domain: o.domain, reason: "no Inboxing domain id on the order" }); continue; }
       if (o.setup_stage === STAGE_QUEUED) {
@@ -118,6 +135,8 @@ export async function GET(request: Request) {
         toUpload: toUpload.length,
         thisRun: batch.map((o) => ({ domain: o.domain, instance: o.instance })),
         awaitingCrawl: awaiting.length,
+        inOtherInstance: inOtherInstance.length,
+        inOtherInstanceSample: inOtherInstance.slice(0, 10),
         unresolvable,
       });
     }
@@ -160,6 +179,7 @@ export async function GET(request: Request) {
       failed,
       remainingToUpload: Math.max(0, toUpload.length - batch.length),
       awaitingCrawl: awaiting,
+      inOtherInstance,
       unresolvable,
       sample: uploaded.slice(0, 10),
     });
