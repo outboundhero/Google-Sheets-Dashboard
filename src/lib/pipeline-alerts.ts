@@ -32,6 +32,9 @@ export interface AlertInput {
   step: string;
   reason: string;
   domains?: string[];
+  /** Record the alert (dashboard) without the per-alert Slack ping — for
+   *  callers that post ONE digest for many alerts instead (stuck-campaigns). */
+  silent?: boolean;
 }
 
 /** Target channel for pipeline failures: #leadsync-outbound — the same channel
@@ -90,9 +93,15 @@ export async function recordPipelineAlert(input: AlertInput): Promise<void> {
     });
   }
 
-  if (isNew || reasonChanged) {
+  if ((isNew || reasonChanged) && !input.silent) {
     await pingSlack(input, domains.length, isNew);
   }
+}
+
+/** The channel pipeline failures go to — exported so digest-style callers
+ *  post to the same place the per-alert pings do. */
+export function pipelineAlertChannel(): string {
+  return OUTBOUND_CHANNEL();
 }
 
 async function pingSlack(input: AlertInput, count: number, isNew: boolean): Promise<void> {

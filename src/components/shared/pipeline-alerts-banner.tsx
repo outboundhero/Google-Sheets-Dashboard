@@ -24,7 +24,11 @@ interface PipelineAlert {
 const SOURCE_LABEL: Record<string, string> = {
   "whitelist-queue": "Whitelist email",
   "send-to-sheet": "Sync to client's Domains tab",
+  "stuck-campaign": "Campaign stuck in Processing",
 };
+// Alerts that report an external condition — nothing in LeadSync to retry.
+// They auto-resolve when the condition clears; Dismiss only.
+const NO_RETRY_SOURCES = new Set(["stuck-campaign"]);
 
 const fetcher = async (url: string): Promise<PipelineAlert[]> => {
   const res = await fetch(url);
@@ -120,10 +124,12 @@ export function PipelineAlertsBanner() {
                 {note[a.id] && <div className="text-xs text-destructive">{note[a.id]}</div>}
               </div>
               <div className="flex items-center gap-2 shrink-0">
+                {!NO_RETRY_SOURCES.has(a.source) && (
                 <Button size="sm" variant="outline" className="gap-1.5 h-8" disabled={!!state} onClick={() => retry(a.id)}>
                   <RefreshCw className={`h-3.5 w-3.5 ${state === "retry" ? "animate-spin" : ""}`} />
                   {state === "retry" ? "Retrying…" : "Retry"}
                 </Button>
+                )}
                 <Button size="sm" variant="ghost" className="gap-1.5 h-8 text-muted-foreground" disabled={!!state} onClick={() => dismiss(a.id)}>
                   <X className="h-3.5 w-3.5" />
                   Dismiss
