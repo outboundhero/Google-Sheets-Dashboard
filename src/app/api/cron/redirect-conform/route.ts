@@ -106,8 +106,22 @@ export async function GET(request: Request) {
 
     // One fix per DOMAIN (redirects are domain-level at the provider), even
     // when the domain has rows on two instances — pick the first tagged row.
+    //
+    // Three kinds of mismatch, handled differently (2026-08-27):
+    //   missing      — observed nothing. Auto-fix.
+    //   cross-client — observed ANOTHER client's URL (a retag that never
+    //                  carried its redirect). Auto-fix: this is the JPWC/
+    //                  knoxville bug the cron exists for.
+    //   custom       — observed a URL that is nobody's sheet URL. Someone set
+    //                  it on purpose (CVJIND → a Gamma landing page while the
+    //                  sheet still says corvusjanitorial.com/...). Report only:
+    //                  the sheet may be the stale side, and auto-"fixing" it
+    //                  daily was a tug-of-war with a human.
+    const expectedNorms = new Map<string, string>(); // normalized expected → tag
+    for (const [t, u] of expectedByTag) expectedNorms.set(normalizeUrl(u), t);
     const seen = new Set<string>();
-    const mismatches: { domain: string; instance: string; tag: string; expected: string; observed: string }[] = [];
+    type Kind = "missing" | "cross-client" | "custom";
+    const mismatches: { domain: string; instance: string; tag: string; expected: string; observed: string; kind: Kind }[] = [];
     for (const r of rows) {
       if (seen.has(r.domain)) continue;
       if (!r.redirect_checked_at) continue;
@@ -117,26 +131,33 @@ export async function GET(request: Request) {
         .find((t) => expectedByTag.has(t));
       if (!tag) continue;
       const expected = expectedByTag.get(tag)!;
-      if (normalizeUrl(r.redirect_url) === normalizeUrl(expected)) continue;
+      const obsNorm = normalizeUrl(r.redirect_url);
+      if (obsNorm === normalizeUrl(expected)) continue;
       seen.add(r.domain);
-      mismatches.push({
-        domain: r.domain,
-        instance: r.instance,
-        tag,
-        expected,
-        observed: r.redirect_url || "(none)",
-      });
+      const kind: Kind = !obsNorm
+        ? "missing"
+        : expectedNorms.has(obsNorm) && expectedNorms.get(obsNorm) !== tag
+          ? "cross-client"
+          : "custom";
+      mismatches.push({ domain: r.domain, instance: r.instance, tag, expected, observed: r.redirect_url || "(none)", kind });
     }
+    const byKind = { missing: 0, "cross-client": 0, custom: 0 };
+    for (const m of mismatches) byKind[m.kind]++;
 
+    // Custom redirects are never auto-applied; everything else is (unless
+    // scoped by ?apply=TAGS, which also unlocks custom for those tags — an
+    // explicit operator decision).
     const toApply = applyTags.size > 0
       ? mismatches.filter((m) => applyTags.has(m.tag))
-      : mismatches;
+      : mismatches.filter((m) => m.kind !== "custom");
 
     if (dry || toApply.length === 0) {
       return NextResponse.json({
         dry,
         mismatches: mismatches.length,
+        byKind,
         applied: 0,
+        customNeedingHuman: mismatches.filter((m) => m.kind === "custom").slice(0, 100),
         sample: mismatches.slice(0, 50),
       });
     }
@@ -186,9 +207,11 @@ export async function GET(request: Request) {
 
     return NextResponse.json({
       mismatches: mismatches.length,
+      byKind,
       fixed,
       failed,
       remaining: Math.max(0, toApply.length - MAX_FIXES_PER_RUN),
+      customNeedingHuman: mismatches.filter((m) => m.kind === "custom").slice(0, 100),
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : "redirect-conform failed";

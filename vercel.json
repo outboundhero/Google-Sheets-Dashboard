@@ -72,6 +72,8 @@
 
     { "path": "/api/cron/inbox-orders-upload",   "schedule": "20 * * * *" },
 
-    { "path": "/api/cron/stuck-campaigns",       "schedule": "10 * * * *" }
+    { "path": "/api/cron/stuck-campaigns",       "schedule": "10 * * * *" },
+
+    { "path": "/api/cron/provider-redirect-sync",  "schedule": "5 * * * *" }
   ]
 }

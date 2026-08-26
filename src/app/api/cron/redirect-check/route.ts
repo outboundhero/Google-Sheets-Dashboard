@@ -17,7 +17,7 @@ export async function GET() {
     // Across runs this naturally cycles through the inventory.
     const { data, error } = await supabase
       .from("deliverability_domains")
-      .select("instance, domain")
+      .select("instance, domain, tags")
       .order("redirect_checked_at", { ascending: true, nullsFirst: true })
       .limit(BATCH_PULL_LIMIT);
 
@@ -26,7 +26,14 @@ export async function GET() {
       return NextResponse.json({ error: error.message }, { status: 500 });
     }
 
+    // Inboxing domains are masked by default — an HTTP walk sees a 200 page and
+    // no redirect, so this checker recorded "none" on hundreds that were set
+    // correctly. Their truth is the provider's configured redirect, written by
+    // provider-redirect-sync; this cron only walks the unmasked providers.
+    const isInboxing = (tags: unknown) =>
+      Array.isArray(tags) && tags.some((t) => String(t).trim().toLowerCase().startsWith("inboxing"));
     const pairs = (data || [])
+      .filter((r) => !isInboxing(r.tags))
       .map((r) => ({
         instance: r.instance as string,
         domain: (r.domain as string)?.trim().toLowerCase(),

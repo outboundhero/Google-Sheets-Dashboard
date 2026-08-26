@@ -5064,14 +5064,6 @@ function DeliverabilityPageInner() {
                         >
                           <HistoryIcon className="h-3.5 w-3.5" />
                         </button>
-                        {handledKeys.has(`${d.instance}:${d.domain}`) && (
-                          <span
-                            className="shrink-0 text-[10px] px-1.5 py-0.5 rounded-full border border-amber-500/40 text-amber-500"
-                            title="The system removed this domain (burnt) or it is queued for deletion — not reserve, do not move or reuse it. Click History for why."
-                          >
-                            removed · do not reuse
-                          </span>
-                        )}
                         {flagged && (
                           <Tooltip>
                             <TooltipTrigger asChild>
@@ -5094,6 +5086,14 @@ function DeliverabilityPageInner() {
                         )}
                       </div>
                       <div className="flex items-center gap-1.5 mt-1 ml-5 flex-wrap">
+                        {handledKeys.has(`${d.instance}:${d.domain}`) && (
+                          <span
+                            className="text-[10px] px-1.5 py-0.5 rounded-full border border-amber-500/40 text-amber-500"
+                            title="The system removed this domain (burnt) or it is queued for deletion — not reserve, do not move or reuse it. Click History for why."
+                          >
+                            removed · do not reuse
+                          </span>
+                        )}
                         {d.tags?.map((t) => (
                           <span key={t} className="text-[10px] bg-muted px-1.5 py-0.5 rounded text-muted-foreground">{t}</span>
                         ))}

@@ -292,6 +292,10 @@ export interface InboxingListedDomainWithLifecycle {
   name: string;
   /** Raw status string from the API — "active" | "failed" | "deleting" | "deleted" | "pending" | ... */
   status: string;
+  /** The redirect CONFIGURED at Inboxing (null when none). This is the truth
+   *  for masked (Cloudflare-proxied) redirects, which an HTTP walk cannot see —
+   *  it just gets a 200 page and reports "no redirect". */
+  redirectUrl: string | null;
 }
 
 /**
@@ -310,15 +314,17 @@ export async function listDomainsWithLifecycle(account: InboxingAccount = DEFAUL
   const perPage = 100;
   for (let page = 1; page < 500; page++) {
     const result = await call<{
-      data?: Array<{ id: string | number; domain: string; status?: string }>;
+      data?: Array<{ id: string | number; domain: string; status?: string; redirect_url?: string | null }>;
     }>("GET", `/domains?per_page=${perPage}&page=${page}`, undefined, false, account);
     const rows = result.data || [];
     for (const d of rows) {
       if (d?.id === undefined || !d?.domain) continue;
+      const ru = typeof d.redirect_url === "string" ? d.redirect_url.trim() : "";
       out.push({
         id: String(d.id),
         name: d.domain,
         status: typeof d.status === "string" ? d.status : "",
+        redirectUrl: ru || null,
       });
     }
     // Terminate when the page returns fewer than per_page rows (or empty).
