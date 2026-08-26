@@ -33,6 +33,13 @@ export const maxDuration = 300;
 // ?dry=1 preview · ?instance= filter · ?max= per-run cap (default 40).
 
 const DEFAULT_MAX = 40;
+// HOLD (2026-08-26): Ramon at Inboxing may upload the August Premium-Tenant
+// backlog by hand, and our connection IDs are unverified under the Premium
+// login. While held, the cron only VERIFIES (marks in_bison as the crawl
+// confirms) and reports — it uploads nothing unless called with ?force=1.
+// Flip to false once the backlog is in Bison and a canary upload has proven
+// the Premium-account connections.
+const UPLOAD_HOLD = true;
 const STAGE_QUEUED = "bison_upload_queued";
 const STAGE_IN_BISON = "in_bison";
 const STAGE_FAILED = "bison_upload_failed";
@@ -125,7 +132,9 @@ export async function GET(request: Request) {
       toUpload.push(o); // null stage or a previous failure → (re)try
     }
 
-    const batch = toUpload.slice(0, max);
+    const force = params.get("force") === "1";
+    const held = UPLOAD_HOLD && !force;
+    const batch = held ? [] : toUpload.slice(0, max);
 
     if (dryRun) {
       return NextResponse.json({
@@ -172,6 +181,7 @@ export async function GET(request: Request) {
     }
 
     return NextResponse.json({
+      held,
       active: orders.length,
       alreadyInBison: alreadyInBison + markInBison.length,
       markedInBison: markInBison.length,
