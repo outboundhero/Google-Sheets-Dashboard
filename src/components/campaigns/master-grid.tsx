@@ -20,7 +20,7 @@ const replyRate = (c: CampaignData) => (c.total_leads_contacted > 0 ? (c.unique_
 type SortKey = "campaign" | "stage" | "class" | "group" | "instance" | "status" | "remaining" | "leads" | "completion" | "senders" | "schedule" | "reply" | "start" | "golive" | "created";
 function compareBy(a: CampaignData, b: CampaignData, key: SortKey): number {
   switch (key) {
-    case "campaign": return a.name.localeCompare(b.name);
+    case "campaign": return (a.name || "").localeCompare(b.name || "");
     case "stage": return stageOrder(a.effective_stage || "") - stageOrder(b.effective_stage || "");
     case "class": return (a.classification || "").localeCompare(b.classification || "");
     case "group": return (a.group || 0) - (b.group || 0);
@@ -158,7 +158,7 @@ export function MasterGrid() {
       return true;
     });
     const dir = sortDir === "asc" ? 1 : -1;
-    return out.sort((a, b) => compareBy(a, b, sortKey) * dir || a.name.localeCompare(b.name));
+    return out.sort((a, b) => compareBy(a, b, sortKey) * dir || (a.name || "").localeCompare(b.name || ""));
   }, [campaigns, search, stages, status, classification, group, instanceFilter, tzFilter, complFilter, warnOnly, bucket, sortKey, sortDir, dupIssueTags, isMissing]);
 
   // Summary counts (reactive to filters).

@@ -120,10 +120,10 @@ export function CampaignDetailDrawer({ campaign, clientTags, onClose, onSaved }:
           <div>
             <div className="flex items-center gap-1.5 text-[11px] font-medium text-muted-foreground mb-1.5"><History className="h-3 w-3" /> History</div>
             {!hist ? <div className="text-[11px] text-muted-foreground">Loading…</div>
-              : hist.events.length === 0 ? <div className="text-[11px] text-muted-foreground">No events yet.</div>
+              : !hist.events?.length ? <div className="text-[11px] text-muted-foreground">No events yet.</div>
               : (
                 <div className="space-y-2 border-l pl-3">
-                  {hist.events.map((e) => (
+                  {(hist.events || []).map((e) => (
                     <div key={e.id} className="relative">
                       <div className="absolute -left-[15px] top-1 h-2 w-2 rounded-full bg-primary/60" />
                       <div className="flex items-center gap-1.5 text-[11px]">

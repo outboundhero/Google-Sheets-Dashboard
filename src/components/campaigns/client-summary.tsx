@@ -43,9 +43,9 @@ export function ClientSummary() {
   // Failed/blocked duplication actions per client tag.
   const dupIssues = useMemo(() => {
     const m = new Map<string, number>();
-    for (const j of dup?.jobs || []) for (const t of j.tags) {
-      const n = (t.counts.failed || 0) + (t.counts.blocked || 0);
-      if (n > 0) m.set(t.clientTag.toUpperCase(), (m.get(t.clientTag.toUpperCase()) || 0) + n);
+    for (const j of dup?.jobs || []) for (const t of j.tags || []) {
+      const n = (t.counts?.failed || 0) + (t.counts?.blocked || 0);
+      if (n > 0) { const tag = (t.clientTag || "").toUpperCase(); m.set(tag, (m.get(tag) || 0) + n); }
     }
     return m;
   }, [dup]);

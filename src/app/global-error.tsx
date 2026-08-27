@@ -13,19 +13,30 @@ import { useEffect } from "react";
 // global-error must render its own <html>/<body> — it replaces the root layout.
 export default function GlobalError({ error, reset }: { error: Error & { digest?: string }; reset: () => void }) {
   useEffect(() => {
+    if (typeof window === "undefined") return;
     const msg = `${error?.name || ""} ${error?.message || ""}`;
     const looksLikeStaleChunk = /ChunkLoadError|Loading chunk|Loading CSS chunk|Failed to fetch dynamically imported|error loading dynamically imported/i.test(msg);
-    if (!looksLikeStaleChunk || typeof window === "undefined") return;
     try {
       const now = Date.now();
-      const last = Number(sessionStorage.getItem("ls-chunk-reload-at") || 0);
-      // Only auto-reload once per 15s window so a persistent error can't loop.
-      if (now - last > 15_000) {
-        sessionStorage.setItem("ls-chunk-reload-at", String(now));
-        window.location.reload();
+      if (looksLikeStaleChunk) {
+        // Stale JS/CSS chunk after a deploy → hard-reload once to fetch the new build.
+        const last = Number(sessionStorage.getItem("ls-chunk-reload-at") || 0);
+        if (now - last > 15_000) {
+          sessionStorage.setItem("ls-chunk-reload-at", String(now));
+          window.location.reload();
+        }
+        return;
+      }
+      // Any other error: most are transient (a render that raced with mid-flight
+      // data). Silently recover ONCE so the user never sees this card. Rate-limited
+      // so a truly broken page can't loop: the second failure within 8s shows it.
+      const last = Number(sessionStorage.getItem("ls-err-reset-at") || 0);
+      if (now - last > 8_000) {
+        sessionStorage.setItem("ls-err-reset-at", String(now));
+        reset();
       }
     } catch { /* sessionStorage blocked — fall through to manual retry */ }
-  }, [error]);
+  }, [error, reset]);
 
   return (
     <html lang="en">
