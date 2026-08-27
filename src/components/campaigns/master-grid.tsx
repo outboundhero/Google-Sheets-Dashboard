@@ -135,8 +135,8 @@ export function MasterGrid() {
   // §28 connection-errors card: open campaign sync/connection alerts.
   const { data: alerts } = useSWR<{ alerts?: { source: string; status: string }[] } | { source: string; status: string }[]>("/api/pipeline-alerts", (u: string) => fetch(u).then((r) => r.json()));
   const connErrors = useMemo(() => {
-    const arr = Array.isArray(alerts) ? alerts : (alerts?.alerts || []);
-    return arr.filter((a) => (a.source || "").startsWith("campaigns")).length;
+    const arr = Array.isArray(alerts) ? alerts : Array.isArray(alerts?.alerts) ? alerts.alerts : [];
+    return arr.filter((a) => (a?.source || "").startsWith("campaigns")).length;
   }, [alerts]);
 
   const filtered = useMemo(() => {
