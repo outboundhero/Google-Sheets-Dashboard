@@ -92,7 +92,7 @@ export function MasterGrid() {
   // Client tags with a failed/blocked duplication → per-row warning (§3 warning status).
   const dupIssueTags = useMemo(() => {
     const s = new Set<string>();
-    for (const j of dupStatus?.jobs || []) for (const t of j.tags) if ((t.counts.failed || 0) + (t.counts.blocked || 0) > 0) s.add(t.clientTag.toUpperCase());
+    for (const j of dupStatus?.jobs || []) for (const t of j.tags || []) if (((t.counts?.failed || 0) + (t.counts?.blocked || 0)) > 0) s.add((t.clientTag || "").toUpperCase());
     return s;
   }, [dupStatus]);
   const hasWarning = (c: CampaignData) => c.status === "failed" || dupIssueTags.has((c.client_tag || "").toUpperCase());

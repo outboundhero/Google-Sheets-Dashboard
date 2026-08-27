@@ -44,8 +44,8 @@ export function DuplicationQueuePanel() {
     drainLoop();
   };
 
-  if (!data || data.jobs.length === 0) return null;
-  const t = data.totals;
+  if (!data || !Array.isArray(data.jobs) || data.jobs.length === 0) return null;
+  const t = data.totals || { total: 0, queued: 0, duplicating: 0, done: 0, failed: 0, blocked: 0, skipped: 0 };
   const finishedAll = t.queued === 0 && t.duplicating === 0 && t.blocked === 0;
   const pct = t.total > 0 ? Math.round(((t.done + t.skipped) / t.total) * 100) : 0;
 
@@ -79,7 +79,7 @@ export function DuplicationQueuePanel() {
       <div className="h-1 bg-muted"><div className="h-full bg-primary transition-all" style={{ width: `${pct}%` }} /></div>
 
       <div className="max-h-80 overflow-y-auto divide-y">
-        {data.jobs.flatMap((job) => job.tags.map((g) => (
+        {data.jobs.flatMap((job) => (job.tags || []).map((g) => (
           <div key={`${job.jobId}:${g.instance}:${g.clientTag}`} className="px-4 py-2.5">
             <div className="flex items-center justify-between gap-2 mb-1.5">
               <div className="flex items-center gap-2">
@@ -90,7 +90,7 @@ export function DuplicationQueuePanel() {
               <span className="text-[10px] text-muted-foreground tabular-nums">{g.counts.done}/{g.counts.total}</span>
             </div>
             <div className="space-y-1">
-              {g.items.map((it) => (
+              {(g.items || []).map((it) => (
                 <div key={it.id} className="flex items-center gap-2 text-[11px]">
                   <StatusDot status={it.status} />
                   <span className="text-muted-foreground/60 w-[92px] shrink-0">{setRoleLabel(it.setRole)}</span>
