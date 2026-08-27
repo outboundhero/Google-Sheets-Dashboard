@@ -83,7 +83,11 @@ async function retryAppendToSheet(
 ): Promise<{ ok: boolean; added?: number; duplicates?: number; reason?: string }> {
   if (!domains || domains.length === 0) return { ok: true, added: 0, duplicates: 0 };
   const config = await getConfig();
-  const tracked = config.sheets.find((s) => s.clientTag === clientTag);
+  // Exact tag, then bare prefix before ":" — same rule as send-to-sheet.
+  const bare = clientTag.split(":")[0].trim().toUpperCase();
+  const tracked =
+    config.sheets.find((s) => s.clientTag === clientTag) ??
+    config.sheets.find((s) => (s.clientTag || "").split(":")[0].trim().toUpperCase() === bare);
   if (!tracked) return { ok: false, reason: `No tracked sheet found for client tag "${clientTag}"` };
   try {
     const result = await appendDomainsToSheet(resolveSpreadsheetId(tracked), domains);

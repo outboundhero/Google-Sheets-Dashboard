@@ -80,9 +80,15 @@ export async function POST(request: Request) {
       );
     }
 
-    // Look up sheet directly from config (no Google Sheets API calls)
+    // Look up sheet directly from config (no Google Sheets API calls).
+    // Exact tag first, then bare prefix before ":" — sheets tracked as
+    // "CCGFTX: Leads" must match the domain tag "CCGFTX" (the ': Leads'
+    // suffix class of bug; first auto-run night, 2026-08-27).
     const config = await getConfig();
-    const tracked = config.sheets.find((s) => s.clientTag === clientTag);
+    const bare = clientTag.split(":")[0].trim().toUpperCase();
+    const tracked =
+      config.sheets.find((s) => s.clientTag === clientTag) ??
+      config.sheets.find((s) => (s.clientTag || "").split(":")[0].trim().toUpperCase() === bare);
     if (!tracked) {
       const reason = `No tracked sheet found for client tag "${clientTag}"`;
       // Loud failure: the domains never reached the client's Domains tab.
