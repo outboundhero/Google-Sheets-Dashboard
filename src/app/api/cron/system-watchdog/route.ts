@@ -118,11 +118,14 @@ export async function GET(request: Request) {
       add("redirect decisions", custom, `${custom} domain(s) point somewhere different from the tracker sheet on purpose — needs a human call`);
     }
 
-    // 5. Inboxing orders active but absent from Bison (the 487 class).
+    // 5. Inboxing orders active but absent from Bison (the 487 class). The
+    //    upload route now verifies candidates against Bison itself, so this
+    //    counts only LIVE-CONFIRMED absences — our own table lags the ~2-day
+    //    crawl and reported 439 phantom missing on 2026-08-28.
     {
       const j = await callDry(uploadDry, "/api/cron/inbox-orders-upload?dry=1");
-      const n = (j?.toUpload as number | undefined) ?? 0;
-      add("orders not in Bison", n, `${n} active Inboxing order(s) whose domain is in NO Bison instance`);
+      const n = (j?.liveConfirmedAbsent as number | undefined) ?? (j?.toUpload as number | undefined) ?? 0;
+      add("orders not in Bison", n, `${n} active Inboxing order(s) confirmed absent from Bison (checked live, not from our copy)`);
     }
 
     // 6. Open pipeline failures older than 24h — alerted once, then ignored.

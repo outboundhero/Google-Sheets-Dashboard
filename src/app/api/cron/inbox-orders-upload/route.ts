@@ -6,6 +6,7 @@ import * as inboxing from "@/lib/inboxing";
 // domain 404s under the regular key. Never use the instance-only helper here.
 import { DEFAULT_INBOXING_ACCOUNT, toInboxingAccount, inboxingConnectionFor } from "@/lib/inboxing-accounts";
 import { isInstanceSlug, type BisonInstanceSlug } from "@/lib/bison-instances";
+import { checkPresence } from "@/lib/deliverability/domain-in-bison";
 
 export const maxDuration = 300;
 
@@ -136,14 +137,35 @@ export async function GET(request: Request) {
 
     const force = params.get("force") === "1";
     const held = UPLOAD_HOLD && !force;
-    const batch = held ? [] : toUpload.slice(0, max);
+    // Final gate: our table's absence is not proof of absence (it lags the
+    // ~2-day crawl). Ask Bison about each candidate before uploading —
+    // 2026-08-28 this table said 439 were missing while Bison had them all.
+    // Only a definite "absent" from Bison proceeds; "unknown" waits.
+    const liveChecked = await checkPresence(
+      toUpload.slice(0, max * 2).map((o) => ({ instance: o.instance as BisonInstanceSlug, domain: o.domain })),
+      { deadlineMs: 90_000 },
+    );
+    const confirmedAbsent = toUpload.filter((o) => liveChecked.get(`${o.instance}:${o.domain}`) === "absent");
+    const liveFoundPresent = toUpload.filter((o) => liveChecked.get(`${o.instance}:${o.domain}`) === "present");
+    // Present in Bison but not yet in our copy → the crawl simply hasn't seen
+    // it; mark the order done so it stops being reported as missing.
+    if (!dryRun && liveFoundPresent.length > 0) {
+      for (const o of liveFoundPresent) {
+        await supabase.from("inbox_orders").update({ setup_stage: STAGE_IN_BISON, last_checked_at: new Date().toISOString() }).eq("id", o.id);
+      }
+    }
+    const batch = held ? [] : confirmedAbsent.slice(0, max);
 
     if (dryRun) {
       return NextResponse.json({
         dryRun: true,
         active: orders.length,
         alreadyInBison: alreadyInBison + markInBison.length,
-        toUpload: toUpload.length,
+        // Our table's view, then what Bison actually says about them.
+        missingPerOurTable: toUpload.length,
+        liveConfirmedAbsent: confirmedAbsent.length,
+        liveFoundPresent: liveFoundPresent.length,
+        toUpload: confirmedAbsent.length,
         thisRun: batch.map((o) => ({ domain: o.domain, instance: o.instance })),
         awaitingCrawl: awaiting.length,
         inOtherInstance: inOtherInstance.length,
