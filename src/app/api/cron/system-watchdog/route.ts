@@ -26,6 +26,12 @@ export const maxDuration = 300;
 
 const DIGEST_KEY = "cron:system-watchdog:last-digest";
 const REMINDER_HOURS = 24;
+// Slack MUTED (Vicky 2026-08-28): the first digests went to the shared
+// client channel before the findings had been reviewed — the client should
+// see this only once we've triaged what it reports. The checks keep running
+// and are readable via ?dry=1 / the JSON response; flip to false to resume
+// posting. Nothing else about the watchdog changes.
+const SLACK_MUTED = true;
 
 interface Finding { area: string; line: string; count: number }
 
@@ -299,6 +305,10 @@ export async function GET(request: Request) {
     // when nothing is wrong, the full digest when something is.
     const morning = new Date().getUTCHours() === 15;
     const reminderDue = !last || Date.now() - new Date(last.postedAt).getTime() > REMINDER_HOURS * 3600_000 || morning;
+
+    if (SLACK_MUTED) {
+      return NextResponse.json({ dryRun, muted: true, findings, signature, slack: { posted: false, reason: "slack muted" } });
+    }
 
     if (!dryRun && findings.length === 0 && morning) {
       const res = await postSlackMessage(
