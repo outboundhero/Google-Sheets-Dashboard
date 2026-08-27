@@ -23,6 +23,13 @@ export const maxDuration = 300;
 //   • only domains not already leaving (removed / queued for deletion)
 //   • ?domains=a.com,b.com restricts further; ?dry=1 previews
 //
+// ?allowAssigned=1 lifts ONLY the no-client-tag guard, and only for domains
+// named explicitly in ?domains= — for a reviewed list. Used 2026-08-28 for
+// the 57 client-assigned Burnt-tagged domains that PASS the group thresholds
+// (checked individually: reply 2-6%, low bounce). The one that failed was
+// left alone for the replacement engine to handle through the normal burnt
+// path. Never use this to clear labels in bulk without that per-domain check.
+//
 // The Burnt-tag reserve rule in code stays: a Burnt tag still means "do not
 // use" going forward. This only clears labels that predate Spencer's ruling.
 
@@ -33,6 +40,8 @@ export async function GET(request: Request) {
     const only = new Set(
       (params.get("domains") || "").split(",").map((d) => d.trim().toLowerCase()).filter(Boolean),
     );
+    // Reviewed-list mode: only meaningful with an explicit ?domains= list.
+    const allowAssigned = params.get("allowAssigned") === "1" && only.size > 0;
 
     const supabase = getSupabaseAdmin();
     const { data: knownRows } = await supabase.from("client_redirects").select("client_tag");
@@ -66,7 +75,7 @@ export async function GET(request: Request) {
       for (const d of data as { instance: string; domain: string; tags: string[] | null }[]) {
         const tags = (d.tags || []).map((t) => String(t).trim());
         if (!tags.some((t) => t.toLowerCase() === "burnt")) continue;
-        if (tags.some((t) => known.has(t.toUpperCase()))) continue;           // assigned to a client
+        if (!allowAssigned && tags.some((t) => known.has(t.toUpperCase()))) continue; // assigned to a client
         if (leaving.has(`${d.instance}:${d.domain}`)) continue;                // already leaving
         if (only.size > 0 && !only.has(d.domain.toLowerCase())) continue;
         if (!isInstanceSlug(d.instance)) continue;
