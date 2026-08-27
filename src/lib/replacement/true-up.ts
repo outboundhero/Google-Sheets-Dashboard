@@ -21,6 +21,7 @@ import { pstDateString } from "@/lib/date-utils";
 import { capFor, getClientTiers, type ClientTier } from "./client-tiers";
 import { deriveCampaignMap, getActiveCampaignKeys, type CampaignRef } from "./campaigns";
 import { hasBurntTag } from "./burnt-tag";
+import { getFrozenMetrics } from "./metric-freeze";
 import { getHandledDomains, getSettings } from "./store";
 import { getSkipSet, skipKey } from "./skips";
 import { evaluateSegments, type DomainMetrics, type ThresholdConfig } from "./threshold-groups";
@@ -184,6 +185,7 @@ export async function computeTrueUp(
   const groupConfig = opts.groupConfig ?? (await getThresholdConfig());
   const handled = await getHandledDomains();
   const skipSet = await getSkipSet();
+  const frozenMetrics = await getFrozenMetrics();
   const tiers = await getClientTiers();
   // An empty tier map is a failed Client Tracker read (Sheets quota, usually
   // during the big lead sync), never reality. Computing with it would mark
@@ -253,8 +255,12 @@ export async function computeTrueUp(
 
   // 3) burnt verdict — same detector the live plan runs on
   const enriched = domains.map((d) => {
+    const tag = clientTagOf(d.tags);
     const r = rateByKey.get(`${d.instance}:${d.domain}`);
-    const m: DomainMetrics = {
+    // Untagged (reserve) domains: judge by the frozen snapshot — idle decay
+    // must not make a healthy parked domain look burnt (metrics freeze).
+    const frozen = tag === null ? frozenMetrics.get(`${d.instance}:${d.domain}`) : undefined;
+    const m: DomainMetrics = frozen ?? {
       sent: d.total_sent ?? 0,
       reply_10: r?.reply_10 ?? null, reply_15: r?.reply_15 ?? null, reply_30: r?.reply_30 ?? null,
       bounce_10: r?.bounce_10 ?? null, bounce_15: r?.bounce_15 ?? null, bounce_30: r?.bounce_30 ?? null,
@@ -263,7 +269,7 @@ export async function computeTrueUp(
     const skipped = skipSet.has(skipKey(d.instance, d.domain));
     const tagsUpper = new Set((d.tags || []).map((t) => String(t).trim().toUpperCase()));
     const burnt = !skipped && evaluateSegments(m, tagsUpper, groupConfig).burnt;
-    return { d, m, provider: providerOf(d), tag: clientTagOf(d.tags), burnt, skipped };
+    return { d, m, provider: providerOf(d), tag, burnt, skipped };
   });
 
   // 4) reserve pools, gated exactly like plan.ts so the counts agree

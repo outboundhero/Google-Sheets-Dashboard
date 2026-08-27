@@ -74,6 +74,10 @@
 
     { "path": "/api/cron/stuck-campaigns",       "schedule": "10 * * * *" },
 
-    { "path": "/api/cron/provider-redirect-sync",  "schedule": "5 * * * *" }
+    { "path": "/api/cron/provider-redirect-sync",  "schedule": "5 * * * *" },
+
+    { "path": "/api/cron/system-watchdog",       "schedule": "55 * * * *" },
+
+    { "path": "/api/cron/metric-freeze",         "schedule": "45 * * * *" }
   ]
 }

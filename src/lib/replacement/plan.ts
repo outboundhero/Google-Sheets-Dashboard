@@ -15,6 +15,7 @@ import { getSkipSet, skipKey } from "./skips";
 import { recordFirstFlagged } from "./first-flagged";
 import { readClientTracker } from "./redirect-audit";
 import { hasBurntTag } from "./burnt-tag";
+import { getFrozenMetrics } from "./metric-freeze";
 
 // Cross-instance donor (Nick Aug-10): B2C instances with no local reserve pull
 // Inboxing-movable reserves from B2B #2. "For now" — single fixed donor.
@@ -261,7 +262,12 @@ export async function buildReplacementPlan(
   const burntVerdict = (d: DomRow): { burnt: boolean; reasons: string[] } => {
     if (burntSource === "groups" && groupConfig) {
       const rr = rateByKey.get(`${d.instance}:${d.domain}`);
-      const m: DomainMetrics = {
+      // Reserve domains are judged by their FROZEN snapshot (metrics as of
+      // when they last sent) — trailing windows decay toward null/zero while
+      // a domain sits idle, which made healthy parked domains look burnt
+      // (Spencer 2026-08-26, the metrics-freeze decision).
+      const frozen = clientTagOf(d.tags) === null ? frozenMetrics.get(`${d.instance}:${d.domain}`) : undefined;
+      const m: DomainMetrics = frozen ?? {
         sent: d.total_sent ?? 0,
         reply_10: rr?.reply_10 ?? null, reply_15: rr?.reply_15 ?? null, reply_30: rr?.reply_30 ?? null,
         bounce_10: rr?.bounce_10 ?? null, bounce_15: rr?.bounce_15 ?? null, bounce_30: rr?.bounce_30 ?? null,
@@ -284,6 +290,7 @@ export async function buildReplacementPlan(
   // (not replaced, not removed, not counted) — it stays put and keeps showing
   // health. Would-be-burnt skips are reported separately so the UI marks them.
   const skipSet = await getSkipSet();
+  const frozenMetrics = await getFrozenMetrics();
   const skippedBurnt: NonNullable<PlanResult["skippedBurnt"]>[number][] = [];
   const flaggedNow: { instance: string; domain: string }[] = [];
   const enriched: Enriched[] = domains.map((d) => {
