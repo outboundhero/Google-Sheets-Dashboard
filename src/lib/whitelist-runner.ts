@@ -5,6 +5,7 @@
 // ": Leads" suffix, so ReplyRouter lookups resolve to the bare client tag.
 import { fetchClientRecipients, sendWhitelistEmail } from "@/lib/whitelist-email";
 import { markSent, partitionByClientSubTags } from "@/lib/whitelist-queue";
+import { isWhitelistExempt } from "@/lib/whitelist-exempt";
 
 export interface WhitelistFailure {
   /** Which step broke: partition | drop-burnt | no-subtag | send. */
@@ -21,6 +22,8 @@ export interface WhitelistClientResult {
   sentDomains: number;
   burntDropped: number;
   failures: WhitelistFailure[];
+  /** Client is on the no-whitelist-email list — domains marked done, no send. */
+  exempt?: boolean;
 }
 
 /**
@@ -41,6 +44,16 @@ export async function runWhitelistForClient(
     burntDropped: 0,
     failures: [],
   };
+
+  // Exempt client (Spencer 2026-08-28, DM4PM → outside agency works the
+  // leads, so there is no client inbox to whitelist against): mark the
+  // domains complete and send nothing. No failure, no alert, no re-queue.
+  if (isWhitelistExempt(clientTag)) {
+    await markSent(clientTag, domains);
+    res.sentDomains = domains.length;
+    res.exempt = true;
+    return res;
+  }
 
   let partition;
   try {

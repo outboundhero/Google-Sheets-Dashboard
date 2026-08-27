@@ -98,6 +98,12 @@ export function MasterGrid() {
   const hasWarning = (c: CampaignData) => c.status === "failed" || dupIssueTags.has((c.client_tag || "").toUpperCase());
 
   const [search, setSearch] = useState("");
+  // Client-tag filter, multi-select (Nick 2026-08-28: "sometimes we have eight
+  // ten clients going live all at once" — pick or paste several tags and take
+  // them live in one pass). Empty = every client.
+  const [tagFilter, setTagFilter] = useState<Set<string>>(new Set());
+  const [tagOpen, setTagOpen] = useState(false);
+  const [tagSearch, setTagSearch] = useState("");
   const [stages, setStages] = useState<Set<string>>(new Set(["Main"])); // default: Main only
   const [status, setStatus] = useState("all");
   const [classification, setClassification] = useState("all");
@@ -127,6 +133,23 @@ export function MasterGrid() {
   const allClasses = useMemo(() => Array.from(new Set(campaigns.map((c) => c.classification || "").filter(Boolean))).sort(), [campaigns]);
   const allInstances = useMemo(() => Array.from(new Set(campaigns.map((c) => c.instance))).sort(), [campaigns]);
   const allTimezones = useMemo(() => Array.from(new Set(campaigns.map((c) => c.sched_timezone).filter(Boolean) as string[])).sort(), [campaigns]);
+  const allClientTags = useMemo(
+    () => Array.from(new Set(campaigns.map((c) => (c.client_tag || "").trim().toUpperCase()).filter(Boolean))).sort(),
+    [campaigns],
+  );
+  const toggleTag = (t: string) =>
+    setTagFilter((s) => { const n = new Set(s); if (n.has(t)) n.delete(t); else n.add(t); return n; });
+  /** Paste "DBSTN, JPCHI, CCGW" (or type one) → select every tag that exists. */
+  const addTagsFromText = (text: string) => {
+    const wanted = text.split(/[,\s]+/).map((t) => t.trim().toUpperCase()).filter(Boolean);
+    if (wanted.length === 0) return;
+    setTagFilter((s) => {
+      const n = new Set(s);
+      for (const w of wanted) if (allClientTags.includes(w)) n.add(w);
+      return n;
+    });
+    setTagSearch("");
+  };
   const lastUpdated = useMemo(() => campaigns.reduce((m, c) => (c.updated_at && c.updated_at > m ? c.updated_at : m), ""), [campaigns]);
   // §12 "Campaign Missing": rows whose sync went stale vs the newest sync (i.e.
   // no longer returned by Bison, so the sync stopped touching them).
@@ -144,9 +167,16 @@ export function MasterGrid() {
   }, [alerts]);
 
   const filtered = useMemo(() => {
-    const q = search.trim().toLowerCase();
+    // Comma-separated search: "DBSTN, JPCHI" matches EITHER, so several clients
+    // going live at once can be pulled up together (Nick 2026-08-28). A single
+    // term behaves exactly as before.
+    const terms = search.split(",").map((t) => t.trim().toLowerCase()).filter(Boolean);
     const out = campaigns.filter((c) => {
-      if (q && !(`${c.name} ${c.client_tag}`.toLowerCase().includes(q))) return false;
+      if (terms.length > 0) {
+        const hay = `${c.name} ${c.client_tag}`.toLowerCase();
+        if (!terms.some((t) => hay.includes(t))) return false;
+      }
+      if (tagFilter.size > 0 && !tagFilter.has((c.client_tag || "").trim().toUpperCase())) return false;
       if (stages.size > 0 && !stages.has(c.effective_stage || "Main")) return false;
       if (status !== "all" && c.status !== status) return false;
       if (classification !== "all" && (c.classification || "") !== classification) return false;
@@ -163,7 +193,7 @@ export function MasterGrid() {
     });
     const dir = sortDir === "asc" ? 1 : -1;
     return out.sort((a, b) => compareBy(a, b, sortKey) * dir || (a.name || "").localeCompare(b.name || ""));
-  }, [campaigns, search, stages, status, classification, group, instanceFilter, tzFilter, complFilter, warnOnly, bucket, sortKey, sortDir, dupIssueTags, isMissing]);
+  }, [campaigns, search, tagFilter, stages, status, classification, group, instanceFilter, tzFilter, complFilter, warnOnly, bucket, sortKey, sortDir, dupIssueTags, isMissing]);
 
   // Summary counts (reactive to filters).
   const summary = useMemo(() => {
@@ -258,8 +288,47 @@ export function MasterGrid() {
         <div className="flex flex-wrap items-center gap-2">
           <div className="flex items-center gap-2 rounded-lg border bg-background px-2.5 py-1.5 w-56">
             <Search className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
-            <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search name or client tag…" className="flex-1 text-xs bg-transparent outline-none placeholder:text-muted-foreground" />
+            <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search — comma-separate for several…" className="flex-1 text-xs bg-transparent outline-none placeholder:text-muted-foreground" />
             {search && <button onClick={() => setSearch("")}><X className="h-3 w-3 text-muted-foreground hover:text-foreground" /></button>}
+          </div>
+
+          {/* Client-tag multi-select: tick several, or paste a comma-separated
+              list, to work a whole launch batch at once. */}
+          <div className="relative">
+            <button onClick={() => setTagOpen((v) => !v)} className="flex items-center gap-1.5 rounded-lg border bg-background px-2.5 py-1.5 text-xs hover:bg-muted/40">
+              Client tags {tagFilter.size > 0 && <span className="rounded-full bg-primary/15 text-primary px-1.5 text-[10px]">{tagFilter.size}</span>}
+              <ChevronDown className="h-3 w-3 text-muted-foreground" />
+            </button>
+            {tagOpen && (
+              <>
+                <div className="fixed inset-0 z-30" onClick={() => setTagOpen(false)} />
+                <div className="absolute z-40 mt-1 w-64 rounded-lg border bg-card shadow-lg p-2 max-h-80 overflow-y-auto space-y-1.5">
+                  <input
+                    value={tagSearch}
+                    onChange={(e) => setTagSearch(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); addTagsFromText(tagSearch); } }}
+                    onPaste={(e) => {
+                      const text = e.clipboardData.getData("text");
+                      if (text.includes(",")) { e.preventDefault(); addTagsFromText(text); }
+                    }}
+                    placeholder="Paste DBSTN, JPCHI, CCGW…"
+                    className="w-full rounded border bg-background px-2 py-1 text-xs outline-none placeholder:text-muted-foreground"
+                  />
+                  <div className="flex items-center justify-between text-[10px] text-muted-foreground px-0.5">
+                    <span>{tagFilter.size} selected</span>
+                    {tagFilter.size > 0 && <button onClick={() => setTagFilter(new Set())} className="underline hover:text-foreground">Clear</button>}
+                  </div>
+                  {allClientTags
+                    .filter((t) => !tagSearch.trim() || t.includes(tagSearch.trim().toUpperCase()))
+                    .map((t) => (
+                      <button key={t} onClick={() => toggleTag(t)} className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-xs hover:bg-muted/40">
+                        <span className={`h-3.5 w-3.5 rounded border flex items-center justify-center ${tagFilter.has(t) ? "bg-primary border-primary text-primary-foreground" : "border-muted-foreground/30"}`}>{tagFilter.has(t) && <Check className="h-2.5 w-2.5" />}</span>
+                        {t}
+                      </button>
+                    ))}
+                </div>
+              </>
+            )}
           </div>
 
           {/* Stage multi-select */}
