@@ -133,9 +133,13 @@ export function MasterGrid() {
   const lastSync = useMemo(() => campaigns.reduce((m, c) => (c.synced_at && c.synced_at > m ? c.synced_at : m), ""), [campaigns]);
   const isMissing = useCallback((c: CampaignData) => !!(c.synced_at && lastSync && new Date(lastSync).getTime() - new Date(c.synced_at).getTime() > 2 * 86_400_000), [lastSync]);
   // §28 connection-errors card: open campaign sync/connection alerts.
-  const { data: alerts } = useSWR<{ alerts?: { source: string; status: string }[] } | { source: string; status: string }[]>("/api/pipeline-alerts", (u: string) => fetch(u).then((r) => r.json()));
+  // NOTE: this key is shared with PipelineAlertsBanner (mounted app-wide), which
+  // reads the cached value as PipelineAlert[]. SWR keeps ONE cache entry per key,
+  // so this fetcher MUST resolve to the same array shape — returning the raw
+  // {alerts} object here would poison the banner's cache and crash it. Keep it an array.
+  const { data: alerts } = useSWR<{ source: string; status: string }[]>("/api/pipeline-alerts", (u: string) => fetch(u).then((r) => r.json()).then((j) => (Array.isArray(j) ? j : j?.alerts || [])));
   const connErrors = useMemo(() => {
-    const arr = Array.isArray(alerts) ? alerts : Array.isArray(alerts?.alerts) ? alerts.alerts : [];
+    const arr = Array.isArray(alerts) ? alerts : [];
     return arr.filter((a) => (a?.source || "").startsWith("campaigns")).length;
   }, [alerts]);
 

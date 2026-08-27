@@ -33,8 +33,11 @@ const NO_RETRY_SOURCES = new Set(["stuck-campaign"]);
 const fetcher = async (url: string): Promise<PipelineAlert[]> => {
   const res = await fetch(url);
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  const json = (await res.json()) as { alerts?: PipelineAlert[] };
-  return json.alerts || [];
+  const json = await res.json();
+  // Tolerate either shape ({alerts:[…]} or a bare array) — this SWR key is shared
+  // with other consumers, so never assume which shape landed in the cache.
+  const arr = Array.isArray(json) ? json : json?.alerts;
+  return Array.isArray(arr) ? arr : [];
 };
 
 export function PipelineAlertsBanner() {
@@ -47,7 +50,7 @@ export function PipelineAlertsBanner() {
   const [note, setNote] = useState<Record<string, string>>({});
 
   // Blocked (viewer) or errored fetch → show nothing rather than a broken box.
-  if (error || !data || data.length === 0) return null;
+  if (error || !Array.isArray(data) || data.length === 0) return null;
 
   const retry = async (id: string) => {
     setBusy((b) => ({ ...b, [id]: "retry" }));
