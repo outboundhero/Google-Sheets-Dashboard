@@ -85,7 +85,9 @@ export function MasterGrid() {
   const { role } = useAuth();
   const isAdmin = role === "admin";
   const { instancesQuery } = useInstance();
-  const { campaigns, activeClients, isLoading, mutate } = useCampaigns(instancesQuery);
+  const { campaigns, activeClients, churnedClients, isLoading, mutate } = useCampaigns(instancesQuery);
+  const activeSet = useMemo(() => new Set(activeClients.map((t) => t.toUpperCase())), [activeClients]);
+  const churnedSet = useMemo(() => new Set(churnedClients.map((t) => t.toUpperCase())), [churnedClients]);
   const { data: dupStatus } = useSWR<{ totals: { queued: number; duplicating: number; failed: number; blocked: number }; jobs: { tags: { clientTag: string; counts: { failed: number; blocked: number } }[] }[] }>("/api/campaigns/duplicate", (u: string) => fetch(u).then((r) => r.json()), { refreshInterval: 15000 });
   const dupQueued = (dupStatus?.totals?.queued ?? 0) + (dupStatus?.totals?.duplicating ?? 0);
   const dupFailed = (dupStatus?.totals?.failed ?? 0) + (dupStatus?.totals?.blocked ?? 0);
@@ -105,6 +107,7 @@ export function MasterGrid() {
   const [tagOpen, setTagOpen] = useState(false);
   const [tagSearch, setTagSearch] = useState("");
   const [stages, setStages] = useState<Set<string>>(new Set(["Main"])); // default: Main only
+  const [clientStatus, setClientStatus] = useState("all"); // all | active | churned
   const [status, setStatus] = useState("all");
   const [classification, setClassification] = useState("all");
   const [group, setGroup] = useState("all");
@@ -177,6 +180,11 @@ export function MasterGrid() {
         if (!terms.some((t) => hay.includes(t))) return false;
       }
       if (tagFilter.size > 0 && !tagFilter.has((c.client_tag || "").trim().toUpperCase())) return false;
+      if (clientStatus !== "all") {
+        const tagU = (c.client_tag || "").trim().toUpperCase();
+        if (clientStatus === "active" && !activeSet.has(tagU)) return false;
+        if (clientStatus === "churned" && !churnedSet.has(tagU)) return false;
+      }
       if (stages.size > 0 && !stages.has(c.effective_stage || "Main")) return false;
       if (status !== "all" && c.status !== status) return false;
       if (classification !== "all" && (c.classification || "") !== classification) return false;
@@ -193,7 +201,7 @@ export function MasterGrid() {
     });
     const dir = sortDir === "asc" ? 1 : -1;
     return out.sort((a, b) => compareBy(a, b, sortKey) * dir || (a.name || "").localeCompare(b.name || ""));
-  }, [campaigns, search, tagFilter, stages, status, classification, group, instanceFilter, tzFilter, complFilter, warnOnly, bucket, sortKey, sortDir, dupIssueTags, isMissing]);
+  }, [campaigns, search, tagFilter, clientStatus, activeSet, churnedSet, stages, status, classification, group, instanceFilter, tzFilter, complFilter, warnOnly, bucket, sortKey, sortDir, dupIssueTags, isMissing]);
 
   // Summary counts (reactive to filters).
   const summary = useMemo(() => {
@@ -227,7 +235,23 @@ export function MasterGrid() {
   const toggleAll = () => setSelected(allSelected ? new Set() : new Set(filtered.map(keyOf)));
   const selectedRows = useMemo(() => filtered.filter((c) => selected.has(keyOf(c))), [filtered, selected]);
 
-  const refresh = async () => { setRefreshing(true); try { await mutate(); } finally { setRefreshing(false); } };
+  // Refresh = live-reconcile from Bison, not just a DB re-read: pull the current
+  // sender-account count (and send schedule) for the campaigns in view straight
+  // from Bison, so senders just attached show up immediately instead of waiting
+  // for the daily enrichment cron. Bounded to what's on screen — filter to a
+  // client tag/stage and the whole batch refreshes in a second or two.
+  const refresh = async () => {
+    setRefreshing(true);
+    try {
+      const items = filtered.slice(0, 150).map((c) => ({ instance: c.instance, id: c.id }));
+      if (items.length > 0) {
+        await fetch("/api/campaigns/refresh-senders", {
+          method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ items }),
+        }).catch(() => { /* fall back to a plain DB re-read below */ });
+      }
+      await mutate();
+    } finally { setRefreshing(false); }
+  };
 
   const runBulk = async (action: "pause" | "resume" | "archive") => {
     if (selectedRows.length === 0 || busy) return;
@@ -251,8 +275,8 @@ export function MasterGrid() {
     if (n.has(s)) n.delete(s); else n.add(s);
     return n;
   });
-  const clearFilters = () => { setSearch(""); setStages(new Set()); setStatus("all"); setClassification("all"); setGroup("all"); setInstanceFilter("all"); setTzFilter("all"); setComplFilter("all"); setWarnOnly(false); setBucket("all"); };
-  const anyFilter = search || stages.size || status !== "all" || classification !== "all" || group !== "all" || instanceFilter !== "all" || tzFilter !== "all" || complFilter !== "all" || warnOnly || bucket !== "all";
+  const clearFilters = () => { setSearch(""); setTagFilter(new Set()); setClientStatus("all"); setStages(new Set()); setStatus("all"); setClassification("all"); setGroup("all"); setInstanceFilter("all"); setTzFilter("all"); setComplFilter("all"); setWarnOnly(false); setBucket("all"); };
+  const anyFilter = search || tagFilter.size || clientStatus !== "all" || stages.size || status !== "all" || classification !== "all" || group !== "all" || instanceFilter !== "all" || tzFilter !== "all" || complFilter !== "all" || warnOnly || bucket !== "all";
 
   return (
     <div className="space-y-4">
@@ -352,6 +376,7 @@ export function MasterGrid() {
             )}
           </div>
 
+          <Select value={clientStatus} onChange={setClientStatus} options={[["all", "All clients"], ["active", "Active clients"], ["churned", "Churned clients"]]} />
           <Select value={status} onChange={setStatus} options={[["all", "All statuses"], ...allStatuses.map((s) => [s, s] as [string, string])]} />
           {allClasses.length > 0 && <Select value={classification} onChange={setClassification} options={[["all", "All classes"], ...allClasses.map((s) => [s, s] as [string, string])]} />}
           <Select value={group} onChange={setGroup} options={[["all", "All groups"], ["1", "Group 1"], ["2", "Group 2"]]} />
