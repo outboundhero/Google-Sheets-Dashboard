@@ -8,6 +8,7 @@ export function sourceOf(detail: string | null | undefined, kind?: string | null
   if (d.startsWith("true-up trim") || d.startsWith("trimmed")) return "true-up trim";
   if (d.startsWith("cross-instance move")) return "cross-instance move";
   if (d.startsWith("duplicate cleanup")) return "duplicate cleanup";
+  if (d.startsWith("burnt-reserve sweep")) return "burnt-reserve sweep";
   if (d.startsWith("stripped lingering") || d.startsWith("strip-removed")) return "stale-tag strip";
   if (d.startsWith("conform:")) return "redirect conform";
   if (d.startsWith("wrong-instance")) return "wrong-instance";
