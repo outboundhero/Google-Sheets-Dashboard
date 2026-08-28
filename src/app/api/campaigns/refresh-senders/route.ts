@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { getSupabaseAdmin } from "@/lib/supabase";
 import { bisonFetch } from "@/lib/bison";
 import { isInstanceSlug, type BisonInstanceSlug } from "@/lib/bison-instances";
+import { countCampaignSenders } from "@/lib/campaigns/sender-count";
 
 export const maxDuration = 60;
 
@@ -24,26 +25,18 @@ interface Item { instance: BisonInstanceSlug; id: number }
 // One campaign → live sender count + schedule, written back to Supabase.
 async function refreshOne(r: Item): Promise<{ instance: string; id: number; sender_count: number | null } | null> {
   const supabase = getSupabaseAdmin();
-  let senderCount: number | null = null;
   let sched: Record<string, unknown> | null = null;
+  // True attached-sender count via page-walk (meta.total under-reports here).
+  const senderCount = await countCampaignSenders(r.instance, r.id);
+  if (senderCount === null) return null; // couldn't read senders → don't overwrite with a guess
   try {
-    const [sendRes, schedRes] = await Promise.allSettled([
-      bisonFetch(r.instance, `/campaigns/${r.id}/sender-emails?per_page=1&page=1`),
-      bisonFetch(r.instance, `/campaigns/${r.id}/schedule`),
-    ]);
-    if (sendRes.status === "fulfilled" && sendRes.value.ok) {
-      const j = await sendRes.value.json().catch(() => null);
-      const total = j?.meta?.total;
-      senderCount = typeof total === "number" ? total : Array.isArray(j?.data) ? j.data.length : null;
-    } else {
-      return null; // couldn't read senders → don't overwrite the stored value with a guess
-    }
-    if (schedRes.status === "fulfilled" && schedRes.value.ok) {
-      const j = await schedRes.value.json().catch(() => null);
+    const schedRes = await bisonFetch(r.instance, `/campaigns/${r.id}/schedule`);
+    if (schedRes.ok) {
+      const j = await schedRes.json().catch(() => null);
       sched = (j?.data as Record<string, unknown>) ?? null;
     }
   } catch {
-    return null;
+    /* schedule optional — keep the sender count we already have */
   }
 
   const days = sched

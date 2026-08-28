@@ -164,6 +164,21 @@ export default function DashboardPage() {
       .sort((a, b) => new Date(b.churnDate!).getTime() - new Date(a.churnDate!).getTime());
   }, [trackerClients]);
 
+  // Bare churned tags (e.g. "CPGH / CPGA" → CPGH, CPGA; a ": Leads" suffix is
+  // stripped) so churned clients are dropped from the "no meeting-ready leads"
+  // panel — a churned client isn't something to chase for fresh leads.
+  const churnedTagSet = useMemo(() => {
+    const bare = (t: string) => t.split(":")[0].trim().toUpperCase();
+    const set = new Set<string>();
+    for (const c of churnedClients) for (const tok of c.clientAbbr.split(/\s*[&/]\s*/).map(bare).filter(Boolean)) set.add(tok);
+    return set;
+  }, [churnedClients]);
+  const flaggedClients = useMemo(() => {
+    const bare = (t: string) => t.split(":")[0].trim().toUpperCase();
+    const isChurned = (client: string) => client.split(/\s*[&/]\s*/).map(bare).some((t) => churnedTagSet.has(t));
+    return (analytics?.clientsWithoutRecentMeetingReady || []).filter((f) => !isChurned(f.client));
+  }, [analytics, churnedTagSet]);
+
   // Unique client tags for the filter dropdown
   const clientTags = useMemo(() => {
     const tags = new Set(sheets.map((s) => s.clientTag));
@@ -349,7 +364,7 @@ export default function DashboardPage() {
       )}
 
       {/* Stale Clients Alert */}
-      {analytics.clientsWithoutRecentMeetingReady.length > 0 && (
+      {flaggedClients.length > 0 && (
         <div className="rounded-xl border-2 border-amber-400 dark:border-amber-600 bg-amber-50 dark:bg-amber-950/30 p-5">
           <div className="flex items-start gap-4">
             <AlertTriangle className="h-7 w-7 text-amber-500 dark:text-amber-400 mt-0.5 shrink-0" />
@@ -359,7 +374,7 @@ export default function DashboardPage() {
                   Clients without meeting-ready leads for the past 4 days
                 </h2>
                 <p className="text-sm text-amber-700 dark:text-amber-400 mt-0.5">
-                  {analytics.clientsWithoutRecentMeetingReady.length} client{analytics.clientsWithoutRecentMeetingReady.length !== 1 ? "s" : ""} need attention — click the dot to set status, name to view leads
+                  {flaggedClients.length} client{flaggedClients.length !== 1 ? "s" : ""} need attention — click the dot to set status, name to view leads
                 </p>
                 {(() => {
                   const fmt = (iso?: string | null) => {
@@ -378,7 +393,7 @@ export default function DashboardPage() {
                 })()}
               </div>
               <div className="flex flex-wrap gap-2">
-                {analytics.clientsWithoutRecentMeetingReady.map(({ client, lastMeetingReadyDate, dataSyncedAt, stale }) => {
+                {flaggedClients.map(({ client, lastMeetingReadyDate, dataSyncedAt, stale }) => {
                   const status = (triageStatuses[client]?.status || "unreviewed") as TriageStatus;
                   const meta = TRIAGE_META[status];
                   const updatedBy = triageStatuses[client]?.updated_by;

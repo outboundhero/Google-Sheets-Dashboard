@@ -3,6 +3,7 @@ import { bisonFetch } from "@/lib/bison";
 import { ALL_INSTANCE_SLUGS, type BisonInstanceSlug } from "@/lib/bison-instances";
 import { runCampaignsSync } from "./sync-campaigns";
 import { recordPipelineAlert, resolveAlertsForClients } from "@/lib/pipeline-alerts";
+import { countCampaignSenders } from "@/lib/campaigns/sender-count";
 
 // The daily 12pm-PT campaigns reconcile:
 //   1. Full list-level sync of all 4 instances (counters, stage, first_sending_at).
@@ -65,19 +66,13 @@ export async function runCampaignsRefresh(): Promise<{ synced: Record<string, nu
 async function enrichOne(r: DueRow): Promise<boolean> {
   const supabase = getSupabaseAdmin();
   let sched: Record<string, unknown> | null = null;
-  let senderCount: number | null = null;
+  // True attached-sender count via page-walk (meta.total under-reports here).
+  const senderCount = await countCampaignSenders(r.instance, r.id);
   try {
-    const [schedRes, sendRes] = await Promise.allSettled([
-      bisonFetch(r.instance, `/campaigns/${r.id}/schedule`),
-      bisonFetch(r.instance, `/campaigns/${r.id}/sender-emails?per_page=1&page=1`),
-    ]);
-    if (schedRes.status === "fulfilled" && schedRes.value.ok) {
-      const j = await schedRes.value.json().catch(() => null);
+    const schedRes = await bisonFetch(r.instance, `/campaigns/${r.id}/schedule`);
+    if (schedRes.ok) {
+      const j = await schedRes.json().catch(() => null);
       sched = (j?.data as Record<string, unknown>) ?? null;
-    }
-    if (sendRes.status === "fulfilled" && sendRes.value.ok) {
-      const j = await sendRes.value.json().catch(() => null);
-      senderCount = (j?.meta?.total as number) ?? (Array.isArray(j?.data) ? j.data.length : null);
     }
   } catch { /* leave nulls; still stamp so we don't hot-loop this row */ }
 
@@ -85,16 +80,20 @@ async function enrichOne(r: DueRow): Promise<boolean> {
     ? { monday: !!sched.monday, tuesday: !!sched.tuesday, wednesday: !!sched.wednesday, thursday: !!sched.thursday, friday: !!sched.friday, saturday: !!sched.saturday, sunday: !!sched.sunday }
     : null;
 
+  const update: Record<string, unknown> = {
+    sched_start_time: (sched?.start_time as string) ?? null,
+    sched_end_time: (sched?.end_time as string) ?? null,
+    sched_timezone: (sched?.timezone as string) ?? null,
+    sched_days: days,
+    schedule_synced_at: new Date().toISOString(),
+  };
+  // Only overwrite the sender count when we actually got one — a failed walk
+  // must not wipe the last known-good value to null.
+  if (senderCount !== null) update.sender_count = senderCount;
+
   const { error } = await supabase
     .from("campaigns")
-    .update({
-      sched_start_time: (sched?.start_time as string) ?? null,
-      sched_end_time: (sched?.end_time as string) ?? null,
-      sched_timezone: (sched?.timezone as string) ?? null,
-      sched_days: days,
-      sender_count: senderCount,
-      schedule_synced_at: new Date().toISOString(),
-    })
+    .update(update)
     .eq("instance", r.instance)
     .eq("id", r.id);
   return !error;
