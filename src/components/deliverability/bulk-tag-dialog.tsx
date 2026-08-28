@@ -151,14 +151,35 @@ export function BulkTagDialog({
   const loadCampaignsForTags = useCallback(async (newTagNames: string[]) => {
     setCampaignsLoading(true);
     setPhase("campaigns");
+    const usable = (c: Campaign) =>
+      c.status.toLowerCase() !== "archived" && c.status.toLowerCase() !== "completed";
+    const allRelevantTags = [...new Set([...(existingTags || []), ...newTagNames])].filter(Boolean);
     try {
-      const res = await fetch(`/api/campaigns?all=1&${instancesQuery}`);
-      const data = await res.json();
-      const allCampaigns: Campaign[] = data.campaigns || (Array.isArray(data) ? data : []);
-      const allRelevantTags = new Set([...(existingTags || []), ...newTagNames]);
-      const matching = allCampaigns.filter((c) =>
-        c.status.toLowerCase() !== "archived" && c.status.toLowerCase() !== "completed" && allRelevantTags.has(c.client_tag)
+      // Ask Bison directly for these tags' campaigns. /api/campaigns serves the
+      // Supabase mirror, which a once-a-day cron rebuilds — anything created or
+      // renamed since the last run is missing from it, so the dialog silently
+      // offered a partial list and the rest had to be attached by hand in
+      // EmailBison (CVJORL, 2026-08-28). Live lookup is scoped by tag, so it
+      // stays a handful of small requests.
+      const liveRes = await fetch(
+        `/api/campaigns/by-tag?tags=${encodeURIComponent(allRelevantTags.join(","))}&${instancesQuery}`,
       );
+      const live = liveRes.ok ? await liveRes.json() : null;
+      const liveCampaigns: Campaign[] = (live?.campaigns || []).filter(usable);
+
+      // Union with the mirror: live is the source of truth for what exists now,
+      // but a failed per-instance lookup must not drop campaigns we already
+      // know about. Live wins on id collisions.
+      const mirrorRes = await fetch(`/api/campaigns?all=1&${instancesQuery}`).catch(() => null);
+      const mirrorData = mirrorRes && mirrorRes.ok ? await mirrorRes.json() : null;
+      const mirrorCampaigns: Campaign[] = (mirrorData?.campaigns || (Array.isArray(mirrorData) ? mirrorData : []) || [])
+        .filter((c: Campaign) => usable(c) && allRelevantTags.includes(c.client_tag));
+
+      const byKey = new Map<string, Campaign>();
+      for (const c of mirrorCampaigns) byKey.set(`${c.instance}:${c.id}`, c);
+      for (const c of liveCampaigns) byKey.set(`${c.instance}:${c.id}`, c);
+
+      const matching = [...byKey.values()].sort((a, b) => a.name.localeCompare(b.name));
       setCampaigns(matching);
       setSelectedCampaignIds(new Set(matching.map((c) => c.id)));
     } catch { setCampaigns([]); }
