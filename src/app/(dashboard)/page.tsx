@@ -166,13 +166,21 @@ export default function DashboardPage() {
 
   // Bare churned tags (e.g. "CPGH / CPGA" → CPGH, CPGA; a ": Leads" suffix is
   // stripped) so churned clients are dropped from the "no meeting-ready leads"
-  // panel — a churned client isn't something to chase for fresh leads.
+  // panel — a churned client isn't something to chase for fresh leads. Churned =
+  // status is "churned" AND the churn date has passed.
   const churnedTagSet = useMemo(() => {
+    const now = new Date();
     const bare = (t: string) => t.split(":")[0].trim().toUpperCase();
     const set = new Set<string>();
-    for (const c of churnedClients) for (const tok of c.clientAbbr.split(/\s*[&/]\s*/).map(bare).filter(Boolean)) set.add(tok);
+    for (const c of trackerClients) {
+      if ((c.status || "").trim().toLowerCase() !== "churned") continue;
+      if (!c.churnDate) continue;
+      const d = new Date(c.churnDate);
+      if (isNaN(d.getTime()) || d > now) continue;
+      for (const tok of c.clientAbbr.split(/\s*[&/]\s*/).map(bare).filter(Boolean)) set.add(tok);
+    }
     return set;
-  }, [churnedClients]);
+  }, [trackerClients]);
   const flaggedClients = useMemo(() => {
     const bare = (t: string) => t.split(":")[0].trim().toUpperCase();
     const isChurned = (client: string) => client.split(/\s*[&/]\s*/).map(bare).some((t) => churnedTagSet.has(t));

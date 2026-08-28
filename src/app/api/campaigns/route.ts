@@ -178,24 +178,15 @@ export async function GET(request: Request) {
     // Case-insensitive lookup set
     const activeClientsUpper = new Set(activeClientTags.map((t) => t.toUpperCase()));
 
-    // Churned client tags — status "churned", or a past churn date that wasn't
-    // re-activated (mirror of the active-exclusion rule above). Powers the grid's
-    // Active/Churned client filter. A tag that's active in any row wins (a client
-    // who returned isn't churned), so subtract the active set at the end.
+    // Churned client tags — status is "churned" AND the churn date has passed.
+    // Powers the grid's Active/Churned client filter. A tag that's active in any
+    // row wins (a client who returned isn't churned), so subtract the active set
+    // at the end.
     const isRowChurned = (r: (typeof tracker)[number]) => {
-      if (r.status.trim().toLowerCase() === "churned") return true;
-      if (r.churnDate) {
-        const churn = new Date(r.churnDate);
-        if (!isNaN(churn.getTime()) && churn <= now) {
-          const reactivated = [r.startDate, r.goLiveDate].some((d) => {
-            if (!d) return false;
-            const dt = new Date(d);
-            return !isNaN(dt.getTime()) && dt > churn;
-          });
-          return !reactivated;
-        }
-      }
-      return false;
+      if (r.status.trim().toLowerCase() !== "churned") return false;
+      if (!r.churnDate) return false;
+      const churn = new Date(r.churnDate);
+      return !isNaN(churn.getTime()) && churn <= now;
     };
     const churnedClientTags = [
       ...new Set(
