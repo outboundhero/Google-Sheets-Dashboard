@@ -84,7 +84,12 @@ export interface DomainReplacementState {
 
 export type ReplacementEventType =
   | "detected" | "proposed" | "tagged" | "redirect_set"
-  | "attached" | "removed" | "cancel_queued" | "skipped" | "error";
+  | "attached" | "removed" | "cancel_queued" | "skipped" | "error"
+  // warmup graduation (inbox ≥21d moved to full daily limit)
+  | "ramped"
+  // observe/confirm/auto flipped on the Replacement page — the audit trail
+  // Nick asked for after the silent Aug 17–26 observe window
+  | "mode_changed";
 
 export interface ReplacementEvent {
   id: number;

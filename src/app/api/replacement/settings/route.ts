@@ -1,5 +1,7 @@
 import { NextResponse } from "next/server";
-import { getSettings, updateSettings } from "@/lib/replacement/store";
+import { cookies } from "next/headers";
+import { createServerSupabaseClient } from "@/lib/supabase";
+import { getSettings, updateSettings, logEvents } from "@/lib/replacement/store";
 import type { ReplacementSettings, ReplacementMode, LookbackWindow } from "@/lib/replacement/types";
 
 // GET  /api/replacement/settings        → current guardrails
@@ -35,6 +37,33 @@ export async function PUT(request: Request) {
     if (body.flagOnSpamhaus !== undefined) patch.flagOnSpamhaus = Boolean(body.flagOnSpamhaus);
     if (body.minSignals !== undefined) patch.minSignals = Math.max(1, Math.floor(Number(body.minSignals)));
     if (body.minSent !== undefined) patch.minSent = Math.max(0, Math.floor(Number(body.minSent)));
+
+    // Mode is the switch that starts/stops the acting engine, and the Aug 17–26
+    // observe window was unattributable because nothing recorded the flip
+    // (Nick, 2026-08-29: "Why was the system in observe mode?" — we could not
+    // answer). Log every change with who saved it, BEFORE applying, so even a
+    // failed save attempt of a mode change leaves no gap. Best-effort: a
+    // logging failure must never block a settings save.
+    if (patch.mode !== undefined) {
+      try {
+        const before = await getSettings();
+        if (before.mode !== patch.mode) {
+          let actor = "unknown user";
+          try {
+            const { data: { user } } = await createServerSupabaseClient(await cookies()).auth.getUser();
+            if (user?.email) actor = user.email;
+          } catch { /* actor stays unknown */ }
+          await logEvents([{
+            eventType: "mode_changed",
+            detail: `mode changed: ${before.mode} → ${patch.mode} (saved from the Replacement page by ${actor})`,
+            signals: { from: before.mode, to: patch.mode, actor },
+          }]);
+        }
+      } catch (e) {
+        console.error("[settings] mode-change log failed:", e);
+      }
+    }
+
     return NextResponse.json(await updateSettings(patch));
   } catch (e) {
     return NextResponse.json({ error: e instanceof Error ? e.message : "Failed" }, { status: 500 });
