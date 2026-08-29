@@ -62,6 +62,46 @@ export async function readClientTracker(): Promise<{ websites: Map<string, strin
   return { websites, allTags };
 }
 
+/**
+ * clientTag(UPPER) → redirect URL, the way every replacement path must resolve it.
+ *
+ * Two sources, sheet wins: the Client Tracker "Website" column is the source of
+ * truth (Nick 2026-08-22) and `client_redirects` is the fallback for tags the
+ * sheet doesn't carry. A sheet read failure changes nothing (fail-open) — we
+ * simply serve the table, which is what the old behaviour was.
+ *
+ * This lives here, shared, because plan.ts and true-up.ts each had their own
+ * copy and they drifted: plan.ts was fixed to read the sheet, true-up.ts was
+ * not. 17 FacilityReach clients have no `client_redirects` row but a perfectly
+ * good website in the tracker, so the fill blocked them with "no redirect URL
+ * for tag" — refusing to allocate out of 267 usable reserve domains while 6
+ * clients sat short (2026-08-29). One implementation, one behaviour.
+ */
+export async function loadRedirectsByTag(): Promise<Map<string, string>> {
+  const supabase = getSupabaseAdmin();
+  const byTag = new Map<string, string>();
+
+  const { data: redirectRows } = await supabase.from("client_redirects").select("client_tag,redirect_url");
+  for (const row of (redirectRows || []) as { client_tag: string; redirect_url: string }[]) {
+    if (row.client_tag) byTag.set(row.client_tag.toUpperCase(), row.redirect_url);
+  }
+
+  try {
+    const { websites } = await readClientTracker();
+    for (const [tag, site] of websites) {
+      const s = site.trim();
+      // Skip junk cells: blanks, anything with whitespace (a note, not a URL),
+      // and anything without a dot (not a hostname).
+      if (!s || /\s/.test(s) || !s.includes(".")) continue;
+      byTag.set(tag.toUpperCase(), /^https?:\/\//i.test(s) ? s : `https://${s}`);
+    }
+  } catch (e) {
+    console.error("[redirects] tracker website read failed; using client_redirects only:", e);
+  }
+
+  return byTag;
+}
+
 interface DomRow { instance: string; domain: string; tags: string[] | null; redirect_url: string | null }
 
 export interface RedirectAuditResult {

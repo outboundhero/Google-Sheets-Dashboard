@@ -13,7 +13,7 @@ import { deriveCampaignMap, type CampaignRef } from "./campaigns";
 import { capFor, getClientTiers } from "./client-tiers";
 import { getSkipSet, skipKey } from "./skips";
 import { recordFirstFlagged } from "./first-flagged";
-import { readClientTracker } from "./redirect-audit";
+import { loadRedirectsByTag } from "./redirect-audit";
 import { hasBurntTag } from "./burnt-tag";
 import { getFrozenMetrics } from "./metric-freeze";
 
@@ -189,27 +189,13 @@ export async function buildReplacementPlan(
   }
 
   // 3) config maps
-  const { data: redirectRows } = await supabase.from("client_redirects").select("client_tag,redirect_url");
-  const redirectByTag = new Map<string, string>();
-  for (const row of (redirectRows || []) as { client_tag: string; redirect_url: string }[]) {
-    redirectByTag.set(row.client_tag.toUpperCase(), row.redirect_url);
-  }
-  // Client Tracker "Website" column is the source of truth for redirects (Nick
-  // 2026-08-22) — redirect-conform already reads it; the plan still read only
-  // client_redirects, so tags missing from that table (CCGDA, CCGFLBR, CCGRUT,
-  // AGCS…) sat blocked with "no redirect URL for tag" and their burnt domains
-  // were never replaced. Sheet wins per tag; client_redirects stays the
-  // fallback; a sheet read failure changes nothing (fail-open).
-  try {
-    const { websites } = await readClientTracker();
-    for (const [tag, site] of websites) {
-      const s = site.trim();
-      if (!s || /\s/.test(s) || !s.includes(".")) continue;
-      redirectByTag.set(tag.toUpperCase(), /^https?:\/\//i.test(s) ? s : `https://${s}`);
-    }
-  } catch (e) {
-    console.error("[PLAN] tracker website read failed; using client_redirects only:", e);
-  }
+  // Sheet-first redirect resolution (Client Tracker "Website" wins,
+  // client_redirects is the fallback) — shared with true-up via
+  // loadRedirectsByTag so the two can't disagree about whether a client has a
+  // redirect. Tags missing from client_redirects (CCGDA, CCGFLBR, CCGRUT,
+  // AGCS…) would otherwise sit blocked on "no redirect URL for tag" and their
+  // burnt domains never get replaced.
+  const redirectByTag = await loadRedirectsByTag();
   const campaignMap = await deriveCampaignMap();
   // Caps are per CLIENT TIER, not per instance (Nick 2026-08-13: Tier 0.5/1 =
   // 20 b2b + 5 b2c, Tier 2 = 40 b2b + 10 b2c). This used to read a flat

@@ -26,6 +26,7 @@ import { getHandledDomains, getSettings } from "./store";
 import { getSkipSet, skipKey } from "./skips";
 import { evaluateSegments, type DomainMetrics, type ThresholdConfig } from "./threshold-groups";
 import { getThresholdConfig } from "./threshold-groups-store";
+import { loadRedirectsByTag } from "./redirect-audit";
 
 const WARMUP_DAYS = 21; // matches plan.ts — a domain is usable once it's ≥ 21d old
 
@@ -202,11 +203,11 @@ export async function computeTrueUp(
 
   // A tag only counts as a client tag if something else in the system knows it
   // — same rule the plan uses, so the two agree on what a "client" is.
-  const redirectByTag = new Map<string, string>();
-  const { data: redirectRows } = await supabase.from("client_redirects").select("client_tag,redirect_url");
-  for (const r of (redirectRows || []) as { client_tag: string; redirect_url: string }[]) {
-    redirectByTag.set(r.client_tag.toUpperCase(), r.redirect_url);
-  }
+  // Sheet-first, same resolution the plan uses — see loadRedirectsByTag. This
+  // read used to be `client_redirects` only, which made "no redirect URL for
+  // tag" a fill blocker for the 17 FR clients whose redirect lives solely in
+  // the tracker's Website column.
+  const redirectByTag = await loadRedirectsByTag();
   const knownTags = new Set<string>(redirectByTag.keys());
   const eligibleKeys = new Set<string>();
   const campaignsByKey = new Map<string, CampaignRef[]>();
