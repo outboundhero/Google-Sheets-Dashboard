@@ -60,6 +60,7 @@ export function CancelDomainsDialog({ open, onOpenChange, selectedDomains }: Pro
   const [plan, setPlan] = useState<PlanResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [doneMsg, setDoneMsg] = useState<string>("");
+  const [progress, setProgress] = useState<string>("");
 
   // Snapshot the selection on the open transition only.
   useEffect(() => {
@@ -100,30 +101,55 @@ export function CancelDomainsDialog({ open, onOpenChange, selectedDomains }: Pro
   // Staged wind-down (Spencer 2026-07-29): both modes first throttle to 1/day +
   // remove from all campaigns; then cancel now (→ delete senders ~10 min later)
   // or cancel in 3 days (→ then delete). Server-orchestrated via one endpoint.
+  // One server call per BATCH, not per selection: a 384-domain selection in a
+  // single request times out at Vercel's 5-minute cap (Spencer's 504,
+  // 2026-08-29 — the throttle + remove-from-campaigns work alone exceeds it).
+  // Batches are sequential so provider/Bison rate limits see the same pacing
+  // as before; a failed batch is retried once, then reported, and the batches
+  // already processed stay done (safe — the endpoint is idempotent per domain).
+  const BATCH = 15;
   const run = async (mode: "immediate" | "delayed") => {
     if (cancelable.length === 0) return;
     setPhase("running");
     setError(null);
-    try {
-      const res = await fetch("/api/deliverability/schedule-cancellation", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ domains: cancelable.map((p) => p.domain), mode }),
-      });
-      const text = await res.text();
-      let data: { ok?: boolean; error?: string };
-      try { data = JSON.parse(text); } catch { throw new Error(`non-JSON response (HTTP ${res.status})`); }
-      if (!res.ok || data.error) throw new Error(data.error || `HTTP ${res.status}`);
-      setDoneMsg(
-        mode === "immediate"
-          ? `Throttled to 1/day, removed from campaigns, and cancelled ${cancelable.length} domain(s) at the vendor. Sender accounts delete from Bison in ~10 min.`
-          : `Throttled to 1/day and removed ${cancelable.length} domain(s) from campaigns. The vendor cancel (then Bison sender delete) fires automatically in 3 days.`,
-      );
-      setPhase("done");
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed");
-      setPhase("error");
+    const all = cancelable.map((p) => p.domain);
+    let done = 0;
+    const failedBatches: string[] = [];
+    for (let i = 0; i < all.length; i += BATCH) {
+      const batch = all.slice(i, i + BATCH);
+      let ok = false;
+      for (let attempt = 0; attempt < 2 && !ok; attempt++) {
+        try {
+          const res = await fetch("/api/deliverability/schedule-cancellation", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ domains: batch, mode }),
+          });
+          const text = await res.text();
+          let data: { ok?: boolean; error?: string };
+          try { data = JSON.parse(text); } catch { throw new Error(`non-JSON response (HTTP ${res.status})`); }
+          if (!res.ok || data.error) throw new Error(data.error || `HTTP ${res.status}`);
+          ok = true;
+        } catch (e) {
+          if (attempt === 1) failedBatches.push(`${batch[0]}…+${batch.length - 1}: ${e instanceof Error ? e.message : "failed"}`);
+          else await new Promise((r) => setTimeout(r, 3000));
+        }
+      }
+      if (ok) done += batch.length;
+      setProgress(`${Math.min(i + BATCH, all.length)}/${all.length} processed…`);
     }
+    if (done === 0) {
+      setError(`all batches failed — ${failedBatches[0] || "see console"}`);
+      setPhase("error");
+      return;
+    }
+    const failNote = failedBatches.length > 0 ? ` ${all.length - done} failed (re-run the dialog for just those).` : "";
+    setDoneMsg(
+      mode === "immediate"
+        ? `Throttled to 1/day, removed from campaigns, and cancelled ${done} domain(s) at the vendor.${failNote} Sender accounts delete from Bison in ~10 min.`
+        : `Throttled to 1/day and removed ${done} domain(s) from campaigns.${failNote} The vendor cancel (then Bison sender delete) fires automatically in 3 days.`,
+    );
+    setPhase("done");
   };
 
   return (
@@ -228,7 +254,7 @@ export function CancelDomainsDialog({ open, onOpenChange, selectedDomains }: Pro
 
         {phase === "running" && (
           <div className="flex items-center gap-2 rounded-md border px-3 py-2 text-sm text-muted-foreground">
-            <Loader2 className="h-4 w-4 animate-spin" /> Throttling, removing from campaigns…
+            <Loader2 className="h-4 w-4 animate-spin" /> Throttling, removing from campaigns… {progress}
           </div>
         )}
         {phase === "done" && (
