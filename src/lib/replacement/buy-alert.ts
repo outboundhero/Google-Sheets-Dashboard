@@ -10,6 +10,7 @@ import { getThresholdConfig } from "./threshold-groups-store";
 import { getActiveCampaignKeys } from "./campaigns";
 import { capFor, getClientTiers, type ClientTier } from "./client-tiers";
 import { getGoingLiveForecast } from "./going-live";
+import { getTaggedDomainCounts } from "./upcoming-stock";
 import { postSlackMessage } from "@/lib/slack";
 import {
   ALL_INSTANCE_SLUGS, getInstance, INSTANCE_SHORT_LABELS,
@@ -119,14 +120,21 @@ export async function runBuyAlert(opts: { force?: boolean; dryRun?: boolean } = 
   const upcomingUnassigned: { tag: string; startDate: string }[] = [];
   try {
     const forecast = await getGoingLiveForecast({});
-    for (const c of [...forecast.onNextFirst, ...forecast.onNextFifteenth, ...forecast.otherUpcoming]) {
-      if (c.source !== "startDate" || activeBuyTags.has(c.clientAbbr)) continue;
+    const candidates = [...forecast.onNextFirst, ...forecast.onNextFifteenth, ...forecast.otherUpcoming]
+      .filter((c) => c.source === "startDate" && !activeBuyTags.has(c.clientAbbr));
+    // Pre-provisioned stock: an upcoming client may already hold tagged
+    // domains (no campaigns yet, so invisible to the active math) — charge
+    // only what's MISSING, or five Sep-1 launches get their 20 re-bought.
+    const have = await getTaggedDomainCounts(candidates.map((c) => c.clientAbbr), ALL_INSTANCE_SLUGS);
+    for (const c of candidates) {
       if (c.group === null) { upcomingUnassigned.push({ tag: c.clientAbbr, startDate: c.date }); continue; }
       const clientTier = tiers.get(c.clientAbbr) ?? "1";
       for (const slug of ALL_INSTANCE_SLUGS) {
         if (getInstance(slug).group !== c.group) continue;
+        const need = Math.max(0, capFor(getInstance(slug).tier, clientTier) - (have.get(`${c.clientAbbr}:${slug}`) ?? 0));
+        if (need === 0) continue;
         const list = upcomingBySlug.get(slug) ?? [];
-        list.push({ tag: c.clientAbbr, startDate: c.date, need: capFor(getInstance(slug).tier, clientTier) });
+        list.push({ tag: c.clientAbbr, startDate: c.date, need });
         upcomingBySlug.set(slug, list);
       }
     }

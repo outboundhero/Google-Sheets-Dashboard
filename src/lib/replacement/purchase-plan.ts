@@ -7,6 +7,7 @@
 import { buildReplacementPlan } from "./plan";
 import { getGoingLiveForecast, type GoingLiveClient } from "./going-live";
 import { capFor, getClientTiers } from "./client-tiers";
+import { getTaggedDomainCounts } from "./upcoming-stock";
 import { ALL_INSTANCE_SLUGS, BISON_INSTANCES, getInstance } from "@/lib/bison-instances";
 
 /** Reserve buffer per CLIENT TAG (Spencer 2026-07-29): 3 on B2B instances,
@@ -67,10 +68,12 @@ export async function computePurchasePlan(): Promise<PurchasePlanResult> {
   const upcomingUnassigned: { clientTag: string; startDate: string }[] = [];
   try {
     const [forecast, tiers] = await Promise.all([getGoingLiveForecast({}), getClientTiers()]);
-    const all: GoingLiveClient[] = [...forecast.onNextFirst, ...forecast.onNextFifteenth, ...forecast.otherUpcoming];
+    const all: GoingLiveClient[] = [...forecast.onNextFirst, ...forecast.onNextFifteenth, ...forecast.otherUpcoming]
+      .filter((c) => c.source === "startDate" && !activeTags.has(c.clientAbbr));
+    // Charge only what's MISSING: pre-provisioned upcoming clients already
+    // hold tagged domains that the active math can't see (no campaigns yet).
+    const have = await getTaggedDomainCounts(all.map((c) => c.clientAbbr), ALL_INSTANCE_SLUGS);
     for (const c of all) {
-      if (c.source !== "startDate") continue;          // rule is a START-date rule
-      if (activeTags.has(c.clientAbbr)) continue;      // already counted by active math
       if (c.group === null) {
         upcomingUnassigned.push({ clientTag: c.clientAbbr, startDate: c.date });
         continue;
@@ -78,7 +81,8 @@ export async function computePurchasePlan(): Promise<PurchasePlanResult> {
       const clientTier = tiers.get(c.clientAbbr) ?? "1"; // unknown → conservative low cap
       for (const inst of ALL_INSTANCE_SLUGS) {
         if (BISON_INSTANCES[inst].group !== c.group) continue;
-        const need = capFor(BISON_INSTANCES[inst].tier, clientTier);
+        const need = Math.max(0, capFor(BISON_INSTANCES[inst].tier, clientTier) - (have.get(`${c.clientAbbr}:${inst}`) ?? 0));
+        if (need === 0) continue;
         const list = upcomingByInstance.get(inst) ?? [];
         list.push({ clientTag: c.clientAbbr, startDate: c.date, goLiveDate: c.goLiveDate, need });
         upcomingByInstance.set(inst, list);
