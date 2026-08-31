@@ -128,10 +128,15 @@ export async function createDomain(
       // Inboxing 400s the whole order on a non-letter in a sender name ("Only
       // letters numbers allowed"), so fold here too — the preview dialog can
       // hand us names an operator typed, which skip the generator's cleanup.
+      // Two holes closed after expertbuildingcare.com 400'd a whole order
+      // (Nick 2026-08-31): the `|| a.first_name` fallback sent the RAW name
+      // back when asciiName stripped it to nothing (fully non-Latin names),
+      // and the alias went out unfolded. Fall back to a neutral safe name
+      // instead, and fold the alias to what Inboxing's validator accepts.
       namesMap.set(k, {
-        first_name: asciiName(a.first_name) || a.first_name,
-        last_name: asciiName(a.last_name) || a.last_name,
-        email_prefix: a.alias,
+        first_name: asciiName(a.first_name) || "Alex",
+        last_name: asciiName(a.last_name) || "Taylor",
+        email_prefix: a.alias.toLowerCase().replace(/[^a-z0-9.]/g, "").replace(/^\.+|\.+$/g, "") || undefined,
       });
     }
   }

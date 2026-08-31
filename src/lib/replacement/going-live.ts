@@ -9,9 +9,19 @@ import { pstDateString } from "@/lib/date-utils";
 export interface GoingLiveClient {
   clientAbbr: string;
   companyName: string;
-  date: string;                            // YYYY-MM-DD (goLiveDate, else startDate)
+  /** Bucketing date: START date (Spencer 2026-08-31 — "start dates on the 1st
+   *  go to Group 2, on the 15th to Group 1"), falling back to go-live only
+   *  when no start date exists. Was go-live-first, which put clients starting
+   *  Sep 1 outside the 1st/15th buckets (all seven showed under 9/9). */
+  date: string;                            // YYYY-MM-DD (startDate, else goLiveDate)
   daysUntil: number;                       // relative to today (PST)
   source: "goLiveDate" | "startDate";
+  /** Readiness deadline: campaigns begin sending this day — domains must be
+   *  warmed by it. Shown alongside, never used for bucketing. */
+  goLiveDate: string | null;
+  /** Spencer's standing rule from the START date: 1st → Group 2, 15th →
+   *  Group 1, anything else → null (surface as unassigned, don't guess). */
+  group: 1 | 2 | null;
   status: string;
 }
 
@@ -55,18 +65,21 @@ export async function getGoingLiveForecast(opts: { horizonDays?: number } = {}):
 
     const go = parseSheetDate(row.goLiveDate);
     const start = parseSheetDate(row.startDate);
-    const date = go ?? start;
+    const date = start ?? go; // start-first — the 1st/15th buckets are a START-date rule
     if (!date) continue;
 
     const daysUntil = daysBetween(today, date);
     if (daysUntil < 0 || daysUntil > horizonDays) continue; // only future within horizon
 
+    const dayOfMonth = Number(date.slice(8, 10));
     upcoming.push({
       clientAbbr: abbr,
       companyName: row.companyName || abbr,
       date,
       daysUntil,
-      source: go ? "goLiveDate" : "startDate",
+      source: start ? "startDate" : "goLiveDate",
+      goLiveDate: go,
+      group: dayOfMonth === 1 ? 2 : dayOfMonth === 15 ? 1 : null,
       status: row.status?.trim() || "",
     });
   }

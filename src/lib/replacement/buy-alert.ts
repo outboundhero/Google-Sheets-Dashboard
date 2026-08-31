@@ -9,6 +9,7 @@ import { buildReplacementPlan } from "./plan";
 import { getThresholdConfig } from "./threshold-groups-store";
 import { getActiveCampaignKeys } from "./campaigns";
 import { capFor, getClientTiers, type ClientTier } from "./client-tiers";
+import { getGoingLiveForecast } from "./going-live";
 import { postSlackMessage } from "@/lib/slack";
 import {
   ALL_INSTANCE_SLUGS, getInstance, INSTANCE_SHORT_LABELS,
@@ -24,6 +25,9 @@ export interface BuyInstanceLine {
   clientsShort: number;
   domains: number; // domains to buy = Σ shortfall-to-live-cap across this instance's tags
   inboxes: number; // domains × 49
+  /** Of `domains`, how many are launch stock for upcoming start-date clients. */
+  upcomingDomains: number;
+  upcomingClients: number;
 }
 export interface BuyAlertResult {
   checkedAt: string;
@@ -87,6 +91,7 @@ export async function runBuyAlert(opts: { force?: boolean; dryRun?: boolean } = 
 
   interface Side { instance: BisonInstanceSlug; short: number }
   const rows: { b2b: Side; b2c: Side }[] = [];
+  const activeBuyTags = new Set<string>();
   for (const [tag, agg] of byTag) {
     const tier: ClientTier = tiers.get(tag) ?? "1";
     // dominant group = the one holding the most of this tag's domains
@@ -102,6 +107,31 @@ export async function runBuyAlert(opts: { force?: boolean; dryRun?: boolean } = 
       return { instance: slug, short: active ? Math.max(0, liveCap - have) : 0 };
     };
     rows.push({ b2b: build(slugs.b2b), b2c: build(slugs.b2c) });
+    activeBuyTags.add(tag.trim().toUpperCase());
+  }
+
+  // Upcoming launches (Spencer 2026-08-31: start on the 1st → Group 2, on the
+  // 15th → Group 1) — full launch stock per instance of the group, sized by
+  // tier cap. Already-active tags are the maintenance math's job. Start dates
+  // on neither day are listed unassigned, never guessed. Fail-open: a
+  // forecast read failure must not blank the maintenance list.
+  const upcomingBySlug = new Map<BisonInstanceSlug, { tag: string; startDate: string; need: number }[]>();
+  const upcomingUnassigned: { tag: string; startDate: string }[] = [];
+  try {
+    const forecast = await getGoingLiveForecast({});
+    for (const c of [...forecast.onNextFirst, ...forecast.onNextFifteenth, ...forecast.otherUpcoming]) {
+      if (c.source !== "startDate" || activeBuyTags.has(c.clientAbbr)) continue;
+      if (c.group === null) { upcomingUnassigned.push({ tag: c.clientAbbr, startDate: c.date }); continue; }
+      const clientTier = tiers.get(c.clientAbbr) ?? "1";
+      for (const slug of ALL_INSTANCE_SLUGS) {
+        if (getInstance(slug).group !== c.group) continue;
+        const list = upcomingBySlug.get(slug) ?? [];
+        list.push({ tag: c.clientAbbr, startDate: c.date, need: capFor(getInstance(slug).tier, clientTier) });
+        upcomingBySlug.set(slug, list);
+      }
+    }
+  } catch (e) {
+    console.error("[buy-alert] upcoming forecast read failed (maintenance list unaffected):", e);
   }
 
   const byInstance: BuyInstanceLine[] = ALL_INSTANCE_SLUGS.map((slug) => {
@@ -113,7 +143,14 @@ export async function runBuyAlert(opts: { force?: boolean; dryRun?: boolean } = 
       if (s.instance !== slug || s.short <= 0) continue;
       domains += s.short; clientsShort += 1;
     }
-    return { instance: slug, label: INSTANCE_SHORT_LABELS[slug], tier, clientsShort, domains, inboxes: domains * MAILBOXES_PER_DOMAIN };
+    const upcoming = upcomingBySlug.get(slug) ?? [];
+    const upcomingDomains = upcoming.reduce((s, u) => s + u.need, 0);
+    domains += upcomingDomains;
+    return {
+      instance: slug, label: INSTANCE_SHORT_LABELS[slug], tier, clientsShort,
+      domains, inboxes: domains * MAILBOXES_PER_DOMAIN,
+      upcomingDomains, upcomingClients: upcoming.length,
+    };
   });
 
   const totalDomains = byInstance.reduce((s, i) => s + i.domains, 0);
@@ -134,14 +171,23 @@ export async function runBuyAlert(opts: { force?: boolean; dryRun?: boolean } = 
     lines.push("Order these to bring every client up to its live cap, then add them to the matching instance:");
     for (const i of byInstance) {
       if (i.domains <= 0) continue;
+      const upcomingNote = i.upcomingClients > 0
+        ? ` (incl. *${i.upcomingDomains}* for ${i.upcomingClients} upcoming launch${i.upcomingClients === 1 ? "" : "es"})`
+        : "";
       lines.push(
         `• *${i.label}* (${i.tier.toUpperCase()}): buy *${i.domains}* domain${i.domains === 1 ? "" : "s"} ` +
-        `(~${i.inboxes.toLocaleString()} inboxes) · ${i.clientsShort} client${i.clientsShort === 1 ? "" : "s"} short`,
+        `(~${i.inboxes.toLocaleString()} inboxes) · ${i.clientsShort} client${i.clientsShort === 1 ? "" : "s"} short${upcomingNote}`,
       );
     }
     lines.push(`*Total: ${totalDomains} domain${totalDomains === 1 ? "" : "s"} (~${totalInboxes.toLocaleString()} inboxes)*`);
   }
-  lines.push(`_Tier-aware caps (col K) · detector: ${detector} · observe-only, nothing was bought._`);
+  if (upcomingUnassigned.length > 0) {
+    lines.push(
+      `⚠️ Start date is neither the 1st nor the 15th — no group assigned, not counted: ` +
+      upcomingUnassigned.map((u) => `${u.tag} (${u.startDate})`).join(", "),
+    );
+  }
+  lines.push(`_Tier-aware caps (col K) · active + upcoming (1st→G2, 15th→G1) · detector: ${detector} · observe-only, nothing was bought._`);
 
   const slack = await postSlackMessage(lines.join("\n"), channelId());
   return { ...base, alerted: slack.ok, slackReason: slack.reason };
