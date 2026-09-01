@@ -81,7 +81,10 @@ export async function getStockCounts(knownTagsUpper: Set<string>): Promise<Stock
       const { data, error } = await supabase
         .from("inbox_orders")
         .select("instance, domain")
-        .in("status", ["active", "pending", "processing"])
+        // NB: inbox_order_status is a Postgres enum — an unknown value in the
+        // filter errors the whole query (a phantom "processing" here zeroed
+        // the in-flight credit on the first deploy). Only real values.
+        .in("status", ["active", "pending"])
         .order("domain", { ascending: true })
         .range(off, off + 999);
       if (error) throw new Error(error.message);
