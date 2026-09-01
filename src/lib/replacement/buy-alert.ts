@@ -11,6 +11,7 @@ import { getActiveCampaignKeys } from "./campaigns";
 import { capFor, getClientTiers, type ClientTier } from "./client-tiers";
 import { getGoingLiveForecast } from "./going-live";
 import { getTaggedDomainCounts } from "./upcoming-stock";
+import { getStockCounts } from "./stock-counts";
 import { postSlackMessage } from "@/lib/slack";
 import {
   ALL_INSTANCE_SLUGS, getInstance, INSTANCE_SHORT_LABELS,
@@ -29,6 +30,16 @@ export interface BuyInstanceLine {
   /** Of `domains`, how many are launch stock for upcoming start-date clients. */
   upcomingDomains: number;
   upcomingClients: number;
+  /** Warmed, real, unassigned domains the fill can pull before anything is bought. */
+  usableReserve: number;
+  /** Ordered at the provider, not yet visible in Bison — bought, don't re-buy. */
+  inflight: number;
+  /** Active clients on this instance (drives the buffer floor). */
+  clientsActive: number;
+  /** max(0, domains − reserve − inflight): what fills every cap today. */
+  buyFill: number;
+  /** buyFill plus rebuilding the per-client reserve buffer (3 b2b / 2 b2c). */
+  buyWithBuffer: number;
 }
 export interface BuyAlertResult {
   checkedAt: string;
@@ -142,6 +153,13 @@ export async function runBuyAlert(opts: { force?: boolean; dryRun?: boolean } = 
     console.error("[buy-alert] upcoming forecast read failed (maintenance list unaffected):", e);
   }
 
+  // Stock credit (Nick 2026-09-02: count what we hold and what's already on
+  // order BEFORE telling anyone to buy) + the per-client reserve buffer
+  // (Spencer 2026-07-29: 3 per B2B client, 2 per B2C, kept unassigned).
+  const knownTagsUpper = new Set([...byTag.keys()].map((t) => t.toUpperCase()));
+  const stock = await getStockCounts(knownTagsUpper);
+  const BUFFER_B2B = 3, BUFFER_B2C = 2;
+
   const byInstance: BuyInstanceLine[] = ALL_INSTANCE_SLUGS.map((slug) => {
     const tier = getInstance(slug).tier;
     const isB2b = tier === "b2b";
@@ -154,15 +172,30 @@ export async function runBuyAlert(opts: { force?: boolean; dryRun?: boolean } = 
     const upcoming = upcomingBySlug.get(slug) ?? [];
     const upcomingDomains = upcoming.reduce((s, u) => s + u.need, 0);
     domains += upcomingDomains;
+
+    let clientsActive = 0;
+    for (const tag of byTag.keys()) {
+      if (activeKeys.has(`${tag.trim().toUpperCase()}:${slug}`)) clientsActive++;
+    }
+    clientsActive += upcoming.length; // launching clients need their buffer too
+    const usableReserve = stock.usableReserve[slug] ?? 0;
+    const inflight = stock.inflight[slug] ?? 0;
+    const bufferFloor = (isB2b ? BUFFER_B2B : BUFFER_B2C) * clientsActive;
+    const buyFill = Math.max(0, domains - usableReserve - inflight);
+    const buyWithBuffer = Math.max(0, domains + bufferFloor - usableReserve - inflight);
+
     return {
       instance: slug, label: INSTANCE_SHORT_LABELS[slug], tier, clientsShort,
       domains, inboxes: domains * MAILBOXES_PER_DOMAIN,
       upcomingDomains, upcomingClients: upcoming.length,
+      usableReserve, inflight, clientsActive, buyFill, buyWithBuffer,
     };
   });
 
   const totalDomains = byInstance.reduce((s, i) => s + i.domains, 0);
   const totalInboxes = totalDomains * MAILBOXES_PER_DOMAIN;
+  const totalBuyFill = byInstance.reduce((s, i) => s + i.buyFill, 0);
+  const totalBuyWithBuffer = byInstance.reduce((s, i) => s + i.buyWithBuffer, 0);
   const checkedAt = new Date().toISOString();
   const detector = useGroups ? "groups" as const : "guardrails" as const;
   const tierSource = tiers.size > 0 ? "client-tracker" as const : "default-tier-1" as const;
@@ -176,18 +209,18 @@ export async function runBuyAlert(opts: { force?: boolean; dryRun?: boolean } = 
   if (totalDomains === 0) {
     lines.push("✅ Every client is at its live cap — nothing to buy this week.");
   } else {
-    lines.push("Order these to bring every client up to its live cap, then add them to the matching instance:");
+    lines.push("Net of warmed reserve on hand and orders already in flight:");
     for (const i of byInstance) {
-      if (i.domains <= 0) continue;
+      if (i.domains <= 0 && i.buyWithBuffer <= 0) continue;
       const upcomingNote = i.upcomingClients > 0
-        ? ` (incl. *${i.upcomingDomains}* for ${i.upcomingClients} upcoming launch${i.upcomingClients === 1 ? "" : "es"})`
+        ? ` · ${i.upcomingClients} launching (${i.upcomingDomains} needed)`
         : "";
       lines.push(
-        `• *${i.label}* (${i.tier.toUpperCase()}): buy *${i.domains}* domain${i.domains === 1 ? "" : "s"} ` +
-        `(~${i.inboxes.toLocaleString()} inboxes) · ${i.clientsShort} client${i.clientsShort === 1 ? "" : "s"} short${upcomingNote}`,
+        `• *${i.label}* (${i.tier.toUpperCase()}): buy *${i.buyFill}* to fill caps, *${i.buyWithBuffer}* with buffers · ` +
+        `need ${i.domains} · reserve ${i.usableReserve} · in-flight ${i.inflight} · ${i.clientsShort} client${i.clientsShort === 1 ? "" : "s"} short${upcomingNote}`,
       );
     }
-    lines.push(`*Total: ${totalDomains} domain${totalDomains === 1 ? "" : "s"} (~${totalInboxes.toLocaleString()} inboxes)*`);
+    lines.push(`*Total: buy ${totalBuyFill} to fill every cap, or ${totalBuyWithBuffer} to also rebuild the per-client reserve buffers (3 per B2B client, 2 per B2C).*`);
   }
   if (upcomingUnassigned.length > 0) {
     lines.push(
