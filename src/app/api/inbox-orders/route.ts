@@ -22,8 +22,12 @@ import {
 
 export const maxDuration = 60;
 
-const DEFAULT_REDIRECT =
-  process.env.INBOX_ORDER_DEFAULT_REDIRECT_URL || "https://findlocalcommercialcleaning.com";
+// No default redirect (Spencer 2026-09-02: "we don't want the redirect to go
+// to anything"). Stock domains are created with NO redirect and stay that way
+// until the replacement system assigns them to a client and applies the
+// client's real website. The old placeholder default
+// (findlocalcommercialcleaning.com) is gone; INBOX_ORDER_DEFAULT_REDIRECT_URL
+// is intentionally no longer read.
 
 function isValidProvider(v: unknown): v is InboxOrderProvider {
   return v === "scaledmail" || v === "milkbox" || v === "inboxing";
@@ -67,15 +71,10 @@ export async function POST(request: Request) {
     const companyName = typeof body?.companyName === "string" ? body.companyName.trim() : null;
     const clientTag = typeof body?.clientTag === "string" ? body.clientTag.trim() : null;
     const redirectRaw = typeof body?.redirectUrl === "string" ? body.redirectUrl.trim() : "";
-    // Blank/omitted → default redirect (unchanged). An explicit "n/a" / "none" /
-    // "-" means the operator wants NO redirect → empty string, which the
-    // provider layer turns into its NONE endpoint. Previously "n/a" was stored
-    // verbatim and pushed to Inboxing as a REGULAR redirect (Ramon's bug).
-    const redirectUrl = !redirectRaw
-      ? DEFAULT_REDIRECT
-      : meansNoRedirect(redirectRaw)
-        ? ""
-        : redirectRaw;
+    // Blank/omitted and "n/a"/"none"/"-" all mean NO redirect → empty string,
+    // which the provider layer turns into its no-redirect state. Only an
+    // explicit URL sets a redirect at creation.
+    const redirectUrl = !redirectRaw || meansNoRedirect(redirectRaw) ? "" : redirectRaw;
 
     if (!isValidProvider(provider)) {
       return NextResponse.json({ error: "Invalid provider" }, { status: 400 });

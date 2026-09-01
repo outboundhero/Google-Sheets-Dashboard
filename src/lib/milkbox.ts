@@ -123,8 +123,15 @@ export async function createOrder(
     email_senders,
     domains: [
       {
+        // MilkBox's create spec lists redirect_url as part of the domain item
+        // and doesn't document it as nullable, so a no-redirect order is
+        // created with a transient placeholder and the strip-stock-redirects
+        // cron removes it via the DOCUMENTED path right after (their PATCH
+        // /redirect accepts null "to remove the redirect"). End state is the
+        // same no-redirect Spencer asked for, without risking create-time
+        // validation failures we can't test from here.
         name: input.domain,
-        redirect_url: input.redirectUrl,
+        redirect_url: input.redirectUrl || `https://${input.domain}`,
         mailboxes: input.aliases.length,
       },
     ],
