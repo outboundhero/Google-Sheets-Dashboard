@@ -80,6 +80,14 @@
 
     { "path": "/api/cron/metric-freeze",         "schedule": "45 * * * *" },
 
-    { "path": "/api/cron/blacklist-recheck",     "schedule": "30 * * * *" }
+    { "path": "/api/cron/blacklist-recheck",     "schedule": "30 * * * *" },
+
+    { "path": "/api/cron/strip-stock-redirects", "schedule": "35 5 * * *" },
+
+    { "path": "/api/cron/limit-policy",          "schedule": "5 6 * * *" },
+
+    { "path": "/api/cron/orphan-attach",         "schedule": "25 * * * *" },
+
+    { "path": "/api/cron/burnt-reserve-sweep",   "schedule": "50 7 * * *" }
   ]
 }
