@@ -8,6 +8,7 @@ import { buildReplacementPlan } from "./plan";
 import { getGoingLiveForecast, type GoingLiveClient } from "./going-live";
 import { capFor, getClientTiers } from "./client-tiers";
 import { getTaggedDomainCounts } from "./upcoming-stock";
+import { getStockCounts } from "./stock-counts";
 import { ALL_INSTANCE_SLUGS, BISON_INSTANCES, getInstance } from "@/lib/bison-instances";
 
 /** Reserve buffer per CLIENT TAG (Spencer 2026-07-29): 3 on B2B instances,
@@ -39,7 +40,12 @@ export interface InstancePurchase {
   upcomingNeed: number;
   upcomingClients: UpcomingClientNeed[];
   reserveFloor: number;     // buffer we want to keep
-  availableReserve: number; // current pull-able (outlook + google) reserve
+  /** Usable reserve by the allocator's own definition (getStockCounts): real
+   *  inboxes only, warmed, truly untagged. Same source as the Slack buy list
+   *  so the dashboard and Slack can never disagree. */
+  availableReserve: number;
+  /** Provider orders placed but not yet visible in Bison — owned, not re-buyable. */
+  inflight: number;
   toBuy: number;            // recommended purchase = max(0, capDeficit + upcoming + floor − available)
   shortClients: ShortClient[];
 }
@@ -92,6 +98,9 @@ export async function computePurchasePlan(): Promise<PurchasePlanResult> {
     console.error("[purchase-plan] upcoming-clients read failed (maintenance numbers unaffected):", e);
   }
 
+  // Same stock counters the Slack buy list uses — one definition everywhere.
+  const stock = await getStockCounts(new Set([...activeTags].map((t) => t.toUpperCase())));
+
   const byInstance: InstancePurchase[] = ALL_INSTANCE_SLUGS.map((inst) => {
     const rows = plan.clientAudit.filter((a) => a.instance === inst);
     const shortClients: ShortClient[] = rows
@@ -102,12 +111,12 @@ export async function computePurchasePlan(): Promise<PurchasePlanResult> {
     const capDeficit = shortClients.reduce((s, c) => s + c.short, 0);
     const upcomingClients = (upcomingByInstance.get(inst) ?? []).sort((a, b) => a.startDate.localeCompare(b.startDate) || a.clientTag.localeCompare(b.clientTag));
     const upcomingNeed = upcomingClients.reduce((s, c) => s + c.need, 0);
-    const r = plan.reserveReadyByInstance[inst];
-    const availableReserve = (r?.outlook ?? 0) + (r?.google ?? 0);
+    const availableReserve = stock.usableReserve[inst] ?? 0;
+    const inflight = stock.inflight[inst] ?? 0;
     const tier = getInstance(inst).tier;
     // floor = per-tag buffer × every client this instance will carry (active + launching)
     const reserveFloor = (tier === "b2b" ? BUFFER_PER_TAG_B2B : BUFFER_PER_TAG_B2C) * (rows.length + upcomingClients.length);
-    const toBuy = Math.max(0, capDeficit + upcomingNeed + reserveFloor - availableReserve);
+    const toBuy = Math.max(0, capDeficit + upcomingNeed + reserveFloor - availableReserve - inflight);
 
     return {
       instance: inst,
@@ -118,6 +127,7 @@ export async function computePurchasePlan(): Promise<PurchasePlanResult> {
       upcomingClients,
       reserveFloor,
       availableReserve,
+      inflight,
       toBuy,
       shortClients,
     };
