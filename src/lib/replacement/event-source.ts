@@ -10,6 +10,9 @@ export function sourceOf(detail: string | null | undefined, kind?: string | null
   if (d.startsWith("duplicate cleanup")) return "duplicate cleanup";
   if (d.startsWith("burnt-reserve sweep")) return "burnt-reserve sweep";
   if (d.startsWith("warmup graduation")) return "warmup graduation";
+  if (d.startsWith("memory restore")) return "tag memory";
+  if (d.startsWith("bulk-tags")) return "manual bulk-tag";
+  if (d.startsWith("warmup mark")) return "manual mark-done";
   if (d.startsWith("orphan-attach")) return "orphan attach";
   if (d.startsWith("mode changed")) return "settings";
   if (d.startsWith("stripped lingering") || d.startsWith("strip-removed")) return "stale-tag strip";

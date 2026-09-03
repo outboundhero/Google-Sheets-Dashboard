@@ -4106,22 +4106,10 @@ function DeliverabilityPageInner() {
           <Inbox className="inline h-4 w-4 mr-1.5" />
           Inboxes by Domain
         </button>
-        <button
-          onClick={() => setActiveTab("warmup")}
-          className={`px-4 py-2 text-sm font-medium border-b-2 transition-colors ${
-            activeTab === "warmup"
-              ? "border-primary text-foreground"
-              : "border-transparent text-muted-foreground hover:text-foreground"
-          }`}
-        >
-          <Clock className="inline h-4 w-4 mr-1.5" />
-          Warmup Status
-          {warmupDomains.filter((d) => d.warmup_status === "open").length > 0 && (
-            <Badge variant="destructive" className="ml-1.5 text-xs px-1.5 py-0">
-              {warmupDomains.filter((d) => d.warmup_status === "open").length}
-            </Badge>
-          )}
-        </button>
+        {/* Warmup Status tab removed (Spencer's Loom 2026-09-03: "this warm up
+            status is redundant, let's remove it" — the manual done-tick kept
+            reading as warmup-complete). The 21-day countdown lives in the age
+            filter and the Reserve chip stays the source of truth. */}
       </div>
 
       {/* INBOXES TAB */}

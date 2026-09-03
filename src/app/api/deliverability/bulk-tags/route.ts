@@ -156,6 +156,23 @@ export async function POST(request: Request) {
     const body = await request.json();
     const { action } = body as { action: string };
 
+    // Actor audit (Spencer 2026-09-03: manual tag changes were unattributable
+    // — the JPLV night). Best-effort, never blocks the operation.
+    if (action === "add" || action === "remove") {
+      try {
+        const { cookies } = await import("next/headers");
+        const { createServerSupabaseClient } = await import("@/lib/supabase");
+        const { logEvents } = await import("@/lib/replacement/store");
+        const { data: { user } } = await createServerSupabaseClient(await cookies()).auth.getUser();
+        const b = body as { tagNames?: string[]; domains?: string[] };
+        await logEvents([{
+          eventType: "tagged",
+          detail: `bulk-tags ${action} by ${user?.email ?? "unknown user"}: [${(b.tagNames || []).join(", ")}] on ${(b.domains || []).length} domain(s)`,
+          signals: { action, tagNames: b.tagNames ?? [], domainCount: (b.domains || []).length, actor: user?.email ?? null },
+        }]);
+      } catch (e) { console.error("[bulk-tags] actor log failed:", e); }
+    }
+
     // --- CREATE TAG (explicit, single-instance) ---
     if (action === "create") {
       const instance = resolveInstance(searchParams.get("instance"));
