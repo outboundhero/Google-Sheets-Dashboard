@@ -86,6 +86,14 @@ export async function GET(request: Request) {
     let tagByRedirect = new Map<string, string>();
     if (redirectFallback) {
       const byTag = await loadRedirectsByTag();
+      // loadRedirectsByTag fails OPEN to the client_redirects table when the
+      // Sheets read throttles — fine for the fill, fatal for a supervised
+      // sweep: the map silently shrinks to ~78 table rows and the 27 Jan-Pro
+      // city tags (sheet-only) vanish. A supervised sweep must see the full
+      // map or refuse.
+      if (byTag.size < 120) {
+        return NextResponse.json({ error: `redirect map degraded (${byTag.size} tags — tracker sheet read likely throttled), retry in a minute` }, { status: 503 });
+      }
       tagByRedirect = new Map([...byTag.entries()].map(([tag, u]) => [norm(u), tag]));
     }
 
