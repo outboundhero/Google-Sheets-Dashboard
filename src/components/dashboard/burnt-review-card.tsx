@@ -105,14 +105,17 @@ export function BurntReviewCard() {
         <Flame className="h-7 w-7 text-red-500 dark:text-red-400 mt-0.5 shrink-0" />
         <div className="flex-1 space-y-3">
           <div>
-            <h2 className="text-xl font-bold text-red-900 dark:text-red-100">
+            <h2 className="text-xl font-bold text-red-900 dark:text-red-100 flex items-center gap-2 flex-wrap">
               Burnt domains awaiting deletion — {awaiting.length}
+              <span className="text-[11px] font-bold uppercase tracking-wide rounded-full px-2.5 py-0.5 bg-emerald-600 text-white">
+                Auto-pilot on
+              </span>
             </h2>
             <p className="text-sm text-red-700 dark:text-red-400 mt-0.5">
-              Approving sends the vendor cancellation and deletes the senders in Bison. Keep
-              releases the domain — untagged back into reserve, never deleted. Anything left
-              alone still auto-fires when its grace period ends —
-              full history on the{" "}
+              <b>No action needed — every domain here fires automatically when its grace ends</b>{" "}
+              (vendor cancel, then Bison sender delete). The buttons are overrides only: Hold
+              pauses one, Keep releases it back into reserve untagged, never deleted. Approve
+              just re-confirms what will already happen. Full history on the{" "}
               <Link href="/replacement" className="underline font-medium">
                 Replacement
               </Link>{" "}
