@@ -180,16 +180,13 @@ export async function processDueCancellations(): Promise<CancelProcessResult> {
     }
   }
 
-  // ScaledMail digest (Nick 2026-09-02: "each of the domains in a list format
-  // so we can easily copy and paste to cancel manually through the ScaledMail
-  // Slack channel"). Same channel the cancel summaries already post to.
+  // ScaledMail domains needing a manual cancel are collected in the result
+  // and logged — NOT posted per run: with the fire cron every 15 minutes a
+  // draining backlog turned the copy-paste digest into message spam
+  // (2026-09-03). The list is delivered once, from the events/queue state,
+  // when a drain completes. TODO: once-daily accumulated digest.
   if (res.scaledmailManual.length > 0) {
-    const { postSlackMessage } = await import("@/lib/slack");
-    const channel = process.env.CANCEL_DOMAINS_SLACK_CHANNEL_ID || "C0B84LMSVMH";
-    await postSlackMessage(
-      `📋 *ScaledMail — cancel manually* (no API on their side; Bison senders already deleted). Copy-paste for their Slack channel:\n\`\`\`\n${[...new Set(res.scaledmailManual)].sort().join("\n")}\n\`\`\``,
-      channel,
-    ).catch(() => {});
+    console.log(`[cancellations] ScaledMail manual-cancel needed: ${[...new Set(res.scaledmailManual)].sort().join(", ")}`);
   }
 
   return res;
