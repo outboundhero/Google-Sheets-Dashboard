@@ -56,6 +56,19 @@ export async function GET(request: Request) {
     const [lastTags, handled, skips, offboarded] = await Promise.all([
       getLastClientTags(), getHandledDomains(), getSkipSet(), getOffboardedClientTags(),
     ]);
+    // A COMPLETED vendor cancellation drops out of getHandledDomains (status
+    // 'done'), but the domain lingers in the mirror until the crawl prunes it
+    // — the first dry runs offered CCGW its own already-cancelled burnt
+    // domains back. Any cancellation history, any status, bars a restore.
+    for (let off = 0; ; off += 1000) {
+      const { data, error } = await supabase
+        .from("replacement_cancellations").select("instance, domain")
+        .order("domain", { ascending: true }).range(off, off + 999);
+      if (error) break;
+      if (!data || data.length === 0) break;
+      for (const r of data as { instance: string; domain: string }[]) handled.add(`${r.instance}:${r.domain}`);
+      if (data.length < 1000) break;
+    }
     const alloc = await getAllocations().catch(() => ({ map: {} as Record<string, number> }));
 
     // Known client tags = campaign universe (same rule as everywhere else).
