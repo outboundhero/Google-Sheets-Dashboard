@@ -98,7 +98,14 @@ export async function GET(request: Request) {
       if (handled.has(key) || skips.has(skipKey(d.instance, d.domain)) || hasBurntTag(d.tags)) continue;
 
       const hist = lastTags.get(`${d.instance}:${d.domain.toLowerCase()}`);
-      const histTag = hist && !isOffboardedTagName(hist.tag, offboarded) && known.has(hist.tag) ? hist : null;
+      // Only OWNERSHIP events justify a restore. If the last client-tag event
+      // is a release (removed / cancel_queued / trimmed), the system took this
+      // domain away from that client ON PURPOSE — restoring would undo the
+      // replacement engine's own work (the first dry run tried to hand CCGW
+      // back its removed burnt domains). Disconnects lose tags silently, so a
+      // reconnect-loss always shows tagged/attached as the last owner event.
+      const OWNERSHIP = new Set(["tagged", "attached", "redirect_set", "proposed", "detected"]);
+      const histTag = hist && OWNERSHIP.has(hist.eventType) && !isOffboardedTagName(hist.tag, offboarded) && known.has(hist.tag) ? hist : null;
 
       if (histTag) {
         const group = alloc.map[histTag.tag] ?? null;
