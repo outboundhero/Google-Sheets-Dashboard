@@ -96,14 +96,14 @@ export async function processReplacementCancellations(
     return true;
   };
 
-  // 1) Overdue rows are announced, not parked — one digest line, then they
-  //    flow through the same staged cancel as everything else this run.
+  // 1) Overdue rows just flow through the same staged cancel as fresh ones.
+  //    No per-run Slack line: with a big backlog draining ~10/run the bridge
+  //    re-announced the same release every pass (posted twice on 2026-09-03
+  //    before the driver was stopped). The fire flow's own summaries and the
+  //    per-domain history are the record.
   res.held = 0;
-  if (stale.length > 0 && !dryRun) {
-    await postSlackMessage(
-      `🔥 Cancel bridge: auto-releasing *${stale.length}* overdue vendor-delete intents (oldest scheduled before ${new Date(staleCutoff).toISOString().slice(0, 10)}). They fire through the normal staged cancel now — per-domain history on /replacement.`,
-      SLACK_CHANNEL,
-    ).catch(() => {});
+  if (stale.length > 0) {
+    console.log(`[cancel-bridge] ${stale.length} overdue intents flowing through with this run`);
   }
 
   if (fresh.length === 0) return res;
