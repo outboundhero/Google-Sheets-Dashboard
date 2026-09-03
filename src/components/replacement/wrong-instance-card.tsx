@@ -172,6 +172,12 @@ export function WrongInstanceCard() {
     }
   }, [moveClient, load]);
 
+  // Watchdog: any committed "queued" item with an idle worker gets picked up —
+  // belt-and-braces against the enqueue/pump timing above.
+  useEffect(() => {
+    if (queue.some((q) => q.status === "queued")) void pump();
+  }, [queue, pump]);
+
   // Cap-aware branch (Spencer 2026-08-24): correct group already at cap →
   // untag back to reserve instead of moving. Duplicates are excluded by the
   // detector AND re-refused server-side.
@@ -204,7 +210,10 @@ export function WrongInstanceCard() {
       const addTags = new Set(additions.map((a) => a.client.clientTag));
       return [...prev.filter((q) => !addTags.has(q.client.clientTag)), ...additions];
     });
-    void pump();
+    // pump AFTER React has committed the queue update — calling it synchronously
+    // raced the state updater and could see an empty queueRef, leaving the item
+    // stuck on "queued…" forever (seen live 2026-09-04, CVJORL move).
+    setTimeout(() => void pump(), 0);
   }, [pump]);
 
   const qFor = (tag: string) => queue.find((q) => q.client.clientTag === tag);
