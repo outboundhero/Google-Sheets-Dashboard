@@ -15,7 +15,7 @@
 // human get ahead of that; it does not by itself make approval mandatory.
 import { useState, useEffect, useCallback } from "react";
 import Link from "next/link";
-import { Flame, Check, X, PauseCircle, Loader2 } from "lucide-react";
+import { Flame, Check, X, PauseCircle, Loader2, ChevronDown, ChevronRight } from "lucide-react";
 import { Button } from "@/components/ui/button";
 
 interface Cancellation {
@@ -51,6 +51,7 @@ export function BurntReviewCard() {
   const [sel, setSel] = useState<Set<string>>(new Set());
   const [busy, setBusy] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
+  const [open, setOpen] = useState(false); // collapsed by default — auto-pilot handles it
 
   const key = (r: Cancellation) => `${r.instance}:${r.domain}`;
 
@@ -100,17 +101,27 @@ export function BurntReviewCard() {
   const awaiting = rows.filter((r) => r.status !== "aborted");
 
   return (
-    <div className="rounded-xl border-2 border-red-400 dark:border-red-600 bg-red-50 dark:bg-red-950/30 p-5">
-      <div className="flex items-start gap-4">
-        <Flame className="h-7 w-7 text-red-500 dark:text-red-400 mt-0.5 shrink-0" />
+    <div className="rounded-xl border-2 border-red-400 dark:border-red-600 bg-red-50 dark:bg-red-950/30">
+      <button onClick={() => setOpen((v) => !v)} className="w-full flex items-center gap-2 px-5 py-3 text-left">
+        {open ? (
+          <ChevronDown className="h-4 w-4 shrink-0 text-red-500 dark:text-red-400" />
+        ) : (
+          <ChevronRight className="h-4 w-4 shrink-0 text-red-500 dark:text-red-400" />
+        )}
+        <Flame className="h-5 w-5 text-red-500 dark:text-red-400 shrink-0" />
+        <span className="text-sm font-bold text-red-900 dark:text-red-100">
+          Burnt domains awaiting deletion — {awaiting.length}
+        </span>
+        <span className="text-[11px] font-bold uppercase tracking-wide rounded-full px-2.5 py-0.5 bg-emerald-600 text-white">
+          Auto-pilot on
+        </span>
+        <span className="ml-auto text-[11px] text-muted-foreground">{open ? "collapse" : "expand"}</span>
+      </button>
+
+      {open && (
+      <div className="flex items-start gap-4 px-5 pb-5">
         <div className="flex-1 space-y-3">
           <div>
-            <h2 className="text-xl font-bold text-red-900 dark:text-red-100 flex items-center gap-2 flex-wrap">
-              Burnt domains awaiting deletion — {awaiting.length}
-              <span className="text-[11px] font-bold uppercase tracking-wide rounded-full px-2.5 py-0.5 bg-emerald-600 text-white">
-                Auto-pilot on
-              </span>
-            </h2>
             <p className="text-sm text-red-700 dark:text-red-400 mt-0.5">
               <b>No action needed — every domain here fires automatically when its grace ends</b>{" "}
               (vendor cancel, then Bison sender delete). The buttons are overrides only: Hold
@@ -228,6 +239,7 @@ export function BurntReviewCard() {
           </div>
         </div>
       </div>
+      )}
     </div>
   );
 }
