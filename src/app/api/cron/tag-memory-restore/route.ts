@@ -42,8 +42,11 @@ export const maxDuration = 300;
 
 const RUN_CAP = 40;
 
+// Aggressive normalization for URL matching: host+path reduced to a-z0-9
+// only. The tracker writes "jan-pro.com/las-vegas", the order-era redirects
+// carry "jan-pro.com/lasvegas" — hyphen/slash variants must still meet.
 const norm = (u: string | null | undefined) =>
-  (u || "").trim().toLowerCase().replace(/^https?:\/\//, "").replace(/^www\./, "").replace(/\/+$/, "");
+  (u || "").trim().toLowerCase().replace(/^https?:\/\//, "").replace(/^www\./, "").replace(/\/+$/, "").replace(/[^a-z0-9]/g, "");
 
 export async function GET(request: Request) {
   try {
