@@ -141,7 +141,7 @@ export async function GET(request: Request) {
       // get brand-new inboxes, so their sends reset to 0 — the Sep-3 batch
       // (27 Jan-Pro domains) was invisible under a sends-only gate. A client
       // redirect on an untagged domain is itself proof of a past life.
-      const parked = norm(d.redirect_url) === "findlocalcommercialcleaning.com"; // policy-parked stock, not a lost client
+      const parked = norm(d.redirect_url) === norm("findlocalcommercialcleaning.com"); // policy-parked stock, not a lost client
       const veteran = (d.total_sent ?? 0) > 0 || (!!d.redirect_url && !parked);
       if (!veteran) continue; // fresh stock — reserve is where it belongs
 
