@@ -140,13 +140,20 @@ async function loadInboxingIds(domains: string[]): Promise<Map<string, InboxingR
   return map;
 }
 
-// Some instances' /sender-emails?search= is slow (FacilityReach ~12s vs
-// outboundhero ~0.5s). Guard every search with a hard abort timeout so a slow
-// instance can never hang the request; the caller retries next poll cycle.
+// Some instances' /sender-emails?search= is slow (FacilityReach ~12s at rest,
+// 30s+ while the deletion executor is hammering the same workspace — seen live
+// 2026-09-04 when a 20-domain move showed "0 moved" forever: FR answered in
+// >11s, the 11s abort fired every poll, and arrivals were invisible). Slow
+// workspaces get a wide window; the abort still guards against a true hang.
+const SEARCH_TIMEOUT_SLOW_MS = 45_000;
 const SEARCH_TIMEOUT_MS = 11_000;
+const SLOW_SEARCH_INSTANCES = new Set<BisonInstanceSlug>(["facilityreach"]);
 async function bisonFetchT(instance: BisonInstanceSlug, path: string): Promise<Response | null> {
   const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), SEARCH_TIMEOUT_MS);
+  const timer = setTimeout(
+    () => ctrl.abort(),
+    SLOW_SEARCH_INSTANCES.has(instance) ? SEARCH_TIMEOUT_SLOW_MS : SEARCH_TIMEOUT_MS,
+  );
   try {
     return await bisonFetch(instance, path, { signal: ctrl.signal });
   } catch {
