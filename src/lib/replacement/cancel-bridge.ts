@@ -76,9 +76,15 @@ export async function processReplacementCancellations(
   res.due = rows.length;
   if (rows.length === 0) return res;
 
+  // Stale-hold retired (Nick 2026-08-26 "we trust the flagging now, make it
+  // automatic" + Spencer 2026-09-03): overdue intents fire like fresh ones,
+  // announced in a digest instead of parking for a human. 162 sat frozen for
+  // days under the old behavior. Also: intents a human explicitly HELD via
+  // the review card keep the 'held' status and are untouched — this only
+  // changes what happens to overdue *pending* rows.
   const staleCutoff = Date.now() - STALE_HOLD_DAYS * 86_400_000;
   const stale = rows.filter((r) => new Date(r.scheduled_at).getTime() < staleCutoff);
-  const fresh = rows.filter((r) => new Date(r.scheduled_at).getTime() >= staleCutoff).slice(0, limit);
+  const fresh = rows.slice(0, limit); // age no longer disqualifies
 
   const setStatus = async (r: PendingRow, status: string, reasonSuffix?: string): Promise<boolean> => {
     const patch: Record<string, unknown> = { status };
@@ -90,19 +96,14 @@ export async function processReplacementCancellations(
     return true;
   };
 
-  // 1) Park the stale backlog (one-time transition → the Slack note fires once).
+  // 1) Overdue rows are announced, not parked — one digest line, then they
+  //    flow through the same staged cancel as everything else this run.
+  res.held = 0;
   if (stale.length > 0 && !dryRun) {
-    let heldOk = 0;
-    for (const r of stale) if (await setStatus(r, "stale-hold")) heldOk++;
-    res.held = heldOk;
-    if (heldOk > 0) {
-      await postSlackMessage(
-        `🧊 Replacement cancel bridge: *${heldOk}* overdue vendor-delete intents (scheduled before ${new Date(staleCutoff).toISOString().slice(0, 10)}) were put on *stale-hold* instead of auto-firing. Review them on /replacement before deleting paid infra in bulk.`,
-        SLACK_CHANNEL,
-      ).catch(() => {});
-    }
-  } else {
-    res.held = dryRun ? stale.length : 0;
+    await postSlackMessage(
+      `🔥 Cancel bridge: auto-releasing *${stale.length}* overdue vendor-delete intents (oldest scheduled before ${new Date(staleCutoff).toISOString().slice(0, 10)}). They fire through the normal staged cancel now — per-domain history on /replacement.`,
+      SLACK_CHANNEL,
+    ).catch(() => {});
   }
 
   if (fresh.length === 0) return res;

@@ -87,13 +87,20 @@ export interface CancelProcessResult {
   deleted: number;
   rescheduled: number;
   exhausted: number;
+  /** ScaledMail has no cancel API — these need a manual cancel via their
+   *  Slack channel. Collected per run and posted as a copy-paste digest
+   *  (Nick 2026-09-02). Senders still get deleted from Bison as usual. */
+  scaledmailManual: string[];
+  /** Porkbun-direct domains (no vendor) — auto-renew switched off so the
+   *  registration lapses instead of silently renewing. */
+  renewOff: number;
 }
 
 /** Cron worker: advance every due row through the cancel → delete state machine. */
 export async function processDueCancellations(): Promise<CancelProcessResult> {
   const supabase = getSupabaseAdmin();
   const nowIso = new Date().toISOString();
-  const res: CancelProcessResult = { cancelled: 0, deleted: 0, rescheduled: 0, exhausted: 0 };
+  const res: CancelProcessResult = { cancelled: 0, deleted: 0, rescheduled: 0, exhausted: 0, scaledmailManual: [], renewOff: 0 };
 
   const { data, error } = await supabase
     .from("scheduled_cancellations")
@@ -124,9 +131,25 @@ export async function processDueCancellations(): Promise<CancelProcessResult> {
         const r = await cancelPOST(req);
         // route returns { results:[{domain,status}], counts }. one domain in →
         // read its status: canceled | alreadyGone | skipped | failed.
-        const d = (await r.json().catch(() => ({}))) as { results?: { status?: string }[] };
+        const d = (await r.json().catch(() => ({}))) as { results?: { status?: string; error?: string }[] };
         const st = d.results?.[0]?.status;
+        const why = d.results?.[0]?.error || "";
         const ok = r.ok && (st === "canceled" || st === "alreadyGone" || st === "skipped");
+        if (ok && st === "skipped") {
+          // A vendor-less skip still needs its money tap closed:
+          if (/scaledmail/i.test(why)) {
+            res.scaledmailManual.push(row.domain); // manual cancel via their Slack — digest below
+          } else if (/no provider tag/i.test(why)) {
+            // Porkbun-direct (.info era) — no vendor to cancel; stop the renewal.
+            try {
+              const { setAutoRenew } = await import("@/lib/porkbun");
+              await setAutoRenew(row.domain, false);
+              res.renewOff++;
+            } catch (e) {
+              console.error(`[cancellations] porkbun auto-renew off failed for ${row.domain}:`, e);
+            }
+          }
+        }
         if (ok) {
           await bump({ stage: "pending_delete", fire_at: new Date(Date.now() + DELETE_BUFFER_MIN * 60_000).toISOString() });
           res.cancelled++;
@@ -156,6 +179,19 @@ export async function processDueCancellations(): Promise<CancelProcessResult> {
       else { await bump({ fire_at: new Date(Date.now() + RETRY_MIN * 60_000).toISOString() }); res.rescheduled++; }
     }
   }
+
+  // ScaledMail digest (Nick 2026-09-02: "each of the domains in a list format
+  // so we can easily copy and paste to cancel manually through the ScaledMail
+  // Slack channel"). Same channel the cancel summaries already post to.
+  if (res.scaledmailManual.length > 0) {
+    const { postSlackMessage } = await import("@/lib/slack");
+    const channel = process.env.CANCEL_DOMAINS_SLACK_CHANNEL_ID || "C0B84LMSVMH";
+    await postSlackMessage(
+      `📋 *ScaledMail — cancel manually* (no API on their side; Bison senders already deleted). Copy-paste for their Slack channel:\n\`\`\`\n${[...new Set(res.scaledmailManual)].sort().join("\n")}\n\`\`\``,
+      channel,
+    ).catch(() => {});
+  }
+
   return res;
 }
 

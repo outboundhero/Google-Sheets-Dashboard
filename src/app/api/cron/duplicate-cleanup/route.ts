@@ -164,11 +164,17 @@ export async function GET(request: Request) {
           needsHuman.push({ domain: dup.domain, reason: `tag ${tag}: no side in allocated group ${group}`, sides: sideNames });
           continue;
         }
-        if (activeKeys.has(`${tag.toUpperCase()}:${other.instance}`)) {
-          needsHuman.push({ domain: dup.domain, reason: `tag ${tag} has ACTIVE campaigns on the wrong-group side ${other.instance}`, sides: sideNames });
-          continue;
-        }
-        verdicts.push({ domain: dup.domain, keep: keeper.instance, del: other.instance, rule: `allocated group ${group}, no active campaigns on ${other.instance}`, clientTag: tag });
+        // Active campaigns on the wrong-group side used to force a human
+        // (deleting a side with live campaigns felt like breaking a client).
+        // Spencer 2026-09-03: the recorded allocation IS the intent — the
+        // wrong-group copy gets wound down regardless, campaigns included
+        // (sender deletion detaches them). No human step.
+        const wrongSideActive = activeKeys.has(`${tag.toUpperCase()}:${other.instance}`);
+        verdicts.push({
+          domain: dup.domain, keep: keeper.instance, del: other.instance,
+          rule: `allocated group ${group} wins${wrongSideActive ? ` — winding down ${other.instance} despite active campaigns (allocation is the recorded intent)` : `, no active campaigns on ${other.instance}`}`,
+          clientTag: tag,
+        });
         continue;
       }
 
