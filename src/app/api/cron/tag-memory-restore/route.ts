@@ -104,7 +104,11 @@ export async function GET(request: Request) {
       // replacement engine's own work (the first dry run tried to hand CCGW
       // back its removed burnt domains). Disconnects lose tags silently, so a
       // reconnect-loss always shows tagged/attached as the last owner event.
-      const OWNERSHIP = new Set(["tagged", "attached", "redirect_set", "proposed", "detected"]);
+      // Strictly {tagged, attached}: 'detected'/'proposed' mean flagged-burnt
+      // (a later manual untag would be undone by restoring), and manual bulk
+      // removes don't yet write per-domain release events — until they do,
+      // this cron must not run unattended (supervised sweeps only).
+      const OWNERSHIP = new Set(["tagged", "attached"]);
       const histTag = hist && OWNERSHIP.has(hist.eventType) && !isOffboardedTagName(hist.tag, offboarded) && known.has(hist.tag) ? hist : null;
 
       if (histTag) {
