@@ -23,8 +23,12 @@ const MAX_PER_RUN = 15; // stay comfortably inside maxDuration; overflow waits f
 // pair was sized for a 300s function and was far too tight for facilityreach,
 // where ONE rate-limited sender search can burn ~60s: rows died on "row timeout
 // after 130s" having deleted nothing, requeued +6h, and repeated forever.
-const RUN_BUDGET_MS = 600_000;
-const ROW_TIMEOUT_MS = 260_000;
+// 2026-09-04 starvation fix: a 48-sender facilityreach domain needs search
+// (≤45s) + deletes + final verify (≤150s), which the old 260s ceiling cut off
+// every attempt — rows then sat 6h and the backlog aged for days. Give a row
+// the room to actually finish inside one attempt.
+const RUN_BUDGET_MS = 700_000;
+const ROW_TIMEOUT_MS = 420_000;
 const REQUEUE_DELAY_MS = 6 * 3600_000;
 // A row whose deletes ran but whose verification was throttled comes back in
 // minutes, not 6 hours — it's usually one clean re-verify away from done.
@@ -113,8 +117,11 @@ export async function runScheduledDeletions(
           : r.failures[0]?.error,
       });
     } catch (e) {
-      await requeueToBack(supabase, row);
       const msg = e instanceof Error ? e.message : String(e);
+      // A row timeout means slow, not broken — deletes that landed persist on
+      // Bison, so a quick retry resumes with fewer senders. The 6h penalty is
+      // reserved for real errors.
+      await requeueToBack(supabase, row, msg.includes("row timeout") ? REQUEUE_SOON_MS : REQUEUE_DELAY_MS);
       console.error(`[cron/fire-scheduled-deletions] ${row.instance}:${row.domain} failed:`, msg);
       results.push({ instance: row.instance, domain: row.domain, deleted: 0, notFound: 0, failed: 1, remainingInBison: -1, done: false, error: msg.slice(0, 200) });
     }

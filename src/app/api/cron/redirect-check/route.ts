@@ -14,16 +14,25 @@ export async function GET() {
 
   try {
     // Pull oldest-checked (or never-checked) (instance, domain) pairs first.
-    // Across runs this naturally cycles through the inventory.
-    const { data, error } = await supabase
-      .from("deliverability_domains")
-      .select("instance, domain, tags")
-      .order("redirect_checked_at", { ascending: true, nullsFirst: true })
-      .limit(BATCH_PULL_LIMIT);
-
-    if (error) {
-      console.error("[cron/redirect-check] select failed:", error.message);
-      return NextResponse.json({ error: error.message }, { status: 500 });
+    // Across runs this naturally cycles through the inventory. Inboxing rows
+    // are filtered out below (provider-redirect-sync owns their truth), and
+    // when the oldest window is Inboxing-heavy a single page yields almost no
+    // walkable candidates — so page deeper until we have a real batch.
+    const data: { instance: string; domain: string; tags: unknown }[] = [];
+    for (let off = 0; off < BATCH_PULL_LIMIT * 6; off += BATCH_PULL_LIMIT) {
+      const { data: page, error } = await supabase
+        .from("deliverability_domains")
+        .select("instance, domain, tags")
+        .order("redirect_checked_at", { ascending: true, nullsFirst: true })
+        .range(off, off + BATCH_PULL_LIMIT - 1);
+      if (error) {
+        console.error("[cron/redirect-check] select failed:", error.message);
+        return NextResponse.json({ error: error.message }, { status: 500 });
+      }
+      if (!page || page.length === 0) break;
+      data.push(...page);
+      const walkable = data.filter((r) => !(Array.isArray(r.tags) && r.tags.some((t) => String(t).trim().toLowerCase().startsWith("inboxing")))).length;
+      if (walkable >= 150 || page.length < BATCH_PULL_LIMIT) break;
     }
 
     // Inboxing domains are masked by default — an HTTP walk sees a 200 page and

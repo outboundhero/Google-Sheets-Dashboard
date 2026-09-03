@@ -64,7 +64,11 @@ export async function GET(request: Request) {
       const key = r.domain.toLowerCase();
       if (!provider.has(key)) { notAtProvider++; continue; }
       const configured = provider.get(key) ?? null;
-      if ((r.redirect_url || null) === configured) { unchanged++; continue; }
+      if ((r.redirect_url || null) === configured) { unchanged++; }
+      // Verified-unchanged rows get their checked_at stamped too. Skipping them
+      // left ~2k Inboxing rows with ancient timestamps permanently occupying
+      // redirect-check's oldest-first window, which starved the HTTP walker
+      // down to ~6 domains/run (found 2026-09-04).
       updates.push({ instance: r.instance, domain: r.domain, redirect_url: configured, redirect_checked_at: now });
     }
 
