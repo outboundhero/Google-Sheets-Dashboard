@@ -75,12 +75,23 @@ export async function GET(request: Request) {
     const alloc = await getAllocations().catch(() => ({ map: {} as Record<string, number> }));
 
     // Known client tags = campaign universe (same rule as everywhere else).
-    const { data: camps } = await supabase.from("campaigns").select("client_tag").limit(10000);
-    const known = new Set(
-      ((camps || []) as { client_tag: string | null }[])
-        .map((c) => (c.client_tag || "").trim().toUpperCase())
-        .filter(Boolean),
-    );
+    // Properly paginated: PostgREST hard-caps a single response at 1000 rows
+    // regardless of .limit(), and unordered reads sample a DIFFERENT 1000
+    // each call — the known-set randomly lost JPLV run to run, which made
+    // the same domain flip between "owned" and "candidate" all night.
+    const known = new Set<string>();
+    for (let off = 0; ; off += 1000) {
+      const { data, error } = await supabase
+        .from("campaigns").select("client_tag")
+        .order("id", { ascending: true }).range(off, off + 999);
+      if (error) throw new Error(`campaigns: ${error.message}`);
+      if (!data || data.length === 0) break;
+      for (const c of data as { client_tag: string | null }[]) {
+        const t = (c.client_tag || "").trim().toUpperCase();
+        if (t) known.add(t);
+      }
+      if (data.length < 1000) break;
+    }
 
     // Reverse redirect → tag map, for the supervised fallback only.
     let tagByRedirect = new Map<string, string>();
