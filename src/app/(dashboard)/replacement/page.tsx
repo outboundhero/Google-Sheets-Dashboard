@@ -712,7 +712,7 @@ export default function ReplacementPage() {
           <div className="flex items-center justify-between">
             <div>
               <div className="text-sm font-medium">Pending cancellations — 5-day vendor-delete queue</div>
-              <div className="text-[11px] text-muted-foreground">Burnt domains removed from campaigns, awaiting provider cancellation. <b>Nothing fires yet</b> (the delete cron isn&apos;t built) — these are scheduled records only.</div>
+              <div className="text-[11px] text-muted-foreground">Burnt domains removed from campaigns, awaiting provider cancellation. <b>Fires automatically</b> once the grace elapses — vendor cancel, then Bison sender delete. Per-domain steps land in the history feed below.</div>
             </div>
             <Button size="sm" variant="outline" onClick={loadCancellations} disabled={loadingCancels} className="gap-2">
               <RefreshCw className={`h-4 w-4 ${loadingCancels ? "animate-spin" : ""}`} />
