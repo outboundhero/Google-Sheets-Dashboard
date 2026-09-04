@@ -6,7 +6,7 @@ import * as milkbox from "@/lib/milkbox";
 import * as inboxing from "@/lib/inboxing";
 import { resolveDomainOrders, milkboxSequencerFor } from "@/lib/inbox-order-accounts";
 import { meansNoRedirect } from "@/lib/deliverability/redirect-normalize";
-import { DEFAULT_INBOXING_ACCOUNT, toInboxingAccount, inboxingRegistrarCredential } from "@/lib/inboxing-accounts";
+import { DEFAULT_INBOXING_ACCOUNT, toInboxingAccount, inboxingRegistrarCredential, inboxingConnectionFor } from "@/lib/inboxing-accounts";
 import type {
   CreateOrderInput,
   InboxOrderProvider,
@@ -152,6 +152,9 @@ export async function POST(request: Request) {
             inboxingRegistrarCredential(inboxingAccount, resolved.source ?? null)
             ?? resolved.inboxing?.registrarCredentialId ?? null,
           cloudflareCredentialId: null, // resolved per-account inside createDomain
+          // Auto-upload at Inboxing (Ramon 2026-09-05): destination workspace
+          // rides on the create call; upload fires when setup is upload-ready.
+          platformConnectionId: inboxingConnectionFor(instance, inboxingAccount) || null,
         },
         inboxingAccount,
       );

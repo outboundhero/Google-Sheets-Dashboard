@@ -108,7 +108,15 @@ export interface InboxingCreateOrderResult {
 
 export async function createDomain(
   input: CreateOrderInput,
-  credentials?: { registrarCredentialId?: string | null; cloudflareCredentialId?: string | null },
+  credentials?: {
+    registrarCredentialId?: string | null;
+    cloudflareCredentialId?: string | null;
+    /** Ramon (Inboxing) 2026-09-05: sending this WITH upload_to_platform on the
+     *  create call stores the destination on the domain and auto-uploads when
+     *  setup reaches upload-ready — the separate /upload call is manual-only.
+     *  Our upload-on-active + hourly verify stay as the safety net. */
+    platformConnectionId?: string | null;
+  },
   account: InboxingAccount = DEFAULT_INBOXING_ACCOUNT,
 ): Promise<InboxingCreateOrderResult> {
   // Credentials are resolved per-domain (from the domain's Porkbun account) by
@@ -153,6 +161,9 @@ export async function createDomain(
       : { redirect_type: "NONE" as const }),
     cloudflare_credential_id: cloudflareId,
     registrar_credential_id: registrarId,
+    ...(credentials?.platformConnectionId
+      ? { upload_to_platform: true, platform_connection_id: credentials.platformConnectionId }
+      : {}),
   };
   let result: InboxingDomain;
   try {
