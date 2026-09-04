@@ -33,6 +33,7 @@ interface FlaggedRow {
   reply_30: number | null;
   bounce_30f15: number | null;
   segmentName: string;
+  groupId?: string | null;
   groupName: string;
   reasons: string[];
   firstFlaggedAt?: string | null;
@@ -71,6 +72,7 @@ export function FlaggedDomainsCard() {
   const [data, setData] = useState<DetectResp | null>(null);
   const [skips, setSkips] = useState<SkipRow[]>([]);
   const [loading, setLoading] = useState(false);
+  const [groupNo, setGroupNo] = useState<Record<string, number>>({});
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [note, setNote] = useState<string | null>(null);
@@ -100,10 +102,21 @@ export function FlaggedDomainsCard() {
   const load = useCallback(async () => {
     setLoading(true); setError(null); setNote(null);
     try {
-      const [dRes, sRes] = await Promise.all([
+      const [dRes, sRes, cRes] = await Promise.all([
         fetch("/api/replacement/detect-groups", { cache: "no-store" }),
         fetch("/api/replacement/skips", { cache: "no-store" }),
+        fetch("/api/replacement/threshold-groups", { cache: "no-store" }),
       ]);
+      // groupId → its 1-based position in its segment, so rows can say
+      // "Flagged by Group N" instead of the full condition text (Nick 8/4 #6).
+      try {
+        const cJson = await cRes.json();
+        const map: Record<string, number> = {};
+        for (const seg of cJson?.config?.segments || cJson?.segments || []) {
+          (seg.groups || []).forEach((g: { id: string }, i: number) => { map[g.id] = i + 1; });
+        }
+        setGroupNo(map);
+      } catch { /* concise labels fall back to the group name */ }
       const d = (await dRes.json().catch(() => null)) as DetectResp | null;
       const s = await sRes.json().catch(() => null);
       if (!dRes.ok || !d || d.error) throw new Error(d?.error || `HTTP ${dRes.status}`);
@@ -373,7 +386,13 @@ export function FlaggedDomainsCard() {
                     <span className="text-muted-foreground tabular-nums">
                       {r.firstFlaggedAt ? new Date(r.firstFlaggedAt).toLocaleDateString([], { month: "numeric", day: "numeric" }) : "—"}
                     </span>
-                    <span className="text-muted-foreground truncate" title={r.reasons.join(" · ")}>{r.reasons.join(" · ")}</span>
+                    {/* Concise (Nick 8/4 #6): just the group number — the full
+                        condition text lives in the hover tooltip. */}
+                    <span className="truncate font-medium" title={`${r.groupName} — ${r.reasons.join(" · ")}`}>
+                      {r.groupId && groupNo[r.groupId]
+                        ? `Flagged by Group ${groupNo[r.groupId]}`
+                        : r.groupName}
+                    </span>
                   </div>
                 );
               })}

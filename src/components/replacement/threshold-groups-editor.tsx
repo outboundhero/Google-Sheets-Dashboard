@@ -54,6 +54,25 @@ export function ThresholdGroupsEditor() {
   const [error, setError] = useState<string | null>(null);
   const [open, setOpen] = useState(true);
   const [editing, setEditing] = useState(false);
+  const [typeFilter, setTypeFilter] = useState<"all" | "cleaning" | "non-cleaning">("all");
+  const [tagSearch, setTagSearch] = useState("");
+  const [sortAZ, setSortAZ] = useState(false);
+
+  // Company type (Nick 8/4 doc #6): the four internal tags are the only
+  // non-cleaning segments — same set true-up excludes (INTERNAL_TAGS there;
+  // that lib is server-only, so the list is mirrored here).
+  const NON_CLEANING = new Set(["OH", "SC", "DM4PM", "SI"]);
+  const segType = (seg: ThresholdSegment): "cleaning" | "non-cleaning" =>
+    !seg.isDefault && seg.clientTags.length > 0 && seg.clientTags.every((t) => NON_CLEANING.has(t.toUpperCase()))
+      ? "non-cleaning" : "cleaning";
+  const visibleSegments = (segments: ThresholdSegment[]): ThresholdSegment[] => {
+    const q = tagSearch.trim().toUpperCase();
+    let out = segments.filter((s) =>
+      (typeFilter === "all" || segType(s) === typeFilter) &&
+      (!q || s.name.toUpperCase().includes(q) || s.clientTags.some((t) => t.toUpperCase().includes(q))));
+    if (sortAZ) out = [...out].sort((a, b) => a.name.localeCompare(b.name));
+    return out;
+  };
 
   useEffect(() => {
     fetch("/api/replacement/threshold-groups")
@@ -194,13 +213,32 @@ export function ThresholdGroupsEditor() {
 
         {error && <div className="rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive">{error}</div>}
 
-        {/* Read-only summary — the config stays static until "Edit groups". */}
+        {/* Read-only summary — the config stays static until "Edit groups".
+            Filter/sort + company-type column: Nick's 8/4 doc, item 6. */}
         {open && cfg && !editing && (
           <div className="space-y-2">
-            {cfg.segments.map((seg) => (
+            <div className="flex flex-wrap items-center gap-2 text-xs">
+              {(["all", "cleaning", "non-cleaning"] as const).map((t) => (
+                <button key={t} onClick={() => setTypeFilter(t)}
+                  className={`rounded-full border px-2.5 py-0.5 ${typeFilter === t ? "bg-foreground text-background font-medium" : "text-muted-foreground"}`}>
+                  {t === "all" ? "All types" : t}
+                </button>
+              ))}
+              <input value={tagSearch} onChange={(e) => setTagSearch(e.target.value)}
+                placeholder="Filter by name / client tag…"
+                className="h-7 w-52 rounded-md border bg-background px-2" />
+              <button onClick={() => setSortAZ((v) => !v)}
+                className={`rounded-full border px-2.5 py-0.5 ${sortAZ ? "bg-foreground text-background font-medium" : "text-muted-foreground"}`}>
+                sort A–Z
+              </button>
+            </div>
+            {visibleSegments(cfg.segments).map((seg) => (
               <div key={seg.id} className="rounded-xl border p-3 bg-muted/20 space-y-1">
                 <div className="flex items-center gap-2 flex-wrap">
                   <span className="text-sm font-medium">{seg.name}</span>
+                  <Badge variant="outline" className={segType(seg) === "cleaning" ? "border-sky-500/30 text-sky-500" : "border-zinc-500/40 text-zinc-400"}>
+                    {segType(seg)}
+                  </Badge>
                   {seg.isDefault ? (
                     <Badge variant="outline" className="border-sky-500/30 text-sky-500">default · cleaning/janitorial</Badge>
                   ) : seg.clientTags.length > 0 ? (
@@ -218,7 +256,8 @@ export function ThresholdGroupsEditor() {
                   seg.groups.map((g, gi) => (
                     <div key={g.id} className="text-xs text-muted-foreground">
                       {gi > 0 && <span className="font-semibold mr-1.5 text-[10px]">OR</span>}
-                      <span className="text-foreground font-medium">{g.name}:</span>{" "}
+                      {/* Numbered so flag reasons can just say "Group N" */}
+                      <span className="text-foreground font-medium">Group {gi + 1} · {g.name}:</span>{" "}
                       {g.conditions.map(condText).join("  AND  ")}
                     </div>
                   ))

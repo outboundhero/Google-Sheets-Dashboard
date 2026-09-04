@@ -213,6 +213,8 @@ export default function ReplacementPage() {
   const isAdmin = role === "admin";
 
   const [settings, setSettings] = useState<ReplacementSettings | null>(null);
+  // Guardrails hidden by default (Nick 8/4 doc #6) — toggled open on demand.
+  const [guardrailsOpen, setGuardrailsOpen] = useState(false);
   const [saving, setSaving] = useState(false);
   const [savedAt, setSavedAt] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -376,11 +378,21 @@ export default function ReplacementPage() {
           retry, so it costs no space on a clean day. */}
       <RetryCard />
 
-      {/* Guardrail settings */}
+      {/* Guardrail settings — hidden by default (Nick 8/4 doc #6: "remove the
+          guardrails block… fine if it can be toggled back"). Rarely-touched
+          config, so it opens on demand instead of taking a card of space. */}
       <Card>
         <CardContent className="p-5 space-y-4">
-          <div className="text-sm font-medium">Guardrails — what makes a domain &ldquo;burnt&rdquo;</div>
-          {!settings ? (
+          <button
+            className="w-full flex items-center gap-2 text-sm font-medium text-left"
+            onClick={() => setGuardrailsOpen((v) => !v)}
+          >
+            Guardrails — what makes a domain &ldquo;burnt&rdquo;
+            <span className="ml-auto text-[11px] font-normal text-muted-foreground">
+              {guardrailsOpen ? "hide" : "show"}
+            </span>
+          </button>
+          {!guardrailsOpen ? null : !settings ? (
             <div className="text-sm text-muted-foreground">Loading…</div>
           ) : (
             <>
