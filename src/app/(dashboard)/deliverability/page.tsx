@@ -1504,6 +1504,10 @@ function DeliverabilityPageInner() {
   }, [retryTagCampaignSurgical, scheduleTagAutoRetry, enqueueBisonRun]);
 
   const startBackgroundTagCampaign = useCallback(async (info: TagApplyInfo) => {
+    // A run with no domains can only fail ("domains … are required" on every
+    // step) — refuse to launch instead of painting an all-red panel. Seen live
+    // 2026-09-04: an empty BHS run snapshot kept replaying from localStorage.
+    if (!info.domains || info.domains.length === 0) return;
     const runId = runIdRef.current++;
     const token = 1;
     tagRetryTokensRef.current.set(runId, token);
@@ -1683,7 +1687,7 @@ function DeliverabilityPageInner() {
       const inFlight = run.queued || run.retry != null || run.tagStatus === "running"
         || run.campaignJobs.some((j) => j.status === "running" || j.status === "pending")
         || run.sheetStatus === "running";
-      if (inFlight && run.info) startBackgroundTagCampaign(run.info);
+      if (inFlight && run.info && (run.info.domains?.length ?? 0) > 0) startBackgroundTagCampaign(run.info);
     }
     for (const job of snap.sheet || []) {
       if (job.status === "running" && job.retryDoms && job.retryDoms.length) {
