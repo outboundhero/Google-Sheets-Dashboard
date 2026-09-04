@@ -307,7 +307,9 @@ async function advanceStage(row: ReassignmentRow): Promise<{ stage: ReassignStag
     // not send anywhere). Discover → remove, both via the proven route.
     const { POST: removeFromCampaigns } = await import("@/app/api/deliverability/remove-from-campaigns/route");
     const url = `http://internal/api/deliverability/remove-from-campaigns?instances=${ALL_INSTANCE_SLUGS.join(",")}`;
-    const disc = await callRoute(removeFromCampaigns, url, { domains: [domain], discover: true });
+    // allClients: a winding-down domain must leave EVERY campaign, including
+    // one it ended up in under some other client's name (cross-tag mess).
+    const disc = await callRoute(removeFromCampaigns, url, { domains: [domain], discover: true, allClients: true });
     const campaigns = (disc.campaigns as { id: number; instance: string; name?: string; status?: string }[] | undefined) || [];
     if (campaigns.length > 0) {
       await callRoute(removeFromCampaigns, url, { domains: [domain], campaigns });
