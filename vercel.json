@@ -1,93 +1,216 @@
 {
   "crons": [
-    { "path": "/api/cron/sync",                  "schedule": "0 * * * *" },
-    { "path": "/api/cron/redirect-check",        "schedule": "0 * * * *" },
-    { "path": "/api/cron/inbox-orders-poll",     "schedule": "0 */6 * * *" },
-    { "path": "/api/cron/client-tag-allocations","schedule": "0 8 * * *" },
-
-    { "path": "/api/cron/churn-check",           "schedule": "0 14 * * *" },
-    { "path": "/api/cron/churn-auto-fire",       "schedule": "5 17 * * *" },
-
-    { "path": "/api/cron/campaigns-outboundhero",     "schedule": "0 */6 * * *" },
-    { "path": "/api/cron/campaigns-cleaningoutbound", "schedule": "15 */6 * * *" },
-    { "path": "/api/cron/campaigns-facilityreach",    "schedule": "30 */6 * * *" },
-    { "path": "/api/cron/campaigns-outboundclean",    "schedule": "45 */6 * * *" },
-    { "path": "/api/cron/campaigns-refresh",          "schedule": "0 19 * * *" },
-    { "path": "/api/cron/campaign-dup-drain",         "schedule": "*/3 * * * *" },
-
-    { "path": "/api/cron/deliverability-outboundhero",     "schedule": "0 12 */2 * *" },
-    { "path": "/api/cron/deliverability-cleaningoutbound", "schedule": "30 12 */2 * *" },
-    { "path": "/api/cron/deliverability-facilityreach",    "schedule": "0 13 */2 * *" },
-    { "path": "/api/cron/deliverability-outboundclean",    "schedule": "30 13 */2 * *" },
-
-    { "path": "/api/cron/conform-tags-group-1",            "schedule": "0 4,16 * * *" },
-    { "path": "/api/cron/conform-tags-group-2",            "schedule": "15 4,16 * * *" },
-
-    { "path": "/api/cron/reconnect-worker",                "schedule": "*/5 * * * *" },
-
-    { "path": "/api/cron/provider-domain-status-check",    "schedule": "0 8 * * *" },
-
-    { "path": "/api/cron/fire-scheduled-deletions",        "schedule": "*/15 * * * *" },
-
-    { "path": "/api/cron/buy-domain-queue",                "schedule": "10 */2 * * *" },
-
-    { "path": "/api/cron/low-domain-alert",                "schedule": "0 15 * * 1-5" },
-
-    { "path": "/api/cron/reserve-alert",                   "schedule": "5 15 * * 1-5" },
-
-    { "path": "/api/cron/replacement-daily-report",        "schedule": "0 1 * * *" },
-
-    { "path": "/api/cron/purchase-proposal",               "schedule": "30 15 * * 1-5" },
-
-    { "path": "/api/cron/buy-alert",                       "schedule": "0 16 * * 1" },
-
-    { "path": "/api/cron/attach-queue",                    "schedule": "20 * * * *" },
-
-    { "path": "/api/cron/auto-runner",                     "schedule": "*/30 * * * *" },
-
-    { "path": "/api/cron/fire-scheduled-cancellations",    "schedule": "*/15 * * * *" },
-
-    { "path": "/api/cron/replacement-cancel-bridge",       "schedule": "50 * * * *" },
-
-    { "path": "/api/cron/cross-tag-cycle",                 "schedule": "25 * * * *" },
-
-    { "path": "/api/cron/mrl-pace-check",                  "schedule": "0 16 * * *" },
-
-    { "path": "/api/cron/daily-account-status-report",     "schedule": "55 7 * * *" },
-
-    { "path": "/api/cron/snapshot-deliverability",         "schedule": "0 15 * * *" },
-
-    { "path": "/api/cron/client-report-daily",             "schedule": "30 0 * * *" },
-    { "path": "/api/cron/client-report-weekly",            "schedule": "0 20 * * 5" },
-
-    { "path": "/api/cron/whitelist-queue",                 "schedule": "30 14 * * *" },
-
-    { "path": "/api/cron/true-up-move",                    "schedule": "7,37 * * * *" },
-
-    { "path": "/api/cron/redirect-conform",                "schedule": "40 9 * * *" },
-
-    { "path": "/api/cron/strip-removed-tags",   "schedule": "50 * * * *" },
-
-    { "path": "/api/cron/duplicate-cleanup",     "schedule": "35 * * * *" },
-
-    { "path": "/api/cron/inbox-orders-upload",   "schedule": "20 * * * *" },
-
-    { "path": "/api/cron/stuck-campaigns",       "schedule": "10 * * * *" },
-
-    { "path": "/api/cron/provider-redirect-sync",  "schedule": "5 * * * *" },
-
-    { "path": "/api/cron/system-watchdog",       "schedule": "55 * * * *" },
-
-    { "path": "/api/cron/metric-freeze",         "schedule": "45 * * * *" },
-
-    { "path": "/api/cron/blacklist-recheck",     "schedule": "30 * * * *" },
-
-    { "path": "/api/cron/strip-stock-redirects", "schedule": "35 5 * * *" },
-
-    { "path": "/api/cron/limit-policy",          "schedule": "5 6 * * *" },
-
-    { "path": "/api/cron/orphan-attach",         "schedule": "25 * * * *" },
-
-    { "path": "/api/cron/burnt-reserve-sweep",   "schedule": "50 7 * * *" }
+    {
+      "path": "/api/cron/sync",
+      "schedule": "0 * * * *"
+    },
+    {
+      "path": "/api/cron/redirect-check",
+      "schedule": "0 * * * *"
+    },
+    {
+      "path": "/api/cron/inbox-orders-poll",
+      "schedule": "0 */6 * * *"
+    },
+    {
+      "path": "/api/cron/client-tag-allocations",
+      "schedule": "0 8 * * *"
+    },
+    {
+      "path": "/api/cron/churn-check",
+      "schedule": "0 14 * * *"
+    },
+    {
+      "path": "/api/cron/churn-auto-fire",
+      "schedule": "5 17 * * *"
+    },
+    {
+      "path": "/api/cron/campaigns-outboundhero",
+      "schedule": "0 */6 * * *"
+    },
+    {
+      "path": "/api/cron/campaigns-cleaningoutbound",
+      "schedule": "15 */6 * * *"
+    },
+    {
+      "path": "/api/cron/campaigns-facilityreach",
+      "schedule": "30 */6 * * *"
+    },
+    {
+      "path": "/api/cron/campaigns-outboundclean",
+      "schedule": "45 */6 * * *"
+    },
+    {
+      "path": "/api/cron/campaigns-refresh",
+      "schedule": "0 19 * * *"
+    },
+    {
+      "path": "/api/cron/campaign-dup-drain",
+      "schedule": "*/3 * * * *"
+    },
+    {
+      "path": "/api/cron/deliverability-outboundhero",
+      "schedule": "0 12 */2 * *"
+    },
+    {
+      "path": "/api/cron/deliverability-cleaningoutbound",
+      "schedule": "30 12 */2 * *"
+    },
+    {
+      "path": "/api/cron/deliverability-facilityreach",
+      "schedule": "0 13 */2 * *"
+    },
+    {
+      "path": "/api/cron/deliverability-outboundclean",
+      "schedule": "30 13 */2 * *"
+    },
+    {
+      "path": "/api/cron/conform-tags-group-1",
+      "schedule": "0 4,16 * * *"
+    },
+    {
+      "path": "/api/cron/conform-tags-group-2",
+      "schedule": "15 4,16 * * *"
+    },
+    {
+      "path": "/api/cron/reconnect-worker",
+      "schedule": "*/5 * * * *"
+    },
+    {
+      "path": "/api/cron/provider-domain-status-check",
+      "schedule": "0 8 * * *"
+    },
+    {
+      "path": "/api/cron/fire-scheduled-deletions",
+      "schedule": "*/15 * * * *"
+    },
+    {
+      "path": "/api/cron/buy-domain-queue",
+      "schedule": "10 */2 * * *"
+    },
+    {
+      "path": "/api/cron/low-domain-alert",
+      "schedule": "0 15 * * 1-5"
+    },
+    {
+      "path": "/api/cron/reserve-alert",
+      "schedule": "5 15 * * 1-5"
+    },
+    {
+      "path": "/api/cron/replacement-daily-report",
+      "schedule": "0 1 * * *"
+    },
+    {
+      "path": "/api/cron/purchase-proposal",
+      "schedule": "30 15 * * 1-5"
+    },
+    {
+      "path": "/api/cron/buy-alert",
+      "schedule": "0 16 * * 1"
+    },
+    {
+      "path": "/api/cron/attach-queue",
+      "schedule": "20 * * * *"
+    },
+    {
+      "path": "/api/cron/auto-runner",
+      "schedule": "*/30 * * * *"
+    },
+    {
+      "path": "/api/cron/fire-scheduled-cancellations",
+      "schedule": "*/15 * * * *"
+    },
+    {
+      "path": "/api/cron/replacement-cancel-bridge",
+      "schedule": "50 * * * *"
+    },
+    {
+      "path": "/api/cron/cross-tag-cycle",
+      "schedule": "25 * * * *"
+    },
+    {
+      "path": "/api/cron/mrl-pace-check",
+      "schedule": "0 16 * * *"
+    },
+    {
+      "path": "/api/cron/daily-account-status-report",
+      "schedule": "55 7 * * *"
+    },
+    {
+      "path": "/api/cron/snapshot-deliverability",
+      "schedule": "0 15 * * *"
+    },
+    {
+      "path": "/api/cron/client-report-daily",
+      "schedule": "30 0 * * *"
+    },
+    {
+      "path": "/api/cron/client-report-weekly",
+      "schedule": "0 20 * * 5"
+    },
+    {
+      "path": "/api/cron/whitelist-queue",
+      "schedule": "30 14 * * *"
+    },
+    {
+      "path": "/api/cron/true-up-move",
+      "schedule": "7,37 * * * *"
+    },
+    {
+      "path": "/api/cron/redirect-conform",
+      "schedule": "40 9 * * *"
+    },
+    {
+      "path": "/api/cron/strip-removed-tags",
+      "schedule": "50 * * * *"
+    },
+    {
+      "path": "/api/cron/duplicate-cleanup",
+      "schedule": "35 * * * *"
+    },
+    {
+      "path": "/api/cron/inbox-orders-upload",
+      "schedule": "20 * * * *"
+    },
+    {
+      "path": "/api/cron/stuck-campaigns",
+      "schedule": "10 * * * *"
+    },
+    {
+      "path": "/api/cron/provider-redirect-sync",
+      "schedule": "5 * * * *"
+    },
+    {
+      "path": "/api/cron/system-watchdog",
+      "schedule": "55 * * * *"
+    },
+    {
+      "path": "/api/cron/metric-freeze",
+      "schedule": "45 * * * *"
+    },
+    {
+      "path": "/api/cron/blacklist-recheck",
+      "schedule": "30 * * * *"
+    },
+    {
+      "path": "/api/cron/strip-stock-redirects",
+      "schedule": "35 5 * * *"
+    },
+    {
+      "path": "/api/cron/limit-policy",
+      "schedule": "5 6 * * *"
+    },
+    {
+      "path": "/api/cron/orphan-attach",
+      "schedule": "25 * * * *"
+    },
+    {
+      "path": "/api/cron/burnt-reserve-sweep",
+      "schedule": "50 7 * * *"
+    },
+    {
+      "path": "/api/cron/reassignments",
+      "schedule": "3,18,33,48 * * * *"
+    }
   ]
 }

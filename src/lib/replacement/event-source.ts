@@ -4,6 +4,7 @@
 // same way. Safe to import client-side (pure function, no server deps).
 export function sourceOf(detail: string | null | undefined, kind?: string | null): string {
   const d = (detail || "").toLowerCase();
+  if (d.startsWith("reassignment")) return "reassignment";
   if (d.startsWith("true-up fill")) return "true-up fill";
   if (d.startsWith("true-up trim") || d.startsWith("trimmed")) return "true-up trim";
   if (d.startsWith("cross-instance move")) return "cross-instance move";

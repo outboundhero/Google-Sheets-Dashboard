@@ -13,6 +13,7 @@ import { GroupPlanCard } from "@/components/replacement/group-plan-card";
 import { FlaggedDomainsCard } from "@/components/replacement/flagged-domains-card";
 import { ShortfallCard } from "@/components/replacement/shortfall-card";
 import { TrueUpCard } from "@/components/replacement/true-up-card";
+import { ReassignmentCard } from "@/components/replacement/reassignment-card";
 import { WrongInstanceCard } from "@/components/replacement/wrong-instance-card";
 import { DailyReportCard } from "@/components/replacement/daily-report-card";
 import { RetryCard } from "@/components/replacement/retry-card";
@@ -457,6 +458,9 @@ export default function ReplacementPage() {
 
       {/* True-up — fill to cap / trim over cap, and which tags have no reserve left */}
       <TrueUpCard />
+
+      {/* Client → client domain hand-over with the 2-day wind-down (Nick 8/4 doc #5). */}
+      <ReassignmentCard />
 
       {/* Wrong-instance flag + per-client Run (moves domains to the correct instance) */}
       <WrongInstanceCard />
