@@ -131,6 +131,10 @@ export async function startReassignments(
     for (const r of carrying) if (busy.has(`${r.instance}:${domain}`)) clash = true;
     if (clash) { res.rejected.push({ domain, why: "already in an active reassignment" }); continue; }
 
+    // Skip rows only for inserts that actually landed — a half-inserted domain
+    // must never sit in the machine without its do-not-touch marker.
+    const inserted: { instance: string; domain: string }[] = [];
+    let insertError: string | null = null;
     for (const r of carrying) {
       const { error } = await supabase.from("reassignments").insert({
         instance: r.instance,
@@ -140,13 +144,13 @@ export async function startReassignments(
         stage: "queued",
         wait_until: new Date().toISOString(), // worker picks it up immediately
       });
-      if (error) { res.rejected.push({ domain, why: error.message }); clash = true; break; }
+      if (error) { insertError = error.message; break; }
+      inserted.push({ instance: r.instance, domain });
     }
-    if (clash) continue;
-
-    await addSkips(carrying.map((r) => ({
-      instance: r.instance, domain, reason: skipReason(from, to, windDownEnd),
-    })));
+    if (inserted.length > 0) {
+      await addSkips(inserted.map((e) => ({ ...e, reason: skipReason(from, to, windDownEnd) })));
+    }
+    if (insertError) { res.rejected.push({ domain, why: insertError }); continue; }
     res.started.push(domain);
   }
 
@@ -200,7 +204,11 @@ export interface WorkResult {
   details: { domain: string; stage: string; to?: string; error?: string }[];
 }
 
-export async function processDueReassignments(limit = 10): Promise<WorkResult> {
+/** Keep well inside the route's 600s ceiling — a row cut off mid-flight by the
+ *  platform would neither advance nor record its error. */
+const RUN_BUDGET_MS = 480_000;
+
+export async function processDueReassignments(limit = 5): Promise<WorkResult> {
   const supabase = getSupabaseAdmin();
   const res: WorkResult = { processed: 0, advanced: 0, retried: 0, failed: 0, details: [] };
 
@@ -214,7 +222,33 @@ export async function processDueReassignments(limit = 10): Promise<WorkResult> {
   if (error) throw new Error(error.message);
   const rows = (data || []) as ReassignmentRow[];
 
+  // Watchdog: an active row nobody has touched for 24h means something is
+  // wedged (e.g. runs being cut off before they can even write an error) —
+  // surface it on the dashboard. recordPipelineAlert dedupes per (source,step),
+  // so repeating cron runs bump one alert instead of stacking new ones.
+  try {
+    const staleCut = new Date(Date.now() - 24 * 3600_000).toISOString();
+    const { data: stuck } = await supabase
+      .from("reassignments")
+      .select("instance,domain,stage,to_tag,updated_at")
+      .in("stage", ["queued", "campaigns_removed", "retagged", "attached"])
+      .lt("updated_at", staleCut)
+      .neq("stage", "campaigns_removed"); // the 2-day wind-down is SUPPOSED to sit still
+    for (const s of stuck || []) {
+      await recordPipelineAlert({
+        source: "reassignment",
+        step: `stuck:${s.instance}:${s.domain}`,
+        clientTag: s.to_tag,
+        domains: [s.domain],
+        reason: `Reassignment of ${s.domain} has sat in stage "${s.stage}" for 24h+ without progress — needs a look`,
+        silent: true,
+      }).catch(() => {});
+    }
+  } catch { /* watchdog must never block the worker */ }
+
+  const startedAt = Date.now();
   for (const row of rows) {
+    if (Date.now() - startedAt > RUN_BUDGET_MS) break; // bank progress; next tick continues
     res.processed++;
     const attempts = row.attempts + 1;
     const patch = (p: Record<string, unknown>) =>
@@ -233,8 +267,11 @@ export async function processDueReassignments(limit = 10): Promise<WorkResult> {
     } catch (e) {
       const msg = (e instanceof Error ? e.message : String(e)).slice(0, 400);
       if (attempts >= MAX_ATTEMPTS) {
+        // The skip STAYS on a failed row — a half-moved domain (out of its
+        // campaigns, tags possibly mid-change) must not be grabbed by true-up
+        // or replacement until a human resolves the alert. The loud skip
+        // reason marks why it's parked.
         await patch({ stage: "failed", attempts, last_error: msg });
-        await removeSkips([{ instance: row.instance, domain: row.domain }]).catch(() => {});
         await recordPipelineAlert({
           source: "reassignment",
           step: `${row.stage}:${row.instance}`,
