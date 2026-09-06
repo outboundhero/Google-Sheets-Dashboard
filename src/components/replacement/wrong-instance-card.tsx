@@ -163,7 +163,9 @@ export function WrongInstanceCard() {
         }
         const ok = agg.failed === 0 && agg.uploading === 0;
         setQueueBoth((prev) => prev.map((q) => (q.client.clientTag === tag
-          ? { ...q, status: ok ? "done" : "failed", error: ok ? undefined : (agg.note || `${agg.failed} failed · ${agg.uploading} never landed`) }
+          ? { ...q, status: ok ? "done" : "failed", error: ok ? undefined : (agg.note || (agg.failed === 0 && agg.uploading > 0
+              ? `${agg.uploading} still uploading at Inboxing — Re-run later to finish (safe)`
+              : `${agg.failed} failed · ${agg.uploading} never landed`)) }
           : q)));
       }
     } finally {
@@ -262,8 +264,8 @@ export function WrongInstanceCard() {
             </div>
             <div className="text-[11px] text-muted-foreground">
               Clients with domains on a Bison instance in the wrong group vs their allocation. Runs queue up and process
-              one client at a time — keep queueing while moves run. The source copy stays — remove it afterward on the
-              Deliverability page.
+              one client at a time — keep queueing while moves run. The source copy stays until the hourly
+              duplicate cleanup deletes it automatically once arrivals are verified.
             </div>
           </div>
           <div className="flex items-center gap-2">

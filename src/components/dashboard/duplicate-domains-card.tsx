@@ -240,7 +240,7 @@ export function DuplicateDomainsCard() {
         <div className="px-5 pb-5 space-y-3">
           <div className="flex items-center justify-between gap-2">
             <p className="text-[11px] text-muted-foreground">
-              Same domain in 2+ instances — each card shows that instance&apos;s inboxes, tags, and created date. The <b>older-created copy is pre-selected</b> for removal (edit as needed). Click an instance to <b>remove</b> the domain from it (drag to multi-select) — leaves it in the others. Removes its senders from that instance&apos;s campaigns, then schedules deletion after 3 days.
+              Same domain in 2+ instances — each card shows that instance&apos;s inboxes, tags, and created date. The <b>older-created copy is pre-selected</b> for removal (edit as needed). Click an instance to <b>remove</b> the domain from it (drag to multi-select) — leaves it in the others. Removes its senders from that instance&apos;s campaigns, then queues the deletion — system-decided copies fire on the next 15-minute pass; manual selections keep the 3-day grace unless you tick immediate.
             </p>
             <button onClick={refresh} disabled={loading || working} className="flex items-center gap-1.5 text-xs rounded-md border px-2.5 py-1.5 hover:bg-muted/50 disabled:opacity-50 shrink-0">
               <RefreshCw className={`h-3.5 w-3.5 ${loading ? "animate-spin" : ""}`} /> Refresh
@@ -349,7 +349,7 @@ export function DuplicateDomainsCard() {
           {pending.length > 0 && (
             <div className="space-y-1.5">
               <div className="flex items-center justify-between gap-2">
-                <div className="flex items-center gap-1.5 text-[11px] text-amber-500"><Clock className="h-3 w-3" /> Pending deletion (after 3-day grace)</div>
+                <div className="flex items-center gap-1.5 text-[11px] text-amber-500"><Clock className="h-3 w-3" /> Pending deletion — the 15-minute executor works this queue</div>
                 <div className="flex items-center gap-1.5 shrink-0">
                   <button
                     onClick={() => runDeletionsNow(false)}
@@ -388,7 +388,7 @@ export function DuplicateDomainsCard() {
                   <div key={`${p.instance}:${p.domain}`} className="flex items-center justify-between px-3 py-1.5 text-xs">
                     <span className="truncate">{p.domain} <span className="text-muted-foreground">{short[p.instance] ?? p.instance}</span></span>
                     <div className="flex items-center gap-2 shrink-0">
-                      <span className="text-[10px] text-muted-foreground">fires {new Date(p.scheduledAt).toLocaleDateString()}</span>
+                      <span className="text-[10px] text-muted-foreground">{new Date(p.scheduledAt).getTime() <= Date.now() ? "due now" : `fires ${new Date(p.scheduledAt).toLocaleDateString()}`}</span>
                       <button onClick={() => cancelPending(p)} className="text-[10px] text-primary hover:underline">cancel</button>
                     </div>
                   </div>
