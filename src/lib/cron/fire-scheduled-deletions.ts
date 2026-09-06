@@ -16,7 +16,8 @@ import { logEvents } from "@/lib/replacement/store";
 // is marked 'done'; if anything is still stuck it stays 'pending' and the next
 // daily run retries it (the delete is idempotent).
 
-const MAX_PER_RUN = 15; // stay comfortably inside maxDuration; overflow waits for the next run
+const MAX_PER_RUN = 40; // pulled per run, split into per-instance lanes below
+const LANE_MAX = 12;    // cap per lane; the shared budget cuts a run off anyway
 // Budgets sized for the routes' 800s Fluid maxDuration, never START a row past
 // RUN_BUDGET_MS, and cap any single row at ROW_TIMEOUT_MS (worst case ~600s +
 // 260s is still under 800s + the trailing count query). The previous 140s/130s
@@ -78,13 +79,23 @@ export async function runScheduledDeletions(
   const rows = (due || []) as { instance: string; domain: string }[];
   const results: { instance: string; domain: string; deleted: number; notFound: number; failed: number; remainingInBison: number; done: boolean; error?: string }[] = [];
 
+  // Per-instance lanes (2026-09-07): one slow facilityreach row used to eat
+  // the whole run's budget while dozens of fast outboundhero/outboundclean
+  // rows sat behind it in the shared oldest-first queue (observed: 72 fast
+  // rows starved for days). Each instance drains sequentially in its OWN lane
+  // — still gentle on that workspace — and the lanes run in parallel.
   const startedAt = Date.now();
+  const lanes = new Map<string, typeof rows>();
   for (const row of rows) {
-    if (Date.now() - startedAt > RUN_BUDGET_MS) break; // bank what finished; next run continues from here
+    const lane = lanes.get(row.instance) ?? [];
+    if (lane.length < LANE_MAX) lane.push(row);
+    lanes.set(row.instance, lane);
+  }
+  const processRow = async (row: { instance: string; domain: string }) => {
     if (!isInstanceSlug(row.instance)) {
       // Unknown instance slug — mark done so it doesn't loop forever.
       await supabase.from("duplicate_domain_deletions").update({ status: "done" }).eq("instance", row.instance).eq("domain", row.domain);
-      continue;
+      return;
     }
     try {
       const r = await Promise.race([
@@ -125,7 +136,15 @@ export async function runScheduledDeletions(
       console.error(`[cron/fire-scheduled-deletions] ${row.instance}:${row.domain} failed:`, msg);
       results.push({ instance: row.instance, domain: row.domain, deleted: 0, notFound: 0, failed: 1, remainingInBison: -1, done: false, error: msg.slice(0, 200) });
     }
-  }
+  };
+  await Promise.all(
+    [...lanes.values()].map(async (lane) => {
+      for (const row of lane) {
+        if (Date.now() - startedAt > RUN_BUDGET_MS) break; // bank what finished; next run continues
+        await processRow(row);
+      }
+    }),
+  );
 
   const fired = results.filter((r) => r.done).length;
 
