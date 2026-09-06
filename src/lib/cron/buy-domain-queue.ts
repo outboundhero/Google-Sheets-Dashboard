@@ -4,14 +4,25 @@ import { getSupabaseAdmin } from "@/lib/supabase";
 import { createDomain, setAutoRenew } from "@/lib/porkbun";
 import { appendToSecondaryDomainColumn } from "@/lib/google-sheets-secondary-domain";
 
-// Drains `porkbun_buy_queue`: buys at most 20 domains per 8-hour window on the
-// outboundhero Porkbun account (via porkbun.ts, which is hard-locked to that
-// account). Runs on a cron; the 8h gate — not the cron cadence — decides when a
-// batch actually fires, so a multi-day backlog empties 20-at-a-time regardless
+// Drains `porkbun_buy_queue`: buys at most 10 domains per ~180-minute window
+// (±1-5 min random) on the outboundhero Porkbun account (via porkbun.ts, which
+// is hard-locked to that account). Runs on a 15-min cron; the jittered window
+// gate — not the cron cadence — decides when a batch actually fires, so a
+// queued backlog (e.g. 90 domains → 9 batches) empties 10-at-a-time regardless
 // of whether any browser tab is open.
 
-const WINDOW_MS = 8 * 60 * 60 * 1000;
-const MAX_PER_BATCH = 20;
+// Spencer's exact pacing (Slack + Loom 2026-07-23): batches of AT MOST 10,
+// one batch per ~180 minutes, never the same interval twice — a random 1-5
+// minute add/subtract each window ("178 minutes, 184 minutes… randomizer"),
+// so Porkbun never sees a bulk pattern or a metronome. The first build shipped
+// 20-per-8h; conformed to his numbers 2026-09-07.
+const WINDOW_MS = 180 * 60 * 1000;
+const JITTER_MIN_MS = 1 * 60 * 1000;
+const JITTER_MAX_MS = 5 * 60 * 1000;
+/** ±1-5 min, fresh each check. */
+const windowJitterMs = () =>
+  (Math.random() < 0.5 ? -1 : 1) * (JITTER_MIN_MS + Math.random() * (JITTER_MAX_MS - JITTER_MIN_MS));
+const MAX_PER_BATCH = 10;
 const TICK_MS = 10_500;        // Porkbun create limit is ~1/10s
 const DEADLINE_MS = 270_000;   // stop before the route's maxDuration=300
 const LOCK_KEY = "cron:porkbun-buy:lock";
@@ -55,8 +66,8 @@ export async function runBuyQueue(): Promise<NextResponse> {
   }
 
   try {
-    // (2) 8h window gate — a new batch may start only if the most recent
-    //     successful purchase is ≥8h old (or none exists).
+    // (2) Window gate — a new batch may start only once the most recent
+    //     successful purchase is ~180min (±1-5min random) old, or none exists.
     const { data: lastRows } = await supabase
       .from("porkbun_buy_queue")
       .select("purchased_at")
@@ -64,10 +75,11 @@ export async function runBuyQueue(): Promise<NextResponse> {
       .order("purchased_at", { ascending: false })
       .limit(1);
     const lastPurchasedAt = lastRows?.[0]?.purchased_at ? new Date(lastRows[0].purchased_at).getTime() : null;
-    if (lastPurchasedAt && Date.now() - lastPurchasedAt < WINDOW_MS) {
+    const windowMs = WINDOW_MS + windowJitterMs();
+    if (lastPurchasedAt && Date.now() - lastPurchasedAt < windowMs) {
       return NextResponse.json({
         skipped: "window",
-        nextEligibleAt: new Date(lastPurchasedAt + WINDOW_MS).toISOString(),
+        nextEligibleAt: new Date(lastPurchasedAt + windowMs).toISOString(),
       });
     }
 
