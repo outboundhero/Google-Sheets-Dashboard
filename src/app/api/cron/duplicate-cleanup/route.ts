@@ -93,6 +93,7 @@ export async function GET(request: Request) {
 
     // Per-side inbox sends — crawled per workspace, not mirrored by carryover.
     const inboxSends = new Map<string, number>();
+    const inboxRows = new Map<string, number>(); // per-side sender count — "has the moved copy actually landed?"
     for (let i = 0; i < names.length; i += 100) {
       const slice = names.slice(i, i + 100);
       let off = 0;
@@ -107,6 +108,7 @@ export async function GET(request: Request) {
         for (const r of data as { instance: string; domain: string; emails_sent_count: number | null }[]) {
           const k = `${r.instance}:${r.domain}`;
           inboxSends.set(k, (inboxSends.get(k) || 0) + (r.emails_sent_count || 0));
+          inboxRows.set(k, (inboxRows.get(k) || 0) + 1);
         }
         if (data.length < 1000) break;
         off += 1000;
@@ -131,9 +133,11 @@ export async function GET(request: Request) {
       return null;
     };
     const sends = (inst: string, domain: string) => inboxSends.get(`${inst}:${domain}`) || 0;
+    const rows = (inst: string, domain: string) => inboxRows.get(`${inst}:${domain}`) || 0;
 
     const verdicts: Verdict[] = [];
     const needsHuman: { domain: string; reason: string; sides: string[] }[] = [];
+    const waitingOnMove: { domain: string; origin: string; destination: string }[] = [];
 
     for (const dup of candidates) {
       const sides = dup.instances.filter((s) => isInstanceSlug(s.instance));
@@ -179,27 +183,51 @@ export async function GET(request: Request) {
       }
 
       if (!tag) {
-        // Case B — untagged both sides: activity decides; both-silent → keep the move destination.
+        // Case B — untagged both sides. A second copy of an untagged domain
+        // exists for exactly one reason: a recorded cross-instance move
+        // (true-up donor / wrong-instance / manual). The recorded direction
+        // IS the intent (Spencer 2026-09-03), so:
+        //   destination landed  → keep destination, retire the origin copy
+        //   destination empty   → the move is mid-flight — touch NOTHING
+        //   destination partial → human
+        // The old "the side with sends wins" rule inverted this: a veteran
+        // reserve moved FR→OH kept losing its fresh OH copy to its own send
+        // history on FR, the mover re-uploaded it, and cleanup deleted it
+        // again — urbancorecleaning.co looped 4× from Aug 25 to Sep 6.
+        const origin = firstInstance.get(dup.domain);
+        const originSide = sides.find((s) => s.instance === origin);
+        const destSide = sides.find((s) => s.instance !== origin);
+        if (origin && originSide && destSide) {
+          const destRows = rows(destSide.instance, dup.domain);
+          const originRows = rows(originSide.instance, dup.domain);
+          if (destRows === 0) {
+            waitingOnMove.push({ domain: dup.domain, origin: originSide.instance, destination: destSide.instance });
+            continue;
+          }
+          if (originRows > 0 && destRows < Math.floor(originRows * 0.9)) {
+            needsHuman.push({ domain: dup.domain, reason: `move to ${destSide.instance} only partially landed (${destRows} of ${originRows} senders)`, sides: sideNames });
+            continue;
+          }
+          verdicts.push({
+            domain: dup.domain, keep: destSide.instance, del: originSide.instance,
+            rule: `recorded move ${originSide.instance} → ${destSide.instance} landed (${destRows} senders) — retiring the origin copy`,
+          });
+          continue;
+        }
+        // No recorded origin — fall back to activity.
         const sa = sends(a.instance, dup.domain);
         const sb = sends(b.instance, dup.domain);
         if (sa > 0 && sb > 0) {
-          needsHuman.push({ domain: dup.domain, reason: "both sides have inbox sends", sides: sideNames });
+          needsHuman.push({ domain: dup.domain, reason: "both sides have inbox sends, origin unknown", sides: sideNames });
           continue;
         }
         if (sa > 0 || sb > 0) {
           const keep = sa > 0 ? a : b;
           const del = sa > 0 ? b : a;
-          verdicts.push({ domain: dup.domain, keep: keep.instance, del: del.instance, rule: `only ${keep.instance} has inbox sends` });
+          verdicts.push({ domain: dup.domain, keep: keep.instance, del: del.instance, rule: `origin unknown — only ${keep.instance} has inbox sends` });
           continue;
         }
-        const origin = firstInstance.get(dup.domain);
-        const originSide = sides.find((s) => s.instance === origin);
-        const destSide = sides.find((s) => s.instance !== origin);
-        if (!origin || !originSide || !destSide) {
-          needsHuman.push({ domain: dup.domain, reason: "both silent, move direction unknown", sides: sideNames });
-          continue;
-        }
-        verdicts.push({ domain: dup.domain, keep: destSide.instance, del: originSide.instance, rule: "both silent — keeping the move destination, deleting the origin copy" });
+        needsHuman.push({ domain: dup.domain, reason: "both silent, move direction unknown", sides: sideNames });
         continue;
       }
 
@@ -216,6 +244,7 @@ export async function GET(request: Request) {
         decided: verdicts.length,
         thisRun: toSchedule.length,
         needsHuman,
+        waitingOnMove,
         verdicts: toSchedule,
       });
     }
@@ -255,6 +284,7 @@ export async function GET(request: Request) {
       scheduled: toSchedule.length,
       remainingDecided: Math.max(0, verdicts.length - toSchedule.length),
       needsHuman,
+      waitingOnMove,
       verdicts: toSchedule,
     });
   } catch (error) {
