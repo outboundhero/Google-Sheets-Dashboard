@@ -70,6 +70,9 @@ const allNavItems: NavEntry[] = [
       { href: "/deliverability", label: "Deliverability", icon: Mailbox, roles: ["admin", "viewer"] },
       { href: "/deliverability/inbox-orders", label: "Inbox Orders", icon: PackagePlus, roles: ["admin"] },
       { href: "/domains", label: "Domains", icon: Globe, roles: ["admin"] },
+      // Spencer's Jul-29 Loom: "let's put replacement inside of infrastructure,
+      // please — at the very bottom."
+      { href: "/replacement", label: "Replacement", icon: Recycle, roles: ["admin"] },
     ],
   },
   { href: "/account-status", label: "Account Status", icon: PlugZap, roles: ["admin", "viewer"] },
@@ -86,7 +89,6 @@ const allNavItems: NavEntry[] = [
     ],
   },
   { href: "/mrl-pacing", label: "MRL Pacing", icon: Gauge, roles: ["admin"] },
-  { href: "/replacement", label: "Replacement", icon: Recycle, roles: ["admin"] },
   { href: "/settings", label: "Settings", icon: Settings, roles: ["admin"] },
 ];
 

@@ -28,6 +28,7 @@ interface FlaggedRow {
   instance: string;
   domain: string;
   clientTag: string | null;
+  redirectUrl?: string | null;
   sent: number;
   reply_15: number | null;
   reply_30: number | null;
@@ -374,7 +375,12 @@ export function FlaggedDomainsCard() {
                     className={`grid grid-cols-[minmax(180px,1.2fr)_70px_65px_minmax(170px,1.3fr)_65px_60px_60px_60px_78px_minmax(200px,1.6fr)] gap-2 px-3 py-1.5 text-xs items-center border-t cursor-pointer ${selected ? "bg-sky-500/15" : "hover:bg-muted/40"}`}
                   >
                     <span className="font-mono truncate">{r.domain}</span>
-                    <span className="font-medium truncate">{r.clientTag ?? "—"}</span>
+                    <span className="font-medium truncate" title={r.redirectUrl ? `redirects to ${r.redirectUrl}` : "no redirect set"}>
+                      {r.clientTag ?? "—"}
+                      {r.redirectUrl && (
+                        <span className="ml-1 font-normal text-[10px] text-muted-foreground">→ {r.redirectUrl.replace(/^https?:\/\//, "").replace(/\/$/, "")}</span>
+                      )}
+                    </span>
                     <span className="text-muted-foreground">{short[r.instance] ?? r.instance}</span>
                     <span className="truncate" title={`${r.segmentName} › ${r.groupName}`}>
                       {r.segmentName} <span className="text-muted-foreground">› {r.groupName}</span>

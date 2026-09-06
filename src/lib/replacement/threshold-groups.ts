@@ -257,6 +257,7 @@ interface DomRow {
   total_bounced: number | null;
   blacklisted: boolean | null;
   spamhaus_dbl: boolean | null;
+  redirect_url: string | null;
 }
 interface RateRow {
   instance: BisonInstanceSlug; domain: string;
@@ -277,6 +278,8 @@ export interface GroupCandidate {
   groupId: string;
   groupName: string;
   reasons: string[];
+  /** Where the domain currently redirects (Spencer's Jul-29 Loom: show it). */
+  redirectUrl: string | null;
 }
 
 /**
@@ -311,7 +314,7 @@ export async function runGroupDetection(
   while (true) {
     const { data, error } = await supabase
       .from("deliverability_domains")
-      .select("instance,domain,tags,total_sent,total_replied,total_bounced,blacklisted,spamhaus_dbl")
+      .select("instance,domain,tags,total_sent,total_replied,total_bounced,blacklisted,spamhaus_dbl,redirect_url")
       .in("instance", instances)
       .range(offset, offset + 999);
     if (error) throw new Error(error.message);
@@ -355,6 +358,7 @@ export async function runGroupDetection(
         segmentId: verdict.segmentId!, segmentName: verdict.segmentName!,
         groupId: verdict.groupId!, groupName: verdict.groupName!,
         reasons: verdict.reasons,
+        redirectUrl: d.redirect_url || null,
       });
     }
   }
