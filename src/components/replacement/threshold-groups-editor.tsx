@@ -107,6 +107,8 @@ export function ThresholdGroupsEditor() {
         clientTags: [],
         isDefault: false,
         groups: src.groups.map((g) => ({ id: uid(), name: g.name, conditions: g.conditions.map((cd) => ({ ...cd })) })),
+        keywordsInclude: [...(src.keywordsInclude ?? [])],
+        keywordsExclude: [...(src.keywordsExclude ?? [])],
       };
       const idx = c.segments.findIndex((s) => s.id === segId);
       const segments = [...c.segments];
@@ -250,6 +252,12 @@ export function ThresholdGroupsEditor() {
                     <Copy className="h-3 w-3" /> duplicate
                   </Button>
                 </div>
+                {((seg.keywordsInclude?.length ?? 0) > 0 || (seg.keywordsExclude?.length ?? 0) > 0) && (
+                  <div className="text-[11px] text-muted-foreground">
+                    naming: {(seg.keywordsInclude?.length ?? 0) > 0 && <>has <b>{seg.keywordsInclude!.join(" / ")}</b></>}
+                    {(seg.keywordsExclude?.length ?? 0) > 0 && <> · never <b>{seg.keywordsExclude!.join(" / ")}</b></>}
+                  </div>
+                )}
                 {seg.groups.length === 0 ? (
                   <div className="text-xs text-muted-foreground italic">No groups — this segment never triggers a replacement.</div>
                 ) : (
@@ -290,6 +298,24 @@ export function ThresholdGroupsEditor() {
                       />
                     </label>
                   )}
+                  <label className="flex items-center gap-1.5 text-xs text-muted-foreground" title="Owned-domain suggestions for this category must contain one of these (Spencer Jul-29 §14)">
+                    name has
+                    <input
+                      value={(seg.keywordsInclude ?? []).join(", ")}
+                      onChange={(e) => patchSeg(seg.id, (sg) => ({ ...sg, keywordsInclude: e.target.value.split(",").map((t) => t.trim().toLowerCase()).filter(Boolean) }))}
+                      placeholder="clean, janitorial…"
+                      className="text-sm px-2 py-1 rounded-lg border bg-background w-44"
+                    />
+                  </label>
+                  <label className="flex items-center gap-1.5 text-xs text-muted-foreground" title="Never suggest a domain whose name contains any of these">
+                    never
+                    <input
+                      value={(seg.keywordsExclude ?? []).join(", ")}
+                      onChange={(e) => patchSeg(seg.id, (sg) => ({ ...sg, keywordsExclude: e.target.value.split(",").map((t) => t.trim().toLowerCase()).filter(Boolean) }))}
+                      placeholder="satin, window…"
+                      className="text-sm px-2 py-1 rounded-lg border bg-background w-40"
+                    />
+                  </label>
                   <div className="flex items-center gap-1 ml-auto">
                     <Button size="sm" variant="ghost" onClick={() => duplicateSegment(seg.id)} className="gap-1 text-muted-foreground" title="Duplicate this segment">
                       <Copy className="h-3.5 w-3.5" /> duplicate

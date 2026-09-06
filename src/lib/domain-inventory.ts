@@ -1,5 +1,6 @@
 import { getSupabaseAdmin } from "@/lib/supabase";
 import { PROTECTED_INSTANCE_DOMAINS } from "@/lib/bison-instances";
+import { getThresholdConfig } from "@/lib/replacement/threshold-groups-store";
 
 // Shared helpers + the merged-inventory assembler for the "All Domains" tab.
 // In-use and deliverability-derived provider are computed LIVE from
@@ -190,6 +191,18 @@ function computeReuseBlockers(r: {
 export async function assembleInventory(): Promise<{ rows: InventoryRow[]; counts: InventoryCounts }> {
   const [inv, deliv, ordered] = await Promise.all([readInventory(), readDeliverability(), readOrderedDomains()]);
 
+  // §14 naming rules from the DEFAULT (cleaning) segment — reserves are for
+  // cleaning clients, so a reusable domain must read like one. Fail-open: a
+  // config read error must never blank the inventory.
+  let kwInclude: string[] = [];
+  let kwExclude: string[] = [];
+  try {
+    const cfg = await getThresholdConfig();
+    const def = cfg.segments.find((sg) => sg.isDefault);
+    kwInclude = (def?.keywordsInclude ?? []).map((k) => k.toLowerCase());
+    kwExclude = (def?.keywordsExclude ?? []).map((k) => k.toLowerCase());
+  } catch { /* keyword rule skipped this load */ }
+
   const rows: InventoryRow[] = inv.map((r) => {
     const d = deliv.get(r.domain);
     const hasInboxes = (d?.inbox ?? 0) > 0;
@@ -233,6 +246,11 @@ export async function assembleInventory(): Promise<{ rows: InventoryRow[]; count
   });
   for (const row of rows) {
     row.reuseBlockers = computeReuseBlockers(row);
+    const name = row.domain.toLowerCase();
+    const hitExclude = kwExclude.find((k) => name.includes(k));
+    if (hitExclude) row.reuseBlockers.push(`name contains excluded keyword "${hitExclude}"`);
+    else if (kwInclude.length > 0 && !kwInclude.some((k) => name.includes(k)))
+      row.reuseBlockers.push("name doesn't match the cleaning naming keywords");
     row.reuseEligible = row.reuseBlockers.length === 0;
   }
 

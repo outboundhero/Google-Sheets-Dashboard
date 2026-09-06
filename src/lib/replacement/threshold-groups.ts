@@ -50,6 +50,11 @@ export interface ThresholdSegment {
   /** The catch-all bucket (commercial cleaning / janitorial). Exactly one. */
   isDefault: boolean;
   groups: ConditionGroup[];        // OR
+  /** §14 naming rules (Spencer Jul-29): an owned domain may only be suggested
+   *  for this category when its name contains ≥1 accepted keyword (when the
+   *  list is non-empty) and none of the excluded ones. Editable per segment. */
+  keywordsInclude?: string[];
+  keywordsExclude?: string[];
 }
 
 export interface ThresholdConfig {
@@ -193,6 +198,8 @@ export function defaultThresholdConfig(): ThresholdConfig {
         name: "Commercial cleaning / janitorial (default)",
         clientTags: [],
         isDefault: true,
+        keywordsInclude: ["clean", "janitorial", "facility", "facilities", "building", "maintenance", "commercial", "office", "custodial"],
+        keywordsExclude: ["satin", "insur", "shockwave", "dm4pm", "outboundhero", "window", "christmas"],
         groups: [
           {
             id: "grp-g1", name: "500–1,499 sent",
@@ -238,10 +245,10 @@ export function defaultThresholdConfig(): ThresholdConfig {
           },
         ],
       },
-      { id: "seg-sc", name: "SC", clientTags: ["SC"], isDefault: false, groups: [] },
+      { id: "seg-sc", name: "SC", clientTags: ["SC"], isDefault: false, groups: [], keywordsInclude: [], keywordsExclude: [] },
       { id: "seg-oh", name: "OH (Outbound Hero internal)", clientTags: ["OH"], isDefault: false, groups: [] },
-      { id: "seg-dm4pm", name: "DM4PM", clientTags: ["DM4PM"], isDefault: false, groups: [] },
-      { id: "seg-si", name: "SI (Insurance)", clientTags: ["SI"], isDefault: false, groups: [] },
+      { id: "seg-dm4pm", name: "DM4PM", clientTags: ["DM4PM"], isDefault: false, groups: [], keywordsInclude: ["dm4pm"], keywordsExclude: [] },
+      { id: "seg-si", name: "SI (Insurance)", clientTags: ["SI"], isDefault: false, groups: [], keywordsInclude: ["satin"], keywordsExclude: [] },
     ],
   };
 }
