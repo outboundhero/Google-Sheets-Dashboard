@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { getSupabaseAdmin } from "@/lib/supabase";
-import { bisonFetch } from "@/lib/bison";
+import { bisonFetch, senderSearchTerm, emailIsOnDomain } from "@/lib/bison";
 import { getHandledDomains, logEvents } from "@/lib/replacement/store";
 import { hasBurntTag } from "@/lib/replacement/burnt-tag";
 import { ALL_INSTANCE_SLUGS, type BisonInstanceSlug } from "@/lib/bison-instances";
@@ -127,12 +127,16 @@ export async function GET(request: Request) {
       }
 
       // LIVE verification — inboxes + current attachments.
-      const sr = await bisonFetch(d.instance, `/sender-emails?search=${encodeURIComponent(d.domain)}&per_page=100`);
+      const sr = await bisonFetch(d.instance, `/sender-emails?search=${encodeURIComponent(senderSearchTerm(d.domain))}&per_page=100`);
       if (!sr.ok) {
         results.push({ instance: d.instance, domain: d.domain, tag: d.tag, action: "error", detail: `Bison inbox lookup HTTP ${sr.status}` });
         continue;
       }
-      const inboxes = (((await sr.json()) as { data?: { id: number; emails_sent_count?: number }[] }).data) || [];
+      // Exact-domain filter is load-bearing: the newer Bison on FR/OC returns
+      // OTHER domains' senders for a query with no hits — attaching those
+      // would put another client's inboxes into this tag's campaigns.
+      const inboxes = ((((await sr.json()) as { data?: { id: number; email?: string; emails_sent_count?: number }[] }).data) || [])
+        .filter((i) => emailIsOnDomain(i.email, d.domain));
       if (inboxes.length === 0) {
         results.push({ instance: d.instance, domain: d.domain, tag: d.tag, action: "skip", detail: "no inboxes in Bison (stale mirror row)" });
         continue;

@@ -11,7 +11,7 @@
 //
 // Rule: for "did an external system receive this?", ask the external system.
 // Our table stays the source for metrics and history, never for existence.
-import { bisonFetch } from "@/lib/bison";
+import { bisonFetch, senderSearchTerm, emailIsOnDomain } from "@/lib/bison";
 import type { BisonInstanceSlug } from "@/lib/bison-instances";
 
 /** Sender count for a domain in one instance. -1 = the check itself failed
@@ -21,16 +21,25 @@ export async function senderCountInBison(
   instance: BisonInstanceSlug,
   domain: string,
 ): Promise<number> {
+  // Label-only term + exact-domain counting: meta.total is NOT the domain's
+  // count any more (it includes name-cousins, and on the newer FR/OC Bison a
+  // dotted query with no hits fuzzy-matched thousands of foreign senders —
+  // which would have made every un-uploaded order look "present").
   try {
-    const res = await bisonFetch(instance, `/sender-emails?search=${encodeURIComponent(domain)}&per_page=1`);
-    if (!res.ok) return -1;
-    const json = (await res.json().catch(() => null)) as
-      | { data?: unknown[]; meta?: { total?: number } }
-      | null;
-    if (!json) return -1;
-    const total = json.meta?.total;
-    if (typeof total === "number") return total;
-    return Array.isArray(json.data) ? json.data.length : -1;
+    let count = 0;
+    for (let page = 1; page <= 8; page++) {
+      const res = await bisonFetch(instance, `/sender-emails?search=${encodeURIComponent(senderSearchTerm(domain))}&page=${page}&per_page=15`);
+      if (!res.ok) return -1;
+      const json = (await res.json().catch(() => null)) as
+        | { data?: { email?: string }[]; meta?: { last_page?: number } }
+        | null;
+      if (!json) return -1;
+      const data = Array.isArray(json.data) ? json.data : [];
+      count += data.filter((s) => emailIsOnDomain(s.email, domain)).length;
+      const last = json.meta?.last_page || 1;
+      if (page >= last || data.length === 0) break;
+    }
+    return count;
   } catch {
     return -1;
   }

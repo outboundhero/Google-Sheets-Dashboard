@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { getSupabaseAdmin } from "@/lib/supabase";
-import { bisonFetch, resolveInstance } from "@/lib/bison";
+import { bisonFetch, resolveInstance, senderSearchTerm } from "@/lib/bison";
 
 export const maxDuration = 120;
 
@@ -55,7 +55,7 @@ export async function POST(request: Request) {
         try {
           const res = await bisonFetch(
             instance,
-            `/sender-emails?search=${encodeURIComponent(domain)}&page=${page}&per_page=15`,
+            `/sender-emails?search=${encodeURIComponent(senderSearchTerm(domain))}&page=${page}&per_page=15`,
           );
           if (!res.ok) break;
           const json = await res.json();

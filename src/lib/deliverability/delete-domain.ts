@@ -1,5 +1,5 @@
 import { getSupabaseAdmin } from "@/lib/supabase";
-import { bisonFetch } from "@/lib/bison";
+import { bisonFetch, senderSearchTerm } from "@/lib/bison";
 import type { BisonInstanceSlug } from "@/lib/bison-instances";
 
 // Authoritative deletion of every inbox under a (instance, domain) — used by
@@ -121,10 +121,10 @@ async function listBisonSenders(
   let page = 1;
   while (page <= SEARCH_MAX_PAGES) {
     if (Date.now() > deadline) { complete = false; break; }
-    // per_page=100 (Bison accepts it — campaigns sync uses the same): the old
-    // per_page=15 meant up to 40 paged calls per verify; on a rate-limited
-    // instance that blew the cron's whole time budget on a single domain.
-    const res = await bisonGetWithRetry(instance, `/sender-emails?search=${encodeURIComponent(domain)}&page=${page}&per_page=100`, deadline);
+    // Label-only term (see senderSearchTerm) — the dotted form makes the
+    // newer Bison on facilityreach/outboundclean fuzzy-match thousands of
+    // rows for an empty domain. per_page is capped at 15 by Bison regardless.
+    const res = await bisonGetWithRetry(instance, `/sender-emails?search=${encodeURIComponent(senderSearchTerm(domain))}&page=${page}&per_page=15`, deadline);
     if (!res || !res.ok) { complete = false; break; }
     const json = await res.json().catch(() => null);
     const payload = Array.isArray(json) ? json[0] : json;

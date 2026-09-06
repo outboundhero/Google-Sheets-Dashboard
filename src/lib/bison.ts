@@ -56,3 +56,25 @@ export async function bisonFetch(
     },
   });
 }
+
+/**
+ * Query term for GET /sender-emails?search= that stays EXACT on every instance.
+ *
+ * facilityreach and outboundclean run a newer Bison whose search falls back to
+ * fuzzy "did-you-mean" matching when a dotted query has no substring hits: an
+ * EMPTY domain like crystalfacilityclean.com returned 9,868 unrelated senders
+ * (2026-09-06), so every verify-by-search paged forever. The bare label (no
+ * TLD) never trips that fallback and still substring-matches the real senders
+ * (plus name-cousins such as commercialcareplusclean.info for
+ * commercialcareplus) — callers MUST keep filtering by exact email domain.
+ */
+export function senderSearchTerm(domain: string): string {
+  const d = domain.trim().toLowerCase();
+  const label = d.split(".")[0];
+  return label.length >= 4 ? label : d;
+}
+
+/** True when `email` belongs exactly to `domain` (case-insensitive). */
+export function emailIsOnDomain(email: string | null | undefined, domain: string): boolean {
+  return String(email || "").split("@")[1]?.toLowerCase() === domain.trim().toLowerCase();
+}

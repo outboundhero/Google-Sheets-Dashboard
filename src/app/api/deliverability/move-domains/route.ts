@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { getSupabaseAdmin } from "@/lib/supabase";
-import { bisonFetch } from "@/lib/bison";
+import { bisonFetch, senderSearchTerm } from "@/lib/bison";
 import { isInstanceSlug, type BisonInstanceSlug } from "@/lib/bison-instances";
 import {
   findDomainAnyAccount,
@@ -166,7 +166,7 @@ async function bisonFetchT(instance: BisonInstanceSlug, path: string): Promise<R
 /** Fast readiness probe: how many senders the instance reports for `domain`
  *  (search meta.total, ONE call). -1 = the search timed out / errored. */
 async function targetSenderCount(instance: BisonInstanceSlug, domain: string): Promise<number> {
-  const res = await bisonFetchT(instance, `/sender-emails?search=${encodeURIComponent(domain)}&page=1&per_page=15`);
+  const res = await bisonFetchT(instance, `/sender-emails?search=${encodeURIComponent(senderSearchTerm(domain))}&page=1&per_page=15`);
   if (!res || !res.ok) return -1;
   const json = await res.json().catch(() => null);
   const payload = Array.isArray(json) ? json[0] : json;
@@ -180,8 +180,11 @@ async function targetSenderCount(instance: BisonInstanceSlug, domain: string): P
 async function fetchSendersOnInstance(instance: BisonInstanceSlug, domain: string): Promise<SenderEmail[]> {
   const found = new Map<number, SenderEmail>();
   let page = 1;
-  while (page <= 5) {
-    const res = await bisonFetchT(instance, `/sender-emails?search=${encodeURIComponent(domain)}&page=${page}&per_page=100`);
+  // 10 pages × Bison's 15-row cap = 150 rows: the label-only term also returns
+  // name-cousins (commercialcareplusclean.info for commercialcareplus) which
+  // can fill the first pages ahead of the real senders.
+  while (page <= 10) {
+    const res = await bisonFetchT(instance, `/sender-emails?search=${encodeURIComponent(senderSearchTerm(domain))}&page=${page}&per_page=100`);
     if (!res || !res.ok) break;
     const json = await res.json().catch(() => null);
     const payload = Array.isArray(json) ? json[0] : json;
