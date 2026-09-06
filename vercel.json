@@ -86,7 +86,7 @@
     },
     {
       "path": "/api/cron/buy-domain-queue",
-      "schedule": "*/15 * * * *"
+      "schedule": "*/5 * * * *"
     },
     {
       "path": "/api/cron/low-domain-alert",

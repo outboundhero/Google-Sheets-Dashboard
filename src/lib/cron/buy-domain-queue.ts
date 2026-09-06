@@ -4,25 +4,23 @@ import { getSupabaseAdmin } from "@/lib/supabase";
 import { createDomain, setAutoRenew } from "@/lib/porkbun";
 import { appendToSecondaryDomainColumn } from "@/lib/google-sheets-secondary-domain";
 
-// Drains `porkbun_buy_queue`: buys at most 10 domains per ~180-minute window
-// (±1-5 min random) on the outboundhero Porkbun account (via porkbun.ts, which
-// is hard-locked to that account). Runs on a 15-min cron; the jittered window
-// gate — not the cron cadence — decides when a batch actually fires, so a
-// queued backlog (e.g. 90 domains → 9 batches) empties 10-at-a-time regardless
-// of whether any browser tab is open.
-
-// Spencer's exact pacing (Slack + Loom 2026-07-23): batches of AT MOST 10,
-// one batch per ~180 minutes, never the same interval twice — a random 1-5
-// minute add/subtract each window ("178 minutes, 184 minutes… randomizer"),
-// so Porkbun never sees a bulk pattern or a metronome. The first build shipped
-// 20-per-8h; conformed to his numbers 2026-09-07.
-const WINDOW_MS = 180 * 60 * 1000;
-const JITTER_MIN_MS = 1 * 60 * 1000;
-const JITTER_MAX_MS = 5 * 60 * 1000;
-/** ±1-5 min, fresh each check. */
-const windowJitterMs = () =>
-  (Math.random() < 0.5 ? -1 : 1) * (JITTER_MIN_MS + Math.random() * (JITTER_MAX_MS - JITTER_MIN_MS));
-const MAX_PER_BATCH = 10;
+// Drains `porkbun_buy_queue` as a DRIP, not batches — Ramon @ Inboxing's
+// anti-SURBL guidance (Spencer, 2026-07-31, supersedes the 7/23 batch spec):
+//   • ONE domain at a time, the next 2–10 minutes later (random each time);
+//   • once per ~20-domain window, a random ~2-hour pause lands somewhere in
+//     the middle so the cadence never looks scripted;
+//   • ≈20 domains over ≈4 hours, never a synchronized bulk burst.
+// The cron fires every 5 minutes; a Redis-stored next-purchase-at gate — not
+// the cron cadence — decides whether THIS tick buys. One purchase per tick.
+const GAP_MIN_MS = 2 * 60 * 1000;
+const GAP_MAX_MS = 10 * 60 * 1000;
+const PAUSE_MS = 2 * 60 * 60 * 1000;      // the long random rest
+const PAUSE_WINDOW = 20;                   // one pause somewhere in every ~20 buys
+const nextGapMs = () => GAP_MIN_MS + Math.random() * (GAP_MAX_MS - GAP_MIN_MS);
+const DRIP_NEXT_KEY = "cron:porkbun-buy:next-at";
+const DRIP_COUNT_KEY = "cron:porkbun-buy:window-count";
+const DRIP_PAUSEAT_KEY = "cron:porkbun-buy:pause-at";
+const MAX_PER_BATCH = 1;                   // drip = exactly one per eligible tick
 const TICK_MS = 10_500;        // Porkbun create limit is ~1/10s
 const DEADLINE_MS = 270_000;   // stop before the route's maxDuration=300
 const LOCK_KEY = "cron:porkbun-buy:lock";
@@ -66,21 +64,25 @@ export async function runBuyQueue(): Promise<NextResponse> {
   }
 
   try {
-    // (2) Window gate — a new batch may start only once the most recent
-    //     successful purchase is ~180min (±1-5min random) old, or none exists.
-    const { data: lastRows } = await supabase
-      .from("porkbun_buy_queue")
-      .select("purchased_at")
-      .eq("status", "registered")
-      .order("purchased_at", { ascending: false })
-      .limit(1);
-    const lastPurchasedAt = lastRows?.[0]?.purchased_at ? new Date(lastRows[0].purchased_at).getTime() : null;
-    const windowMs = WINDOW_MS + windowJitterMs();
-    if (lastPurchasedAt && Date.now() - lastPurchasedAt < windowMs) {
-      return NextResponse.json({
-        skipped: "window",
-        nextEligibleAt: new Date(lastPurchasedAt + windowMs).toISOString(),
-      });
+    // (2) Drip gate — buy only when the randomized next-purchase-at has
+    //     passed. Redis holds the schedule; without Redis, fall back to a
+    //     conservative fixed 10-min gap off the last DB purchase.
+    if (redis) {
+      const nextAt = await redis.get<string>(DRIP_NEXT_KEY);
+      if (nextAt && Date.now() < new Date(nextAt).getTime()) {
+        return NextResponse.json({ skipped: "drip-wait", nextEligibleAt: nextAt });
+      }
+    } else {
+      const { data: lastRows } = await supabase
+        .from("porkbun_buy_queue")
+        .select("purchased_at")
+        .eq("status", "registered")
+        .order("purchased_at", { ascending: false })
+        .limit(1);
+      const last = lastRows?.[0]?.purchased_at ? new Date(lastRows[0].purchased_at).getTime() : null;
+      if (last && Date.now() - last < GAP_MAX_MS) {
+        return NextResponse.json({ skipped: "drip-wait", nextEligibleAt: new Date(last + GAP_MAX_MS).toISOString() });
+      }
     }
 
     // (3) Claim a batch of the oldest queued rows.
@@ -196,6 +198,34 @@ export async function runBuyQueue(): Promise<NextResponse> {
       }
     }
 
+    // (5) Schedule the next drip slot (Ramon's cadence). Counted on real
+    //     purchases; skips/failures retry on a short gap without advancing
+    //     the pause window.
+    if (redis) {
+      let gap = nextGapMs();
+      let windowNote = "gap";
+      if (registered > 0) {
+        const count = ((await redis.get<number>(DRIP_COUNT_KEY)) ?? 0) + registered;
+        let pauseAt = await redis.get<number>(DRIP_PAUSEAT_KEY);
+        if (pauseAt == null) {
+          pauseAt = 3 + Math.floor(Math.random() * 15); // somewhere mid-window
+          await redis.set(DRIP_PAUSEAT_KEY, pauseAt);
+        }
+        if (count >= PAUSE_WINDOW) {
+          await redis.set(DRIP_COUNT_KEY, 0);
+          await redis.del(DRIP_PAUSEAT_KEY);
+        } else {
+          await redis.set(DRIP_COUNT_KEY, count);
+          if (count === pauseAt) {
+            gap = PAUSE_MS + Math.random() * 10 * 60 * 1000; // the random ~2h rest
+            windowNote = "long-pause";
+          }
+        }
+      }
+      const nextAt = new Date(Date.now() + gap).toISOString();
+      await redis.set(DRIP_NEXT_KEY, nextAt);
+      return NextResponse.json({ batchId, attempted: rows.length, registered, skipped, failed, bought, nextEligibleAt: nextAt, windowNote });
+    }
     return NextResponse.json({ batchId, attempted: rows.length, registered, skipped, failed, bought });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Failed";
