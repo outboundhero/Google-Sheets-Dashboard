@@ -58,7 +58,7 @@ async function requeueToBack(
  */
 export async function runScheduledDeletions(
   limit = MAX_PER_RUN,
-  opts: { force?: boolean } = {},
+  opts: { force?: boolean; instanceOnly?: string } = {},
 ): Promise<NextResponse> {
   const supabase = getSupabaseAdmin();
   const nowIso = new Date().toISOString();
@@ -70,7 +70,10 @@ export async function runScheduledDeletions(
   // outboundclean/outboundhero lanes never received a row while FR failed).
   const perLane = Math.max(1, Math.min(limit, LANE_MAX));
   const rows: { instance: string; domain: string }[] = [];
-  for (const inst of ["outboundhero", "cleaningoutbound", "facilityreach", "outboundclean"]) {
+  const laneOrder = opts.instanceOnly
+    ? [opts.instanceOnly] // debug: probe one workspace's rows directly
+    : ["outboundhero", "cleaningoutbound", "facilityreach", "outboundclean"];
+  for (const inst of laneOrder) {
     let query = supabase
       .from("duplicate_domain_deletions")
       .select("instance, domain, scheduled_at, status")

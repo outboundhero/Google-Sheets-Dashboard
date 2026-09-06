@@ -12,5 +12,6 @@ export async function GET(request: Request) {
   // call succeeds locally; the reason only exists in logs we can't read).
   const limitRaw = parseInt(params.get("limit") || "", 10);
   const limit = Number.isFinite(limitRaw) && limitRaw > 0 ? Math.min(limitRaw, 40) : undefined;
-  return runScheduledDeletions(limit, { force });
+  const instanceOnly = params.get("instance") || undefined;
+  return runScheduledDeletions(limit, { force, instanceOnly });
 }
