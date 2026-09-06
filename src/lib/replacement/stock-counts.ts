@@ -16,7 +16,7 @@ import { getSupabaseAdmin } from "@/lib/supabase";
 import { getHandledDomains } from "./store";
 import { getSkipSet, skipKey } from "./skips";
 import { hasBurntTag } from "./burnt-tag";
-import { ALL_INSTANCE_SLUGS, type BisonInstanceSlug } from "@/lib/bison-instances";
+import { ALL_INSTANCE_SLUGS, type BisonInstanceSlug, PROTECTED_INSTANCE_DOMAINS } from "@/lib/bison-instances";
 
 const WARMUP_DAYS = 21;
 
@@ -65,6 +65,7 @@ export async function getStockCounts(knownTagsUpper: Set<string>): Promise<Stock
   for (const d of doms) {
     const key = `${d.instance}:${d.domain}`;
     mirrorKeys.add(`${d.instance}:${d.domain.toLowerCase()}`);
+    if (PROTECTED_INSTANCE_DOMAINS.has(d.domain.toLowerCase())) continue; // instance roots are never stock
     if ((d.tags || []).some((t) => knownTagsUpper.has(String(t).trim().toUpperCase()))) continue;
     if (handled.has(key) || skips.has(skipKey(d.instance, d.domain)) || hasBurntTag(d.tags)) continue;
     if (!d.domain_created_at || now - new Date(d.domain_created_at).getTime() < WARMUP_DAYS * 86_400_000) continue;

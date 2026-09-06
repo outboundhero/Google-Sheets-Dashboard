@@ -59,6 +59,14 @@ export const ALL_INSTANCE_SLUGS: BisonInstanceSlug[] = [
 ];
 
 export const DEFAULT_INSTANCE: BisonInstanceSlug = "outboundhero";
+
+/** The four instance-root domains (Spencer's Jul-29 requirements §16): never
+ *  reserve-pulled, replaced, trimmed, moved, or counted as stock — they ARE
+ *  the EmailBison workspaces. Duplicate-cleanup guards these already; every
+ *  reserve-picking path must too. */
+export const PROTECTED_INSTANCE_DOMAINS = new Set([
+  "outboundhero.co", "facilityreach.com", "cleaningoutbound.com", "outboundclean.com",
+]);
 export const DEFAULT_GROUP: BisonGroup = 1;
 
 /** Compact per-instance labels for dense UI (chips, table cells). */

@@ -4,7 +4,7 @@
 // anything. Reads Supabase only. This is the "show exactly what it would do" layer
 // that ties detection + config maps + reserve pool together.
 import { getSupabaseAdmin } from "@/lib/supabase";
-import { ALL_INSTANCE_SLUGS, getInstance, type BisonInstanceSlug } from "@/lib/bison-instances";
+import { ALL_INSTANCE_SLUGS, getInstance, type BisonInstanceSlug, PROTECTED_INSTANCE_DOMAINS } from "@/lib/bison-instances";
 import { pstDateString } from "@/lib/date-utils";
 import { getSettings, getHandledDomains } from "./store";
 import { evaluateDomain, type DomainSignals } from "./detect";
@@ -165,7 +165,11 @@ export async function buildReplacementPlan(
       .range(off, off + 999);
     if (error) throw new Error(error.message);
     if (!data || data.length === 0) break;
-    for (const d of data as DomRow[]) if (!handled.has(`${d.instance}:${d.domain}`)) domains.push(d);
+    for (const d of data as DomRow[]) {
+      if (handled.has(`${d.instance}:${d.domain}`)) continue;
+      if (PROTECTED_INSTANCE_DOMAINS.has(d.domain.toLowerCase())) continue; // §16: instance roots untouchable
+      domains.push(d);
+    }
     if (data.length < 1000) break;
     off += 1000;
   }

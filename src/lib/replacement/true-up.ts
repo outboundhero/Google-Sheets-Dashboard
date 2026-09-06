@@ -16,7 +16,7 @@
 // of it is wired into the auto-runner. Deliberately standalone (its own reads)
 // so the live replacement path is untouched.
 import { getSupabaseAdmin } from "@/lib/supabase";
-import { ALL_INSTANCE_SLUGS, getInstance, type BisonInstanceSlug } from "@/lib/bison-instances";
+import { ALL_INSTANCE_SLUGS, getInstance, type BisonInstanceSlug, PROTECTED_INSTANCE_DOMAINS } from "@/lib/bison-instances";
 import { pstDateString } from "@/lib/date-utils";
 import { capFor, getClientTiers, type ClientTier } from "./client-tiers";
 import { deriveCampaignMap, getActiveCampaignKeys, type CampaignRef } from "./campaigns";
@@ -235,7 +235,11 @@ export async function computeTrueUp(
       .range(off, off + 999);
     if (error) throw new Error(error.message);
     if (!data || data.length === 0) break;
-    for (const d of data as DomRow[]) if (!handled.has(`${d.instance}:${d.domain}`)) domains.push(d);
+    for (const d of data as DomRow[]) {
+      if (handled.has(`${d.instance}:${d.domain}`)) continue;
+      if (PROTECTED_INSTANCE_DOMAINS.has(d.domain.toLowerCase())) continue; // §16: instance roots untouchable
+      domains.push(d);
+    }
     if (data.length < 1000) break;
     off += 1000;
   }

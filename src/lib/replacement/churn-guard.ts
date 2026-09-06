@@ -14,7 +14,10 @@ import { getClientTrackerData } from "@/lib/google-sheets";
 import { parseSheetDate } from "@/lib/churn-offboarding";
 import { pstDateString } from "@/lib/date-utils";
 
-export const CHURN_BLACKOUT_DAYS = 5;
+// 7, not 5 — Spencer corrected himself mid-Loom (Jul-29 Part 2, 14:01: "I'm
+// going to correct myself. Seven days before the churn date") and the written
+// requirements doc pins it: block at exactly 7 days and closer.
+export const CHURN_BLACKOUT_DAYS = 7;
 
 export interface ChurnBlackout {
   clientTag: string;
