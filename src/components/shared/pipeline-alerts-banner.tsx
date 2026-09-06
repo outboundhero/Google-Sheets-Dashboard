@@ -7,7 +7,7 @@
 // whose GET is blocked). Pairs with the #leadsync-outbound Slack ping.
 import { useState } from "react";
 import useSWR from "swr";
-import { AlertTriangle, RefreshCw, X } from "lucide-react";
+import { AlertTriangle, RefreshCw, X, ChevronDown, ChevronRight } from "lucide-react";
 import { Button } from "@/components/ui/button";
 
 interface PipelineAlert {
@@ -48,6 +48,9 @@ export function PipelineAlertsBanner() {
   });
   const [busy, setBusy] = useState<Record<string, "retry" | "dismiss" | undefined>>({});
   const [note, setNote] = useState<Record<string, string>>({});
+  // Stuck campaigns come in batches (22 on FR, 2026-09-06) — one collapsed
+  // row with a count, not 22 rows above the fold (Vicky 2026-09-07).
+  const [stuckOpen, setStuckOpen] = useState(false);
 
   // Blocked (viewer) or errored fetch → show nothing rather than a broken box.
   if (error || !Array.isArray(data) || data.length === 0) return null;
@@ -92,19 +95,51 @@ export function PipelineAlertsBanner() {
     }
   };
 
+  const stuck = data.filter((a) => a.source === "stuck-campaign");
+  const others = data.filter((a) => a.source !== "stuck-campaign");
+  const headline = [
+    others.length > 0 ? `${others.length} pipeline ${others.length === 1 ? "failure needs" : "failures need"} attention` : null,
+    stuck.length > 0 ? `${stuck.length} campaign${stuck.length === 1 ? "" : "s"} stuck in Processing` : null,
+  ].filter(Boolean).join(" · ");
+
   return (
     <div className="mb-6 rounded-lg border border-destructive/40 bg-destructive/5">
       <div className="flex items-center gap-2 px-4 py-3 border-b border-destructive/20">
         <AlertTriangle className="h-4 w-4 text-destructive" />
-        <span className="text-sm font-semibold text-destructive">
-          {data.length} pipeline {data.length === 1 ? "failure needs" : "failures need"} attention
-        </span>
+        <span className="text-sm font-semibold text-destructive">{headline}</span>
         <span className="text-[11px] text-muted-foreground ml-1">
           Also sent to #leadsync-outbound. Retry once fixed, or dismiss to clear.
         </span>
       </div>
+      {stuck.length > 0 && (
+        <div className="border-b border-destructive/10">
+          <button onClick={() => setStuckOpen((v) => !v)} className="w-full flex items-center gap-2 px-4 py-2.5 text-left">
+            {stuckOpen ? <ChevronDown className="h-4 w-4 shrink-0 text-destructive" /> : <ChevronRight className="h-4 w-4 shrink-0 text-destructive" />}
+            <span className="text-sm font-medium">Campaigns stuck in Processing — {stuck.length}</span>
+            <span className="text-[11px] text-muted-foreground">
+              external (EmailBison) — auto-clears when a campaign launches
+            </span>
+            <span className="ml-auto text-[11px] text-muted-foreground">{stuckOpen ? "collapse" : "expand"}</span>
+          </button>
+          {stuckOpen && (
+            <ul className="divide-y divide-destructive/10 border-t border-destructive/10">
+              {stuck.map((a) => (
+                <li key={a.id} className="px-4 py-2 flex items-center justify-between gap-3 text-xs">
+                  <div className="min-w-0 flex items-center gap-2 flex-wrap">
+                    {a.client_tag && <span className="font-mono px-1.5 py-0.5 rounded bg-muted text-foreground">{a.client_tag}</span>}
+                    <span className="text-muted-foreground break-words">{a.reason}</span>
+                  </div>
+                  <Button size="sm" variant="ghost" className="gap-1 h-7 text-muted-foreground shrink-0" disabled={!!busy[a.id]} onClick={() => dismiss(a.id)}>
+                    <X className="h-3 w-3" /> Dismiss
+                  </Button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      )}
       <ul className="divide-y divide-destructive/10">
-        {data.map((a) => {
+        {others.map((a) => {
           const label = SOURCE_LABEL[a.source] || a.source;
           const state = busy[a.id];
           return (

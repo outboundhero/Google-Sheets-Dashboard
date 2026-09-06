@@ -221,7 +221,12 @@ export async function GET(request: Request) {
       }
       const hoursSinceLast = last ? (nowMs - new Date(last.postedAt).getTime()) / 3_600_000 : Infinity;
       const changed = !last || last.signature !== signature;
-      if (changed || hoursSinceLast >= REMINDER_HOURS) {
+      // At most ONE Slack post per 24h, full stop (2026-09-07: with the FR
+      // queue growing hourly, "post on change" re-posted 6-8×/day — the exact
+      // per-run spam the channel must never see). The dashboard is live; Slack
+      // gets a daily reminder while anything is stuck, first sighting included.
+      const dailyDue = !last || hoursSinceLast >= REMINDER_HOURS;
+      if (dailyDue) {
         const byInstance = new Map<string, typeof stuck>();
         for (const s of stuck) byInstance.set(s.instance, [...(byInstance.get(s.instance) ?? []), s]);
         const lines: string[] = [
@@ -237,12 +242,12 @@ export async function GET(request: Request) {
         if (toResolve.length > 0) lines.push(`_${toResolve.length} previously-stuck campaign${toResolve.length === 1 ? "" : "s"} moved on since the last check._`);
         lines.push(changed ? "_Shown on the LeadSync dashboard; auto-clears when a campaign launches._" : "_Daily reminder — still stuck. Auto-clears when a campaign launches._");
         const res = await postSlackMessage(lines.join("\n"), pipelineAlertChannel());
-        slack = { posted: res.ok, reason: res.ok ? (changed ? "stuck set changed" : "daily reminder") : `slack failed: ${res.reason}` };
+        slack = { posted: res.ok, reason: res.ok ? (changed ? "daily digest (set changed)" : "daily reminder") : `slack failed: ${res.reason}` };
         if (res.ok && redis) {
           try { await redis.set(DIGEST_KEY, { signature, postedAt: new Date(nowMs).toISOString() }); } catch { /* best-effort */ }
         }
       } else {
-        slack = { posted: false, reason: "unchanged, reminder not due" };
+        slack = { posted: false, reason: changed ? "set changed — held until the daily digest" : "unchanged, reminder not due" };
       }
     } else if (params.get("correction") === "1") {
       // One-off, operator-triggered: the v1 digest over-flagged; say so in the
