@@ -102,6 +102,8 @@ export function AllDomainsTable() {
       if (sourceFilter !== "all" && r.source !== sourceFilter) return false;
       if (inUseFilter === "in" && !r.inUse) return false;
       if (inUseFilter === "out" && r.inUse) return false;
+      // Spencer Jul-29 §13/§15: safe-to-hand-out owned domains in one click.
+      if (inUseFilter === "reuse" && !r.reuseEligible) return false;
       if (providerFilter !== "all" && r.provider !== providerFilter) return false;
       return true;
     });
@@ -184,7 +186,7 @@ export function AllDomainsTable() {
           </div>
 
           <FilterSelect value={sourceFilter} onChange={withReset(setSourceFilter)} label="Source" options={[["all", "All sources"], ...sources.map((s) => [s, s] as [string, string])]} />
-          <FilterSelect value={inUseFilter} onChange={withReset(setInUseFilter)} label="In use" options={[["all", "All"], ["in", "In use"], ["out", "Not in use"]]} />
+          <FilterSelect value={inUseFilter} onChange={withReset(setInUseFilter)} label="In use" options={[["all", "All"], ["in", "In use"], ["out", "Not in use"], ["reuse", "Reuse-eligible ✓"]]} />
           <FilterSelect value={providerFilter} onChange={withReset(setProviderFilter)} label="Provider" options={[["all", "All providers"], ...providers.map((p) => [p, p] as [string, string])]} />
 
           {(search || sourceFilter !== "all" || inUseFilter !== "all" || providerFilter !== "all" || conditions.length > 0) && (
@@ -434,8 +436,12 @@ function Row({ r, selected, onMouseDown, onMouseEnter }: {
           >
             {r.inUsePending ? "In use · ordered" : "In use"}
           </span>
+        ) : r.reuseEligible ? (
+          <span className="inline-flex items-center rounded-md border border-sky-500/20 bg-sky-500/10 px-1.5 py-0.5 text-[10px] font-medium text-sky-600" title="Passes every reuse rule: not in use, expiry runway, blacklist-clean and freshly checked">
+            Reuse ✓
+          </span>
         ) : (
-          <span className="text-[10px] text-muted-foreground">—</span>
+          <span className="text-[10px] text-muted-foreground" title={r.reuseBlockers.join(" · ") || undefined}>—</span>
         )}
       </td>
       <td className="px-3 py-2.5">

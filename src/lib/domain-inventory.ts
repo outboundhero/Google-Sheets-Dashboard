@@ -1,4 +1,5 @@
 import { getSupabaseAdmin } from "@/lib/supabase";
+import { PROTECTED_INSTANCE_DOMAINS } from "@/lib/bison-instances";
 
 // Shared helpers + the merged-inventory assembler for the "All Domains" tab.
 // In-use and deliverability-derived provider are computed LIVE from
@@ -32,6 +33,10 @@ export interface InventoryRow {
   surblCheckedAt: string | null;
   spamhausListed: boolean | null;
   spamhausCheckedAt: string | null;
+  /** §13/§15 of Spencer's Jul-29 requirements: owned domain safe to hand out
+   *  as reserve/reuse. Empty blockers = eligible. */
+  reuseEligible: boolean;
+  reuseBlockers: string[];
 }
 
 export interface InventoryCounts {
@@ -151,6 +156,37 @@ async function readOrderedDomains(): Promise<Set<string>> {
   return claimed;
 }
 
+
+/** Spencer's Jul-29 §13/§15 owned-domain reuse rules, one place. Empty result
+ *  = eligible. Naming/keyword rules (§14) layer on top per client category. */
+export const REUSE_MIN_EXPIRY_DAYS = 100;
+export const BLACKLIST_FRESH_DAYS = 30;
+function computeReuseBlockers(r: {
+  domain: string; inUse: boolean; inUsePending: boolean; hidden: boolean;
+  expireDate: string | null; autoRenew: boolean | null;
+  surblListed: boolean | null; surblCheckedAt: string | null;
+  spamhausListed: boolean | null; spamhausCheckedAt: string | null;
+}): string[] {
+  const out: string[] = [];
+  if (PROTECTED_INSTANCE_DOMAINS.has(r.domain.toLowerCase())) out.push("protected instance domain — never reusable");
+  if (r.inUse) out.push(r.inUsePending ? "claimed by a live inbox order" : "in use (has inboxes)");
+  if (r.hidden) out.push("hidden from inventory");
+  // Expiry: auto-renew ON always passes; OFF needs >100 days of runway.
+  if (r.autoRenew !== true) {
+    if (!r.expireDate) out.push("no expiry date on record (auto-renew off)");
+    else {
+      const days = Math.floor((new Date(r.expireDate).getTime() - Date.now()) / 86_400_000);
+      if (days <= REUSE_MIN_EXPIRY_DAYS) out.push(`expires in ${days}d with auto-renew off (needs > ${REUSE_MIN_EXPIRY_DAYS}d)`);
+    }
+  }
+  if (r.surblListed === true) out.push("SURBL listed");
+  if (r.spamhausListed === true) out.push("Spamhaus listed");
+  const fresh = (iso: string | null) => iso != null && Date.now() - new Date(iso).getTime() <= BLACKLIST_FRESH_DAYS * 86_400_000;
+  if (r.surblListed !== true && !fresh(r.surblCheckedAt)) out.push("SURBL check missing/older than 30d — re-check first");
+  if (r.spamhausListed !== true && !fresh(r.spamhausCheckedAt)) out.push("Spamhaus check missing/older than 30d — re-check first");
+  return out;
+}
+
 export async function assembleInventory(): Promise<{ rows: InventoryRow[]; counts: InventoryCounts }> {
   const [inv, deliv, ordered] = await Promise.all([readInventory(), readDeliverability(), readOrderedDomains()]);
 
@@ -191,8 +227,14 @@ export async function assembleInventory(): Promise<{ rows: InventoryRow[]; count
       surblCheckedAt: r.surbl_checked_at,
       spamhausListed: r.spamhaus_listed,
       spamhausCheckedAt: r.spamhaus_checked_at,
+      reuseEligible: false,
+      reuseBlockers: [],
     };
   });
+  for (const row of rows) {
+    row.reuseBlockers = computeReuseBlockers(row);
+    row.reuseEligible = row.reuseBlockers.length === 0;
+  }
 
   rows.sort((a, b) => a.domain.localeCompare(b.domain));
 
