@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Globe,
   Sparkles,
@@ -85,14 +85,31 @@ export function BuyDomainsPanel() {
     if (allSelected) setSelected(new Set());
     else setSelected(new Set(filtered.map((d) => d.domain)));
   };
-  const toggleOne = (domain: string) => {
+  // Drag-select / drag-deselect (Spencer's Loom 2026-07-23: "there's not a
+  // drag select in here, so let's add the drag select… and drag deselect").
+  // Mouse-down on a row starts a sweep whose value = the OPPOSITE of that
+  // row's state; every row swept over gets that value; mouse-up anywhere ends.
+  const dragValueRef = useRef<boolean | null>(null);
+  const applyDrag = (domain: string, value: boolean) =>
     setSelected((prev) => {
+      if (prev.has(domain) === value) return prev;
       const next = new Set(prev);
-      if (next.has(domain)) next.delete(domain);
-      else next.add(domain);
+      if (value) next.add(domain); else next.delete(domain);
       return next;
     });
+  const dragStart = (domain: string) => {
+    const value = !selected.has(domain);
+    dragValueRef.current = value;
+    applyDrag(domain, value);
   };
+  const dragOver = (domain: string) => {
+    if (dragValueRef.current !== null) applyDrag(domain, dragValueRef.current);
+  };
+  useEffect(() => {
+    const end = () => { dragValueRef.current = null; };
+    window.addEventListener("mouseup", end);
+    return () => window.removeEventListener("mouseup", end);
+  }, []);
 
   // Select-first-N (Nick Aug-13): "I want to buy 200" shouldn't mean 200 clicks.
   const [selectCount, setSelectCount] = useState("");
@@ -436,7 +453,8 @@ export function BuyDomainsPanel() {
                     key={d.domain}
                     d={d}
                     selected={selected.has(d.domain)}
-                    onToggle={() => toggleOne(d.domain)}
+                    onDragStart={() => dragStart(d.domain)}
+                    onDragOver={() => dragOver(d.domain)}
                     disabled={!isAdmin || enqueuing}
                   />
                 ))}
@@ -494,16 +512,18 @@ function ResultRow({ result }: { result: { domain: string; outcome: "available" 
   );
 }
 
-function DomainRow({ d, selected, onToggle, disabled }: {
+function DomainRow({ d, selected, onDragStart, onDragOver, disabled }: {
   d: DiscoveredDomain;
   selected: boolean;
-  onToggle: () => void;
+  onDragStart: () => void;
+  onDragOver: () => void;
   disabled?: boolean;
 }) {
   return (
     <tr
-      className={`transition-colors ${selected ? "bg-primary/5" : "hover:bg-muted/30"} ${disabled ? "" : "cursor-pointer"}`}
-      onClick={() => { if (!disabled) onToggle(); }}
+      className={`transition-colors select-none ${selected ? "bg-primary/5" : "hover:bg-muted/30"} ${disabled ? "" : "cursor-pointer"}`}
+      onMouseDown={(e) => { if (!disabled) { e.preventDefault(); onDragStart(); } }}
+      onMouseEnter={() => { if (!disabled) onDragOver(); }}
     >
       <td className="px-3 py-2.5">
         <div className={`h-4 w-4 rounded border flex items-center justify-center transition-colors ${
