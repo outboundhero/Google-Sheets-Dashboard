@@ -1,6 +1,7 @@
 import { getSupabaseAdmin } from "@/lib/supabase";
 import { PROTECTED_INSTANCE_DOMAINS } from "@/lib/bison-instances";
 import { getThresholdConfig } from "@/lib/replacement/threshold-groups-store";
+import { defaultThresholdConfig } from "@/lib/replacement/threshold-groups";
 
 // Shared helpers + the merged-inventory assembler for the "All Domains" tab.
 // In-use and deliverability-derived provider are computed LIVE from
@@ -199,8 +200,13 @@ export async function assembleInventory(): Promise<{ rows: InventoryRow[]; count
   try {
     const cfg = await getThresholdConfig();
     const def = cfg.segments.find((sg) => sg.isDefault);
-    kwInclude = (def?.keywordsInclude ?? []).map((k) => k.toLowerCase());
-    kwExclude = (def?.keywordsExclude ?? []).map((k) => k.toLowerCase());
+    // Configs saved before the keyword fields existed have neither key —
+    // fall back to the seeded cleaning defaults so the rule isn't inert.
+    const seeded = def && def.keywordsInclude === undefined && def.keywordsExclude === undefined
+      ? defaultThresholdConfig().segments.find((sg) => sg.isDefault)
+      : def;
+    kwInclude = (seeded?.keywordsInclude ?? []).map((k) => k.toLowerCase());
+    kwExclude = (seeded?.keywordsExclude ?? []).map((k) => k.toLowerCase());
   } catch { /* keyword rule skipped this load */ }
 
   const rows: InventoryRow[] = inv.map((r) => {
