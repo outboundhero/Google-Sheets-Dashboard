@@ -138,7 +138,19 @@ export async function processDueCancellations(): Promise<CancelProcessResult> {
         if (ok && st === "skipped") {
           // A vendor-less skip still needs its money tap closed:
           if (/scaledmail/i.test(why)) {
-            res.scaledmailManual.push(row.domain); // manual cancel via their Slack — digest below
+            res.scaledmailManual.push(row.domain); // manual cancel via their Slack — daily digest cron
+            // Durable record — the once-daily scaledmail-digest cron reads
+            // these events; a console line alone vanished with the invocation.
+            try {
+              const { logEvents } = await import("@/lib/replacement/store");
+              await logEvents([{
+                domain: row.domain,
+                eventType: "skipped",
+                detail: "scaledmail manual-cancel needed — no cancel API; cancel via their Slack (senders already deleted from Bison)",
+              }]);
+            } catch (e) {
+              console.error(`[cancellations] scaledmail event log failed for ${row.domain}:`, e);
+            }
           } else if (/no provider tag/i.test(why)) {
             // Porkbun-direct (.info era) — no vendor to cancel; stop the renewal.
             try {

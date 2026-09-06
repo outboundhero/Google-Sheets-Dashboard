@@ -211,6 +211,10 @@
     {
       "path": "/api/cron/reassignments",
       "schedule": "3,18,33,48 * * * *"
+    },
+    {
+      "path": "/api/cron/scaledmail-digest",
+      "schedule": "30 13 * * *"
     }
   ]
 }
