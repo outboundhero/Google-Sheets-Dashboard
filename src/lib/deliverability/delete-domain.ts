@@ -287,6 +287,15 @@ export async function deleteDomainFromInstance(
   // search returning 0 is authoritative even if the seed walk was cut short.
   let finalVerifyComplete = false;
   let confirmedZero = false; // a sweep's re-verify already reported 0 → skip the extra final search (each search is 30–60s on slow instances like facilityreach)
+  // Already-empty domain: Supabase knows nothing and the seed search COMPLETED
+  // at zero — that IS the verification. Demanding a second search here is what
+  // wedged the whole queue when facilityreach throttled searches (2026-09-06:
+  // every empty row burned the 150s verify budget, failed it, and requeued
+  // forever — found via the ?limit=1 probe on cleanbridgefacilitycare.com).
+  if (candidates.size === 0 && seed.complete) {
+    confirmedZero = true;
+    finalVerifyComplete = true;
+  }
   for (let sweep = 0; sweep < MAX_SWEEPS && toDelete.length > 0; sweep++) {
     const r = await deleteBatch(instance, dom, toDelete);
     for (const id of r.deletedIds) { deletedIds.add(id); notFoundIds.delete(id); }
