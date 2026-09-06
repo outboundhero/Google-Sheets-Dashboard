@@ -64,19 +64,28 @@ export async function runScheduledDeletions(
   const nowIso = new Date().toISOString();
   const force = opts.force === true;
 
-  let query = supabase
-    .from("duplicate_domain_deletions")
-    .select("instance, domain, scheduled_at, status")
-    .eq("status", "pending");
-  if (!force) query = query.lte("scheduled_at", nowIso);
-  const { data: due, error } = await query
-    .order("scheduled_at", { ascending: true })
-    .limit(limit);
-  if (error) {
-    return NextResponse.json({ error: error.message }, { status: 500 });
+  // Pull the oldest due rows PER INSTANCE — a single global oldest-N pull let
+  // one sick instance's ancient rows fill the whole batch and starve every
+  // other lane (2026-09-07: the 40 oldest were all facilityreach, so the
+  // outboundclean/outboundhero lanes never received a row while FR failed).
+  const perLane = Math.max(1, Math.min(limit, LANE_MAX));
+  const rows: { instance: string; domain: string }[] = [];
+  for (const inst of ["outboundhero", "cleaningoutbound", "facilityreach", "outboundclean"]) {
+    let query = supabase
+      .from("duplicate_domain_deletions")
+      .select("instance, domain, scheduled_at, status")
+      .eq("status", "pending")
+      .eq("instance", inst);
+    if (!force) query = query.lte("scheduled_at", nowIso);
+    const { data: due, error } = await query
+      .order("scheduled_at", { ascending: true })
+      .limit(perLane);
+    if (error) {
+      return NextResponse.json({ error: error.message }, { status: 500 });
+    }
+    rows.push(...((due || []) as { instance: string; domain: string }[]));
+    if (rows.length >= limit) break;
   }
-
-  const rows = (due || []) as { instance: string; domain: string }[];
   const results: { instance: string; domain: string; deleted: number; notFound: number; failed: number; remainingInBison: number; done: boolean; error?: string }[] = [];
 
   // Per-instance lanes (2026-09-07): one slow facilityreach row used to eat

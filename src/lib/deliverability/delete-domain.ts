@@ -27,6 +27,12 @@ const SEARCH_MAX_PAGES = 40; // safety cap when paging the domain search
 // the domain is finished, and a domain that keeps failing to verify is what
 // leaves rows looping in the queue.
 const SEARCH_BUDGET_MS = 45_000;
+// facilityreach throttles sender-search hard since 2026-09-06 — one attempt
+// can take 30-60s, so 45s rarely fits even a single completed search. A wider
+// seed window lets ONE search land, and a completed zero-sender seed is
+// itself the verification (see below).
+const SEARCH_BUDGET_SLOW_MS = 120_000;
+const SLOW_SEARCH_INSTANCES = new Set<string>(["facilityreach"]);
 const VERIFY_BUDGET_MS = 150_000;
 
 interface SenderLite { id: number; email: string }
@@ -106,8 +112,9 @@ async function bisonGetWithRetry(
 async function listBisonSenders(
   instance: BisonInstanceSlug,
   domain: string,
-  budgetMs = SEARCH_BUDGET_MS,
+  budgetMs?: number,
 ): Promise<{ senders: SenderLite[]; complete: boolean }> {
+  budgetMs ??= SLOW_SEARCH_INSTANCES.has(instance) ? SEARCH_BUDGET_SLOW_MS : SEARCH_BUDGET_MS;
   const found = new Map<number, SenderLite>();
   const deadline = Date.now() + budgetMs;
   let complete = true;
