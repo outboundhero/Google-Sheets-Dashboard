@@ -1507,7 +1507,10 @@ function DeliverabilityPageInner() {
     // A run with no domains can only fail ("domains … are required" on every
     // step) — refuse to launch instead of painting an all-red panel. Seen live
     // 2026-09-04: an empty BHS run snapshot kept replaying from localStorage.
-    if (!info.domains || info.domains.length === 0) return;
+    if (!info.domains || info.domains.length === 0) {
+      window.alert("No domains in this run — the selection was cleared before you confirmed. Reselect the domains and try again.");
+      return;
+    }
     const runId = runIdRef.current++;
     const token = 1;
     tagRetryTokensRef.current.set(runId, token);

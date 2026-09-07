@@ -43,6 +43,11 @@ const STATUS_COLORS: Record<string, string> = {
 export function BulkTagDialog({
   mode, open, onOpenChange, selectedDomains, existingTags, availableTags, onApply,
 }: BulkTagDialogProps) {
+  // Freeze the selection the moment the dialog opens. The page clears its
+  // live selection whenever a queued run starts (runTagCampaignOnce), and this
+  // dialog spans three steps — reading the live prop at confirm time handed a
+  // run 0 domains while Spencer was mid-flow (BHS on B2C 1, 2026-09-04).
+  const [frozenDomains] = useState<string[]>(() => [...selectedDomains]);
   const { instances, instancesQuery } = useInstance();
   const [phase, setPhase] = useState<"tags" | "campaigns" | "sheet">("tags");
   // Tag names (deduped across all selected instances). Bison tag IDs are
@@ -141,7 +146,7 @@ export function BulkTagDialog({
 
     if (mode === "remove") {
       // Remove mode: close immediately, no campaign step
-      onApply({ mode, tagNames: names, domains: [...selectedDomains], campaigns: [] });
+      onApply({ mode, tagNames: names, domains: [...frozenDomains], campaigns: [] });
       onOpenChange(false);
     } else {
       loadCampaignsForTags(names);
@@ -236,12 +241,12 @@ export function BulkTagDialog({
   };
 
   const handleSheetConfirm = () => {
-    onApply({ mode, tagNames: savedTagNames, domains: [...selectedDomains], campaigns: savedCampaigns, sheetAppend: selectedSheetTag ? { clientTag: selectedSheetTag } : null });
+    onApply({ mode, tagNames: savedTagNames, domains: [...frozenDomains], campaigns: savedCampaigns, sheetAppend: selectedSheetTag ? { clientTag: selectedSheetTag } : null });
     onOpenChange(false);
   };
 
   const handleSheetSkip = () => {
-    onApply({ mode, tagNames: savedTagNames, domains: [...selectedDomains], campaigns: savedCampaigns, sheetAppend: null });
+    onApply({ mode, tagNames: savedTagNames, domains: [...frozenDomains], campaigns: savedCampaigns, sheetAppend: null });
     onOpenChange(false);
   };
 
@@ -254,7 +259,7 @@ export function BulkTagDialog({
               ? "Add to Domains Sheet"
               : phase === "campaigns"
               ? "Select Campaigns"
-              : `${mode === "add" ? "Add Tags" : "Remove Tags"} — ${selectedDomains.length} domain${selectedDomains.length !== 1 ? "s" : ""}`}
+              : `${mode === "add" ? "Add Tags" : "Remove Tags"} — ${frozenDomains.length} domain${frozenDomains.length !== 1 ? "s" : ""}`}
           </DialogTitle>
         </DialogHeader>
 
@@ -325,7 +330,7 @@ export function BulkTagDialog({
         {phase === "campaigns" && (
           <div className="space-y-3 flex-1 overflow-hidden flex flex-col">
             <p className="text-sm text-muted-foreground">
-              Also attach these {selectedDomains.length} domains to campaigns?
+              Also attach these {frozenDomains.length} domains to campaigns?
             </p>
             {campaignsLoading ? (
               <div className="flex items-center justify-center py-8"><Loader2 className="h-5 w-5 animate-spin text-muted-foreground" /></div>
@@ -380,7 +385,7 @@ export function BulkTagDialog({
         {phase === "sheet" && (
           <div className="space-y-3 flex-1 overflow-hidden flex flex-col">
             <p className="text-sm text-muted-foreground">
-              Also add these {selectedDomains.length} domains to a client&apos;s Domains sheet?
+              Also add these {frozenDomains.length} domains to a client&apos;s Domains sheet?
             </p>
 
             {sheetsLoading ? (
