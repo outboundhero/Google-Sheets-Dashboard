@@ -42,7 +42,12 @@ const DEFAULT_MAX = 40;
 // confirms) and reports — it uploads nothing unless called with ?force=1.
 // Flip to false once the backlog is in Bison and a canary upload has proven
 // the Premium-account connections.
-const UPLOAD_HOLD = true;
+// HOLD LIFTED 2026-09-08: Inboxing now auto-uploads on create (Ramon's
+// upload_to_platform field, ca6ecdf) and handed the stray Aug-31 batch to us,
+// which this cron placed (107/107). From here it is the true backup: an order
+// live-confirmed absent from its workspace is uploaded within the hour, capped
+// per run, skip_verified keeps a slow Inboxing job from doubling up.
+const UPLOAD_HOLD = false;
 const STAGE_QUEUED = "bison_upload_queued";
 const STAGE_IN_BISON = "in_bison";
 const STAGE_FAILED = "bison_upload_failed";
