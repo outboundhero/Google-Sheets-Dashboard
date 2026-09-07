@@ -115,6 +115,24 @@ export async function GET(request: Request) {
       }
     }
 
+    // Recorded purchase intent: an inbox order names the workspace a domain
+    // was bought FOR. When a fresh domain lands in two workspaces (vendor
+    // uploaded a batch to the wrong connection, we re-uploaded to the right
+    // one — Sep 2026, 107 domains), neither copy has sends and first-seen
+    // order is a coin flip; the order record is the truth.
+    const orderedFor = new Map<string, string>();
+    for (let i = 0; i < names.length; i += 100) {
+      const { data } = await supabase
+        .from("inbox_orders")
+        .select("domain,instance,created_at")
+        .in("domain", names.slice(i, i + 100))
+        .in("status", ["active", "pending"])
+        .order("created_at", { ascending: false });
+      for (const r of (data || []) as { domain: string; instance: string | null }[]) {
+        if (r.instance && !orderedFor.has(r.domain.toLowerCase())) orderedFor.set(r.domain.toLowerCase(), r.instance);
+      }
+    }
+
     // Move direction, for the both-silent untagged case.
     const firstInstance = new Map<string, string>();
     {
@@ -194,9 +212,15 @@ export async function GET(request: Request) {
         // reserve moved FR→OH kept losing its fresh OH copy to its own send
         // history on FR, the mover re-uploaded it, and cleanup deleted it
         // again — urbancorecleaning.co looped 4× from Aug 25 to Sep 6.
-        const origin = firstInstance.get(dup.domain);
+        // Destination = the workspace the domain was ORDERED for when an order
+        // exists and one side is that workspace; otherwise the non-origin side.
+        const intended = orderedFor.get(dup.domain.toLowerCase());
+        const intendedSide = intended ? sides.find((s) => s.instance === intended) : undefined;
+        const origin = intendedSide
+          ? sides.find((s) => s !== intendedSide)?.instance
+          : firstInstance.get(dup.domain);
         const originSide = sides.find((s) => s.instance === origin);
-        const destSide = sides.find((s) => s.instance !== origin);
+        const destSide = intendedSide ?? sides.find((s) => s.instance !== origin);
         if (origin && originSide && destSide) {
           const destRows = rows(destSide.instance, dup.domain);
           const originRows = rows(originSide.instance, dup.domain);
@@ -210,7 +234,7 @@ export async function GET(request: Request) {
           }
           verdicts.push({
             domain: dup.domain, keep: destSide.instance, del: originSide.instance,
-            rule: `recorded move ${originSide.instance} → ${destSide.instance} landed (${destRows} senders) — retiring the origin copy`,
+            rule: `${intendedSide ? "ordered for" : "recorded move to"} ${destSide.instance} — landed (${destRows} senders), retiring the ${originSide.instance} copy`,
           });
           continue;
         }
