@@ -84,6 +84,38 @@ export async function GET(request: Request) {
     }
     if (orders.length === 0) return NextResponse.json({ clean: true, active: 0 });
 
+    // ?recheck=1[&since=YYYY-MM-DD] — live re-verify orders already marked
+    // in_bison. Needed once (2026-09-07): between Sep 4-7 the facilityreach /
+    // outboundclean sender search fuzzy-matched foreign senders for a domain
+    // with no hits, so absent domains were marked present. Absent ones flip
+    // back to bison_upload_failed so the normal re-upload flow picks them up
+    // (dry=1 only reports). Also handy whenever a vendor batch goes astray.
+    if (params.get("recheck") === "1") {
+      const since = params.get("since") || "2026-08-25";
+      const subject = orders.filter((o) => o.setup_stage === STAGE_IN_BISON && o.created_at >= since);
+      const live = await checkPresence(
+        subject.map((o) => ({ instance: o.instance as BisonInstanceSlug, domain: o.domain })),
+        { concurrency: 4, deadlineMs: 240_000 },
+      );
+      const present: string[] = [];
+      const absent: { instance: string; domain: string }[] = [];
+      const unknown: string[] = [];
+      for (const o of subject) {
+        const st = live.get(`${o.instance}:${o.domain}`);
+        if (st === "present") present.push(`${o.instance}:${o.domain}`);
+        else if (st === "absent") absent.push({ instance: o.instance, domain: o.domain });
+        else unknown.push(`${o.instance}:${o.domain}`);
+      }
+      if (!dryRun && absent.length > 0) {
+        for (const a of absent) {
+          await supabase.from("inbox_orders")
+            .update({ setup_stage: STAGE_FAILED, last_checked_at: new Date().toISOString() })
+            .eq("provider", "inboxing").eq("instance", a.instance).eq("domain", a.domain).eq("setup_stage", STAGE_IN_BISON);
+        }
+      }
+      return NextResponse.json({ dryRun, recheck: true, since, checked: subject.length, present: present.length, absent, unknown, reverted: dryRun ? 0 : absent.length });
+    }
+
     // Presence from the deliverability crawl — per (instance, domain) AND per
     // domain across ALL instances. The all-instances view is the safety rail:
     // an older order's recorded instance can differ from where the domain
