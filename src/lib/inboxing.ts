@@ -106,6 +106,11 @@ export interface InboxingCreateOrderResult {
   reused?: boolean;
 }
 
+/** Tags every new Inboxing domain is created with (≤10, letters/numbers/dashes). */
+export function inboxingCreationTags(account: InboxingAccount): string[] {
+  return account === "sst" ? ["Inboxing", "US-IP", "AWSDNS"] : ["Inboxing", "Asia-IP"];
+}
+
 export async function createDomain(
   input: CreateOrderInput,
   credentials?: {
@@ -164,6 +169,12 @@ export async function createDomain(
     ...(credentials?.platformConnectionId
       ? { upload_to_platform: true, platform_connection_id: credentials.platformConnectionId }
       : {}),
+    // Provider tags at CREATION (Ramon 2026-09-08): set here they land on the
+    // Inboxing domain AND ride the auto-upload onto the Bison sender accounts;
+    // PUT /domains/{id}/tags later only touches Inboxing. LeadSync keys
+    // provider detection / movable-reserve on the "Inboxing" tag, so every
+    // order carries it; US (Premium) batches add the IP + DNS markers.
+    tags: inboxingCreationTags(account),
   };
   let result: InboxingDomain;
   try {
