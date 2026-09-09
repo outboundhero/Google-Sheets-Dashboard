@@ -4,7 +4,7 @@ import type {
 } from "@/types/inbox-order";
 import {
   DEFAULT_INBOXING_ACCOUNT, INBOXING_ACCOUNT_ORDER, inboxingAccountConfigured, inboxingAuth,
-  inboxingCloudflareCredential, inboxingRedirectType, type InboxingAccount,
+  inboxingRedirectType, type InboxingAccount,
 } from "@/lib/inboxing-accounts";
 import { asciiName } from "@/lib/inbox-order-aliases";
 
@@ -130,9 +130,15 @@ export async function createDomain(
     credentials?.registrarCredentialId ||
     // Legacy single-registrar env — only valid for the account it belongs to.
     (account === DEFAULT_INBOXING_ACCOUNT ? process.env.INBOXING_REGISTRAR_CREDENTIAL_ID : undefined);
-  const cloudflareId = credentials?.cloudflareCredentialId || inboxingCloudflareCredential(account);
-  if (!registrarId || !cloudflareId) {
-    throw new Error("Inboxing createDomain: missing registrar/cloudflare credential for this domain's Porkbun account");
+  // DNS: AWS Route 53 (Inboxing's default since 2026-08-31). Spencer picked AWS
+  // for BOTH accounts (2026-09-09) and Ramon's fix is to send NO
+  // cloudflare_credential_id — Route 53 domains reject a Cloudflare credential,
+  // which is what failed the whole `.org` batch ("Cloudflare credentials cannot
+  // be used with the ROUTE53 DNS provider"). dns_provider is left unset so the
+  // account default (AWS) applies. The Cloudflare credential helper stays in
+  // inboxing-accounts for a possible switch back.
+  if (!registrarId) {
+    throw new Error("Inboxing createDomain: missing registrar credential for this domain's Porkbun account");
   }
   const namesMap = new Map<string, { first_name: string; last_name: string; email_prefix?: string }>();
   for (const a of input.aliases) {
@@ -164,7 +170,6 @@ export async function createDomain(
     ...(input.redirectUrl
       ? { redirect_url: input.redirectUrl, redirect_type: inboxingRedirectType(input.redirectUrl) }
       : { redirect_type: "NONE" as const }),
-    cloudflare_credential_id: cloudflareId,
     registrar_credential_id: registrarId,
     ...(credentials?.platformConnectionId
       ? { upload_to_platform: true, platform_connection_id: credentials.platformConnectionId }
