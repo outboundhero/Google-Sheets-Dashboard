@@ -45,11 +45,14 @@ export async function GET(request: Request) {
     // ordered by overage, so a specific client someone is waiting on could
     // otherwise sit behind bigger overages for hours.
     const params = new URL(request.url).searchParams;
+    // ?dry=1 previews every round. Before this the flag was silently ignored
+    // and a "preview" call ran trim/move/fill for real (2026-09-16).
+    const dryRun = params.get("dry") === "1";
     const targetTag = (params.get("tag") || "").trim();
     const targetInstance = (params.get("instance") || "").trim();
     if (targetTag && targetInstance) {
-      const targeted = await call(trim, { clientTag: targetTag, instance: targetInstance });
-      return NextResponse.json({ targeted: true, trim: targeted });
+      const targeted = await call(trim, { clientTag: targetTag, instance: targetInstance, dryRun });
+      return NextResponse.json({ targeted: true, dryRun, trim: targeted });
     }
 
     // Trim first, so domains freed here are in the reserve before the fill
@@ -59,16 +62,17 @@ export async function GET(request: Request) {
     // (Nick, 2026-08-21, third such request — "so I don't have to come back
     // to you guys"). The route only ever returns HEALTHY domains to reserve;
     // burnt ones stay with the replacement runner's delete path.
-    const trimmed = await call(trim, { all: true, maxClients: 2 });
+    const trimmed = await call(trim, { all: true, maxClients: 2, dryRun });
 
     // One move round: finalize whatever has landed, queue the next batch.
-    const move = await call(moveFill, { dryRun: false, maxDomains: 40 });
+    const move = await call(moveFill, { dryRun, maxDomains: 40 });
 
     // Then top up short clients from whatever reserve is registered by now —
     // small increments; the next tick picks up where this one stopped.
-    const filled = await call(fill, { all: true, maxClients: 3 });
+    const filled = await call(fill, { all: true, maxClients: 3, dryRun });
 
     return NextResponse.json({
+      dryRun,
       trim: {
         ranClients: (trimmed.ranClients as number) ?? 0,
         trimmed: (trimmed.trimmedTotal as number) ?? 0,
