@@ -209,18 +209,20 @@ export async function runBuyAlert(opts: { force?: boolean; dryRun?: boolean } = 
   if (totalDomains === 0) {
     lines.push("✅ Every client is at its live cap — nothing to buy this week.");
   } else {
-    lines.push("Net of warmed reserve on hand and orders already in flight:");
+    // Nick 2026-09-16: "just tell us how much to buy per instance" — one number
+    // per workspace, no jargon. The headline is the buffered figure because
+    // that is the operating target (Spencer's +3 per B2B / +2 per B2C client);
+    // the bare shortfall is a single footnote, not a second column.
+    lines.push("*Buy this many domains:*");
     for (const i of byInstance) {
       if (i.domains <= 0 && i.buyWithBuffer <= 0) continue;
-      const upcomingNote = i.upcomingClients > 0
-        ? ` · ${i.upcomingClients} launching (${i.upcomingDomains} needed)`
-        : "";
-      lines.push(
-        `• *${i.label}* (${i.tier.toUpperCase()}): buy *${i.buyFill}* to fill caps, *${i.buyWithBuffer}* with buffers · ` +
-        `need ${i.domains} · reserve ${i.usableReserve} · in-flight ${i.inflight} · ${i.clientsShort} client${i.clientsShort === 1 ? "" : "s"} short${upcomingNote}`,
-      );
+      lines.push(`• *${i.label}*: ${i.buyWithBuffer}`);
     }
-    lines.push(`*Total: buy ${totalBuyFill} to fill every cap, or ${totalBuyWithBuffer} to also rebuild the per-client reserve buffers (3 per B2B client, 2 per B2C).*`);
+    lines.push(`*Total: ${totalBuyWithBuffer}*`);
+    lines.push(
+      `_Already counts what we hold and what's on order. ` +
+      `The bare minimum that only closes today's gaps is ${totalBuyFill} — buying that leaves no spare for the next replacement._`,
+    );
   }
   if (upcomingUnassigned.length > 0) {
     lines.push(
@@ -228,7 +230,7 @@ export async function runBuyAlert(opts: { force?: boolean; dryRun?: boolean } = 
       upcomingUnassigned.map((u) => `${u.tag} (${u.startDate})`).join(", "),
     );
   }
-  lines.push(`_Tier-aware caps (col K) · active + upcoming (1st→G2, 15th→G1) · detector: ${detector} · observe-only, nothing was bought._`);
+  lines.push(`_Nothing was bought — this is a recommendation only._`);
 
   const slack = await postSlackMessage(lines.join("\n"), channelId());
   return { ...base, alerted: slack.ok, slackReason: slack.reason };
