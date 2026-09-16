@@ -4,6 +4,7 @@ import { bisonFetch, senderSearchTerm, emailIsOnDomain } from "@/lib/bison";
 import { getHandledDomains, logEvents } from "@/lib/replacement/store";
 import { hasBurntTag } from "@/lib/replacement/burnt-tag";
 import { ALL_INSTANCE_SLUGS, type BisonInstanceSlug } from "@/lib/bison-instances";
+import { loadFirstCreated, effectiveAgeDays } from "@/lib/replacement/domain-age";
 
 export const maxDuration = 300;
 
@@ -45,7 +46,7 @@ export async function GET(request: Request) {
     const cap = Math.max(1, Number(url.searchParams.get("limit") ?? RUN_CAP) || RUN_CAP);
 
     const supabase = getSupabaseAdmin();
-    const handled = await getHandledDomains();
+    const [handled, firstCreated] = await Promise.all([getHandledDomains(), loadFirstCreated()]);
 
     // Campaign universe → client tags + per (tag, instance) attachable sets.
     const campaigns: CampaignRow[] = [];
@@ -71,8 +72,10 @@ export async function GET(request: Request) {
       attachable.get(k)!.push(c);
     }
 
-    // Candidate domains: client-tagged, warmed, not burnt, not leaving.
-    const cutoff = new Date(Date.now() - WARMUP_DAYS * 86_400_000).toISOString();
+    // Candidate domains: client-tagged, warmed, not burnt, not leaving. Age is
+    // the effective one (first-ever-seen beats the Bison upload date) — the
+    // JPLV dozen were months-old re-uploads that read as 12 days old here.
+    const nowMs = Date.now();
     interface DomRow { instance: BisonInstanceSlug; domain: string; tags: string[] | null; domain_created_at: string | null }
     const tagged: (DomRow & { tag: string })[] = [];
     for (let off = 0; ; off += 1000) {
@@ -80,12 +83,13 @@ export async function GET(request: Request) {
         .from("deliverability_domains")
         .select("instance, domain, tags, domain_created_at")
         .in("instance", ALL_INSTANCE_SLUGS)
-        .lte("domain_created_at", cutoff)
+        .order("domain", { ascending: true })
         .range(off, off + 999);
       if (error) throw new Error(error.message);
       if (!data || data.length === 0) break;
       for (const d of data as DomRow[]) {
         if (handled.has(`${d.instance}:${d.domain}`) || hasBurntTag(d.tags)) continue;
+        if (effectiveAgeDays(d.domain, d.domain_created_at, firstCreated, nowMs) < WARMUP_DAYS) continue;
         const tag = (d.tags || []).map((t) => String(t).trim().toUpperCase()).find((t) => knownTags.has(t));
         if (tag) tagged.push({ ...d, tag });
       }

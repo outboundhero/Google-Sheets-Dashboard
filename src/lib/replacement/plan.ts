@@ -7,6 +7,7 @@ import { getSupabaseAdmin } from "@/lib/supabase";
 import { ALL_INSTANCE_SLUGS, getInstance, type BisonInstanceSlug, PROTECTED_INSTANCE_DOMAINS } from "@/lib/bison-instances";
 import { pstDateString } from "@/lib/date-utils";
 import { getSettings, getHandledDomains } from "./store";
+import { loadFirstCreated, effectiveCreatedAt } from "./domain-age";
 import { evaluateDomain, type DomainSignals } from "./detect";
 import { evaluateSegments, type ThresholdConfig, type DomainMetrics } from "./threshold-groups";
 import { deriveCampaignMap, type CampaignRef } from "./campaigns";
@@ -152,7 +153,7 @@ export async function buildReplacementPlan(
 
   // domains already removed/in-flight from a prior execution — exclude so they
   // disappear from the plan the moment they're executed.
-  const handled = await getHandledDomains();
+  const [handled, firstCreated] = await Promise.all([getHandledDomains(), loadFirstCreated()]);
 
   // 1) all domains (with tags + fields)
   const domains: DomRow[] = [];
@@ -313,7 +314,7 @@ export async function buildReplacementPlan(
     if (e.tag !== null) continue;
     if (e.provider !== "outlook" && e.provider !== "google") continue;
     if (!allowInfo && isInfo(e.d.domain)) continue;
-    if (ageDays(e.d.domain_created_at, nowMs) < WARMUP_DAYS) continue;
+    if (ageDays(effectiveCreatedAt(e.d.domain, e.d.domain_created_at, firstCreated), nowMs) < WARMUP_DAYS) continue;
     // SURBL-listed reserves: allowed while cfg.allowSurblReserves is on (Nick +
     // Spencer, Aug-10: "allow SURBL blacklist for now" — it's what's available;
     // flip the setting off once inventory recovers). Clean ones are consumed
@@ -373,7 +374,7 @@ export async function buildReplacementPlan(
 
   for (const e of enriched) {
     if (e.tag !== null) continue;                                    // must be untagged
-    const age = ageDays(e.d.domain_created_at, nowMs);
+    const age = ageDays(effectiveCreatedAt(e.d.domain, e.d.domain_created_at, firstCreated), nowMs);
     if (age < WARMUP_DAYS) continue;                                 // must be ≥ 21d
     totalReserveByInstance[e.d.instance] = (totalReserveByInstance[e.d.instance] || 0) + 1;
     reserveList.push({

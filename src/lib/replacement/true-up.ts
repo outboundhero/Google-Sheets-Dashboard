@@ -23,6 +23,7 @@ import { deriveCampaignMap, getActiveCampaignKeys, type CampaignRef } from "./ca
 import { hasBurntTag } from "./burnt-tag";
 import { getFrozenMetrics } from "./metric-freeze";
 import { getHandledDomains, getSettings } from "./store";
+import { loadFirstCreated, effectiveCreatedAt } from "./domain-age";
 import { getSkipSet, skipKey } from "./skips";
 import { evaluateSegments, type DomainMetrics, type ThresholdConfig } from "./threshold-groups";
 import { getThresholdConfig } from "./threshold-groups-store";
@@ -184,7 +185,7 @@ export async function computeTrueUp(
 
   const cfg = await getSettings();
   const groupConfig = opts.groupConfig ?? (await getThresholdConfig());
-  const handled = await getHandledDomains();
+  const [handled, firstCreated] = await Promise.all([getHandledDomains(), loadFirstCreated()]);
   const skipSet = await getSkipSet();
   const frozenMetrics = await getFrozenMetrics();
   const tiers = await getClientTiers();
@@ -284,7 +285,7 @@ export async function computeTrueUp(
     if (hasBurntTag(e.d.tags)) continue;              // human "Burnt" verdict outranks metrics
     if (e.provider !== "outlook" && e.provider !== "google") continue;
     if (!cfg.allowInfoReserves && isInfo(e.d.domain)) continue;
-    if (ageDays(e.d.domain_created_at, nowMs) < WARMUP_DAYS) continue;
+    if (ageDays(effectiveCreatedAt(e.d.domain, e.d.domain_created_at, firstCreated), nowMs) < WARMUP_DAYS) continue;
     if (e.d.spamhaus_dbl === true) continue;
     if (!cfg.allowSurblReserves && e.d.blacklisted === true) continue;
     if (e.burnt || e.skipped) continue;
@@ -401,7 +402,7 @@ export async function computeTrueUp(
         const isUnproven = sent < ranking.minSentToTrim || reply == null;
         (isUnproven ? unproven : proven).push({
           domain: e.d.domain, sent, reply, replyWindow: window, bounce,
-          ageDays: ageDays(e.d.domain_created_at, nowMs),
+          ageDays: ageDays(effectiveCreatedAt(e.d.domain, e.d.domain_created_at, firstCreated), nowMs),
           bucket: isUnproven ? "unproven" : "ranked",
           // bounceWeight is 0 by default: bounce is already a flagging
           // threshold, so scoring it here would double-count it (and bounce

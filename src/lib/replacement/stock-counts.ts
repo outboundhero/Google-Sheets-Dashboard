@@ -16,6 +16,7 @@ import { getSupabaseAdmin } from "@/lib/supabase";
 import { getHandledDomains } from "./store";
 import { getSkipSet, skipKey } from "./skips";
 import { hasBurntTag } from "./burnt-tag";
+import { loadFirstCreated, effectiveAgeDays } from "./domain-age";
 import { ALL_INSTANCE_SLUGS, type BisonInstanceSlug, PROTECTED_INSTANCE_DOMAINS } from "@/lib/bison-instances";
 
 const WARMUP_DAYS = 21;
@@ -27,7 +28,7 @@ export interface StockCounts {
 
 export async function getStockCounts(knownTagsUpper: Set<string>): Promise<StockCounts> {
   const supabase = getSupabaseAdmin();
-  const [handled, skips] = await Promise.all([getHandledDomains(), getSkipSet()]);
+  const [handled, skips, firstCreated] = await Promise.all([getHandledDomains(), getSkipSet(), loadFirstCreated()]);
 
   interface DomRow { instance: BisonInstanceSlug; domain: string; tags: string[] | null; domain_created_at: string | null; spamhaus_dbl: boolean | null }
   const doms: DomRow[] = [];
@@ -68,7 +69,7 @@ export async function getStockCounts(knownTagsUpper: Set<string>): Promise<Stock
     if (PROTECTED_INSTANCE_DOMAINS.has(d.domain.toLowerCase())) continue; // instance roots are never stock
     if ((d.tags || []).some((t) => knownTagsUpper.has(String(t).trim().toUpperCase()))) continue;
     if (handled.has(key) || skips.has(skipKey(d.instance, d.domain)) || hasBurntTag(d.tags)) continue;
-    if (!d.domain_created_at || now - new Date(d.domain_created_at).getTime() < WARMUP_DAYS * 86_400_000) continue;
+    if (effectiveAgeDays(d.domain, d.domain_created_at, firstCreated, now) < WARMUP_DAYS) continue;
     if (d.spamhaus_dbl === true) continue;
     if (!(inboxCount.get(key)! > 0)) continue; // shells don't count
     usableReserve[d.instance] = (usableReserve[d.instance] || 0) + 1;
