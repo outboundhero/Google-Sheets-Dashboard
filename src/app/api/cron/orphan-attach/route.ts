@@ -39,7 +39,8 @@ const WARMUP_DAYS = 21;        // domain-age rule, same as the manual attach flo
 const DEAD = new Set(["archived", "completed"]);
 const ALERT_SOURCE = "orphan-attach";
 const ALERT_STEP = "tagged-not-attached";
-const YOUNG_CHECK_CAP = 40;    // live lookups per run for the under-age set
+const YOUNG_CHECK_CAP = 40;
+const SENDER_MAX_PAGES = 8;    // 8 × 15 covers a 49-sender domain twice over    // live lookups per run for the under-age set
 
 interface CampaignRow { id: number; instance: BisonInstanceSlug; client_tag: string | null; status: string; name: string }
 
@@ -141,17 +142,26 @@ export async function GET(request: Request) {
         continue;
       }
 
-      // LIVE verification — inboxes + current attachments.
-      const sr = await bisonFetch(d.instance, `/sender-emails?search=${encodeURIComponent(senderSearchTerm(d.domain))}&per_page=100`);
-      if (!sr.ok) {
-        results.push({ instance: d.instance, domain: d.domain, tag: d.tag, action: "error", detail: `Bison inbox lookup HTTP ${sr.status}` });
+      // LIVE verification — ALL inboxes + current attachments. Bison caps
+      // per_page at 15, so a single page attached 15 of a 49-sender domain and
+      // called it done (buildingserviceexperts.info, 2026-09-17). Page through.
+      type Sender = { id: number; email?: string; emails_sent_count?: number };
+      const inboxes: Sender[] = [];
+      let lookupFailed: number | null = null;
+      for (let page = 1; page <= SENDER_MAX_PAGES; page++) {
+        const sr = await bisonFetch(d.instance, `/sender-emails?search=${encodeURIComponent(senderSearchTerm(d.domain))}&page=${page}&per_page=15`);
+        if (!sr.ok) { lookupFailed = sr.status; break; }
+        const rows = (((await sr.json()) as { data?: Sender[] }).data) || [];
+        // Exact-domain filter is load-bearing: the newer Bison on FR/OC returns
+        // OTHER domains' senders for a query with no hits — attaching those
+        // would put another client's inboxes into this tag's campaigns.
+        inboxes.push(...rows.filter((i) => emailIsOnDomain(i.email, d.domain)));
+        if (rows.length < 15) break;
+      }
+      if (lookupFailed !== null) {
+        results.push({ instance: d.instance, domain: d.domain, tag: d.tag, action: "error", detail: `Bison inbox lookup HTTP ${lookupFailed}` });
         continue;
       }
-      // Exact-domain filter is load-bearing: the newer Bison on FR/OC returns
-      // OTHER domains' senders for a query with no hits — attaching those
-      // would put another client's inboxes into this tag's campaigns.
-      const inboxes = ((((await sr.json()) as { data?: { id: number; email?: string; emails_sent_count?: number }[] }).data) || [])
-        .filter((i) => emailIsOnDomain(i.email, d.domain));
       if (inboxes.length === 0) {
         results.push({ instance: d.instance, domain: d.domain, tag: d.tag, action: "skip", detail: "no inboxes in Bison (stale mirror row)" });
         continue;
@@ -160,17 +170,25 @@ export async function GET(request: Request) {
         results.push({ instance: d.instance, domain: d.domain, tag: d.tag, action: "skip", detail: "already sending (mirror stale)" });
         continue;
       }
-      const cr = await bisonFetch(d.instance, `/sender-emails/${inboxes[0].id}/campaigns`);
-      if (cr.ok) {
+      // "Already attached" is judged on first, middle and last sender, not one:
+      // a re-upload can leave the newest senders outside while the rest are in.
+      // Attach is idempotent, so a mixed domain simply gets every id re-sent.
+      const probe = [inboxes[0], inboxes[Math.floor(inboxes.length / 2)], inboxes[inboxes.length - 1]]
+        .filter((v, i, a) => a.findIndex((x) => x.id === v.id) === i);
+      let allOnOwnLive = true;
+      for (const s of probe) {
+        const cr = await bisonFetch(d.instance, `/sender-emails/${s.id}/campaigns`);
+        if (!cr.ok) { allOnOwnLive = false; break; }
         const attachedTo = (((await cr.json()) as { data?: { name?: string; status?: string }[] }).data) || [];
         const ownLive = attachedTo.some((c) => {
           const prefix = String(c.name || "").split(":")[0].trim().toUpperCase();
           return prefix === d.tag && !DEAD.has(String(c.status || "").toLowerCase());
         });
-        if (ownLive) {
-          results.push({ instance: d.instance, domain: d.domain, tag: d.tag, action: "skip", detail: "already attached to its client's live campaigns — graduation cron owns the ramp" });
-          continue;
-        }
+        if (!ownLive) { allOnOwnLive = false; break; }
+      }
+      if (allOnOwnLive) {
+        results.push({ instance: d.instance, domain: d.domain, tag: d.tag, action: "skip", detail: "already attached to its client's live campaigns — graduation cron owns the ramp" });
+        continue;
       }
 
       if (dryRun) {
