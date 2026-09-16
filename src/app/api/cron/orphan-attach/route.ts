@@ -5,6 +5,7 @@ import { getHandledDomains, logEvents } from "@/lib/replacement/store";
 import { hasBurntTag } from "@/lib/replacement/burnt-tag";
 import { ALL_INSTANCE_SLUGS, type BisonInstanceSlug } from "@/lib/bison-instances";
 import { loadFirstCreated, effectiveAgeDays } from "@/lib/replacement/domain-age";
+import { recordPipelineAlert, resolveAlertsForClients } from "@/lib/pipeline-alerts";
 
 export const maxDuration = 300;
 
@@ -36,6 +37,9 @@ export const maxDuration = 300;
 const RUN_CAP = 10;            // domains per run — repair loop, not a bulk mover
 const WARMUP_DAYS = 21;        // domain-age rule, same as the manual attach flow
 const DEAD = new Set(["archived", "completed"]);
+const ALERT_SOURCE = "orphan-attach";
+const ALERT_STEP = "tagged-not-attached";
+const YOUNG_CHECK_CAP = 40;    // live lookups per run for the under-age set
 
 interface CampaignRow { id: number; instance: BisonInstanceSlug; client_tag: string | null; status: string; name: string }
 
@@ -78,6 +82,9 @@ export async function GET(request: Request) {
     const nowMs = Date.now();
     interface DomRow { instance: BisonInstanceSlug; domain: string; tags: string[] | null; domain_created_at: string | null }
     const tagged: (DomRow & { tag: string })[] = [];
+    // Tagged but too young to attach: not this cron's job to launch them, but
+    // silence is how JPLV sat unnoticed. They get a dashboard alert (no Slack).
+    const youngTagged: (DomRow & { tag: string })[] = [];
     for (let off = 0; ; off += 1000) {
       const { data, error } = await supabase
         .from("deliverability_domains")
@@ -89,7 +96,11 @@ export async function GET(request: Request) {
       if (!data || data.length === 0) break;
       for (const d of data as DomRow[]) {
         if (handled.has(`${d.instance}:${d.domain}`) || hasBurntTag(d.tags)) continue;
-        if (effectiveAgeDays(d.domain, d.domain_created_at, firstCreated, nowMs) < WARMUP_DAYS) continue;
+        const tag0 = (d.tags || []).map((t) => String(t).trim().toUpperCase()).find((t) => knownTags.has(t));
+        if (tag0 && effectiveAgeDays(d.domain, d.domain_created_at, firstCreated, nowMs) < WARMUP_DAYS) {
+          youngTagged.push({ ...d, tag: tag0 });
+          continue;
+        }
         const tag = (d.tags || []).map((t) => String(t).trim().toUpperCase()).find((t) => knownTags.has(t));
         if (tag) tagged.push({ ...d, tag });
       }
@@ -203,8 +214,47 @@ export async function GET(request: Request) {
       }
     }
 
+    // Under-age tagged domains in no live campaign of their client → one open
+    // alert per client tag on the dashboard (silent: the daily digest / a human
+    // decides whether to launch early). Cleared when the set empties.
+    const unattachedYoung = new Map<string, string[]>(); // tag → domains
+    let youngChecked = 0;
+    for (const d of youngTagged) {
+      if (youngChecked >= YOUNG_CHECK_CAP) break;
+      const camps = attachable.get(`${d.tag}:${d.instance}`) || [];
+      if (camps.length === 0) continue;
+      const { data } = await supabase
+        .from("deliverability_inboxes")
+        .select("id, emails_sent_count")
+        .eq("instance", d.instance)
+        .eq("domain", d.domain)
+        .limit(1000);
+      const rows = (data || []) as { id: number; emails_sent_count: number | null }[];
+      if (rows.length === 0 || rows.some((r) => (r.emails_sent_count ?? 0) > 0)) continue;
+      youngChecked++;
+      const cr = await bisonFetch(d.instance, `/sender-emails/${rows[0].id}/campaigns`);
+      if (!cr.ok) continue;
+      const attachedTo = (((await cr.json()) as { data?: { name?: string; status?: string }[] }).data) || [];
+      const ownLive = attachedTo.some((c) => String(c.name || "").split(":")[0].trim().toUpperCase() === d.tag && !DEAD.has(String(c.status || "").toLowerCase()));
+      if (ownLive) continue;
+      if (!unattachedYoung.has(d.tag)) unattachedYoung.set(d.tag, []);
+      unattachedYoung.get(d.tag)!.push(`${d.instance}:${d.domain}`);
+    }
+    if (!dryRun) {
+      for (const [tag, doms] of unattachedYoung) {
+        await recordPipelineAlert({
+          source: ALERT_SOURCE, clientTag: tag, step: ALERT_STEP, silent: true,
+          reason: `${doms.length} ${tag}-tagged domain(s) under 21 days old are in none of ${tag}'s live campaigns (0 sends). Attach early or wait for warmup.`,
+          domains: doms.map((k) => k.split(":")[1]),
+        });
+      }
+      const clearTags = [...new Set(youngTagged.map((d) => d.tag))].filter((t) => !unattachedYoung.has(t));
+      if (clearTags.length > 0) await resolveAlertsForClients(ALERT_SOURCE, clearTags);
+    }
+
     return NextResponse.json({
       dryRun,
+      youngTaggedUnattached: Object.fromEntries(unattachedYoung),
       candidatesChecked: candidates.length,
       attached: results.filter((r) => r.action === "attached").length,
       skipped: results.filter((r) => r.action === "skip").length,
