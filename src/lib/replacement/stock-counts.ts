@@ -24,6 +24,10 @@ const WARMUP_DAYS = 21;
 export interface StockCounts {
   usableReserve: Record<string, number>;
   inflight: Record<string, number>;
+  /** In Bison with real inboxes, untagged, clean — just not 21 days old yet. Bought, don't re-buy. */
+  warming: Record<string, number>;
+  /** Of `warming`, how many cross the 21-day line within the next 7 days. */
+  warmingReady7: Record<string, number>;
 }
 
 export async function getStockCounts(knownTagsUpper: Set<string>): Promise<StockCounts> {
@@ -61,7 +65,9 @@ export async function getStockCounts(knownTagsUpper: Set<string>): Promise<Stock
 
   const now = Date.now();
   const usableReserve: Record<string, number> = {};
-  for (const s of ALL_INSTANCE_SLUGS) usableReserve[s] = 0;
+  const warming: Record<string, number> = {};
+  const warmingReady7: Record<string, number> = {};
+  for (const s of ALL_INSTANCE_SLUGS) { usableReserve[s] = 0; warming[s] = 0; warmingReady7[s] = 0; }
   const mirrorKeys = new Set<string>();
   for (const d of doms) {
     const key = `${d.instance}:${d.domain}`;
@@ -69,9 +75,14 @@ export async function getStockCounts(knownTagsUpper: Set<string>): Promise<Stock
     if (PROTECTED_INSTANCE_DOMAINS.has(d.domain.toLowerCase())) continue; // instance roots are never stock
     if ((d.tags || []).some((t) => knownTagsUpper.has(String(t).trim().toUpperCase()))) continue;
     if (handled.has(key) || skips.has(skipKey(d.instance, d.domain)) || hasBurntTag(d.tags)) continue;
-    if (effectiveAgeDays(d.domain, d.domain_created_at, firstCreated, now) < WARMUP_DAYS) continue;
     if (d.spamhaus_dbl === true) continue;
     if (!(inboxCount.get(key)! > 0)) continue; // shells don't count
+    const age = effectiveAgeDays(d.domain, d.domain_created_at, firstCreated, now);
+    if (age < WARMUP_DAYS) {
+      warming[d.instance] = (warming[d.instance] || 0) + 1;
+      if (age >= WARMUP_DAYS - 7) warmingReady7[d.instance] = (warmingReady7[d.instance] || 0) + 1;
+      continue;
+    }
     usableReserve[d.instance] = (usableReserve[d.instance] || 0) + 1;
   }
 
@@ -106,5 +117,5 @@ export async function getStockCounts(knownTagsUpper: Set<string>): Promise<Stock
     console.error("[stock-counts] in-flight read failed (credited as 0):", e);
   }
 
-  return { usableReserve, inflight };
+  return { usableReserve, inflight, warming, warmingReady7 };
 }

@@ -34,9 +34,13 @@ export interface BuyInstanceLine {
   usableReserve: number;
   /** Ordered at the provider, not yet visible in Bison — bought, don't re-buy. */
   inflight: number;
+  /** In Bison, real inboxes, untagged, clean, under 21 days old — bought, don't re-buy. */
+  warming: number;
+  /** Of `warming`, ready within 7 days. */
+  warmingReady7: number;
   /** Active clients on this instance (drives the buffer floor). */
   clientsActive: number;
-  /** max(0, domains − reserve − inflight): what fills every cap today. */
+  /** max(0, domains − reserve − inflight − warming): what fills every cap once stock on hand matures. */
   buyFill: number;
   /** buyFill plus rebuilding the per-client reserve buffer (3 b2b / 2 b2c). */
   buyWithBuffer: number;
@@ -180,15 +184,20 @@ export async function runBuyAlert(opts: { force?: boolean; dryRun?: boolean } = 
     clientsActive += upcoming.length; // launching clients need their buffer too
     const usableReserve = stock.usableReserve[slug] ?? 0;
     const inflight = stock.inflight[slug] ?? 0;
+    // Warming stock is already ours (Nick 2026-09-16: 278 domains sat in OH
+    // under the 21-day line while the list said "buy 87"). Nets like in-flight.
+    const warming = stock.warming[slug] ?? 0;
+    const warmingReady7 = stock.warmingReady7[slug] ?? 0;
     const bufferFloor = (isB2b ? BUFFER_B2B : BUFFER_B2C) * clientsActive;
-    const buyFill = Math.max(0, domains - usableReserve - inflight);
-    const buyWithBuffer = Math.max(0, domains + bufferFloor - usableReserve - inflight);
+    const onHand = usableReserve + inflight + warming;
+    const buyFill = Math.max(0, domains - onHand);
+    const buyWithBuffer = Math.max(0, domains + bufferFloor - onHand);
 
     return {
       instance: slug, label: INSTANCE_SHORT_LABELS[slug], tier, clientsShort,
       domains, inboxes: domains * MAILBOXES_PER_DOMAIN,
       upcomingDomains, upcomingClients: upcoming.length,
-      usableReserve, inflight, clientsActive, buyFill, buyWithBuffer,
+      usableReserve, inflight, warming, warmingReady7, clientsActive, buyFill, buyWithBuffer,
     };
   });
 
@@ -219,6 +228,11 @@ export async function runBuyAlert(opts: { force?: boolean; dryRun?: boolean } = 
       lines.push(`• *${i.label}*: ${i.buyWithBuffer}`);
     }
     lines.push(`*Total: ${totalBuyWithBuffer}*`);
+    const warmingTotal = byInstance.reduce((s, i) => s + i.warming, 0);
+    const ready7Total = byInstance.reduce((s, i) => s + i.warmingReady7, 0);
+    if (warmingTotal > 0) {
+      lines.push(`Already warming in Bison and counted: ${warmingTotal} (${ready7Total} ready within 7 days).`);
+    }
     lines.push(
       `_Already counts what we hold and what's on order. ` +
       `The bare minimum that only closes today's gaps is ${totalBuyFill} — buying that leaves no spare for the next replacement._`,
