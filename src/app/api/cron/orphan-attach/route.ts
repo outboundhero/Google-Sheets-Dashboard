@@ -110,8 +110,23 @@ export async function GET(request: Request) {
 
     // Never-sent filter from the mirror's per-inbox sends (cheap pre-filter;
     // each survivor is re-verified live below).
-    const candidates: (DomRow & { tag: string })[] = [];
+    // Round-robin across client tags: the alphabetical first-N window starved
+    // clients late in the alphabet (JPDET sat unattached behind CCG*/IJSD/JPCL
+    // for a day, 2026-09-17). Take one domain per tag per pass until the window
+    // is full, so every client gets a turn every run.
+    const byTag = new Map<string, (DomRow & { tag: string })[]>();
     for (const d of tagged) {
+      if (!byTag.has(d.tag)) byTag.set(d.tag, []);
+      byTag.get(d.tag)!.push(d);
+    }
+    const roundRobin: (DomRow & { tag: string })[] = [];
+    for (let i = 0; roundRobin.length < tagged.length; i++) {
+      let took = false;
+      for (const list of byTag.values()) if (i < list.length) { roundRobin.push(list[i]); took = true; }
+      if (!took) break;
+    }
+    const candidates: (DomRow & { tag: string })[] = [];
+    for (const d of roundRobin) {
       if (candidates.length >= cap * 3) break; // enough to fill the cap after live checks
       const { data } = await supabase
         .from("deliverability_inboxes")
@@ -235,38 +250,57 @@ export async function GET(request: Request) {
     // Under-age tagged domains in no live campaign of their client → one open
     // alert per client tag on the dashboard (silent: the daily digest / a human
     // decides whether to launch early). Cleared when the set empties.
-    const unattachedYoung = new Map<string, string[]>(); // tag → domains
-    let youngChecked = 0;
+    // Sample up to 3 domains per (tag, instance) group — a per-domain cap let
+    // three big groups exhaust the budget and the fourth was never looked at
+    // (and then wrongly cleared). Only groups actually probed can be resolved.
+    const youngGroups = new Map<string, (DomRow & { tag: string })[]>(); // `${tag}:${instance}`
     for (const d of youngTagged) {
+      if ((attachable.get(`${d.tag}:${d.instance}`) || []).length === 0) continue;
+      const k = `${d.tag}:${d.instance}`;
+      if (!youngGroups.has(k)) youngGroups.set(k, []);
+      youngGroups.get(k)!.push(d);
+    }
+    const unattachedYoung = new Map<string, string[]>(); // tag → domains
+    const probedTags = new Set<string>();
+    let youngChecked = 0;
+    for (const [k, group] of youngGroups) {
       if (youngChecked >= YOUNG_CHECK_CAP) break;
-      const camps = attachable.get(`${d.tag}:${d.instance}`) || [];
-      if (camps.length === 0) continue;
-      const { data } = await supabase
-        .from("deliverability_inboxes")
-        .select("id, emails_sent_count")
-        .eq("instance", d.instance)
-        .eq("domain", d.domain)
-        .limit(1000);
-      const rows = (data || []) as { id: number; emails_sent_count: number | null }[];
-      if (rows.length === 0 || rows.some((r) => (r.emails_sent_count ?? 0) > 0)) continue;
-      youngChecked++;
-      const cr = await bisonFetch(d.instance, `/sender-emails/${rows[0].id}/campaigns`);
-      if (!cr.ok) continue;
-      const attachedTo = (((await cr.json()) as { data?: { name?: string; status?: string }[] }).data) || [];
-      const ownLive = attachedTo.some((c) => String(c.name || "").split(":")[0].trim().toUpperCase() === d.tag && !DEAD.has(String(c.status || "").toLowerCase()));
-      if (ownLive) continue;
-      if (!unattachedYoung.has(d.tag)) unattachedYoung.set(d.tag, []);
-      unattachedYoung.get(d.tag)!.push(`${d.instance}:${d.domain}`);
+      const tag = k.split(":")[0];
+      let anyOutside = false;
+      let probes = 0;
+      for (const d of group) {
+        if (probes >= 3) break;
+        const { data } = await supabase
+          .from("deliverability_inboxes")
+          .select("id, emails_sent_count")
+          .eq("instance", d.instance)
+          .eq("domain", d.domain)
+          .limit(1000);
+        const rows = (data || []) as { id: number; emails_sent_count: number | null }[];
+        if (rows.length === 0 || rows.some((r) => (r.emails_sent_count ?? 0) > 0)) continue;
+        probes++; youngChecked++;
+        const cr = await bisonFetch(d.instance, `/sender-emails/${rows[0].id}/campaigns`);
+        if (!cr.ok) continue;
+        const attachedTo = (((await cr.json()) as { data?: { name?: string; status?: string }[] }).data) || [];
+        const ownLive = attachedTo.some((c) => String(c.name || "").split(":")[0].trim().toUpperCase() === tag && !DEAD.has(String(c.status || "").toLowerCase()));
+        if (!ownLive) { anyOutside = true; break; }
+      }
+      if (probes === 0) continue;
+      probedTags.add(tag);
+      if (anyOutside) {
+        if (!unattachedYoung.has(tag)) unattachedYoung.set(tag, []);
+        unattachedYoung.get(tag)!.push(...group.map((d) => `${d.instance}:${d.domain}`));
+      }
     }
     if (!dryRun) {
       for (const [tag, doms] of unattachedYoung) {
         await recordPipelineAlert({
           source: ALERT_SOURCE, clientTag: tag, step: ALERT_STEP, silent: true,
           reason: `${doms.length} ${tag}-tagged domain(s) under 21 days old are in none of ${tag}'s live campaigns (0 sends). Attach early or wait for warmup.`,
-          domains: doms.map((k) => k.split(":")[1]),
+          domains: doms.map((x) => x.split(":")[1]),
         });
       }
-      const clearTags = [...new Set(youngTagged.map((d) => d.tag))].filter((t) => !unattachedYoung.has(t));
+      const clearTags = [...probedTags].filter((t) => !unattachedYoung.has(t));
       if (clearTags.length > 0) await resolveAlertsForClients(ALERT_SOURCE, clearTags);
     }
 
