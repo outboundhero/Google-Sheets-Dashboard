@@ -2,6 +2,13 @@ import { NextResponse } from "next/server";
 import { scheduleDeletions } from "@/lib/replacement/duplicate-domains";
 import { postSlackMessage } from "@/lib/slack";
 import { INSTANCE_SHORT_LABELS, isInstanceSlug, type BisonInstanceSlug } from "@/lib/bison-instances";
+import { Redis } from "@upstash/redis";
+
+function getRedisOrNull(): Redis | null {
+  const url = process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_REST_URL;
+  const token = process.env.KV_REST_API_TOKEN || process.env.UPSTASH_REDIS_REST_TOKEN;
+  return url && token ? new Redis({ url, token }) : null;
+}
 
 export const maxDuration = 30;
 
@@ -65,7 +72,21 @@ export async function POST(request: Request) {
       }
       if (partials.length > 20) lines.push(`…and ${partials.length - 20} more`);
     }
-    if (lines.length > 0) slack = await postSlackMessage(lines.join("\n"), CHANNEL());
+    // Same partial set again within the hour = a retry that changed nothing;
+    // posting it every time turned a 19-domain move into hourly spam
+    // (FFO, 2026-09-17). Verified-scheduled summaries always post.
+    let suppressed = false;
+    if (scheduled === 0 && partials.length > 0) {
+      const key = `move-finalize:partials:${targetLabel}:${partials.map((p) => `${p.domain}=${p.landed ?? "?"}`).sort().join(",")}`;
+      const redis = getRedisOrNull();
+      if (redis) {
+        const seen = await redis.get<number>(key).catch(() => null);
+        if (seen && Date.now() - seen < 60 * 60 * 1000) suppressed = true;
+        else await redis.set(key, Date.now(), { ex: 3 * 60 * 60 }).catch(() => undefined);
+      }
+    }
+    if (lines.length > 0 && !suppressed) slack = await postSlackMessage(lines.join("\n"), CHANNEL());
+    else if (suppressed) slack = { ok: false, reason: "same partial set posted within the last hour" };
 
     return NextResponse.json({ ok: true, scheduled, partials: partials.length, slack });
   } catch (e) {
