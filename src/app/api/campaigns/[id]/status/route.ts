@@ -32,6 +32,21 @@ export async function PATCH(
       );
     }
 
+    // Who flipped what, when — JPDET (2026-09-17) went active with nobody able
+    // to say from where. Best-effort, never blocks the action.
+    try {
+      const { cookies } = await import("next/headers");
+      const { createServerSupabaseClient } = await import("@/lib/supabase");
+      const { logEvents } = await import("@/lib/replacement/store");
+      const { data: { user } } = await createServerSupabaseClient(await cookies()).auth.getUser();
+      await logEvents([{
+        instance,
+        eventType: "proposed",
+        detail: `campaign ${action} by ${user?.email ?? "unknown user"}: campaign #${id} on ${instance}`,
+        signals: { kind: "campaign_status", action, campaignId: id, actor: user?.email ?? null },
+      }]);
+    } catch (e) { console.error("[campaigns/status] actor log failed:", e); }
+
     return NextResponse.json({ success: true, action, instance });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Failed";
