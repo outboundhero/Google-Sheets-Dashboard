@@ -25,10 +25,15 @@ const SOURCE_LABEL: Record<string, string> = {
   "whitelist-queue": "Whitelist email",
   "send-to-sheet": "Sync to client's Domains tab",
   "stuck-campaign": "Campaign stuck in Processing",
+  "orphan-attach": "Tagged, not yet in campaigns",
 };
 // Alerts that report an external condition — nothing in LeadSync to retry.
 // They auto-resolve when the condition clears; Dismiss only.
-const NO_RETRY_SOURCES = new Set(["stuck-campaign"]);
+const NO_RETRY_SOURCES = new Set(["stuck-campaign", "orphan-attach"]);
+// Heads-up sources: recorded silently (no Slack), informational, auto-resolve.
+// Rendered apart from real failures so a pre-launch client does not read as
+// a broken pipeline (Spencer, 2026-09-17).
+const HEADS_UP_SOURCES = new Set(["orphan-attach"]);
 
 const fetcher = async (url: string): Promise<PipelineAlert[]> => {
   const res = await fetch(url);
@@ -51,6 +56,7 @@ export function PipelineAlertsBanner() {
   // Stuck campaigns come in batches (22 on FR, 2026-09-06) — one collapsed
   // row with a count, not 22 rows above the fold (Vicky 2026-09-07).
   const [stuckOpen, setStuckOpen] = useState(false);
+  const [headsUpOpen, setHeadsUpOpen] = useState(false);
 
   // Blocked (viewer) or errored fetch → show nothing rather than a broken box.
   if (error || !Array.isArray(data) || data.length === 0) return null;
@@ -96,10 +102,12 @@ export function PipelineAlertsBanner() {
   };
 
   const stuck = data.filter((a) => a.source === "stuck-campaign");
-  const others = data.filter((a) => a.source !== "stuck-campaign");
+  const headsUp = data.filter((a) => HEADS_UP_SOURCES.has(a.source));
+  const others = data.filter((a) => a.source !== "stuck-campaign" && !HEADS_UP_SOURCES.has(a.source));
   const headline = [
     others.length > 0 ? `${others.length} pipeline ${others.length === 1 ? "failure needs" : "failures need"} attention` : null,
     stuck.length > 0 ? `${stuck.length} campaign${stuck.length === 1 ? "" : "s"} stuck in Processing` : null,
+    headsUp.length > 0 ? `${headsUp.length} heads-up` : null,
   ].filter(Boolean).join(" · ");
 
   return (
@@ -108,7 +116,9 @@ export function PipelineAlertsBanner() {
         <AlertTriangle className="h-4 w-4 text-destructive" />
         <span className="text-sm font-semibold text-destructive">{headline}</span>
         <span className="text-[11px] text-muted-foreground ml-1">
-          Also sent to #leadsync-outbound. Retry once fixed, or dismiss to clear.
+          {others.length > 0
+            ? "Failures are also sent to #leadsync-outbound. Retry once fixed, or dismiss to clear."
+            : "Dashboard only, nothing was sent to Slack."}
         </span>
       </div>
       {stuck.length > 0 && (
@@ -127,6 +137,34 @@ export function PipelineAlertsBanner() {
                 <li key={a.id} className="px-4 py-2 flex items-center justify-between gap-3 text-xs">
                   <div className="min-w-0 flex items-center gap-2 flex-wrap">
                     {a.client_tag && <span className="font-mono px-1.5 py-0.5 rounded bg-muted text-foreground">{a.client_tag}</span>}
+                    <span className="text-muted-foreground break-words">{a.reason}</span>
+                  </div>
+                  <Button size="sm" variant="ghost" className="gap-1 h-7 text-muted-foreground shrink-0" disabled={!!busy[a.id]} onClick={() => dismiss(a.id)}>
+                    <X className="h-3 w-3" /> Dismiss
+                  </Button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      )}
+      {headsUp.length > 0 && (
+        <div className="border-b border-destructive/10">
+          <button onClick={() => setHeadsUpOpen((v) => !v)} className="w-full flex items-center gap-2 px-4 py-2.5 text-left">
+            {headsUpOpen ? <ChevronDown className="h-4 w-4 shrink-0 text-amber-500" /> : <ChevronRight className="h-4 w-4 shrink-0 text-amber-500" />}
+            <span className="text-sm font-medium">Tagged, not yet in campaigns — {headsUp.length} client{headsUp.length === 1 ? "" : "s"}</span>
+            <span className="text-[11px] text-muted-foreground">
+              heads-up, not a failure — domains under 21 days attach on their own once warmed; dashboard only
+            </span>
+            <span className="ml-auto text-[11px] text-muted-foreground">{headsUpOpen ? "collapse" : "expand"}</span>
+          </button>
+          {headsUpOpen && (
+            <ul className="divide-y divide-destructive/10 border-t border-destructive/10">
+              {headsUp.map((a) => (
+                <li key={a.id} className="px-4 py-2 flex items-center justify-between gap-3 text-xs">
+                  <div className="min-w-0 flex items-center gap-2 flex-wrap">
+                    {a.client_tag && <span className="font-mono px-1.5 py-0.5 rounded bg-muted text-foreground">{a.client_tag}</span>}
+                    <span className="text-muted-foreground">{a.domains_count} domain{a.domains_count === 1 ? "" : "s"}</span>
                     <span className="text-muted-foreground break-words">{a.reason}</span>
                   </div>
                   <Button size="sm" variant="ghost" className="gap-1 h-7 text-muted-foreground shrink-0" disabled={!!busy[a.id]} onClick={() => dismiss(a.id)}>
