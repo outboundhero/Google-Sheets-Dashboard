@@ -21,6 +21,7 @@ export async function GET() {
     let sentEmails = 0;
     let sentDomains = 0;
     let burntDropped = 0;
+    let untaggedDropped = 0;
     const skipped: { clientTag: string; step: string; reason: string; domains: number }[] = [];
     const recovered: string[] = [];
 
@@ -29,6 +30,7 @@ export async function GET() {
       sentEmails += r.sentEmails;
       sentDomains += r.sentDomains;
       burntDropped += r.burntDropped;
+      untaggedDropped += r.untaggedDropped;
 
       for (const f of r.failures) {
         skipped.push({
@@ -58,6 +60,7 @@ export async function GET() {
       sentEmails,
       sentDomains,
       burntDropped,
+      untaggedDropped,
       skipped,
     });
   } catch (error) {

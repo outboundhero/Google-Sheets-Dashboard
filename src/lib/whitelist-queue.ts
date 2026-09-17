@@ -100,8 +100,11 @@ export interface ClientPartition {
   buckets: Map<string, string[]>;
   /** queued domains currently tagged Burnt — pointless to whitelist */
   burnt: string[];
-  /** compound-tag domains matching NO sub-tag — left queued, surfaced */
+  /** compound-tag domains carrying a DIFFERENT client's tag — left queued, surfaced */
   unmatched: string[];
+  /** compound-tag domains carrying no client tag at all (removed/untagged since
+   *  queueing) — pointless to whitelist, dropped like burnt */
+  untagged: string[];
 }
 
 /**
@@ -149,19 +152,40 @@ export async function partitionByClientSubTags(
 
   const buckets = new Map<string, string[]>();
   const unmatched: string[] = [];
+  const untagged: string[] = [];
   if (subTags.length <= 1) {
     if (live.length > 0) buckets.set(subTags[0] ?? bareClientTag(clientTag), live);
-    return { buckets, burnt, unmatched };
+    return { buckets, burnt, unmatched, untagged };
+  }
+  // A domain that matches no sub-tag is either someone else's (keep it queued
+  // and surface it) or nobody's — removed from its client after it was queued
+  // (commercialbuildingconnect.com, burnt off CVJORL 2026-09-12, queued again
+  // 09-15). The second kind has no recipient and never will; drop it.
+  const knownClientTags = new Set<string>();
+  for (let off = 0; ; off += 1000) {
+    const { data, error } = await supabase
+      .from("campaigns")
+      .select("client_tag")
+      .order("id", { ascending: true })
+      .range(off, off + 999);
+    if (error) throw new Error(error.message);
+    if (!data || data.length === 0) break;
+    for (const r of data as { client_tag: string | null }[]) {
+      const t = (r.client_tag || "").trim().toLowerCase();
+      if (t) knownClientTags.add(t);
+    }
+    if (data.length < 1000) break;
   }
   for (const d of live) {
     const tags = tagsByDomain.get(d);
     const matches = subTags.filter((s) => tags?.has(s.toLowerCase()));
     if (matches.length === 0) {
-      unmatched.push(d);
+      const hasAnyClientTag = [...(tags ?? [])].some((t) => knownClientTags.has(t));
+      (hasAnyClientTag ? unmatched : untagged).push(d);
       continue;
     }
     // A domain tagged for several sub-clients goes in each of their emails.
     for (const m of matches) (buckets.get(m) ?? buckets.set(m, []).get(m)!).push(d);
   }
-  return { buckets, burnt, unmatched };
+  return { buckets, burnt, unmatched, untagged };
 }

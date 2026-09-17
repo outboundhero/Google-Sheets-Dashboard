@@ -21,6 +21,8 @@ export interface WhitelistClientResult {
   sentEmails: number;
   sentDomains: number;
   burntDropped: number;
+  /** Queued under a compound tag but carrying no client tag any more — dropped. */
+  untaggedDropped: number;
   failures: WhitelistFailure[];
   /** Client is on the no-whitelist-email list — domains marked done, no send. */
   exempt?: boolean;
@@ -42,6 +44,7 @@ export async function runWhitelistForClient(
     sentEmails: 0,
     sentDomains: 0,
     burntDropped: 0,
+    untaggedDropped: 0,
     failures: [],
   };
 
@@ -68,7 +71,7 @@ export async function runWhitelistForClient(
     return res;
   }
 
-  const { buckets, burnt, unmatched } = partition;
+  const { buckets, burnt, unmatched, untagged } = partition;
 
   if (burnt.length > 0) {
     try {
@@ -84,8 +87,22 @@ export async function runWhitelistForClient(
     }
   }
 
+  if (untagged.length > 0) {
+    try {
+      await markSent(clientTag, untagged); // no client tag left — nobody to email
+      res.untaggedDropped += untagged.length;
+    } catch (err) {
+      res.failures.push({
+        step: "drop-untagged",
+        subTag: clientTag,
+        reason: err instanceof Error ? err.message : "failed to clear untagged domains",
+        domains: untagged,
+      });
+    }
+  }
+
   if (unmatched.length > 0) {
-    // Compound-tag domains carrying no sub-client tag in Bison — can't be
+    // Compound-tag domains carrying ANOTHER client's tag in Bison — can't be
     // routed to a recipient. Surfaced as a real failure so it doesn't vanish.
     res.failures.push({
       step: "no-subtag",
