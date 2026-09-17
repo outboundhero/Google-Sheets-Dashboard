@@ -37,6 +37,10 @@ export const maxDuration = 300;
 const RUN_CAP = 10;            // domains per run — repair loop, not a bulk mover
 const WARMUP_DAYS = 21;        // domain-age rule, same as the manual attach flow
 const DEAD = new Set(["archived", "completed"]);
+// Nick 2026-09-17 (JPDET): a client that has not launched must not be touched
+// by this cron. Only campaigns that are genuinely running or deliberately
+// paused get senders; draft/queued/launching are a human launch decision.
+const ATTACHABLE = new Set(["active", "paused"]);
 const ALERT_SOURCE = "orphan-attach";
 const ALERT_STEP = "tagged-not-attached";
 const YOUNG_CHECK_CAP = 40;
@@ -73,7 +77,7 @@ export async function GET(request: Request) {
       const tag = (c.client_tag || "").trim().toUpperCase();
       if (!tag) continue;
       knownTags.add(tag);
-      if (DEAD.has(String(c.status || "").toLowerCase())) continue;
+      if (!ATTACHABLE.has(String(c.status || "").toLowerCase())) continue;
       const k = `${tag}:${c.instance}`;
       if (!attachable.has(k)) attachable.set(k, []);
       attachable.get(k)!.push(c);
