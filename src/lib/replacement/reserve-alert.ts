@@ -23,7 +23,7 @@ export interface ReserveAlertResult {
   totalBlocked: number;
 }
 
-export async function checkReserveAndAlert(opts: { force?: boolean } = {}): Promise<ReserveAlertResult> {
+export async function checkReserveAndAlert(opts: { force?: boolean; dryRun?: boolean } = {}): Promise<ReserveAlertResult & { preview?: string }> {
   const plan = await buildReplacementPlan({ infoMigration: false });
 
   // Stock on hand that is not "ready" yet — warming in Bison and orders in
@@ -60,7 +60,7 @@ export async function checkReserveAndAlert(opts: { force?: boolean } = {}): Prom
   const checkedAt = new Date().toISOString();
   const base = { checkedAt, hasIssue, floor: LOW_RESERVE_FLOOR, low, blockedByReserve, totalBlocked };
 
-  if (!hasIssue && !opts.force) return { ...base, alerted: false };
+  if (!hasIssue && !opts.force && !opts.dryRun) return { ...base, alerted: false };
 
   const lines: string[] = ["*🟠 Reserve alert — LeadSync domain replacement*"];
   if (totalBlocked > 0) {
@@ -83,6 +83,8 @@ export async function checkReserveAndAlert(opts: { force?: boolean } = {}): Prom
     || process.env.SLACK_OUTBOUND_CHANNEL_ID
     || process.env.SLACK_LEAD_SYNC_CHANNEL_ID
     || "C0B84LMSVMH";
+  // ?dry=1 renders the message without posting — the true-up-move lesson.
+  if (opts.dryRun) return { ...base, alerted: false, slackReason: "dry run", preview: lines.join("\n") };
   const slack = await postSlackMessage(lines.join("\n"), channel);
   return { ...base, alerted: slack.ok, slackReason: slack.reason };
 }

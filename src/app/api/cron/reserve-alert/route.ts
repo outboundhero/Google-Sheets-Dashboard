@@ -7,8 +7,10 @@ export const maxDuration = 120;
 // ?force=1 posts a summary even when there's no issue (handy for testing).
 export async function GET(request: Request) {
   try {
-    const force = new URL(request.url).searchParams.get("force") === "1";
-    return NextResponse.json(await checkReserveAndAlert({ force }));
+    const params = new URL(request.url).searchParams;
+    const force = params.get("force") === "1";
+    const dryRun = params.get("dry") === "1";
+    return NextResponse.json(await checkReserveAndAlert({ force, dryRun }));
   } catch (e) {
     return NextResponse.json({ error: e instanceof Error ? e.message : "Failed" }, { status: 500 });
   }
