@@ -263,8 +263,14 @@ export async function POST(request: Request) {
         }
       }
     } else if (nameBased) {
-      // All instances those domains live in.
-      await collect(null);
+      // Name-based callers normally mean "every instance these domains live
+      // in" (the dialog). The replacement fill passes ?instance= so a client
+      // tag lands ONLY on the copy it is assigning: without it, the tag also
+      // hit a stale reserve copy on another instance and the duplicate
+      // cleanup then kept the wrong side (8 FSD/DBSNJ/DBSM domains stranded
+      // on FacilityReach, 2026-09-18).
+      const scoped = searchParams.get("instance");
+      await collect(scoped && isInstanceSlug(scoped) ? scoped : null);
     } else {
       const instance = resolveInstance(searchParams.get("instance"));
       await collect(instance);

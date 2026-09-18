@@ -305,7 +305,7 @@ export async function runExecution(
     let tagTotal = 0;
     let tagDomains = replacementDomains;
     for (let pass = 0; pass < MAX_PASSES; pass++) {
-      const res = await callJson("/api/deliverability/bulk-tags", { action: "add", tagNames: [clientTag], domains: tagDomains });
+      const res = await callJson(`/api/deliverability/bulk-tags?instance=${instance}`, { action: "add", tagNames: [clientTag], domains: tagDomains });
       if (!res.ok) { tagOk = false; tagErr = res.error; break; }
       tagOk = true;
       const d = (res.data || {}) as TagData;
@@ -449,7 +449,7 @@ export async function runExecution(
     // "removed", which getHandledDomains() excludes from every pool — an
     // untagged burnt domain can NOT come back as someone's fill.
     setStep("untag", { state: "running" });
-    const utRes = await callJson("/api/deliverability/bulk-tags", {
+    const utRes = await callJson(`/api/deliverability/bulk-tags?instance=${instance}`, {
       action: "remove",
       tagNames: [clientTag],
       domains: removeDomains,
