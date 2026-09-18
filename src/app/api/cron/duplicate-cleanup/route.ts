@@ -255,7 +255,27 @@ export async function GET(request: Request) {
         continue;
       }
 
-      // Different tags per side / tagged on one side only — human.
+      // Tagged on ONE side only: the untagged copy is stale reserve left behind
+      // by a move (36 such pairs sat on "needs a human" for weeks, 2026-09-18).
+      // If the tagged side is in its client's allocated group, it is the
+      // keeper and the untagged copy winds down. Anything else stays human.
+      if ((tagA && !tagB) || (!tagA && tagB)) {
+        const keeper = tagA ? a : b;
+        const other = tagA ? b : a;
+        const group = allocation[tag!.toUpperCase()];
+        if (group != null && getInstance(keeper.instance as BisonInstanceSlug).group === group) {
+          verdicts.push({
+            domain: dup.domain, keep: keeper.instance, del: other.instance,
+            rule: `tagged ${tag} on ${keeper.instance} (allocated group ${group}) — retiring the untagged ${other.instance} copy`,
+            clientTag: tag!,
+          });
+          continue;
+        }
+        needsHuman.push({ domain: dup.domain, reason: `tagged ${tag} on ${keeper.instance} but ${tag} is allocated to group ${group ?? "?"}`, sides: sideNames });
+        continue;
+      }
+
+      // Different client tags per side — human.
       needsHuman.push({ domain: dup.domain, reason: `sides carry different client tags (${tagA || "-"} vs ${tagB || "-"})`, sides: sideNames });
     }
 
