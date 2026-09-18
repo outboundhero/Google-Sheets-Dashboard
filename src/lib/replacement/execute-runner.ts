@@ -461,7 +461,7 @@ export async function runExecution(
 
     setStep("schedule", { state: "running" });
     await record({
-      events: removeDomains.map((d) => ({ instance, domain: d, clientTag, eventType: "removed" as const, detail: "removed from campaigns, untagged; vendor-delete scheduled +5d" })),
+      events: removeDomains.map((d) => ({ instance, domain: d, clientTag, eventType: "removed" as const, detail: "removed from campaigns, untagged; vendor-delete queued (immediate)" })),
       lifecycle: removeDomains.map((d) => ({ instance, domain: d, state: "removed" as const, clientTag })),
       cancellations: removeDomains.map((d) => ({ instance, domain: d, clientTag, reason: "burnt — replaced" })),
     });

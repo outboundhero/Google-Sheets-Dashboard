@@ -37,7 +37,7 @@ export function ExecuteDialog({
           </div>
           <ul className="space-y-1.5 text-muted-foreground">
             <li>➕ Add <b className="text-emerald-500">{replacementDomains.length}</b> replacement domain(s) → tag, set redirect{redirectUrl ? ` (${redirectUrl.replace(/^https?:\/\//, "")})` : ""}, attach to <b>{targetCampaigns.length}</b> campaign(s), sheet + whitelist.</li>
-            <li>➖ Remove <b className="text-amber-500">{removeDomains.length}</b> burnt domain(s) from campaigns + schedule cancellation (+5d).</li>
+            <li>➖ Remove <b className="text-amber-500">{removeDomains.length}</b> burnt domain(s) from campaigns + queue vendor cancellation (fires on the next pass).</li>
           </ul>
           {nothing && <p className="text-destructive">Nothing to execute for this client.</p>}
           <p className="text-[11px] text-muted-foreground">Added to the execution queue — runs after any client(s) ahead of it. You can queue more while it runs.</p>

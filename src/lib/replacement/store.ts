@@ -107,7 +107,10 @@ export async function setLifecycle(updates: LifecycleUpdate[]): Promise<void> {
 }
 
 // --- Cancellation scheduling (5-day vendor-delete grace) ---------------------
-export const CANCEL_GRACE_DAYS = 5;
+// Spencer 2026-09-18 (and the Sep-16 call: "deleted ASAP, from the vendor and
+// from the instance"): a burnt domain is out of reserve the moment it is flagged,
+// so the hold bought nothing but a longer bill. 0 = next cancel-bridge pass.
+export const CANCEL_GRACE_DAYS = 0;
 
 export interface CancellationEntry {
   instance: BisonInstanceSlug;
