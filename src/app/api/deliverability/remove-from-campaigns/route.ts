@@ -229,6 +229,8 @@ export async function POST(request: Request) {
       const campaignName = c.name || `Campaign ${c.id}`;
       const discoveryIds = Array.isArray(c.inboxIds) ? Array.from(new Set(c.inboxIds)) : [];
 
+      let pausedByUs = false;
+      const routeDeadline = Date.now() + 200_000; // leave room to resume before Vercel's 300s cap
       try {
         let toRemove: number[];
         if (discoveryIds.length > 0) {
@@ -270,7 +272,6 @@ export async function POST(request: Request) {
         // (bounded poll) → only then resume. `removed` is what verification saw.
         const liveStatus = await fetchLiveCampaignStatus(inst, c.id) ?? (c.status || "").toLowerCase();
         const sendable = !REMOVABLE_STATUSES.has(liveStatus);
-        let pausedByUs = false;
         if (sendable) {
           const p = await bisonFetch(inst, `/campaigns/${c.id}/pause`, { method: "PATCH" });
           pausedByUs = p.ok;
@@ -292,7 +293,7 @@ export async function POST(request: Request) {
         // Verify: poll the campaign's live sender list until none of ours remain.
         const target = new Set(toRemove);
         let stillAttached = toRemove.length;
-        const verifyDeadline = Date.now() + VERIFY_BUDGET_MS;
+        const verifyDeadline = Math.min(Date.now() + VERIFY_BUDGET_MS, routeDeadline);
         while (Date.now() < verifyDeadline) {
           await delay(VERIFY_POLL_MS);
           const now = await fetchCampaignSenderIds(inst, c.id);
@@ -313,7 +314,7 @@ export async function POST(request: Request) {
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         details.push({ id: c.id, name: campaignName, removed: 0, error: msg });
-        if ((c.status || "").toLowerCase() === "active") {
+        if (pausedByUs || (c.status || "").toLowerCase() === "active") {
           try { await bisonFetch(inst, `/campaigns/${c.id}/resume`, { method: "PATCH" }); } catch { /* best effort */ }
         }
       }
