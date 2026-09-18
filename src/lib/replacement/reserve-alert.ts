@@ -4,6 +4,8 @@
 // on Bison or any provider. Fires from a daily cron; also runnable on demand.
 import { buildReplacementPlan } from "./plan";
 import { postSlackMessage } from "@/lib/slack";
+import { getStockCounts } from "./stock-counts";
+import { getSupabaseAdmin } from "@/lib/supabase";
 import { ALL_INSTANCE_SLUGS, getInstance } from "@/lib/bison-instances";
 
 /** Below this many pull-able reserve domains, an instance is "low". Env-tunable. */
@@ -16,7 +18,7 @@ export interface ReserveAlertResult {
   alerted: boolean;
   slackReason?: string;
   floor: number;
-  low: { instance: string; tier: string; ready: number }[];
+  low: { instance: string; tier: string; ready: number; warming: number; warmingReady7: number; inflight: number }[];
   blockedByReserve: { instance: string; count: number }[];
   totalBlocked: number;
 }
@@ -24,13 +26,22 @@ export interface ReserveAlertResult {
 export async function checkReserveAndAlert(opts: { force?: boolean } = {}): Promise<ReserveAlertResult> {
   const plan = await buildReplacementPlan({ infoMigration: false });
 
+  // Stock on hand that is not "ready" yet — warming in Bison and orders in
+  // flight. Vicky 2026-09-18: "4 ready" on CO read as "buy more" while 20+
+  // B2C domains were days from crossing the 21-day line and the buy list
+  // said 0. Same gates as the buy list, so the two never disagree.
+  const stock = await getStockCounts(await knownClientTags());
+
   // low reserve per instance (pull-able = outlook + google)
   const low: ReserveAlertResult["low"] = [];
   for (const inst of ALL_INSTANCE_SLUGS) {
     const r = plan.reserveReadyByInstance[inst];
     const ready = (r?.outlook ?? 0) + (r?.google ?? 0);
     if (ready < LOW_RESERVE_FLOOR) {
-      low.push({ instance: inst, tier: getInstance(inst).tier, ready });
+      low.push({
+        instance: inst, tier: getInstance(inst).tier, ready,
+        warming: stock.warming[inst] ?? 0, warmingReady7: stock.warmingReady7[inst] ?? 0, inflight: stock.inflight[inst] ?? 0,
+      });
     }
   }
 
@@ -58,9 +69,13 @@ export async function checkReserveAndAlert(opts: { force?: boolean } = {}): Prom
   }
   if (low.length > 0) {
     lines.push(`• Low reserve (< ${LOW_RESERVE_FLOOR} ready):`);
-    for (const l of low) lines.push(`    – ${l.instance} (${l.tier}): ${l.ready} ready`);
+    for (const l of low) {
+      lines.push(`    – ${l.instance} (${l.tier}): ${l.ready} ready · ${l.warming} warming (${l.warmingReady7} ready within 7 days) · ${l.inflight} on order`);
+    }
   }
+  const covered = low.length > 0 && low.every((l) => l.ready + l.warming + l.inflight >= LOW_RESERVE_FLOOR);
   if (!hasIssue) lines.push("_(forced test — no actual issue)_");
+  else if (covered && totalBlocked === 0) lines.push("Warming stock and open orders cover this — nothing to buy, replacements resume as domains finish warmup.");
   else lines.push("Buy + warm more domains so replacements never stall.");
 
   // #leadsync-outbound (Spencer confirmed 2026-07-29) via the shared chain
@@ -70,4 +85,25 @@ export async function checkReserveAndAlert(opts: { force?: boolean } = {}): Prom
     || "C0B84LMSVMH";
   const slack = await postSlackMessage(lines.join("\n"), channel);
   return { ...base, alerted: slack.ok, slackReason: slack.reason };
+}
+
+/** Every client tag the campaigns table knows — the "has a client" gate stock-counts uses. */
+async function knownClientTags(): Promise<Set<string>> {
+  const supabase = getSupabaseAdmin();
+  const out = new Set<string>();
+  for (let off = 0; ; off += 1000) {
+    const { data, error } = await supabase
+      .from("campaigns")
+      .select("client_tag")
+      .order("id", { ascending: true })
+      .range(off, off + 999);
+    if (error) throw new Error(`campaigns: ${error.message}`);
+    if (!data || data.length === 0) break;
+    for (const r of data as { client_tag: string | null }[]) {
+      const t = (r.client_tag || "").trim().toUpperCase();
+      if (t) out.add(t);
+    }
+    if (data.length < 1000) break;
+  }
+  return out;
 }
