@@ -28,6 +28,7 @@ export const maxDuration = 30;
 // pass, so "immediate" = minutes, with the row visible (and cancelable) in
 // the delete queue until then.
 const MOVE_GRACE_DAYS = 0;
+const POST_PARTIALS_TO_SLACK = false;
 
 const CHANNEL = () =>
   process.env.SLACK_OUTBOUND_CHANNEL_ID ||
@@ -63,7 +64,10 @@ export async function POST(request: Request) {
         `:arrows_counterclockwise: Move to ${targetLabel}: *${scheduled}* domain${scheduled === 1 ? "" : "s"} fully verified — source cop${scheduled === 1 ? "y" : "ies"} ${MOVE_GRACE_DAYS === 0 ? "queued for immediate deletion (next executor pass)" : `auto-delete in ${MOVE_GRACE_DAYS * 24}h`} (cancel from the Duplicate domains card if needed).`,
       );
     }
-    if (partials.length > 0) {
+    // Partial = still uploading at Inboxing, not a failure. The progress panel
+    // already shows it; posting it to Slack read as "the move is failing"
+    // twice in two days (FFO 09-17, the OC→OH batch 09-19). Dashboard only.
+    if (partials.length > 0 && POST_PARTIALS_TO_SLACK) {
       lines.push(`:warning: Move to ${targetLabel} — partial moves, *nothing deleted*, re-run Move to finish:`);
       for (const p of partials.slice(0, 20)) {
         const from = p.sourceInstance && isInstanceSlug(p.sourceInstance) ? ` (from ${INSTANCE_SHORT_LABELS[p.sourceInstance as BisonInstanceSlug]})` : "";
