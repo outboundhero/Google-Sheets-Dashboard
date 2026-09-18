@@ -124,6 +124,21 @@ async function discoverCampaigns(instance: BisonInstanceSlug, inboxIds: number[]
  * retries transient 429/5xx and throws on persistent failure — never a
  * silent partial list.
  */
+const REMOVABLE_STATUSES = new Set(["draft", "paused"]); // the only states Bison detaches in
+const VERIFY_BUDGET_MS = 90_000;  // async delete queue — wait for it before resuming
+const VERIFY_POLL_MS = 5_000;
+
+/** Live campaign status (the stored/passed one can be stale). null when unreadable. */
+async function fetchLiveCampaignStatus(instance: BisonInstanceSlug, campaignId: number): Promise<string | null> {
+  try {
+    const res = await bisonFetch(instance, `/campaigns/${campaignId}`);
+    if (!res.ok) return null;
+    const json = (await res.json()) as { data?: { status?: string }; status?: string };
+    const st = json?.data?.status ?? json?.status;
+    return st ? String(st).toLowerCase() : null;
+  } catch { return null; }
+}
+
 async function fetchCampaignSenderIds(instance: BisonInstanceSlug, campaignId: number): Promise<number[]> {
   try {
     return await fetchCampaignSenderEmails(instance, campaignId);
@@ -246,14 +261,23 @@ export async function POST(request: Request) {
           continue;
         }
 
-        const wasActive = (c.status || "").toLowerCase() === "active";
-
-        if (wasActive) {
-          await bisonFetch(inst, `/campaigns/${c.id}/pause`, { method: "PATCH" });
-          await delay(500);
+        // Bison's remove-sender-emails only acts on a DRAFT or PAUSED campaign
+        // and is an async queue ("may take a moment"). The old sequence paused,
+        // submitted, waited 500 ms and resumed — the queue then ran against an
+        // active campaign and detached nothing, while the 200s were counted as
+        // "removed" (6 of 7 sampled removals still sending, 2026-09-17). Now:
+        // live status → pause if sendable → submit → VERIFY the ids are gone
+        // (bounded poll) → only then resume. `removed` is what verification saw.
+        const liveStatus = await fetchLiveCampaignStatus(inst, c.id) ?? (c.status || "").toLowerCase();
+        const sendable = !REMOVABLE_STATUSES.has(liveStatus);
+        let pausedByUs = false;
+        if (sendable) {
+          const p = await bisonFetch(inst, `/campaigns/${c.id}/pause`, { method: "PATCH" });
+          pausedByUs = p.ok;
+          await delay(800);
         }
 
-        let removed = 0;
+        let submitted = 0;
         for (let i = 0; i < toRemove.length; i += 100) {
           const batch = toRemove.slice(i, i + 100);
           const res = await bisonFetch(inst, `/campaigns/${c.id}/remove-sender-emails`, {
@@ -261,17 +285,31 @@ export async function POST(request: Request) {
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ sender_email_ids: batch }),
           });
-          if (res.ok) removed += batch.length;
+          if (res.ok) submitted += batch.length;
           if (i + 100 < toRemove.length) await delay(200);
         }
 
-        if (wasActive) {
-          await delay(500);
+        // Verify: poll the campaign's live sender list until none of ours remain.
+        const target = new Set(toRemove);
+        let stillAttached = toRemove.length;
+        const verifyDeadline = Date.now() + VERIFY_BUDGET_MS;
+        while (Date.now() < verifyDeadline) {
+          await delay(VERIFY_POLL_MS);
+          const now = await fetchCampaignSenderIds(inst, c.id);
+          stillAttached = now.filter((id) => target.has(id)).length;
+          if (stillAttached === 0) break;
+        }
+        const removed = toRemove.length - stillAttached;
+
+        if (pausedByUs) {
           await bisonFetch(inst, `/campaigns/${c.id}/resume`, { method: "PATCH" });
         }
 
         totalRemoved += removed;
-        details.push({ id: c.id, name: campaignName, removed });
+        details.push({
+          id: c.id, name: campaignName, removed,
+          ...(stillAttached > 0 ? { error: `${stillAttached} of ${toRemove.length} still attached after ${Math.round(VERIFY_BUDGET_MS / 1000)}s (submitted ${submitted})` } : {}),
+        });
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         details.push({ id: c.id, name: campaignName, removed: 0, error: msg });
