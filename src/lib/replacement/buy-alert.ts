@@ -11,6 +11,7 @@ import { getActiveCampaignKeys } from "./campaigns";
 import { capFor, getClientTiers, type ClientTier } from "./client-tiers";
 import { getGoingLiveForecast } from "./going-live";
 import { getTaggedDomainCounts } from "./upcoming-stock";
+import { getActiveAnticipated, groupForStartDate } from "./anticipated-clients";
 import { getStockCounts } from "./stock-counts";
 import { postSlackMessage } from "@/lib/slack";
 import {
@@ -30,6 +31,9 @@ export interface BuyInstanceLine {
   /** Of `domains`, how many are launch stock for upcoming start-date clients. */
   upcomingDomains: number;
   upcomingClients: number;
+  /** Of `domains`, launch stock for ANTICIPATED clients (Spencer's box, not in the tracker yet). */
+  anticipatedDomains: number;
+  anticipatedClients: number;
   /** Warmed, real, unassigned domains the fill can pull before anything is bought. */
   usableReserve: number;
   /** Ordered at the provider, not yet visible in Bison — bought, don't re-buy. */
@@ -157,6 +161,28 @@ export async function runBuyAlert(opts: { force?: boolean; dryRun?: boolean } = 
     console.error("[buy-alert] upcoming forecast read failed (maintenance list unaffected):", e);
   }
 
+  // Anticipated clients (Spencer 2026-09-21): launches not in the tracker
+  // yet, entered on the Replacement tab per start date. Full launch stock on
+  // each instance of the date's group, sized by tier cap. Fail-open.
+  const anticipatedBySlug = new Map<BisonInstanceSlug, { clients: number; need: number }>();
+  const anticipatedNotes: string[] = [];
+  try {
+    for (const a of await getActiveAnticipated()) {
+      const group = groupForStartDate(a.startDate);
+      if (group === null) continue;
+      anticipatedNotes.push(`${a.clients} × Tier ${a.tier} on ${a.startDate} (Group ${group})`);
+      for (const slug of ALL_INSTANCE_SLUGS) {
+        if (getInstance(slug).group !== group) continue;
+        const cur = anticipatedBySlug.get(slug) ?? { clients: 0, need: 0 };
+        cur.clients += a.clients;
+        cur.need += a.clients * capFor(getInstance(slug).tier, a.tier);
+        anticipatedBySlug.set(slug, cur);
+      }
+    }
+  } catch (e) {
+    console.error("[buy-alert] anticipated clients read failed (ignored):", e);
+  }
+
   // Stock credit (Nick 2026-09-02: count what we hold and what's already on
   // order BEFORE telling anyone to buy) + the per-client reserve buffer
   // (Spencer 2026-07-29: 3 per B2B client, 2 per B2C, kept unassigned).
@@ -176,12 +202,14 @@ export async function runBuyAlert(opts: { force?: boolean; dryRun?: boolean } = 
     const upcoming = upcomingBySlug.get(slug) ?? [];
     const upcomingDomains = upcoming.reduce((s, u) => s + u.need, 0);
     domains += upcomingDomains;
+    const anticipated = anticipatedBySlug.get(slug) ?? { clients: 0, need: 0 };
+    domains += anticipated.need;
 
     let clientsActive = 0;
     for (const tag of byTag.keys()) {
       if (activeKeys.has(`${tag.trim().toUpperCase()}:${slug}`)) clientsActive++;
     }
-    clientsActive += upcoming.length; // launching clients need their buffer too
+    clientsActive += upcoming.length + anticipated.clients; // launching clients need their buffer too
     const usableReserve = stock.usableReserve[slug] ?? 0;
     const inflight = stock.inflight[slug] ?? 0;
     // Warming stock is already ours (Nick 2026-09-16: 278 domains sat in OH
@@ -197,6 +225,7 @@ export async function runBuyAlert(opts: { force?: boolean; dryRun?: boolean } = 
       instance: slug, label: INSTANCE_SHORT_LABELS[slug], tier, clientsShort,
       domains, inboxes: domains * MAILBOXES_PER_DOMAIN,
       upcomingDomains, upcomingClients: upcoming.length,
+      anticipatedDomains: anticipated.need, anticipatedClients: anticipated.clients,
       usableReserve, inflight, warming, warmingReady7, clientsActive, buyFill, buyWithBuffer,
     };
   });
@@ -228,6 +257,7 @@ export async function runBuyAlert(opts: { force?: boolean; dryRun?: boolean } = 
       lines.push(`• *${i.label}*: ${i.buyWithBuffer}`);
     }
     lines.push(`*Total: ${totalBuyWithBuffer}*`);
+    if (anticipatedNotes.length > 0) lines.push(`Includes anticipated clients: ${anticipatedNotes.join("; ")}.`);
     const warmingTotal = byInstance.reduce((s, i) => s + i.warming, 0);
     const ready7Total = byInstance.reduce((s, i) => s + i.warmingReady7, 0);
     if (warmingTotal > 0) {

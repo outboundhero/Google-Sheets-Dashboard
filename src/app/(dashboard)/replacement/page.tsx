@@ -19,6 +19,7 @@ import { DailyReportCard } from "@/components/replacement/daily-report-card";
 import { RetryCard } from "@/components/replacement/retry-card";
 import { PurchasePlanCard } from "@/components/replacement/purchase-plan-card";
 import { GoingLiveCard } from "@/components/replacement/going-live-card";
+import { AnticipatedClientsCard } from "@/components/replacement/anticipated-clients-card";
 import { WarmupForecastCard } from "@/components/replacement/warmup-forecast-card";
 import { PurchaseProposalCard } from "@/components/replacement/purchase-proposal-card";
 import { BisonCapacityCard } from "@/components/replacement/bison-capacity-card";
@@ -492,6 +493,7 @@ export default function ReplacementPage() {
       <WarmupForecastCard />
 
       <GoingLiveCard />
+      <AnticipatedClientsCard />
 
       {/* Replacement plan — full proposed action per burnt domain (observe-only) */}
       <Card>
