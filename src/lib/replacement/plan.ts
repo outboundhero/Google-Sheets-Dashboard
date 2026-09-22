@@ -10,7 +10,7 @@ import { getSettings, getHandledDomains } from "./store";
 import { loadFirstCreated, effectiveCreatedAt } from "./domain-age";
 import { evaluateDomain, type DomainSignals } from "./detect";
 import { evaluateSegments, type ThresholdConfig, type DomainMetrics } from "./threshold-groups";
-import { deriveCampaignMap, type CampaignRef } from "./campaigns";
+import { deriveCampaignMap, getActiveCampaignKeys, type CampaignRef } from "./campaigns";
 import { capFor, getClientTiers } from "./client-tiers";
 import { getSkipSet, skipKey } from "./skips";
 import { recordFirstFlagged } from "./first-flagged";
@@ -202,6 +202,7 @@ export async function buildReplacementPlan(
   // burnt domains never get replaced.
   const redirectByTag = await loadRedirectsByTag();
   const campaignMap = await deriveCampaignMap();
+  const activeKeys = await getActiveCampaignKeys();
   // Caps are per CLIENT TIER, not per instance (Nick 2026-08-13: Tier 0.5/1 =
   // 20 b2b + 5 b2c, Tier 2 = 40 b2b + 10 b2c). This used to read a flat
   // INSTANCE_CAP of 20/5, which silently held Tier 2 clients to half their
@@ -485,6 +486,9 @@ export async function buildReplacementPlan(
       // blockers only matter when we actually intend to add a replacement
       if (!redirectUrl) blockers.push("no redirect URL for tag");
       if (targetCampaigns.length === 0) blockers.push("no eligible campaign in this instance");
+      // Same rule as the true-up (Nick 2026-09-22): no automatic adds for a
+      // client that is not sending yet.
+      else if (!activeKeys.has(groupKey)) blockers.push("client not live yet (no sending campaign) — initial fill is manual");
       if (provider === "mixed" || provider === "unknown") blockers.push(`${provider}-provider domain (manual)`);
       else if (!replacementDomain) blockers.push(`no ready ${provider} reserve in this instance${getInstance(d.instance).tier === "b2c" ? " (and no Inboxing-movable B2B#2 donor)" : ""}`);
     } else {

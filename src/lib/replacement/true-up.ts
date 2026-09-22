@@ -341,6 +341,14 @@ export async function computeTrueUp(
       skipped.push({ clientTag, instance, reason: "no live campaign in this instance" });
       continue;
     }
+    // Nick 2026-09-22: a client whose campaigns are all still draft/paused has
+    // not launched — its initial domains are added by hand until the
+    // onboarding automation exists. Filling a not-live client also loaded
+    // CGCWP with 25 domains nobody asked for. Live clients keep topping up.
+    if (!hasActiveCampaign) {
+      skipped.push({ clientTag, instance, reason: "client not live yet (no sending campaign) — initial fill is manual" });
+      continue;
+    }
 
     const it = getInstance(instance).tier;
     const cap = capFor(it, tier);

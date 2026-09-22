@@ -4,6 +4,7 @@ import { updateRedirect as inboxingUpdateRedirect } from "@/lib/inboxing";
 import type { InboxingAccount } from "@/lib/inboxing-accounts";
 import { updateRedirect as milkboxUpdateRedirect } from "@/lib/milkbox";
 import { getKnownClientTags } from "@/lib/replacement/cross-tag-audit";
+import { loadRedirectsByTag } from "@/lib/replacement/redirect-audit";
 import { logEvents } from "@/lib/replacement/store";
 import type { BisonInstanceSlug } from "@/lib/bison-instances";
 
@@ -38,7 +39,12 @@ export async function GET(request: Request) {
 
     const supabase = getSupabaseAdmin();
     const knownTags = await getKnownClientTags();
-    const knownUpper = new Set([...knownTags].map((t) => t.toUpperCase()));
+    // A pre-launch client has a tag in the tracker before it has campaigns.
+    // Campaign-derived tags alone made CGCWP look like stock: its redirect
+    // was stripped here at 05:35 and re-set by redirect-conform at 09:40,
+    // every day (2026-09-17 → 22). Tracker/redirect tags count as assigned.
+    const redirectTags = await loadRedirectsByTag().then((m) => [...m.keys()]).catch(() => [] as string[]);
+    const knownUpper = new Set([...knownTags, ...redirectTags].map((t) => t.toUpperCase()));
 
     // Order-sourced domains with a provider id we can act on.
     interface OrderRow {
