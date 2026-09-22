@@ -40,7 +40,8 @@ const DEAD = new Set(["archived", "completed"]);
 const ALERT_SOURCE = "orphan-attach";
 const ALERT_STEP = "tagged-not-attached";
 const YOUNG_CHECK_CAP = 40;
-const SENDER_MAX_PAGES = 8;    // 8 × 15 covers a 49-sender domain twice over    // live lookups per run for the under-age set
+const SENDER_MAX_PAGES = 8;
+const SCAN_BUDGET_MS = 200_000;  // leave room for the young check + summary before Vercel's 300 s    // 8 × 15 covers a 49-sender domain twice over    // live lookups per run for the under-age set
 
 interface CampaignRow { id: number; instance: BisonInstanceSlug; client_tag: string | null; status: string; name: string }
 
@@ -50,6 +51,7 @@ export async function GET(request: Request) {
     const dryRun = url.searchParams.get("dry") === "1";
     const cap = Math.max(1, Number(url.searchParams.get("limit") ?? RUN_CAP) || RUN_CAP);
 
+    const startedAt = Date.now();
     const supabase = getSupabaseAdmin();
     const [handled, firstCreated] = await Promise.all([getHandledDomains(), loadFirstCreated()]);
 
@@ -125,9 +127,13 @@ export async function GET(request: Request) {
       for (const list of byTag.values()) if (i < list.length) { roundRobin.push(list[i]); took = true; }
       if (!took) break;
     }
+    // The whole pool is a candidate. A fixed window of cap×3 was eaten by
+    // domains that are attached but idle (draft/paused campaigns, 0 sends), so
+    // four freshly launched clients got nothing for four days (2026-09-18 →
+    // 21). The cap now bounds ATTACHES; a time budget bounds the scan.
     const candidates: (DomRow & { tag: string })[] = [];
     for (const d of roundRobin) {
-      if (candidates.length >= cap * 3) break; // enough to fill the cap after live checks
+      if (Date.now() - startedAt > SCAN_BUDGET_MS) break;
       const { data } = await supabase
         .from("deliverability_inboxes")
         .select("emails_sent_count")
@@ -151,10 +157,30 @@ export async function GET(request: Request) {
 
     for (const d of candidates) {
       if (attachedDomains >= cap) break;
+      if (Date.now() - startedAt > SCAN_BUDGET_MS) break;
       const camps = attachable.get(`${d.tag}:${d.instance}`) || [];
       if (camps.length === 0) {
         results.push({ instance: d.instance, domain: d.domain, tag: d.tag, action: "skip", detail: "no live campaign for this tag in this instance" });
         continue;
+      }
+      // Cheap first probe on one mirrored inbox: most idle-tagged domains are
+      // already in their client's campaigns (draft/paused, 0 sends). Only a
+      // domain that looks unattached pays for the full sender walk below.
+      {
+        const { data: one } = await supabase
+          .from("deliverability_inboxes").select("id").eq("instance", d.instance).eq("domain", d.domain).limit(1);
+        const firstId = (one?.[0] as { id: number } | undefined)?.id;
+        if (firstId) {
+          const pr = await bisonFetch(d.instance, `/sender-emails/${firstId}/campaigns`);
+          if (pr.ok) {
+            const on = (((await pr.json()) as { data?: { name?: string; status?: string }[] }).data) || [];
+            const ownLive = on.some((c) => String(c.name || "").split(":")[0].trim().toUpperCase() === d.tag && !DEAD.has(String(c.status || "").toLowerCase()));
+            if (ownLive) {
+              results.push({ instance: d.instance, domain: d.domain, tag: d.tag, action: "skip", detail: "already attached to its client's live campaigns — graduation cron owns the ramp" });
+              continue;
+            }
+          }
+        }
       }
 
       // LIVE verification — ALL inboxes + current attachments. Bison caps
@@ -302,6 +328,19 @@ export async function GET(request: Request) {
       }
       const clearTags = [...probedTags].filter((t) => !unattachedYoung.has(t));
       if (clearTags.length > 0) await resolveAlertsForClients(ALERT_SOURCE, clearTags);
+    }
+
+    if (!dryRun) {
+      const skipReasons: Record<string, number> = {};
+      for (const r of results) if (r.action === "skip") skipReasons[r.detail.slice(0, 40)] = (skipReasons[r.detail.slice(0, 40)] || 0) + 1;
+      // "proposed" is the run-level note type nothing aggregates — the daily
+      // Slack report and the dashboard widget count skipped/attached/removed,
+      // not this. Audit trail only.
+      await logEvents([{
+        eventType: "proposed",
+        detail: `orphan-attach run: pool ${tagged.length} · candidates ${candidates.length} · attached ${attachedDomains} · skipped ${results.filter((r) => r.action === "skip").length} · errors ${results.filter((r) => r.action === "error").length} · ${Math.round((Date.now() - startedAt) / 1000)}s`,
+        signals: { kind: "orphan_attach_run", pool: tagged.length, candidates: candidates.length, attached: attachedDomains, skipReasons, budgetHit: Date.now() - startedAt > SCAN_BUDGET_MS },
+      }]).catch(() => undefined);
     }
 
     return NextResponse.json({
