@@ -188,7 +188,12 @@ export async function POST(request: Request) {
     // allClients=true to bypass and show every campaign it's in.
     if (discover) {
       const showAllClients = (body as { allClients?: boolean }).allClients === true;
-      const domainTags = showAllClients ? null : await getDomainTags(domains);
+      // A domain that carries NO client tag any more still sits in its old
+      // client's campaigns — that is the whole reason someone is removing it.
+      // Scoping by current tags found nothing and the button silently did
+      // nothing (CGCWP, Nick 2026-09-22: tag removed first, then "Remove").
+      const tagsNow = showAllClients ? null : await getDomainTags(domains);
+      const domainTags = tagsNow && tagsNow.size > 0 ? tagsNow : null;
       const perInstance = await Promise.all(
         ALL_INSTANCE_SLUGS.map(async (inst) => {
           const inboxIds = await getInboxIdsForDomains(inst, domains);
@@ -319,6 +324,20 @@ export async function POST(request: Request) {
         }
       }
     }
+
+    // Trail (best-effort): who removed what. Nick's "remove didn't work"
+    // report had nothing to look at.
+    try {
+      const { cookies } = await import("next/headers");
+      const { createServerSupabaseClient } = await import("@/lib/supabase");
+      const { logEvents } = await import("@/lib/replacement/store");
+      const { data: { user } } = await createServerSupabaseClient(await cookies()).auth.getUser();
+      await logEvents([{
+        eventType: "removed",
+        detail: `remove-from-campaigns by ${user?.email ?? "unknown user"}: ${domains.length} domain(s), ${details.length} campaign(s), ${totalRemoved} sender(s) verified removed${details.some((d) => d.error) ? ` · ${details.filter((d) => d.error).length} campaign(s) reported an error` : ""}`,
+        signals: { kind: "manual_remove", actor: user?.email ?? null, domains: domains.slice(0, 50), campaigns: details.map((d) => ({ id: d.id, name: d.name, removed: d.removed, error: d.error ?? null })) },
+      }]);
+    } catch (e) { console.error("[remove-from-campaigns] actor log failed:", e); }
 
     return NextResponse.json({
       inboxes: totalInboxes,
