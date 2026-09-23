@@ -38,6 +38,7 @@ import { DomainHistoryDialog } from "@/components/deliverability/domain-history-
 import { hasBurntTag } from "@/lib/replacement/burnt-tag";
 import { History as HistoryIcon } from "lucide-react";
 import { AttachCampaignsDialog } from "@/components/deliverability/attach-campaigns-dialog";
+import { AttachActivityCard } from "@/components/deliverability/attach-activity-card";
 import { BulkTagDialog, type TagApplyInfo } from "@/components/deliverability/bulk-tag-dialog";
 import { BulkDeleteDialog } from "@/components/deliverability/bulk-delete-dialog";
 import { AttachToCampaignsDialog } from "@/components/deliverability/attach-to-campaigns-dialog";
@@ -3189,6 +3190,9 @@ function DeliverabilityPageInner() {
           )}
         </div>
       </PageHeader>
+
+      {/* What the attach automations did (Spencer's Loom 2026-09-16) */}
+      {isAdmin && <AttachActivityCard />}
 
       {/* Domains — Porkbun expiring ≤10 days (admin only), collapsed by default */}
       {isAdmin && (
