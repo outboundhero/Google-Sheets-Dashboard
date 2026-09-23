@@ -219,6 +219,10 @@
     {
       "path": "/api/cron/campaign-completeness",
       "schedule": "*/30 * * * *"
+    },
+    {
+      "path": "/api/cron/revive-completed",
+      "schedule": "0 15 * * *"
     }
   ]
 }
