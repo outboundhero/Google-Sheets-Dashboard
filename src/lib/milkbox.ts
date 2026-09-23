@@ -209,6 +209,8 @@ export interface MilkboxListedDomain {
 export interface MilkboxListedDomainWithLifecycle extends MilkboxListedDomain {
   status: string | null;
   active: boolean;
+  /** Configured redirect, when the list endpoint returns it. undefined = not reported. */
+  redirectUrl?: string | null;
 }
 
 /**
@@ -238,7 +240,7 @@ export async function listDomainsWithLifecycle(): Promise<MilkboxListedDomainWit
       ? `/domains?cursor=${encodeURIComponent(cursor)}`
       : `/domains`;
     const result: {
-      data?: Array<{ id: string | number; name: string; status?: string | null; active?: boolean }>;
+      data?: Array<{ id: string | number; name: string; status?: string | null; active?: boolean; redirect_url?: string | null }>;
       pagination?: { next_cursor?: string | null };
     } = await call("GET", path);
     for (const d of result.data || []) {
@@ -250,6 +252,9 @@ export async function listDomainsWithLifecycle(): Promise<MilkboxListedDomainWit
         // Treat missing `active` as true to avoid false-flagging historic
         // rows where the field isn't populated yet.
         active: d.active !== false,
+        // Only present when the list endpoint reports it; `undefined` means
+        // "not reported", which readers must not confuse with "no redirect".
+        redirectUrl: "redirect_url" in d ? (d.redirect_url ?? null) : undefined,
       });
     }
     const next: string | null | undefined = result.pagination?.next_cursor;

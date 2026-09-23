@@ -8,6 +8,19 @@ const BATCH_PULL_LIMIT = 500;
 
 export const maxDuration = 60;
 
+// Providers whose own configuration is the truth, because an HTTP walk cannot
+// see their redirect: Inboxing masks it behind Cloudflare, and MilkBox domains
+// answer our walk with a Cloudflare bot challenge. Both are synced by
+// provider-redirect-sync; walking them here only produces false blanks.
+const PROVIDER_TRUTH_PREFIXES = ["inboxing", "milkbox"];
+function isProviderTruth(tags: unknown): boolean {
+  return Array.isArray(tags)
+    && tags.some((t) => {
+      const v = String(t).trim().toLowerCase();
+      return PROVIDER_TRUTH_PREFIXES.some((p) => v.startsWith(p));
+    });
+}
+
 export async function GET() {
   const t0 = Date.now();
   const supabase = getSupabaseAdmin();
@@ -31,7 +44,7 @@ export async function GET() {
       }
       if (!page || page.length === 0) break;
       data.push(...page);
-      const walkable = data.filter((r) => !(Array.isArray(r.tags) && r.tags.some((t) => String(t).trim().toLowerCase().startsWith("inboxing")))).length;
+      const walkable = data.filter((r) => !isProviderTruth(r.tags)).length;
       if (walkable >= 150 || page.length < BATCH_PULL_LIMIT) break;
     }
 
@@ -39,10 +52,8 @@ export async function GET() {
     // no redirect, so this checker recorded "none" on hundreds that were set
     // correctly. Their truth is the provider's configured redirect, written by
     // provider-redirect-sync; this cron only walks the unmasked providers.
-    const isInboxing = (tags: unknown) =>
-      Array.isArray(tags) && tags.some((t) => String(t).trim().toLowerCase().startsWith("inboxing"));
     const pairs = (data || [])
-      .filter((r) => !isInboxing(r.tags))
+      .filter((r) => !isProviderTruth(r.tags))
       .map((r) => ({
         instance: r.instance as string,
         domain: (r.domain as string)?.trim().toLowerCase(),
