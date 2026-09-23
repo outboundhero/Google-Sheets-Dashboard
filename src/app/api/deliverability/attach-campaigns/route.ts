@@ -70,7 +70,7 @@ async function campaignsFromMirror(instance: BisonInstanceSlug): Promise<Campaig
     for (let off = 0; ; off += 1000) {
       const { data, error } = await supabase
         .from("campaigns").select("id, name, status, synced_at")
-        .eq("instance", instance).order("id", { ascending: true }).range(off, off + 999);
+        .eq("instance", instance).is("gone_at", null).order("id", { ascending: true }).range(off, off + 999);
       if (error) return null;
       if (!data || data.length === 0) break;
       rows.push(...(data as typeof rows));

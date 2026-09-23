@@ -119,7 +119,7 @@ export async function GET(request: Request) {
     const knownTags = new Set<string>();
     for (let off = 0; ; off += 1000) {
       const { data, error } = await supabase
-        .from("campaigns").select("client_tag")
+        .from("campaigns").select("client_tag").is("gone_at", null)
         .order("id", { ascending: true }).range(off, off + 999);
       if (error) throw new Error(error.message);
       if (!data || data.length === 0) break;

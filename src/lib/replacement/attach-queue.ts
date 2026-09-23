@@ -57,10 +57,12 @@ export async function maybeDeferReattach(o: AttachOutcome): Promise<string | nul
     const supabase = getSupabaseAdmin();
     const { data } = await supabase
       .from("campaigns")
-      .select("status")
+      .select("status, gone_at")
       .eq("instance", o.instance)
       .eq("id", o.campaignId)
       .maybeSingle();
+    // Deleted in Bison — retrying can never succeed, so never queue it.
+    if (data?.gone_at) return null;
     const st = normStatus(data?.status);
     if (DEFERRED_STATUSES.has(st)) reason = `campaign is "${st}" — Bison may ignore adds; verifying in 8h`;
   }

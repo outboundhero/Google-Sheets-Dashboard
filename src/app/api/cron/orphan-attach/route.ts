@@ -65,6 +65,7 @@ export async function GET(request: Request) {
       const { data, error } = await supabase
         .from("campaigns")
         .select("id, instance, client_tag, status, name")
+        .is("gone_at", null)
         .range(off, off + 999);
       if (error) throw new Error(error.message);
       if (!data || data.length === 0) break;

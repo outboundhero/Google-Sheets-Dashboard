@@ -49,12 +49,19 @@ export async function runCampaignsSync(instance: BisonInstanceSlug): Promise<Nex
     const lastPage: number = firstJson.meta?.last_page || 1;
     const all: CampaignPayload[] = [...(firstJson.data || [])];
 
-    for (let p = 2; p <= lastPage && Date.now() - t0 < 55_000; p++) {
+    // A page we never fetched, or one that errored, means the picture is
+    // incomplete — and an incomplete picture must never mark anything gone.
+    let fullCrawl = true;
+    let lastFetched = 1;
+    for (let p = 2; p <= lastPage; p++) {
+      if (Date.now() - t0 > 55_000) { fullCrawl = false; break; }
       const r = await bisonFetch(instance, `/campaigns?page=${p}&per_page=100`);
-      if (!r.ok) continue;
+      if (!r.ok) { fullCrawl = false; continue; }
       const j = await r.json();
       all.push(...(j.data || []));
+      lastFetched = p;
     }
+    if (lastFetched < lastPage && fullCrawl) fullCrawl = false;
 
     // Existing first_sending_at per campaign — so we stamp it ONCE (first time we
     // see the campaign Active) and never move it. stage_override is preserved by
@@ -105,6 +112,7 @@ export async function runCampaignsSync(instance: BisonInstanceSlug): Promise<Nex
         created_at: c.created_at,
         updated_at: c.updated_at,
         synced_at: nowIso,
+        gone_at: null,
       };
     });
 
@@ -115,11 +123,45 @@ export async function runCampaignsSync(instance: BisonInstanceSlug): Promise<Nex
       if (error) console.error(`[cron/campaigns:${instance}] upsert failed:`, error.message);
     }
 
+    // Campaigns deleted in Bison used to sit in the mirror forever, and
+    // campaign-completeness kept trying to attach senders to them (BCSOR 393 /
+    // 396 / 399, DM4PM 1484-1486 — every run logged a 404 and a red FAILED row,
+    // 2026-09-23). We do NOT delete the rows: history stays, and a campaign
+    // that reappears is picked back up by the upsert above, which clears
+    // gone_at on its own. Guarded by fullCrawl and a 40% safety cap so a
+    // partial or rate-limited crawl can never wipe an instance's mirror.
+    let markedGone = 0;
+    let goneSkipped: string | null = null;
+    if (!fullCrawl) {
+      goneSkipped = "partial crawl";
+    } else {
+      const live = new Set(rows.map((r) => r.id));
+      const { data: mirrorRows } = await supabase
+        .from("campaigns").select("id").eq("instance", instance).is("gone_at", null)
+        .order("id", { ascending: true }).limit(5000);
+      const missing = (mirrorRows || []).map((r) => r.id as number).filter((id) => !live.has(id));
+      const total = (mirrorRows || []).length;
+      if (missing.length === 0) {
+        goneSkipped = null;
+      } else if (total > 0 && missing.length / total > 0.4) {
+        goneSkipped = `safety cap: ${missing.length}/${total} missing`;
+        console.warn(`[cron/campaigns:${instance}] gone-marking skipped — ${goneSkipped}`);
+      } else {
+        for (let i = 0; i < missing.length; i += 200) {
+          const { error } = await supabase
+            .from("campaigns").update({ gone_at: nowIso })
+            .eq("instance", instance).in("id", missing.slice(i, i + 200));
+          if (error) console.error(`[cron/campaigns:${instance}] gone-mark failed:`, error.message);
+          else markedGone += missing.slice(i, i + 200).length;
+        }
+      }
+    }
+
     const durationMs = Date.now() - t0;
     console.log(
-      `[cron/campaigns:${instance}] synced=${rows.length} pages=${lastPage} duration=${durationMs}ms`,
+      `[cron/campaigns:${instance}] synced=${rows.length} pages=${lastPage} markedGone=${markedGone}${goneSkipped ? ` (skipped: ${goneSkipped})` : ""} duration=${durationMs}ms`,
     );
-    return NextResponse.json({ instance, campaignsSynced: rows.length, pages: lastPage, durationMs });
+    return NextResponse.json({ instance, campaignsSynced: rows.length, pages: lastPage, markedGone, goneSkipped, durationMs });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Failed";
     console.error(`[cron/campaigns:${instance}]`, message);

@@ -65,7 +65,7 @@ export async function GET(request: Request) {
     for (let off = 0; ; off += 1000) {
       const { data, error } = await supabase
         .from("campaigns").select("id, instance, name, client_tag, stage, status")
-        .in("instance", ALL_INSTANCE_SLUGS).order("id", { ascending: true }).range(off, off + 999);
+        .in("instance", ALL_INSTANCE_SLUGS).is("gone_at", null).order("id", { ascending: true }).range(off, off + 999);
       if (error) throw new Error(error.message);
       if (!data || data.length === 0) break;
       for (const c of data as Row[]) {

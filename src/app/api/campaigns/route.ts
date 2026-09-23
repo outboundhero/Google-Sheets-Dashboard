@@ -71,6 +71,7 @@ async function getFromSupabase(instances: BisonInstanceSlug[]): Promise<Campaign
         .from("campaigns")
         .select("*")
         .in("instance", instances)
+        .is("gone_at", null)
         .order("created_at", { ascending: false })
         .range(offset, offset + 999);
       if (!page || page.length === 0) break;

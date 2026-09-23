@@ -87,6 +87,7 @@ export async function GET(request: Request) {
         .from("campaigns")
         .select("id, instance, name, status, client_tag, updated_at, synced_at")
         .in("instance", ALL_INSTANCE_SLUGS)
+        .is("gone_at", null)
         .range(off, off + 999);
       if (error) throw new Error(error.message);
       if (!data || data.length === 0) break;
