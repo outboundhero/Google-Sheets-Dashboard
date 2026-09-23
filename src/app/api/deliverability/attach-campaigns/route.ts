@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { bisonFetch, resolveInstance, resolveInstances } from "@/lib/bison";
+import { getSupabaseAdmin } from "@/lib/supabase";
 import type { BisonInstanceSlug } from "@/lib/bison-instances";
 import {
   bisonGetWithRetry,
@@ -54,8 +55,38 @@ async function fetchAllCampaigns(instance: BisonInstanceSlug): Promise<Campaign[
   return all;
 }
 
+// Campaign list for the preview. The live cursor walk is 15 rows per page —
+// roughly 90 calls for OutboundHero alone, which is why opening the dialog
+// took so long (Spencer, 2026-09-16 and again 09-23: "it takes a long time…
+// can this load quicker"). The mirror holds the same rows, refreshed by the
+// per-instance campaign crons, so read it first and only walk Bison when the
+// mirror is empty or stale. ?fresh=1 forces the live walk.
+const MIRROR_MAX_AGE_MS = 8 * 3600_000;
+
+async function campaignsFromMirror(instance: BisonInstanceSlug): Promise<Campaign[] | null> {
+  try {
+    const supabase = getSupabaseAdmin();
+    const rows: { id: number; name: string; status: string; synced_at: string | null }[] = [];
+    for (let off = 0; ; off += 1000) {
+      const { data, error } = await supabase
+        .from("campaigns").select("id, name, status, synced_at")
+        .eq("instance", instance).order("id", { ascending: true }).range(off, off + 999);
+      if (error) return null;
+      if (!data || data.length === 0) break;
+      rows.push(...(data as typeof rows));
+      if (data.length < 1000) break;
+    }
+    if (rows.length === 0) return null;
+    const newest = rows.reduce((m, r) => (r.synced_at && r.synced_at > m ? r.synced_at : m), "");
+    if (!newest || Date.now() - new Date(newest).getTime() > MIRROR_MAX_AGE_MS) return null;
+    return rows.map((r) => ({ id: r.id, name: r.name, status: r.status })) as Campaign[];
+  } catch {
+    return null;
+  }
+}
+
 // GET: preview — list campaigns with matching tags across the requested
-// instances (live from Bison). Supports both single-instance legacy callers
+// instances (mirror-first, live fallback). Supports both single-instance legacy callers
 // via ?instance= and multi-instance callers via ?instances=<csv>.
 export async function GET(request: Request) {
   try {
@@ -63,6 +94,7 @@ export async function GET(request: Request) {
     const instances = searchParams.get("instances")
       ? resolveInstances(searchParams)
       : [resolveInstance(searchParams.get("instance"))];
+    const forceFresh = searchParams.get("fresh") === "1";
 
     const statusOrder: Record<string, number> = { Active: 0, Launching: 1, Queued: 2, Draft: 3, Paused: 4, Completed: 5 };
 
@@ -71,7 +103,9 @@ export async function GET(request: Request) {
         try {
           const [tagMap, campaigns] = await Promise.all([
             fetchTags(instance),
-            fetchAllCampaigns(instance),
+            forceFresh
+              ? fetchAllCampaigns(instance)
+              : campaignsFromMirror(instance).then((rows) => rows ?? fetchAllCampaigns(instance)),
           ]);
           return campaigns.map((c) => {
             const clientTag = c.name.split(":")[0].trim();

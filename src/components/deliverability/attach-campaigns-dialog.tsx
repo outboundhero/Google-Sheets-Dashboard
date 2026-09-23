@@ -119,6 +119,7 @@ export function AttachCampaignsDialog({ open, onOpenChange, instancesQuery }: Pr
   // tracker's active tags; churned ones are hidden unless you ask for them.
   const [activeTags, setActiveTags] = useState<Set<string> | null>(null);
   const [showInactive, setShowInactive] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
 
   // Reset on open. We do NOT depend on instancesQuery for re-fetches — the
   // parent rebuilds it on every render so depending on it would wipe the
@@ -138,26 +139,40 @@ export function AttachCampaignsDialog({ open, onOpenChange, instancesQuery }: Pr
       setCollapsedTags(new Set());
       setActiveTags(null);
       setShowInactive(false);
+      setRefreshing(false);
       return;
     }
     setPhase("loading");
     setError(null);
 
-    // 1) Auto-detected campaigns (matching tags)
+    // 1) Auto-detected campaigns (matching tags). The endpoint serves the
+    //    mirror first so this paints in about a second; a background ?fresh=1
+    //    pass then reconciles against live Bison, keeping any box you have
+    //    already ticked. Spencer asked twice for this to stop being slow.
+    const applyAuto = (list: CampaignPreview[], preselect: boolean) => {
+      const tagged = list.filter((c) => c.has_tag).map((c) => ({ ...c, source: "auto" as const }));
+      setAutoCampaigns(tagged);
+      const keys = new Set(tagged.map((c) => `${c.instance}:${c.campaign_id}`));
+      // Pre-select all auto-detected campaigns by default — matches the old
+      // "Attach All" behaviour but now individually deselectable. On the
+      // refresh pass, keep the user's ticks and drop only vanished campaigns.
+      setSelected((prev) => (preselect ? keys : new Set([...prev].filter((k) => keys.has(k)))));
+    };
+
     const autoP = fetch(`/api/deliverability/attach-campaigns?${instancesQuery}`)
       .then(async (res) => {
         const data = await res.json();
         if (!res.ok) throw new Error(data.error || "Failed to load");
-        const list: CampaignPreview[] = Array.isArray(data) ? data : [];
-        const tagged = list
-          .filter((c) => c.has_tag)
-          .map((c) => ({ ...c, source: "auto" as const }));
-        setAutoCampaigns(tagged);
-        // Pre-select all auto-detected campaigns by default — matches the old
-        // "Attach All" behaviour but now individually deselectable.
-        const next = new Set<string>();
-        for (const c of tagged) next.add(`${c.instance}:${c.campaign_id}`);
-        setSelected(next);
+        applyAuto(Array.isArray(data) ? data : [], true);
+        setRefreshing(true);
+        fetch(`/api/deliverability/attach-campaigns?fresh=1&${instancesQuery}`)
+          .then(async (r2) => {
+            if (!r2.ok) return;
+            const fresh = await r2.json();
+            if (Array.isArray(fresh)) applyAuto(fresh, false);
+          })
+          .catch(() => { /* the mirror view stays usable */ })
+          .finally(() => setRefreshing(false));
       });
 
     // 2) All campaigns from the current group (for manual add)
@@ -555,6 +570,7 @@ export function AttachCampaignsDialog({ open, onOpenChange, instancesQuery }: Pr
                 </button>
               ))}
               <div className="flex-1" />
+              {refreshing && <span className="text-[11px] text-muted-foreground">checking Bison for changes…</span>}
               {inactiveHidden > 0 && (
                 <button
                   onClick={() => setShowInactive((v) => !v)}
