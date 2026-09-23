@@ -178,31 +178,52 @@ export async function GET(request: Request) {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ dryRun: false, domains, newUrl: url }),
         });
-        const json = await res.json().catch(() => ({}));
+        const json = (await res.json().catch(() => ({}))) as { error?: string; results?: { domain: string; status: string; reason?: string }[] };
         if (!res.ok || json?.error) throw new Error(json?.error || `HTTP ${res.status}`);
 
-        // Optimistic local update so tomorrow's run doesn't re-fix the same
-        // domains before the redirect-check re-observes them.
-        await supabase
-          .from("deliverability_domains")
-          .update({ redirect_url: url })
-          .in("domain", domains);
-
-        await logEvents(
-          group.map((g) => ({
-            instance: g.instance as BisonInstanceSlug,
-            domain: g.domain,
-            clientTag: g.tag,
-            eventType: "redirect_set" as const,
-            detail: `conform: was ${g.observed}`,
-          })),
-        ).catch(() => {});
-        fixed += domains.length;
+        // Only what the PROVIDER confirmed counts. The optimistic mirror write
+        // used to cover skipped/failed domains too, so the mirror said
+        // "redirect set" while the domain still returned nothing — the hourly
+        // redirect-check then reset it to none and this cron "fixed" the same
+        // domains every morning (CVJLOU: 3 MilkBox domains, 09-19 → 09-23).
+        const byDomain = new Map((json.results ?? []).map((r) => [r.domain.toLowerCase(), r]));
+        const updated = domains.filter((d) => byDomain.get(d.toLowerCase())?.status === "updated");
+        const notUpdated = domains.filter((d) => byDomain.get(d.toLowerCase())?.status !== "updated");
+        if (updated.length > 0) {
+          await supabase
+            .from("deliverability_domains")
+            .update({ redirect_url: url })
+            .in("domain", updated);
+          await logEvents(
+            group.filter((g) => updated.includes(g.domain)).map((g) => ({
+              instance: g.instance as BisonInstanceSlug,
+              domain: g.domain,
+              clientTag: g.tag,
+              eventType: "redirect_set" as const,
+              detail: `conform: was ${g.observed}`,
+            })),
+          ).catch(() => {});
+        }
+        for (const d of notUpdated) {
+          const r = byDomain.get(d.toLowerCase());
+          failed.push({ domain: d, error: `${r?.status ?? "no result"}${r?.reason ? `: ${r.reason}` : ""}` });
+        }
+        fixed += updated.length;
       } catch (e) {
         for (const d of domains) {
           failed.push({ domain: d, error: e instanceof Error ? e.message : "failed" });
         }
       }
+    }
+
+    // The domains the provider could not update are the ones a human sees
+    // "not changed" (Nick, CVJLOU 2026-09-23). One audit line per run.
+    if (failed.length > 0) {
+      await logEvents([{
+        eventType: "error",
+        detail: `redirect-conform: ${failed.length} domain(s) not updated at the provider — ${failed.slice(0, 6).map((f) => `${f.domain} (${f.error})`).join("; ")}${failed.length > 6 ? "; …" : ""}`,
+        signals: { kind: "redirect_conform_failed", failed: failed.slice(0, 100) },
+      }]).catch(() => {});
     }
 
     return NextResponse.json({

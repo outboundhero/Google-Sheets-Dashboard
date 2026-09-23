@@ -1,7 +1,8 @@
 import { NextResponse } from "next/server";
 import { getSupabaseAdmin } from "@/lib/supabase";
 import { bisonFetch } from "@/lib/bison";
-import { fetchCampaignSenderEmails } from "@/lib/attach-campaigns";
+import { fetchCampaignSenderEmails, mapConcurrent } from "@/lib/attach-campaigns";
+import { Redis } from "@upstash/redis";
 import { getHandledDomains, logEvents } from "@/lib/replacement/store";
 import { hasBurntTag } from "@/lib/replacement/burnt-tag";
 import { ALL_INSTANCE_SLUGS, type BisonInstanceSlug } from "@/lib/bison-instances";
@@ -30,6 +31,19 @@ export const maxDuration = 300;
 const ATTACHABLE = new Set(["active", "paused"]);
 const BUDGET_MS = 240_000;
 const BATCH = 100;
+// Bison lists campaign senders 15 per page, so one 980-sender campaign is ~66
+// calls: a client with six campaigns took the whole budget on the first prod
+// run. Walk a client's campaigns concurrently and carry a cursor across runs
+// so the fleet completes in a few ticks instead of never.
+const CAMPAIGN_CONCURRENCY = 6;
+const CURSOR_KEY = "cron:campaign-completeness:cursor";
+const CURSOR_TTL_S = 24 * 3600;
+
+function getRedis(): Redis | null {
+  const url = process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_REST_URL;
+  const token = process.env.KV_REST_API_TOKEN || process.env.UPSTASH_REDIS_REST_TOKEN;
+  return url && token ? new Redis({ url, token }) : null;
+}
 
 interface CampaignRow { id: number; instance: BisonInstanceSlug; client_tag: string | null; status: string; name: string }
 
@@ -91,8 +105,14 @@ export async function GET(request: Request) {
     const results: ClientResult[] = [];
     let budgetHit = false;
 
-    // Clients with the most domains first — they are where a partial attach costs the most.
-    const keys = [...byKey.keys()].sort((a, b) => (domainsByKey.get(b)?.length ?? 0) - (domainsByKey.get(a)?.length ?? 0));
+    // Stable order (by key) with a resume cursor: each tick continues where the
+    // last one stopped and wraps to the start once the fleet is covered.
+    const redis = getRedis();
+    const allKeys = [...byKey.keys()].sort();
+    const cursor = !onlyTag && redis ? await redis.get<string>(CURSOR_KEY).catch(() => null) : null;
+    const startIdx = cursor ? Math.max(0, allKeys.indexOf(cursor) + 1) : 0;
+    const keys = [...allKeys.slice(startIdx), ...allKeys.slice(0, startIdx)];
+    let lastDone: string | null = null;
     for (const k of keys) {
       if (Date.now() - startedAt > BUDGET_MS) { budgetHit = true; break; }
       const [tag, instance] = k.split(":") as [string, BisonInstanceSlug];
@@ -109,17 +129,15 @@ export async function GET(request: Request) {
       if (inboxIds.size === 0) continue;
 
       const res: ClientResult = { tag, instance, domains: domains.length, inboxes: inboxIds.size, campaigns: 0, missingBefore: 0, attached: 0, errors: [] };
-      for (const c of byKey.get(k)!) {
-        if (Date.now() - startedAt > BUDGET_MS) { budgetHit = true; break; }
-        res.campaigns++;
-        let onCampaign: Set<number>;
-        try {
-          onCampaign = new Set(await fetchCampaignSenderEmails(instance, c.id));
-        } catch (e) {
-          res.errors.push(`${c.name}: list ${e instanceof Error ? e.message : "failed"}`);
-          continue;
-        }
-        const missing = [...inboxIds].filter((id) => !onCampaign.has(id));
+      const camps = byKey.get(k)!;
+      res.campaigns = camps.length;
+      const lists = await mapConcurrent(camps, CAMPAIGN_CONCURRENCY, async (c) => {
+        try { return { c, ids: new Set(await fetchCampaignSenderEmails(instance, c.id)), err: null as string | null }; }
+        catch (e) { return { c, ids: null, err: e instanceof Error ? e.message : "failed" }; }
+      });
+      for (const { c, ids, err } of lists) {
+        if (!ids) { res.errors.push(`${c.name}: list ${err}`); continue; }
+        const missing = [...inboxIds].filter((id) => !ids.has(id));
         res.missingBefore += missing.length;
         if (missing.length === 0 || dryRun) continue;
         for (let i = 0; i < missing.length; i += BATCH) {
@@ -133,6 +151,7 @@ export async function GET(request: Request) {
         }
       }
       results.push(res);
+      lastDone = k;
       if (!dryRun && (res.missingBefore > 0 || res.errors.length > 0)) {
         await logEvents([{
           instance, clientTag: tag, eventType: res.errors.length ? "error" : "attached",
@@ -142,6 +161,11 @@ export async function GET(request: Request) {
       }
     }
 
+    if (!dryRun && !onlyTag && redis && lastDone) {
+      // Wrapped the whole fleet → clear so the next tick starts fresh.
+      const wrapped = !budgetHit;
+      await (wrapped ? redis.del(CURSOR_KEY) : redis.set(CURSOR_KEY, lastDone, { ex: CURSOR_TTL_S })).catch(() => undefined);
+    }
     if (!dryRun) {
       await logEvents([{
         eventType: "proposed",
