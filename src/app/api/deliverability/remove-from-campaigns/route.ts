@@ -319,7 +319,10 @@ export async function POST(request: Request) {
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         details.push({ id: c.id, name: campaignName, removed: 0, error: msg });
-        if (pausedByUs || (c.status || "").toLowerCase() === "active") {
+        // Only ever resume what WE paused. Resuming on a caller-supplied
+        // "active" would launch a campaign that is draft today (stale status)
+        // — LeadSync must never be the thing that puts a client live.
+        if (pausedByUs) {
           try { await bisonFetch(inst, `/campaigns/${c.id}/resume`, { method: "PATCH" }); } catch { /* best effort */ }
         }
       }
