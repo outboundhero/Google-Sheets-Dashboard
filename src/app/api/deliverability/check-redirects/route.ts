@@ -59,12 +59,16 @@ export async function POST(request: Request) {
 
     // Upsert per (instance, domain) so the existing row is actually updated.
     const now = new Date().toISOString();
-    const upsertRows = targetRows.map(({ instance, domain }) => ({
-      instance,
-      domain,
-      redirect_url: resultByDomain.get(domain)?.redirectUrl ?? null,
-      redirect_checked_at: now,
-    }));
+    // Blocked = unknown, not "no redirect": skip the write so a live redirect
+    // is never wiped by a Cloudflare challenge page.
+    const upsertRows = targetRows
+      .filter(({ domain }) => resultByDomain.get(domain)?.blocked !== true)
+      .map(({ instance, domain }) => ({
+        instance,
+        domain,
+        redirect_url: resultByDomain.get(domain)?.redirectUrl ?? null,
+        redirect_checked_at: now,
+      }));
     for (let i = 0; i < upsertRows.length; i += 200) {
       const { error } = await supabase
         .from("deliverability_domains")

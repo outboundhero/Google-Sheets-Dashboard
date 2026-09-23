@@ -12,6 +12,13 @@ export interface ResolveResult {
   domain: string;
   redirectUrl: string | null;
   error: string | null;
+  /**
+   * True when the domain answered but behind a bot challenge, so we learned
+   * nothing about its redirect. Callers must treat this as UNKNOWN and leave
+   * the stored value alone — writing null here is what made 735 domains read
+   * as "no redirect" when the redirect was in fact set (CVJLOU, 2026-09-23).
+   */
+  blocked?: boolean;
 }
 
 function hostOf(url: string): string | null {
@@ -29,7 +36,14 @@ function hostOf(url: string): string | null {
  * already in the first hop's Location header, so we never need to load the
  * (possibly blocked) destination.
  */
-async function walkRedirects(startUrl: string, deadline: number): Promise<string> {
+function isBotChallenge(res: Response): boolean {
+  if (res.headers.get("cf-mitigated") === "challenge") return true;
+  const server = (res.headers.get("server") || "").toLowerCase();
+  if ((res.status === 403 || res.status === 503) && server.includes("cloudflare")) return true;
+  return res.status === 429;
+}
+
+async function walkRedirects(startUrl: string, deadline: number): Promise<{ url: string; blocked: boolean }> {
   let currentUrl = startUrl;
   for (let hop = 0; hop < MAX_HOPS; hop++) {
     const remaining = deadline - Date.now();
@@ -53,9 +67,12 @@ async function walkRedirects(startUrl: string, deadline: number): Promise<string
       }
       continue;
     }
+    // A challenge page is not an answer — the redirect may well be there, we
+    // just were not allowed to see it.
+    if (isBotChallenge(res)) return { url: currentUrl, blocked: true };
     break; // not a redirect — this is the final destination
   }
-  return currentUrl;
+  return { url: currentUrl, blocked: false };
 }
 
 export async function resolveRedirect(rawDomain: string): Promise<ResolveResult> {
@@ -63,23 +80,31 @@ export async function resolveRedirect(rawDomain: string): Promise<ResolveResult>
   const startHost = hostOf(`http://${domain}`);
   const deadline = Date.now() + TOTAL_BUDGET_MS;
   let reachable = false;
+  let blocked = false;
   let lastError = "Could not reach domain";
 
   for (const scheme of ["https", "http"] as const) {
     if (Date.now() >= deadline) break;
     try {
-      const finalUrl = await walkRedirects(`${scheme}://${domain}`, deadline);
-      const finalHost = hostOf(finalUrl);
+      const walk = await walkRedirects(`${scheme}://${domain}`, deadline);
+      const finalHost = hostOf(walk.url);
       if (finalHost && startHost && finalHost !== startHost) {
-        return { domain, redirectUrl: finalUrl, error: null };
+        return { domain, redirectUrl: walk.url, error: null };
       }
-      reachable = true; // reachable but no external redirect on this scheme
+      if (walk.blocked) blocked = true;
+      else reachable = true; // answered for real, with no external redirect
     } catch (e) {
       lastError = e instanceof Error ? e.message : "fetch failed";
     }
   }
 
-  // Reachable on at least one scheme with no external redirect → genuinely none.
+  // Answered for real on at least one scheme with no external redirect →
+  // genuinely none.
   if (reachable) return { domain, redirectUrl: null, error: null };
+  // Only a challenge page came back → we do not know. Say so; do not claim
+  // "no redirect".
+  if (blocked) {
+    return { domain, redirectUrl: null, error: "blocked by bot protection", blocked: true };
+  }
   return { domain, redirectUrl: null, error: lastError.slice(0, 200) };
 }

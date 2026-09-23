@@ -53,7 +53,7 @@ export async function GET() {
       return NextResponse.json({ checked: 0, redirects: 0, note: "no domains in table" });
     }
 
-    const results: { instance: string; domain: string; redirectUrl: string | null }[] = [];
+    const results: { instance: string; domain: string; redirectUrl: string | null; blocked: boolean }[] = [];
     for (let i = 0; i < pairs.length; i += CONCURRENT) {
       if (Date.now() - t0 >= TIME_BUDGET_MS) break;
       const batch = pairs.slice(i, i + CONCURRENT);
@@ -64,17 +64,24 @@ export async function GET() {
           instance: batch[j].instance,
           domain: batch[j].domain,
           redirectUrl: r.status === "fulfilled" ? r.value.redirectUrl : null,
+          blocked: r.status === "fulfilled" ? r.value.blocked === true : false,
         });
       }
     }
 
+    // A bot challenge tells us nothing about the redirect, so leave the stored
+    // value alone rather than overwriting a good redirect with null — that is
+    // what made 735 domains read as "no redirect" (CVJLOU, 2026-09-23).
     const now = new Date().toISOString();
-    const rows = results.map((r) => ({
-      instance: r.instance,
-      domain: r.domain,
-      redirect_url: r.redirectUrl,
-      redirect_checked_at: now,
-    }));
+    const blockedCount = results.filter((r) => r.blocked).length;
+    const rows = results
+      .filter((r) => !r.blocked)
+      .map((r) => ({
+        instance: r.instance,
+        domain: r.domain,
+        redirect_url: r.redirectUrl,
+        redirect_checked_at: now,
+      }));
     for (let i = 0; i < rows.length; i += 200) {
       const { error: upsertErr } = await supabase
         .from("deliverability_domains")
@@ -85,12 +92,13 @@ export async function GET() {
     const redirects = results.filter((r) => r.redirectUrl).length;
     const durationMs = Date.now() - t0;
     console.log(
-      `[cron/redirect-check] checked=${results.length} redirects=${redirects} duration=${durationMs}ms`
+      `[cron/redirect-check] checked=${results.length} redirects=${redirects} blocked=${blockedCount} duration=${durationMs}ms`
     );
 
     return NextResponse.json({
       checked: results.length,
       redirects,
+      blocked: blockedCount,
       remainingInBatch: pairs.length - results.length,
       durationMs,
     });
