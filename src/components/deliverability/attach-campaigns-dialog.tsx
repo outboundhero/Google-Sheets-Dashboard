@@ -68,7 +68,7 @@ interface AllCampaign {
 }
 
 type Phase = "loading" | "select" | "attaching" | "done";
-type StatusFilter = "all" | "active" | "paused" | "draft";
+type StatusFilter = "all" | "active" | "paused" | "draft" | "completed";
 
 interface Props {
   open: boolean;
@@ -114,6 +114,11 @@ export function AttachCampaignsDialog({ open, onOpenChange, instancesQuery }: Pr
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
   const [collapsedTags, setCollapsedTags] = useState<Set<string>>(new Set());
+  // Spencer asked twice (Loom 2026-09-16, again 09-23): this list must show
+  // CURRENT clients, not every tag Bison ever had. /api/campaigns returns the
+  // tracker's active tags; churned ones are hidden unless you ask for them.
+  const [activeTags, setActiveTags] = useState<Set<string> | null>(null);
+  const [showInactive, setShowInactive] = useState(false);
 
   // Reset on open. We do NOT depend on instancesQuery for re-fetches — the
   // parent rebuilds it on every render so depending on it would wipe the
@@ -131,6 +136,8 @@ export function AttachCampaignsDialog({ open, onOpenChange, instancesQuery }: Pr
       setSearch("");
       setStatusFilter("all");
       setCollapsedTags(new Set());
+      setActiveTags(null);
+      setShowInactive(false);
       return;
     }
     setPhase("loading");
@@ -165,6 +172,8 @@ export function AttachCampaignsDialog({ open, onOpenChange, instancesQuery }: Pr
           client_tag: c.client_tag,
         }));
         setAllCampaigns(raw);
+        const active: string[] = Array.isArray(data?.activeClients) ? data.activeClients : [];
+        setActiveTags(active.length > 0 ? new Set(active.map((t: string) => t.trim().toUpperCase())) : null);
       })
       .catch(() => { /* manual search just won't have anything to show */ });
 
@@ -184,9 +193,12 @@ export function AttachCampaignsDialog({ open, onOpenChange, instancesQuery }: Pr
   );
 
   // Status filter + search filter applied to the visible list.
+  const isActiveTag = (tag: string) => !activeTags || activeTags.has(tag.trim().toUpperCase());
+
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
     return allListed.filter((c) => {
+      if (!showInactive && !isActiveTag(c.client_tag)) return false;
       if (statusFilter !== "all") {
         if (c.campaign_status.toLowerCase() !== statusFilter) return false;
       }
@@ -194,7 +206,8 @@ export function AttachCampaignsDialog({ open, onOpenChange, instancesQuery }: Pr
             && !c.client_tag.toLowerCase().includes(q)) return false;
       return true;
     });
-  }, [allListed, search, statusFilter]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [allListed, search, statusFilter, showInactive, activeTags]);
 
   // Group by client_tag for the collapsible sections.
   const groups = useMemo(() => {
@@ -229,13 +242,22 @@ export function AttachCampaignsDialog({ open, onOpenChange, instancesQuery }: Pr
   }, [search, allCampaigns, allListed]);
 
   const statusCounts = useMemo(() => {
-    const m: Record<string, number> = { all: allListed.length, active: 0, paused: 0, draft: 0 };
-    for (const c of allListed) {
+    const visible = showInactive ? allListed : allListed.filter((c) => isActiveTag(c.client_tag));
+    const m: Record<string, number> = { all: visible.length, active: 0, paused: 0, draft: 0, completed: 0 };
+    for (const c of visible) {
       const s = c.campaign_status.toLowerCase();
       if (m[s] !== undefined) m[s]++;
     }
     return m;
-  }, [allListed]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [allListed, showInactive, activeTags]);
+
+  /** Campaigns hidden purely because their client is not active on the tracker. */
+  const inactiveHidden = useMemo(
+    () => (activeTags ? allListed.filter((c) => !isActiveTag(c.client_tag)).length : 0),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [allListed, activeTags],
+  );
 
   const toggleOne = (key: string) => {
     setSelected((prev) => {
@@ -518,7 +540,7 @@ export function AttachCampaignsDialog({ open, onOpenChange, instancesQuery }: Pr
 
             {/* Status filter pills */}
             <div className="flex flex-wrap gap-1.5 items-center text-xs">
-              {(["all", "active", "paused", "draft"] as StatusFilter[]).map((s) => (
+              {(["all", "active", "paused", "draft", "completed"] as StatusFilter[]).map((s) => (
                 <button
                   key={s}
                   onClick={() => setStatusFilter(s)}
@@ -533,6 +555,15 @@ export function AttachCampaignsDialog({ open, onOpenChange, instancesQuery }: Pr
                 </button>
               ))}
               <div className="flex-1" />
+              {inactiveHidden > 0 && (
+                <button
+                  onClick={() => setShowInactive((v) => !v)}
+                  className="text-xs text-muted-foreground hover:text-foreground underline"
+                  title="Campaigns belonging to clients the Client Tracker no longer lists as active"
+                >
+                  {showInactive ? `Hide ${inactiveHidden} inactive-client` : `Show ${inactiveHidden} inactive-client`}
+                </button>
+              )}
               <button onClick={toggleAllVisible} className="text-xs text-primary hover:underline">
                 {allFilteredSelected ? "Deselect visible" : "Select visible"}
               </button>
