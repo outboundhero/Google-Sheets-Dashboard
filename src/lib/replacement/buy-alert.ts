@@ -8,7 +8,7 @@
 import { buildReplacementPlan } from "./plan";
 import { getThresholdConfig } from "./threshold-groups-store";
 import { getActiveCampaignKeys } from "./campaigns";
-import { capFor, getClientTiers, type ClientTier } from "./client-tiers";
+import { capFor, reserveBufferFor, getClientTiers, type ClientTier } from "./client-tiers";
 import { getGoingLiveForecast } from "./going-live";
 import { getTaggedDomainCounts } from "./upcoming-stock";
 import { getActiveAnticipated, groupForStartDate } from "./anticipated-clients";
@@ -164,7 +164,7 @@ export async function runBuyAlert(opts: { force?: boolean; dryRun?: boolean } = 
   // Anticipated clients (Spencer 2026-09-21): launches not in the tracker
   // yet, entered on the Replacement tab per start date. Full launch stock on
   // each instance of the date's group, sized by tier cap. Fail-open.
-  const anticipatedBySlug = new Map<BisonInstanceSlug, { clients: number; need: number }>();
+  const anticipatedBySlug = new Map<BisonInstanceSlug, { clients: number; need: number; buffer: number }>();
   const anticipatedNotes: string[] = [];
   try {
     for (const a of await getActiveAnticipated()) {
@@ -173,9 +173,10 @@ export async function runBuyAlert(opts: { force?: boolean; dryRun?: boolean } = 
       anticipatedNotes.push(`${a.clients} × Tier ${a.tier} on ${a.startDate} (Group ${group})`);
       for (const slug of ALL_INSTANCE_SLUGS) {
         if (getInstance(slug).group !== group) continue;
-        const cur = anticipatedBySlug.get(slug) ?? { clients: 0, need: 0 };
+        const cur = anticipatedBySlug.get(slug) ?? { clients: 0, need: 0, buffer: 0 };
         cur.clients += a.clients;
         cur.need += a.clients * capFor(getInstance(slug).tier, a.tier);
+        cur.buffer += a.clients * reserveBufferFor(getInstance(slug).tier, a.tier);
         anticipatedBySlug.set(slug, cur);
       }
     }
@@ -184,11 +185,12 @@ export async function runBuyAlert(opts: { force?: boolean; dryRun?: boolean } = 
   }
 
   // Stock credit (Nick 2026-09-02: count what we hold and what's already on
-  // order BEFORE telling anyone to buy) + the per-client reserve buffer
-  // (Spencer 2026-07-29: 3 per B2B client, 2 per B2C, kept unassigned).
+  // order BEFORE telling anyone to buy) + the per-client reserve buffer, which
+  // is TIER-AWARE like every other figure here: 3 B2B / 2 B2C for tier 0.5 and
+  // 1, 6 B2B / 4 B2C for tier 2 (Spencer 2026-08-04, restated 2026-09-24). It
+  // used to be a flat 3/2, which under-bought for every tier-2 client.
   const knownTagsUpper = new Set([...byTag.keys()].map((t) => t.toUpperCase()));
   const stock = await getStockCounts(knownTagsUpper);
-  const BUFFER_B2B = 3, BUFFER_B2C = 2;
 
   const byInstance: BuyInstanceLine[] = ALL_INSTANCE_SLUGS.map((slug) => {
     const tier = getInstance(slug).tier;
@@ -202,21 +204,29 @@ export async function runBuyAlert(opts: { force?: boolean; dryRun?: boolean } = 
     const upcoming = upcomingBySlug.get(slug) ?? [];
     const upcomingDomains = upcoming.reduce((s, u) => s + u.need, 0);
     domains += upcomingDomains;
-    const anticipated = anticipatedBySlug.get(slug) ?? { clients: 0, need: 0 };
+    const anticipated = anticipatedBySlug.get(slug) ?? { clients: 0, need: 0, buffer: 0 };
     domains += anticipated.need;
 
     let clientsActive = 0;
+    let bufferFloor = 0;
     for (const tag of byTag.keys()) {
-      if (activeKeys.has(`${tag.trim().toUpperCase()}:${slug}`)) clientsActive++;
+      if (!activeKeys.has(`${tag.trim().toUpperCase()}:${slug}`)) continue;
+      clientsActive++;
+      bufferFloor += reserveBufferFor(tier, tiers.get(tag.trim().toUpperCase()) ?? "1");
     }
-    clientsActive += upcoming.length + anticipated.clients; // launching clients need their buffer too
+    // Launching clients need their buffer too, at their own tier.
+    for (const u of upcoming) {
+      clientsActive++;
+      bufferFloor += reserveBufferFor(tier, tiers.get(u.tag.trim().toUpperCase()) ?? "1");
+    }
+    clientsActive += anticipated.clients;
+    bufferFloor += anticipated.buffer;
     const usableReserve = stock.usableReserve[slug] ?? 0;
     const inflight = stock.inflight[slug] ?? 0;
     // Warming stock is already ours (Nick 2026-09-16: 278 domains sat in OH
     // under the 21-day line while the list said "buy 87"). Nets like in-flight.
     const warming = stock.warming[slug] ?? 0;
     const warmingReady7 = stock.warmingReady7[slug] ?? 0;
-    const bufferFloor = (isB2b ? BUFFER_B2B : BUFFER_B2C) * clientsActive;
     const onHand = usableReserve + inflight + warming;
     const buyFill = Math.max(0, domains - onHand);
     const buyWithBuffer = Math.max(0, domains + bufferFloor - onHand);
