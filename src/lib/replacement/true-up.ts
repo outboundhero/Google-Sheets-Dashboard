@@ -28,6 +28,7 @@ import { getSkipSet, skipKey } from "./skips";
 import { evaluateSegments, type DomainMetrics, type ThresholdConfig } from "./threshold-groups";
 import { getThresholdConfig } from "./threshold-groups-store";
 import { loadRedirectsByTag } from "./redirect-audit";
+import { loadTrailingRates } from "./trailing-rates";
 
 const WARMUP_DAYS = 21; // matches plan.ts — a domain is usable once it's ≥ 21d old
 
@@ -247,16 +248,8 @@ export async function computeTrueUp(
 
   // 2) trailing windows (PostgREST caps a single response at 1000 rows — page it)
   const rateByKey = new Map<string, RateRow>();
-  let roff = 0;
-  while (true) {
-    const { data, error } = await supabase
-      .rpc("trailing_domain_rates", { p_instances: ALL_INSTANCE_SLUGS, p_today: today })
-      .range(roff, roff + 999);
-    if (error) throw new Error(error.message);
-    if (!data || data.length === 0) break;
-    for (const r of data as RateRow[]) rateByKey.set(`${r.instance}:${r.domain}`, r);
-    if ((data as RateRow[]).length < 1000) break;
-    roff += 1000;
+  for (const [k, v] of await loadTrailingRates(ALL_INSTANCE_SLUGS, today)) {
+    rateByKey.set(k, v as RateRow);
   }
 
   // 3) burnt verdict — same detector the live plan runs on

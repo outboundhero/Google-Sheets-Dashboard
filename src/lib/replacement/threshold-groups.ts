@@ -13,6 +13,7 @@
 //   • Blank ≠ 0: a null/missing metric never satisfies a numeric condition, so a
 //     domain with no trailing history is never flagged on that condition.
 import { getSupabaseAdmin } from "@/lib/supabase";
+import { loadTrailingRates } from "./trailing-rates";
 import { ALL_INSTANCE_SLUGS, type BisonInstanceSlug } from "@/lib/bison-instances";
 import { pstDateString } from "@/lib/date-utils";
 import { getHandledDomains } from "./store";
@@ -334,16 +335,8 @@ export async function runGroupDetection(
   // trailing windows (always — the groups are window-based)
   const rateByKey = new Map<string, RateRow>();
   const today = pstDateString(new Date());
-  let roff = 0;
-  while (true) {
-    const { data, error } = await supabase
-      .rpc("trailing_domain_rates", { p_instances: instances, p_today: today })
-      .range(roff, roff + 999);
-    if (error) throw new Error(error.message);
-    if (!data || data.length === 0) break;
-    for (const r of data as RateRow[]) rateByKey.set(`${r.instance}:${r.domain}`, r);
-    if (data.length < 1000) break;
-    roff += 1000;
+  for (const [k, v] of await loadTrailingRates(instances, today)) {
+    rateByKey.set(k, v as RateRow);
   }
 
   const candidates: GroupCandidate[] = [];

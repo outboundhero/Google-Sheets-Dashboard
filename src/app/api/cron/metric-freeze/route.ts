@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { getSupabaseAdmin } from "@/lib/supabase";
+import { loadTrailingRates } from "@/lib/replacement/trailing-rates";
 import { freezeMetrics, unfreeze } from "@/lib/replacement/metric-freeze";
 import { getKnownClientTags } from "@/lib/replacement/cross-tag-audit";
 import { getHandledDomains } from "@/lib/replacement/store";
@@ -73,11 +74,9 @@ export async function GET(request: Request) {
 
     let rates = new Map<string, { reply_10: number | null; reply_15: number | null; reply_30: number | null; bounce_10: number | null; bounce_15: number | null; bounce_30: number | null }>();
     if (candidates.length > 0) {
-      const { data, error } = await supabase
-        .rpc("trailing_domain_rates", { p_instances: ALL_INSTANCE_SLUGS, p_today: pstDateString(new Date()) })
-        .range(0, 9999);
-      if (error) throw new Error(`trailing rates: ${error.message}`);
-      rates = new Map((data || []).map((r: { instance: string; domain: string } & Record<string, number | null>) => [`${r.instance}:${r.domain}`, r]));
+      // .range(0, 9999) looked like "all of them" but PostgREST caps a page at
+      // 1000 rows, so this only ever saw the first 1000 domains.
+      rates = await loadTrailingRates(ALL_INSTANCE_SLUGS, pstDateString(new Date()));
     }
 
     const toFreeze = candidates.map((r) => {

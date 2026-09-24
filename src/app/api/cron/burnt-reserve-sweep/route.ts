@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { getSupabaseAdmin } from "@/lib/supabase";
+import { loadTrailingRates } from "@/lib/replacement/trailing-rates";
 import { getKnownClientTags } from "@/lib/replacement/cross-tag-audit";
 import { getHandledDomains, scheduleCancellations, logEvents } from "@/lib/replacement/store";
 import { getSkipSet, skipKey } from "@/lib/replacement/skips";
@@ -112,14 +113,8 @@ export async function GET(request: Request) {
     // Live trailing windows — used ONLY as a second opinion, never as the
     // verdict on its own (see the confirm step below).
     const liveRates = new Map<string, RateRow>();
-    for (let off = 0; ; off += 1000) {
-      const { data, error } = await supabase
-        .rpc("trailing_domain_rates", { p_instances: ALL_INSTANCE_SLUGS, p_today: pstDateString(new Date()) })
-        .range(off, off + 999);
-      if (error) throw new Error(`trailing rates: ${error.message}`);
-      if (!data || data.length === 0) break;
-      for (const r of data as RateRow[]) liveRates.set(`${r.instance}:${r.domain}`, r);
-      if ((data as RateRow[]).length < 1000) break;
+    for (const [k, v] of await loadTrailingRates(ALL_INSTANCE_SLUGS, pstDateString(new Date()))) {
+      liveRates.set(k, v as RateRow);
     }
 
     const isClientTagged = (d: DomRow) =>

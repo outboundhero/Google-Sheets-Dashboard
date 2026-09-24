@@ -4,6 +4,7 @@
 // anything. Reads Supabase only. This is the "show exactly what it would do" layer
 // that ties detection + config maps + reserve pool together.
 import { getSupabaseAdmin } from "@/lib/supabase";
+import { loadTrailingRates } from "./trailing-rates";
 import { ALL_INSTANCE_SLUGS, getInstance, type BisonInstanceSlug, PROTECTED_INSTANCE_DOMAINS } from "@/lib/bison-instances";
 import { pstDateString } from "@/lib/date-utils";
 import { getSettings, getHandledDomains } from "./store";
@@ -180,16 +181,8 @@ export async function buildReplacementPlan(
   //    of the flat guardrails' lookback setting.
   const rateByKey = new Map<string, RateRow>();
   if (cfg.lookbackWindow !== "all" || burntSource === "groups") {
-    let r = 0;
-    while (true) {
-      const { data, error } = await supabase
-        .rpc("trailing_domain_rates", { p_instances: ALL_INSTANCE_SLUGS, p_today: today })
-        .range(r, r + 999);
-      if (error) throw new Error(error.message);
-      if (!data || data.length === 0) break;
-      for (const row of data as RateRow[]) rateByKey.set(`${row.instance}:${row.domain}`, row);
-      if (data.length < 1000) break;
-      r += 1000;
+    for (const [k, v] of await loadTrailingRates(ALL_INSTANCE_SLUGS, today)) {
+      rateByKey.set(k, v as RateRow);
     }
   }
 
