@@ -34,12 +34,17 @@ export async function getStockCounts(knownTagsUpper: Set<string>): Promise<Stock
   const supabase = getSupabaseAdmin();
   const [handled, skips, firstCreated] = await Promise.all([getHandledDomains(), getSkipSet(), loadFirstCreated()]);
 
-  interface DomRow { instance: BisonInstanceSlug; domain: string; tags: string[] | null; domain_created_at: string | null; spamhaus_dbl: boolean | null }
+  // inbox_count comes along for the ride: it is maintained by the
+  // rebuild_domain_stats RPC and agrees exactly with the inboxes table
+  // (129,995 on both sides, 2026-09-24). Counting the inboxes table by hand
+  // meant ~130 paged reads of 130k rows on every run, which is what made this
+  // route die with "canceling statement due to statement timeout".
+  interface DomRow { instance: BisonInstanceSlug; domain: string; tags: string[] | null; domain_created_at: string | null; spamhaus_dbl: boolean | null; inbox_count: number | null }
   const doms: DomRow[] = [];
   for (let off = 0; ; off += 1000) {
     const { data, error } = await supabase
       .from("deliverability_domains")
-      .select("instance, domain, tags, domain_created_at, spamhaus_dbl")
+      .select("instance, domain, tags, domain_created_at, spamhaus_dbl, inbox_count")
       .order("domain", { ascending: true })
       .range(off, off + 999);
     if (error) throw new Error(`deliverability_domains: ${error.message}`);
@@ -48,20 +53,7 @@ export async function getStockCounts(knownTagsUpper: Set<string>): Promise<Stock
     if (data.length < 1000) break;
   }
   const inboxCount = new Map<string, number>();
-  for (let off = 0; ; off += 1000) {
-    const { data, error } = await supabase
-      .from("deliverability_inboxes")
-      .select("instance, domain")
-      .order("id", { ascending: true })
-      .range(off, off + 999);
-    if (error) throw new Error(`deliverability_inboxes: ${error.message}`);
-    if (!data || data.length === 0) break;
-    for (const i of data as { instance: string; domain: string }[]) {
-      const k = `${i.instance}:${i.domain}`;
-      inboxCount.set(k, (inboxCount.get(k) || 0) + 1);
-    }
-    if (data.length < 1000) break;
-  }
+  for (const d of doms) inboxCount.set(`${d.instance}:${d.domain}`, d.inbox_count ?? 0);
 
   const now = Date.now();
   const usableReserve: Record<string, number> = {};
@@ -76,7 +68,7 @@ export async function getStockCounts(knownTagsUpper: Set<string>): Promise<Stock
     if ((d.tags || []).some((t) => knownTagsUpper.has(String(t).trim().toUpperCase()))) continue;
     if (handled.has(key) || skips.has(skipKey(d.instance, d.domain)) || hasBurntTag(d.tags)) continue;
     if (d.spamhaus_dbl === true) continue;
-    if (!(inboxCount.get(key)! > 0)) continue; // shells don't count
+    if (!((inboxCount.get(key) ?? 0) > 0)) continue; // shells don't count
     const age = effectiveAgeDays(d.domain, d.domain_created_at, firstCreated, now);
     if (age < WARMUP_DAYS) {
       warming[d.instance] = (warming[d.instance] || 0) + 1;
