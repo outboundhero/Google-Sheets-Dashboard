@@ -69,7 +69,16 @@ export async function POST(request: Request) {
       return NextResponse.json({ ok: false, resolved: false, reason: result.reason }, { status: 502 });
     }
 
-    return NextResponse.json({ error: "retry not supported for this alert" }, { status: 400 });
+    // Nothing in LeadSync to re-run: these report a condition outside it (a
+    // campaign a human still has to build, a domain still warming). They clear
+    // themselves on the next pass, so say that instead of "not supported".
+    return NextResponse.json(
+      {
+        error:
+          "Nothing to retry here — this is a heads-up, not a failed step. It clears itself once the campaign exists in Bison. Dismiss it if you would rather not see it.",
+      },
+      { status: 400 },
+    );
   } catch (error) {
     const message = error instanceof Error ? error.message : "Failed";
     return NextResponse.json({ error: message }, { status: 500 });

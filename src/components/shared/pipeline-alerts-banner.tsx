@@ -26,14 +26,18 @@ const SOURCE_LABEL: Record<string, string> = {
   "send-to-sheet": "Sync to client's Domains tab",
   "stuck-campaign": "Campaign stuck in Processing",
   "orphan-attach": "Tagged, not yet in campaigns",
+  "campaign-set": "Campaign set not fully built",
 };
 // Alerts that report an external condition — nothing in LeadSync to retry.
 // They auto-resolve when the condition clears; Dismiss only.
-const NO_RETRY_SOURCES = new Set(["stuck-campaign", "orphan-attach"]);
+const NO_RETRY_SOURCES = new Set(["stuck-campaign", "orphan-attach", "campaign-set"]);
 // Heads-up sources: recorded silently (no Slack), informational, auto-resolve.
 // Rendered apart from real failures so a pre-launch client does not read as
 // a broken pipeline (Spencer, 2026-09-17).
-const HEADS_UP_SOURCES = new Set(["orphan-attach"]);
+// campaign-set joined them 2026-09-24: a stage missing one of its three send
+// campaigns is something a human builds in Bison, so offering Retry only
+// produced "retry not supported for this alert" (Spencer, 5:20 AM).
+const HEADS_UP_SOURCES = new Set(["orphan-attach", "campaign-set"]);
 
 const fetcher = async (url: string): Promise<PipelineAlert[]> => {
   const res = await fetch(url);
@@ -152,9 +156,9 @@ export function PipelineAlertsBanner() {
         <div className="border-b border-destructive/10">
           <button onClick={() => setHeadsUpOpen((v) => !v)} className="w-full flex items-center gap-2 px-4 py-2.5 text-left">
             {headsUpOpen ? <ChevronDown className="h-4 w-4 shrink-0 text-amber-500" /> : <ChevronRight className="h-4 w-4 shrink-0 text-amber-500" />}
-            <span className="text-sm font-medium">Tagged, not yet in campaigns — {headsUp.length} client{headsUp.length === 1 ? "" : "s"}</span>
+            <span className="text-sm font-medium">Needs a look, nothing failed — {headsUp.length} client{headsUp.length === 1 ? "" : "s"}</span>
             <span className="text-[11px] text-muted-foreground">
-              heads-up, not a failure — domains under 21 days attach on their own once warmed; dashboard only
+              heads-up, not a failure — these clear themselves once the campaign is built or the domains finish warming; dashboard only
             </span>
             <span className="ml-auto text-[11px] text-muted-foreground">{headsUpOpen ? "collapse" : "expand"}</span>
           </button>
@@ -164,7 +168,10 @@ export function PipelineAlertsBanner() {
                 <li key={a.id} className="px-4 py-2 flex items-center justify-between gap-3 text-xs">
                   <div className="min-w-0 flex items-center gap-2 flex-wrap">
                     {a.client_tag && <span className="font-mono px-1.5 py-0.5 rounded bg-muted text-foreground">{a.client_tag}</span>}
-                    <span className="text-muted-foreground">{a.domains_count} domain{a.domains_count === 1 ? "" : "s"}</span>
+                    <span className="text-muted-foreground">{SOURCE_LABEL[a.source] || a.source}</span>
+                    {a.domains_count > 0 && (
+                      <span className="text-muted-foreground">{a.domains_count} domain{a.domains_count === 1 ? "" : "s"}</span>
+                    )}
                     <span className="text-muted-foreground break-words">{a.reason}</span>
                   </div>
                   <Button size="sm" variant="ghost" className="gap-1 h-7 text-muted-foreground shrink-0" disabled={!!busy[a.id]} onClick={() => dismiss(a.id)}>
