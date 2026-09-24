@@ -6,7 +6,7 @@ import { buildReplacementPlan } from "./plan";
 import { postSlackMessage } from "@/lib/slack";
 import { getStockCounts } from "./stock-counts";
 import { getSupabaseAdmin } from "@/lib/supabase";
-import { ALL_INSTANCE_SLUGS, getInstance } from "@/lib/bison-instances";
+import { ALL_INSTANCE_SLUGS, getInstance, INSTANCE_SHORT_LABELS } from "@/lib/bison-instances";
 
 /** Below this many pull-able reserve domains, an instance is "low". Env-tunable. */
 const LOW_RESERVE_FLOOR = Math.max(0, Number(process.env.RESERVE_MIN_READY ?? 5));
@@ -62,21 +62,30 @@ export async function checkReserveAndAlert(opts: { force?: boolean; dryRun?: boo
 
   if (!hasIssue && !opts.force && !opts.dryRun) return { ...base, alerted: false };
 
-  const lines: string[] = ["*🟠 Reserve alert — LeadSync domain replacement*"];
-  if (totalBlocked > 0) {
-    lines.push(`• *${totalBlocked}* burnt domain${totalBlocked === 1 ? "" : "s"} can't be replaced — no ready reserve:`);
-    for (const b of blockedByReserve) lines.push(`    – ${b.instance}: ${b.count}`);
-  }
-  if (low.length > 0) {
-    lines.push(`• Low reserve (< ${LOW_RESERVE_FLOOR} ready):`);
-    for (const l of low) {
-      lines.push(`    – ${l.instance} (${l.tier}): ${l.ready} ready · ${l.warming} warming (${l.warmingReady7} ready within 7 days) · ${l.inflight} on order`);
-    }
+  // Shaped like the weekly buy list Spencer asked us to match (2026-09-24):
+  // one line per instance, the number first, the detail only where it changes
+  // what he does. The old format listed only the low instances with four
+  // figures each, which read as a wall of numbers.
+  const lowBySlug = new Map(low.map((l) => [l.instance, l]));
+  const blockedBySlug = new Map(blockedByReserve.map((b) => [b.instance, b.count]));
+  const lines: string[] = ["*🟠 Reserve ready — LeadSync domain replacement*"];
+  lines.push("Domains ready to pull for replacements:");
+  for (const slug of ALL_INSTANCE_SLUGS) {
+    const l = lowBySlug.get(slug);
+    const ready = l ? l.ready : (plan.reserveReadyByInstance[slug]?.total ?? 0);
+    const extras: string[] = [];
+    if (l && l.warming > 0) extras.push(`${l.warming} warming (${l.warmingReady7} ready within 7 days)`);
+    if (l && l.inflight > 0) extras.push(`${l.inflight} on order`);
+    const blocked = blockedBySlug.get(slug) ?? 0;
+    if (blocked > 0) extras.push(`*${blocked} burnt waiting*`);
+    lines.push(`• ${INSTANCE_SHORT_LABELS[slug]}: ${ready}${extras.length ? ` — ${extras.join(" · ")}` : ""}`);
   }
   const covered = low.length > 0 && low.every((l) => l.ready + l.warming + l.inflight >= LOW_RESERVE_FLOOR);
   if (!hasIssue) lines.push("_(forced test — no actual issue)_");
-  else if (covered && totalBlocked === 0) lines.push("Warming stock and open orders cover this — nothing to buy, replacements resume as domains finish warmup.");
-  else lines.push("Buy + warm more domains so replacements never stall.");
+  else if (totalBlocked > 0) lines.push(`${totalBlocked} burnt domain${totalBlocked === 1 ? "" : "s"} can't be replaced yet — nothing ready to swap in.`);
+  else if (covered) lines.push("Warming stock and open orders cover this — nothing to buy.");
+  else lines.push(`Below ${LOW_RESERVE_FLOOR} ready — buy and warm more so replacements never stall.`);
+  lines.push("_Nothing was bought or changed — this is a status check._");
 
   // #leadsync-outbound (Spencer confirmed 2026-07-29) via the shared chain
   const channel = process.env.SLACK_RESERVE_CHANNEL_ID
