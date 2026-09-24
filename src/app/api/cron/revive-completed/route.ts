@@ -34,6 +34,14 @@ const REVIVABLE_STAGE = /^(main|nurture \d+)$/i;
 const RUN_CAP = 25;
 const BUDGET_MS = 240_000;
 const SETTLE_MS = 1_500;
+// Bison's resume is asynchronous: the campaign reports `queued` (or
+// `launching`) for a few seconds before it flips to `active`. Reading the
+// status immediately after the PATCH therefore logged a failure on a resume
+// that had in fact worked — 18 of them on 2026-09-24, while JPCHI 1011 and
+// JPCI 739 were sitting active by the time anyone looked. Poll instead.
+const RESUME_VERIFY_MS = 25_000;
+const RESUME_POLL_MS = 3_000;
+const IN_PROGRESS = new Set(["queued", "launching", "processing"]);
 
 interface Row { id: number; instance: BisonInstanceSlug; name: string; client_tag: string | null; stage: string | null; status: string }
 interface LiveCampaign { status?: string; total_leads?: number; total_leads_contacted?: number }
@@ -136,8 +144,26 @@ export async function GET(request: Request) {
       }
 
       const r = await bisonFetch(c.instance, `/campaigns/${c.id}/resume`, { method: "PATCH" });
-      const after = await liveCampaign(c.instance, c.id);
-      const afterStatus = String(after?.status || "").toLowerCase();
+      // Wait for the queue to settle before calling it a failure.
+      let afterStatus = "";
+      if (r.ok) {
+        const deadline = Date.now() + RESUME_VERIFY_MS;
+        for (;;) {
+          const after = await liveCampaign(c.instance, c.id);
+          afterStatus = String(after?.status || "").toLowerCase();
+          if (afterStatus === "active" || !IN_PROGRESS.has(afterStatus)) break;
+          if (Date.now() >= deadline) break;
+          await new Promise((res) => setTimeout(res, RESUME_POLL_MS));
+        }
+      }
+      // Still mid-flight after the wait is Bison being slow, not a failure of
+      // ours — the stuck-campaign cron owns anything that never leaves the
+      // queue. Only a real refusal is logged as an error here.
+      if (r.ok && IN_PROGRESS.has(afterStatus)) {
+        results.push({ instance: c.instance, id: c.id, name: c.name, tag, action: "revived", detail: `resume accepted, Bison still ${afterStatus} — rechecked next run`, leadsWaiting: waiting });
+        revived++;
+        continue;
+      }
       if (!r.ok || (afterStatus && afterStatus !== "active")) {
         const t = r.ok ? "" : await r.text().catch(() => "");
         results.push({ instance: c.instance, id: c.id, name: c.name, tag, action: "failed", detail: `resume ${r.ok ? `left it ${afterStatus}` : `HTTP ${r.status} ${t.slice(0, 120)}`} — retried next run`, leadsWaiting: waiting });
