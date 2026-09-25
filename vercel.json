@@ -153,6 +153,10 @@
       "schedule": "30 14 * * *"
     },
     {
+      "path": "/api/cron/wrong-instance-move",
+      "schedule": "20 14,2 * * *"
+    },
+    {
       "path": "/api/cron/true-up-move",
       "schedule": "7,37 * * * *"
     },
