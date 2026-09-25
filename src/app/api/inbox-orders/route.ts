@@ -129,11 +129,30 @@ export async function POST(request: Request) {
     // DNS → order failures. Block up-front with a clear message if unresolved.
     const resolved = (await resolveDomainOrders([domain], provider)).get(domain);
     if (!resolved || !resolved.ok) {
-      return NextResponse.json({
-        error: `Can't place this ${provider} order for ${domain}: ${resolved?.reason || "unknown Porkbun account — run Refresh Porkbun"}.`,
-      }, { status: 400 });
+      // Recorded for the same reason a provider rejection is: otherwise the
+      // attempt leaves no trace anywhere and the operator is the only one who
+      // ever sees why.
+      const reason = `Can't place this ${provider} order for ${domain}: ${resolved?.reason || "unknown Porkbun account — run Refresh Porkbun"}.`;
+      try {
+        await getSupabaseAdmin().from("inbox_orders").insert({
+          instance, provider,
+          inboxing_account: provider === "inboxing" ? inboxingAccount : null,
+          domain, redirect_url: redirectUrl, mailbox_count: mailboxCount,
+          tag, company_name: companyName, client_tag: clientTag,
+          status: "failed", failure_reason: reason.slice(0, 500), aliases,
+        });
+      } catch { /* the error below is what matters */ }
+      return NextResponse.json({ error: reason, recorded: true }, { status: 400 });
     }
 
+    // A provider rejection used to throw straight out of here, so the row was
+    // never written: the domain vanished from LeadSync entirely and the only
+    // record of WHY was a toast on the operator's screen. Nick had to paste
+    // the error into Slack by hand, and it arrived truncated twice
+    // (2026-09-24 seven domains, 2026-09-25 proactivefacilitymaintenance.com).
+    // Now the attempt is recorded as a failed order carrying the provider's
+    // own words, so it shows on the Inbox Orders page and can be retried.
+    try {
     if (provider === "scaledmail") {
       const r = await scaledmail.createOrder(orderInput, resolved.scaledmail);
       providerOrderId = r.orderId;
@@ -163,6 +182,28 @@ export async function POST(request: Request) {
       // An adopted domain may sit on the OTHER Inboxing login — record where it
       // actually is, or the status poller queries the wrong account and 404s.
       if (r.account) inboxingAccount = r.account;
+    }
+    } catch (providerErr) {
+      const reason = providerErr instanceof Error ? providerErr.message : "provider rejected the order";
+      const supabase = getSupabaseAdmin();
+      // Recording the failure must never mask the provider's error.
+      try {
+      await supabase.from("inbox_orders").insert({
+        instance,
+        provider,
+        inboxing_account: provider === "inboxing" ? inboxingAccount : null,
+        domain,
+        redirect_url: redirectUrl,
+        mailbox_count: mailboxCount,
+        tag,
+        company_name: companyName,
+        client_tag: clientTag,
+        status: "failed",
+        failure_reason: reason.slice(0, 500),
+        aliases,
+      });
+      } catch { /* the provider error below is what matters */ }
+      return NextResponse.json({ error: reason, recorded: true }, { status: 502 });
     }
 
     const supabase = getSupabaseAdmin();
