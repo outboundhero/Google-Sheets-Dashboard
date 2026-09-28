@@ -814,8 +814,8 @@ export function TrueUpCard() {
             )}
 
             <div className="text-[10px] text-muted-foreground">
-              {data.rows.length} client tag × instance pairs · {data.skipped.length} skipped (internal tag, no tier, or no
-              live campaign) · trim order: burnt (handled by replacement) → unproven, under{" "}
+              {data.rows.length} client tag × instance pairs · {data.skipped.length} skipped (internal tag, no tier,
+              churning, or no live campaign) · trim order: burnt (handled by replacement) → unproven, under{" "}
               {data.ranking.minSentToTrim.toLocaleString()} sent → lowest reply rate, 30-day where there is one, else
               15-day. Reply rate only; bounce is not scored here because it is already its own flagging threshold.
             </div>

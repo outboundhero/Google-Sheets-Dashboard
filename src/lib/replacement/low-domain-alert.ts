@@ -10,6 +10,7 @@
 import { buildReplacementPlan } from "./plan";
 import { getThresholdConfig } from "./threshold-groups-store";
 import { getActiveCampaignKeys } from "./campaigns";
+import { getChurnBlackoutMap } from "./churn-guard";
 import { postSlackMessage } from "@/lib/slack";
 import { getInstance, type BisonInstanceSlug } from "@/lib/bison-instances";
 
@@ -35,6 +36,10 @@ export interface LowDomainAlertResult {
    *  pairs (leftover setups, wrong-group tags). Hidden from the list so the
    *  alert reads real shortfalls only (Spencer, 2026-08-24: JPCO double-count). */
   ghostPairs: number;
+  /** (tag, instance) pairs under cap whose client is inside its churn blackout
+   *  or already churned — offboarding's job, not a shortfall. Hidden so a
+   *  client on its way out never reads as "short 8" (GJS, 2026-09-29). */
+  churnPairs: number;
   alerted: boolean;
   slackReason?: string;
   low: LowDomainClient[];
@@ -85,13 +90,18 @@ export async function checkLowDomainClients(
   // topline read 78 when the real number was lower). Same rule the buy digest
   // uses, so the two alerts agree on what counts.
   const activeKeys = await getActiveCampaignKeys();
-  const low = allLow.filter((c) =>
+  const live = allLow.filter((c) =>
     activeKeys.has(`${c.clientTag.trim().toUpperCase()}:${c.instance}`),
   );
-  const ghostPairs = allLow.length - low.length;
+  const ghostPairs = allLow.length - live.length;
+  // Same blackout the true-up and the runner use: a churning client is not
+  // short, it is leaving.
+  const churnMap = await getChurnBlackoutMap();
+  const low = live.filter((c) => !churnMap.get(c.clientTag.trim().toUpperCase())?.blocked);
+  const churnPairs = live.length - low.length;
 
   const checkedAt = new Date().toISOString();
-  const base = { checkedAt, detector, clientsChecked: plan.clientAudit.length, lowCount: low.length, ghostPairs, low };
+  const base = { checkedAt, detector, clientsChecked: plan.clientAudit.length, lowCount: low.length, ghostPairs, churnPairs, low };
 
   if (low.length === 0 && !opts.force) return { ...base, alerted: false };
   if (opts.dryRun) return { ...base, alerted: false, slackReason: "dry run" };
@@ -114,6 +124,9 @@ export async function checkLowDomainClients(
   }
   if (ghostPairs > 0) {
     main.push(`_${ghostPairs} pair${ghostPairs === 1 ? "" : "s"} hidden — no active campaigns in that instance (leftover setups, not real shortfalls)_`);
+  }
+  if (churnPairs > 0) {
+    main.push(`_${churnPairs} pair${churnPairs === 1 ? "" : "s"} hidden — client churning or churned (offboarding handles these)_`);
   }
   main.push(`_Detector: ${detector} · observe-only, nothing was changed_`);
 

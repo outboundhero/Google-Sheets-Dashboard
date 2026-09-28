@@ -60,6 +60,10 @@ export async function getChurnBlackout(clientTag: string): Promise<ChurnBlackout
     return { clientTag: tag, blocked: false, churnDate: null, daysUntil: null, reason: null };
   }
 
+  return evaluate(tag, churnDate, today);
+}
+
+function evaluate(tag: string, churnDate: string, today: string): ChurnBlackout {
   const daysUntil = daysBetween(today, churnDate);
   const blocked = daysUntil <= CHURN_BLACKOUT_DAYS;
   const reason = blocked
@@ -69,4 +73,31 @@ export async function getChurnBlackout(clientTag: string): Promise<ChurnBlackout
     : null;
 
   return { clientTag: tag, blocked, churnDate, daysUntil, reason };
+}
+
+/**
+ * Blackout status for EVERY tag with a churn date, from one tracker read —
+ * for callers that walk all clients (true-up, the cap alert) and must not hit
+ * the sheet once per tag. Tags without a churn date are simply absent.
+ *
+ * Fails open like getChurnBlackout: a tracker read failure returns an empty
+ * map, so nothing gets skipped on a Sheets hiccup. The execute-runner's own
+ * guard still stands in front of any actual change.
+ */
+export async function getChurnBlackoutMap(): Promise<Map<string, ChurnBlackout>> {
+  const map = new Map<string, ChurnBlackout>();
+  let rows: Awaited<ReturnType<typeof getClientTrackerData>> = [];
+  try {
+    rows = await getClientTrackerData();
+  } catch {
+    return map;
+  }
+  const today = pstDateString(new Date());
+  for (const r of rows) {
+    const tag = (r.clientAbbr || "").trim().toUpperCase();
+    const churnDate = parseSheetDate(r.churnDate);
+    if (!tag || !churnDate) continue;
+    map.set(tag, evaluate(tag, churnDate, today));
+  }
+  return map;
 }

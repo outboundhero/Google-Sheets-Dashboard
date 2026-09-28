@@ -29,6 +29,7 @@ import { evaluateSegments, type DomainMetrics, type ThresholdConfig } from "./th
 import { getThresholdConfig } from "./threshold-groups-store";
 import { loadRedirectsByTag } from "./redirect-audit";
 import { loadTrailingRates } from "./trailing-rates";
+import { getChurnBlackoutMap } from "./churn-guard";
 
 const WARMUP_DAYS = 21; // matches plan.ts — a domain is usable once it's ≥ 21d old
 
@@ -213,6 +214,7 @@ export async function computeTrueUp(
   }
   const activeKeys = await getActiveCampaignKeys();
   const campaignMap = await deriveCampaignMap();
+  const churnMap = await getChurnBlackoutMap();
 
   // A tag only counts as a client tag if something else in the system knows it
   // — same rule the plan uses, so the two agree on what a "client" is.
@@ -332,6 +334,17 @@ export async function computeTrueUp(
 
     if (INTERNAL_TAGS.has(clientTag)) {
       skipped.push({ clientTag, instance, reason: "internal tag — not a client" });
+      continue;
+    }
+    // A client inside its churn blackout is offboarding's, not ours: no fill,
+    // no trim, and above all no shortfall for the mover to chase. The runner
+    // already refuses to execute for these, but the true-up still COUNTED
+    // them — GJS (churn 2026-09-29, website N/A) read as "7 short" on FR for
+    // days and had the cross-instance mover pulling stock for it (Nick,
+    // 2026-09-29). Same blackout window the runner uses.
+    const churn = churnMap.get(clientTag);
+    if (churn?.blocked) {
+      skipped.push({ clientTag, instance, reason: `churn blackout — ${churn.reason} — offboarding owns it` });
       continue;
     }
     const tier = tiers.get(clientTag);
