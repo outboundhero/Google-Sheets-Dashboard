@@ -68,9 +68,19 @@ export function BuyDomainsPanel() {
   const [search, setSearch] = useState("");
 
   // Queue
-  const { counts: queueCounts, nextEligibleAt, inWindow, recent: queueRecent, mutate: mutateQueue } = useBuyQueue(12000);
+  const {
+    counts: queueCounts, nextEligibleAt, inWindow, recent: queueRecent,
+    accounts, defaultAccount, pendingByAccount, mutate: mutateQueue,
+  } = useBuyQueue(12000);
   const [retrying, setRetrying] = useState(false);
   const [retryNote, setRetryNote] = useState<string | null>(null);
+
+  // Which Porkbun account buys. Spencer asked for both to be selectable with
+  // spencersellstech as the default; the server decides that default, we just
+  // follow it until the user picks otherwise.
+  const [account, setAccount] = useState<string | null>(null);
+  const buyAccount = account ?? defaultAccount;
+  const accountConfigured = accounts.length === 0 || accounts.includes(buyAccount);
 
   // Failed rows are dead weight until something puts them back: the cron only
   // ever claims `queued`. After the September 2026 Porkbun account block this
@@ -81,11 +91,13 @@ export function BuyDomainsPanel() {
     try {
       const res = await fetch("/api/domains/queue", {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: "retry-failed" }),
+        // Retrying on the currently-selected account is the whole point when the
+        // previous account is the thing that failed (out of credit / blocked).
+        body: JSON.stringify({ action: "retry-failed", account: buyAccount }),
       });
       const json = await res.json().catch(() => ({}));
       if (!res.ok || json?.error) throw new Error(json?.error || `HTTP ${res.status}`);
-      setRetryNote(`${json.requeued} back in the queue — buying resumes on the usual drip.`);
+      setRetryNote(`${json.requeued} back in the queue on ${buyAccount} — buying resumes on the usual drip.`);
       await mutateQueue();
     } catch (e) {
       setRetryNote(e instanceof Error ? e.message : "retry failed");
@@ -155,11 +167,12 @@ export function BuyDomainsPanel() {
           domains: list,
           source: mode,
           niche: mode === "lookalike" ? `look-a-like: ${seedDomain}` : niche,
+          account: buyAccount,
         }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data?.error || `HTTP ${res.status}`);
-      setEnqueueMsg(`Added ${data.enqueued} to buy queue${data.skipped ? ` · ${data.skipped} already queued` : ""}.`);
+      setEnqueueMsg(`Added ${data.enqueued} to buy queue on ${data.account ?? buyAccount}${data.skipped ? ` · ${data.skipped} already queued` : ""}.`);
       setSelected(new Set());
       mutateQueue();
     } catch (e) {
@@ -167,7 +180,7 @@ export function BuyDomainsPanel() {
     } finally {
       setEnqueuing(false);
     }
-  }, [selected, mode, niche, seedDomain, mutateQueue]);
+  }, [selected, mode, niche, seedDomain, buyAccount, mutateQueue]);
 
   const deleteSelected = useCallback(async () => {
     const list = Array.from(selected);
@@ -212,7 +225,7 @@ export function BuyDomainsPanel() {
             <div>
               <h2 className="text-base font-semibold tracking-tight">Find Domains</h2>
               <p className="text-xs text-muted-foreground">
-                Buys on the <span className="font-medium text-foreground">outboundhero</span> Porkbun account · live prices · no cap
+                Buys on the <span className="font-medium text-foreground">{buyAccount}</span> Porkbun account · live prices · no cap
               </p>
             </div>
           </div>
@@ -238,6 +251,22 @@ export function BuyDomainsPanel() {
 
         {isAdmin && (
           <div className="space-y-3 border-t pt-4">
+            {/* Which Porkbun account pays. Spencer asked for both to be
+                selectable, with spencersellstech as the default. */}
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="text-[11px] uppercase tracking-wide text-muted-foreground w-16">Account</span>
+              {(accounts.length > 0 ? accounts : [defaultAccount]).map((a) => (
+                <ToggleBtn key={a} active={buyAccount === a} onClick={() => setAccount(a)}>
+                  {a}{a === defaultAccount ? " (default)" : ""}
+                </ToggleBtn>
+              ))}
+              {!accountConfigured && (
+                <span className="flex items-center gap-1 text-[11px] text-destructive">
+                  <AlertTriangle className="h-3 w-3" /> no API key set for this account
+                </span>
+              )}
+            </div>
+
             <div className="flex flex-wrap items-center gap-2">
               <span className="text-[11px] uppercase tracking-wide text-muted-foreground w-16">Mode</span>
               <ToggleBtn active={mode === "niche"} onClick={() => setMode("niche")}>Commercial cleaning</ToggleBtn>
@@ -354,12 +383,22 @@ export function BuyDomainsPanel() {
               {failed > 0 && (
                 <Button size="sm" variant="outline" className="h-7 gap-1.5 text-xs" disabled={retrying} onClick={retryFailed}>
                   <RefreshCw className={`h-3.5 w-3.5 ${retrying ? "animate-spin" : ""}`} />
-                  {retrying ? "Requeueing…" : `Retry ${failed} failed`}
+                  {retrying ? "Requeueing…" : `Retry ${failed} failed on ${buyAccount}`}
                 </Button>
               )}
             </div>
           </div>
           {retryNote && <p className="text-[11px] text-muted-foreground">{retryNote}</p>}
+          {/* Pending rows can sit on a different account than the one selected —
+              say which, so nobody waits on a queue pointed at a dead account. */}
+          {Object.keys(pendingByAccount).length > 0 && (
+            <p className="text-[11px] text-muted-foreground">
+              Waiting to buy:{" "}
+              {Object.entries(pendingByAccount)
+                .map(([a, n]) => `${n} on ${a}${accounts.length > 0 && !accounts.includes(a) ? " (no API key)" : ""}`)
+                .join(" · ")}
+            </p>
+          )}
           <div className="grid grid-cols-2 sm:grid-cols-5 gap-3 text-xs">
             <Stat label="Queued" value={queued} accent={queued > 0 ? "violet" : undefined} />
             <Stat label="Buying" value={buying} />
@@ -605,6 +644,7 @@ function QueueRow({ r }: { r: BuyQueueRow }) {
       {r.status === "failed" && <AlertTriangle className="h-3 w-3 text-destructive shrink-0" />}
       <span className="font-medium truncate">{r.domain}</span>
       <span className="ml-auto shrink-0 flex items-center gap-2">
+        {r.porkbun_account && <span className="text-muted-foreground/70">{r.porkbun_account}</span>}
         {Number.isFinite(price) && price > 0 && <span className="text-muted-foreground tabular-nums">${price.toFixed(2)}</span>}
         <span className={
           r.status === "registered" ? "text-emerald-500"

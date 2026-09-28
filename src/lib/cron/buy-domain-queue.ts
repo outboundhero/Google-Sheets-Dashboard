@@ -1,7 +1,12 @@
 import { NextResponse } from "next/server";
 import { Redis } from "@upstash/redis";
 import { getSupabaseAdmin } from "@/lib/supabase";
-import { createDomain, setAutoRenew } from "@/lib/porkbun";
+import {
+  createDomain,
+  setAutoRenew,
+  resolveBuyAccount,
+  PORKBUN_ACCOUNT_SOURCE,
+} from "@/lib/porkbun";
 import { appendToSecondaryDomainColumn } from "@/lib/google-sheets-secondary-domain";
 
 // Drains `porkbun_buy_queue` as a DRIP, not batches — Ramon @ Inboxing's
@@ -47,6 +52,9 @@ interface QueueRow {
   domain: string;
   real_price_usd: number | string | null;
   requested_at: string;
+  // Which Porkbun account to buy on. Stamped at enqueue time so a row can never
+  // drift to a different account between queueing and purchase.
+  porkbun_account: string | null;
 }
 
 export async function runBuyQueue(): Promise<NextResponse> {
@@ -101,7 +109,7 @@ export async function runBuyQueue(): Promise<NextResponse> {
       .update({ status: "buying", batch_id: batchId, updated_at: new Date().toISOString() })
       .in("id", ids)
       .eq("status", "queued")
-      .select("id, domain, real_price_usd, requested_at");
+      .select("id, domain, real_price_usd, requested_at, porkbun_account");
     const rows = (claimed || []) as QueueRow[];
     rows.sort((a, b) => new Date(a.requested_at).getTime() - new Date(b.requested_at).getTime());
 
@@ -129,8 +137,10 @@ export async function runBuyQueue(): Promise<NextResponse> {
         continue;
       }
 
+      const account = resolveBuyAccount(row.porkbun_account);
+
       try {
-        await createDomain(row.domain, price);
+        await createDomain(row.domain, price, account);
       } catch (err) {
         const msg = err instanceof Error ? err.message : "createDomain failed";
         if (is429(msg)) {
@@ -166,7 +176,9 @@ export async function runBuyQueue(): Promise<NextResponse> {
       await supabase.from("domain_inventory").upsert(
         {
           domain: row.domain,
-          source: "porkbun_outboundhero",
+          // Must match the account we actually bought on: inbox-order account
+          // resolution keys its registrar credentials off this exact string.
+          source: PORKBUN_ACCOUNT_SOURCE[account],
           manual: false,
           tld: `.${row.domain.split(".").pop()}`,
           porkbun_status: "ACTIVE",
@@ -179,7 +191,7 @@ export async function runBuyQueue(): Promise<NextResponse> {
 
       // Auto-renew OFF (non-fatal).
       try {
-        await setAutoRenew(row.domain, false);
+        await setAutoRenew(row.domain, false, account);
         await supabase.from("porkbun_buy_queue").update({ auto_renew_disabled: true }).eq("id", row.id);
         await supabase.from("porkbun_domains").update({ auto_renew_disabled: true }).eq("domain", row.domain);
       } catch (e) {

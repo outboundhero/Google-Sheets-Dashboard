@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { getSupabaseAdmin } from "@/lib/supabase";
+import { resolveBuyAccount, configuredBuyAccounts, DEFAULT_BUY_ACCOUNT } from "@/lib/porkbun";
 
 const WINDOW_MS = 8 * 60 * 60 * 1000;
 
@@ -26,15 +27,23 @@ export async function POST(request: Request) {
       const only: string[] = Array.isArray(body?.domains)
         ? body.domains.filter((d: unknown): d is string => typeof d === "string").map((d: string) => d.trim().toLowerCase())
         : [];
-      let q = supabase
-        .from("porkbun_buy_queue")
-        .update({ status: "queued", batch_id: null, last_error: null, updated_at: new Date().toISOString() })
-        .eq("status", "failed");
+      // Optionally move the rows to another Porkbun account on the way back in.
+      // This is the recovery path when a whole account is the problem (out of
+      // credit, or blocked) — otherwise the retry just fails the same way.
+      const patch: Record<string, unknown> = {
+        status: "queued", batch_id: null, last_error: null, updated_at: new Date().toISOString(),
+      };
+      if (body?.account !== undefined) patch.porkbun_account = resolveBuyAccount(body.account);
+      let q = supabase.from("porkbun_buy_queue").update(patch).eq("status", "failed");
       if (only.length > 0) q = q.in("domain", only);
       const { data, error } = await q.select("domain");
       if (error) throw new Error(error.message);
       const requeued = (data || []).map((r) => r.domain as string);
-      return NextResponse.json({ requeued: requeued.length, domains: requeued.slice(0, 50) });
+      return NextResponse.json({
+        requeued: requeued.length,
+        domains: requeued.slice(0, 50),
+        account: patch.porkbun_account ?? null,
+      });
     }
 
     const raw = Array.isArray(body?.domains) ? body.domains : [];
@@ -51,6 +60,8 @@ export async function POST(request: Request) {
     }
     const source = body?.source === "lookalike" ? "lookalike" : "niche";
     const niche = typeof body?.niche === "string" ? body.niche.trim() : null;
+    // Stamped on every row now, so the buyer never has to guess later.
+    const account = resolveBuyAccount(body?.account);
 
     const supabase = getSupabaseAdmin();
 
@@ -90,6 +101,7 @@ export async function POST(request: Request) {
         status: "queued",
         source,
         niche,
+        porkbun_account: account,
         requested_at: nowIso,
       }));
 
@@ -103,7 +115,7 @@ export async function POST(request: Request) {
       enqueued += data?.length ?? 0;
     }
 
-    return NextResponse.json({ enqueued, skipped: domains.length - toInsert.length });
+    return NextResponse.json({ enqueued, skipped: domains.length - toInsert.length, account });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Failed";
     return NextResponse.json({ error: message }, { status: 500 });
@@ -138,9 +150,21 @@ export async function GET() {
 
     const { data: recent } = await supabase
       .from("porkbun_buy_queue")
-      .select("domain, status, real_price_usd, purchased_at, last_error, requested_at, updated_at")
+      .select("domain, status, real_price_usd, purchased_at, last_error, requested_at, updated_at, porkbun_account")
       .order("updated_at", { ascending: false })
       .limit(50);
+
+    // How many still-queued rows sit on each account — the UI warns when rows
+    // are pointed at an account that has no credentials configured.
+    const { data: queuedRows } = await supabase
+      .from("porkbun_buy_queue")
+      .select("porkbun_account")
+      .in("status", ["queued", "failed"]);
+    const byAccount: Record<string, number> = {};
+    for (const r of queuedRows || []) {
+      const a = (r.porkbun_account as string | null) ?? DEFAULT_BUY_ACCOUNT;
+      byAccount[a] = (byAccount[a] ?? 0) + 1;
+    }
 
     return NextResponse.json({
       counts,
@@ -148,6 +172,9 @@ export async function GET() {
       nextEligibleAt,
       inWindow,
       recent: recent || [],
+      accounts: configuredBuyAccounts(),
+      defaultAccount: DEFAULT_BUY_ACCOUNT,
+      pendingByAccount: byAccount,
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Failed";

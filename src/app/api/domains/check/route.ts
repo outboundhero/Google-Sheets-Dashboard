@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { checkDomain } from "@/lib/porkbun";
+import { checkDomain, resolveBuyAccount } from "@/lib/porkbun";
 import { getSupabaseAdmin } from "@/lib/supabase";
 
 export async function POST(request: Request) {
@@ -14,7 +14,8 @@ export async function POST(request: Request) {
     // Live, exact price from Porkbun — never an estimate. No price cap: any
     // available domain qualifies; the real price is surfaced for the user to
     // decide + is used verbatim at purchase time.
-    const result = await checkDomain(domain);
+    const account = resolveBuyAccount(body?.account);
+    const result = await checkDomain(domain, account);
     const qualifies = result.avail && Number.isFinite(result.price);
 
     const supabase = getSupabaseAdmin();
@@ -37,6 +38,7 @@ export async function POST(request: Request) {
       qualifies,
       ttlRemaining: result.ttlRemaining,
       rateLimitNote: result.rateLimitNote,
+      account,
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Failed";

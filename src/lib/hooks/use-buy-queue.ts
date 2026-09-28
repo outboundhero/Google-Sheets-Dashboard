@@ -10,6 +10,7 @@ export interface BuyQueueRow {
   last_error: string | null;
   requested_at: string;
   updated_at: string;
+  porkbun_account: string | null;
 }
 
 export interface BuyQueueData {
@@ -18,6 +19,9 @@ export interface BuyQueueData {
   nextEligibleAt: string | null;
   inWindow: boolean;
   recent: BuyQueueRow[];
+  accounts: string[];
+  defaultAccount: string;
+  pendingByAccount: Record<string, number>;
 }
 
 const fetcher = (url: string) => fetch(url).then((r) => r.json());
@@ -40,6 +44,9 @@ export function useBuyQueue(refreshIntervalMs = 15000) {
     nextEligibleAt: data?.nextEligibleAt ?? null,
     inWindow: data?.inWindow ?? false,
     recent: data?.recent || [],
+    accounts: data?.accounts || [],
+    defaultAccount: data?.defaultAccount ?? "spencersellstech",
+    pendingByAccount: data?.pendingByAccount || {},
     isLoading,
     error,
     mutate,

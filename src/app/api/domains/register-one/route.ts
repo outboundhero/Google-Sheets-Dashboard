@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { createDomain, setAutoRenew } from "@/lib/porkbun";
+import { createDomain, setAutoRenew, resolveBuyAccount } from "@/lib/porkbun";
 import { getSupabaseAdmin } from "@/lib/supabase";
 
 export async function POST(request: Request) {
@@ -31,9 +31,11 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "Invalid stored price" }, { status: 400 });
     }
 
+    const account = resolveBuyAccount(body?.account);
+
     // Step 1: register
     try {
-      await createDomain(domain, priceUsd);
+      await createDomain(domain, priceUsd, account);
     } catch (err) {
       const msg = err instanceof Error ? err.message : "createDomain failed";
       await supabase
@@ -52,7 +54,7 @@ export async function POST(request: Request) {
     let autoRenewDisabled = false;
     let autoRenewError: string | null = null;
     try {
-      await setAutoRenew(domain, false);
+      await setAutoRenew(domain, false, account);
       autoRenewDisabled = true;
       await supabase
         .from("porkbun_domains")
@@ -71,6 +73,7 @@ export async function POST(request: Request) {
       registered: true,
       autoRenewDisabled,
       autoRenewError,
+      account,
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Failed";

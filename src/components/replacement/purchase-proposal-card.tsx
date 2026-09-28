@@ -39,6 +39,22 @@ export function PurchaseProposalCard() {
   const [running, setRunning] = useState<number | null>(null); // proposal id being executed
   const [progress, setProgress] = useState<Record<string, string>>({}); // domain -> status
   const [error, setError] = useState<string | null>(null);
+  // Which Porkbun account pays. Server default is spencersellstech (Spencer's
+  // request); null = follow the server until someone picks explicitly.
+  const [account, setAccount] = useState<string | null>(null);
+  const [accountOptions, setAccountOptions] = useState<string[]>([]);
+  const [defaultAccount, setDefaultAccount] = useState("spencersellstech");
+  const buyAccount = account ?? defaultAccount;
+
+  useEffect(() => {
+    fetch("/api/domains/queue", { cache: "no-store" })
+      .then((r) => r.json())
+      .then((d) => {
+        if (Array.isArray(d?.accounts)) setAccountOptions(d.accounts);
+        if (typeof d?.defaultAccount === "string") setDefaultAccount(d.defaultAccount);
+      })
+      .catch(() => {});
+  }, []);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -72,7 +88,7 @@ export function PurchaseProposalCard() {
   };
 
   const approve = async (p: PurchaseProposal) => {
-    if (!window.confirm(`Buy up to ${p.domains.length} domains for ${p.instance}? This spends real money (Porkbun registration + Inboxing mailboxes).`)) return;
+    if (!window.confirm(`Buy up to ${p.domains.length} domains for ${p.instance} on the ${buyAccount} Porkbun account? This spends real money (Porkbun registration + Inboxing mailboxes).`)) return;
     setRunning(p.id); setError(null);
     const results: Record<string, string> = {};
     const set = (d: string, s: string) => { results[d] = s; setProgress({ ...results }); };
@@ -81,13 +97,13 @@ export function PurchaseProposalCard() {
     const registered: string[] = [];
     for (const domain of p.domains) {
       set(domain, "checking…");
-      const chk = await post("/api/domains/check", { domain });
+      const chk = await post("/api/domains/check", { domain, account: buyAccount });
       if (!chk.ok) { set(domain, `check failed: ${chk.error}`); await sleep(PORKBUN_PACE_MS); continue; }
       const avail = (chk.data?.qualifies ?? chk.data?.available) === true;
       if (!avail) { set(domain, "taken — skipped"); await sleep(PORKBUN_PACE_MS); continue; }
       await sleep(PORKBUN_PACE_MS);
       set(domain, "registering…");
-      const reg = await post("/api/domains/register-one", { domain });
+      const reg = await post("/api/domains/register-one", { domain, account: buyAccount });
       if (!reg.ok) { set(domain, `register failed: ${reg.error}`); await sleep(PORKBUN_PACE_MS); continue; }
       registered.push(domain);
       set(domain, "registered ✓");
@@ -126,6 +142,25 @@ export function PurchaseProposalCard() {
             </div>
             <div className="text-[11px] text-muted-foreground">
               Staged .com/.co buys when reserve is short. Nothing is purchased until Approve is clicked here.
+            </div>
+            {/* Which Porkbun account pays — both selectable, spencersellstech
+                the default, per Spencer's original request. */}
+            <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+              <span className="text-[11px] text-muted-foreground">Buy on</span>
+              {(accountOptions.length > 0 ? accountOptions : [defaultAccount]).map((a) => (
+                <button
+                  key={a}
+                  onClick={() => setAccount(a)}
+                  disabled={running !== null}
+                  className={`text-[11px] px-2 py-0.5 rounded-md border transition-colors disabled:opacity-50 ${
+                    buyAccount === a
+                      ? "bg-primary text-primary-foreground border-primary"
+                      : "bg-background hover:bg-muted/50 border-muted-foreground/20"
+                  }`}
+                >
+                  {a}{a === defaultAccount ? " (default)" : ""}
+                </button>
+              ))}
             </div>
           </div>
           <div className="flex items-center gap-2">

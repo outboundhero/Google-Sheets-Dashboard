@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { listAllDomainNamesPage } from "@/lib/porkbun-domains";
+import { DEFAULT_BUY_ACCOUNT, configuredBuyAccounts } from "@/lib/porkbun";
 
 // GET /api/domains/porkbun-account-check  (admin-only via middleware)
 //
@@ -8,8 +9,8 @@ import { listAllDomainNamesPage } from "@/lib/porkbun-domains";
 // account's domain list and looks for marker domains unique to each account:
 //   outboundhero    → skytabbilling.com / facilityreach.com / smartjanitorsolutions.com
 //   spencersellstech→ dm4pm.info / satininsurance.com / outboundherogrowth.com
-// Use this once after deploy to confirm the buyer (PORKBUN_OUTBOUNDHERO_*) is
-// pointed at outboundhero and to catch a mis-pointed slot.
+// Use this after deploy to confirm each configured slot really holds the
+// account it is named for, and that the DEFAULT buy account is among them.
 export const maxDuration = 60;
 
 const MARKERS: Record<"outboundhero" | "spencersellstech", string[]> = {
@@ -104,15 +105,23 @@ export async function GET() {
     };
   });
 
-  const buyAccount = results.find((r) => r.envVar === "PORKBUN_OUTBOUNDHERO_API_KEY");
-  const buyerSafe = buyAccount?.configured === true && buyAccount.resolvesTo === "outboundhero";
+  // The buyer is now account-selectable (per-queue-row), so "safe" means the
+  // DEFAULT buy account is configured and its key really resolves to that
+  // account — not that everything points at outboundhero.
+  const defaultEnv = DEFAULT_BUY_ACCOUNT === "spencersellstech"
+    ? "PORKBUN_SPENCERSELLSTECH_API_KEY"
+    : "PORKBUN_OUTBOUNDHERO_API_KEY";
+  const buyAccount = results.find((r) => r.envVar === defaultEnv);
+  const buyerSafe = buyAccount?.configured === true && buyAccount.resolvesTo === DEFAULT_BUY_ACCOUNT;
 
   return NextResponse.json({
     buyerSafe,
+    defaultBuyAccount: DEFAULT_BUY_ACCOUNT,
+    configuredBuyAccounts: configuredBuyAccounts(),
     buyAccountResolvesTo: buyAccount?.resolvesTo ?? null,
     note: buyerSafe
-      ? "Buyer is correctly pointed at the outboundhero account."
-      : "Buyer is NOT confirmed on outboundhero — set PORKBUN_OUTBOUNDHERO_* to the outboundhero key (holds skytab/facilityreach).",
+      ? `Default buy account (${DEFAULT_BUY_ACCOUNT}) is configured and verified.`
+      : `Default buy account ${DEFAULT_BUY_ACCOUNT} is NOT confirmed — set ${defaultEnv} / ${defaultEnv.replace("_API_KEY", "_SECRET_API_KEY")} to that account's key.`,
     results,
   });
 }
