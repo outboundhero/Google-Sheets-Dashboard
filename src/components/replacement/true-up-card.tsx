@@ -41,6 +41,7 @@ interface Row {
   fillNeeded: number;
   fillCandidates: string[];
   fillShort: number;
+  fillBlocked: number;
   trimNeeded: number;
   trimCandidates: TrimCandidate[];
   trimHeld: number;
@@ -53,9 +54,9 @@ interface Resp {
   rows: Row[];
   totals: {
     tagsAtCap: number; tagsUnderCap: number; tagsOverCap: number;
-    fillNeeded: number; fillAvailable: number; fillShort: number; trimNeeded: number;
+    fillNeeded: number; fillAvailable: number; fillShort: number; fillBlocked: number; trimNeeded: number;
   };
-  byInstance: Record<string, { fillNeeded: number; fillAvailable: number; fillShort: number; trimNeeded: number }>;
+  byInstance: Record<string, { fillNeeded: number; fillAvailable: number; fillShort: number; fillBlocked: number; trimNeeded: number }>;
   skipped: { clientTag: string; instance: string; reason: string }[];
   error?: string;
 }
@@ -99,10 +100,11 @@ interface MoveResult {
   }[];
 }
 
-type Filter = "no-stock" | "fill" | "trim" | "all";
+type Filter = "no-stock" | "blocked" | "fill" | "trim" | "all";
 
 const FILTERS: { key: Filter; label: string }[] = [
   { key: "no-stock", label: "No stock" },
+  { key: "blocked", label: "Blocked" },
   { key: "fill", label: "Under cap" },
   { key: "trim", label: "Over cap" },
   { key: "all", label: "All" },
@@ -165,6 +167,7 @@ export function TrueUpCard() {
     if (!data) return [];
     const picked = data.rows.filter((r) => {
       if (filter === "no-stock") return r.fillShort > 0;
+      if (filter === "blocked") return r.fillBlocked > 0;
       if (filter === "fill") return r.fillNeeded > 0;
       if (filter === "trim") return r.trimNeeded > 0;
       return r.fillNeeded > 0 || r.trimNeeded > 0;
@@ -172,6 +175,7 @@ export function TrueUpCard() {
     return picked.sort(
       (a, b) =>
         b.fillShort - a.fillShort ||
+        b.fillBlocked - a.fillBlocked ||
         b.fillNeeded - a.fillNeeded ||
         b.trimNeeded - a.trimNeeded ||
         a.clientTag.localeCompare(b.clientTag),
@@ -598,6 +602,7 @@ export function TrueUpCard() {
               <span className="text-muted-foreground">
                 Add <b>{data.totals.fillNeeded}</b> · reserve covers <b className="text-emerald-500">{data.totals.fillAvailable}</b>
                 {data.totals.fillShort > 0 && <> · <b className="text-destructive">{data.totals.fillShort} short</b></>}
+                {data.totals.fillBlocked > 0 && <> · <b className="text-amber-500">{data.totals.fillBlocked} blocked</b></>}
               </span>
               <span className="text-muted-foreground">Trim <b className="text-sky-500">{data.totals.trimNeeded}</b></span>
             </div>
@@ -616,6 +621,7 @@ export function TrueUpCard() {
                       {i.fillShort > 0
                         ? <b className="text-destructive">{i.fillShort} short</b>
                         : <span className="text-emerald-500">covered</span>}
+                      {i.fillBlocked > 0 && <span className="text-amber-500"> · {i.fillBlocked} blocked</span>}
                       {i.trimNeeded > 0 && <span className="text-muted-foreground"> · trim {i.trimNeeded}</span>}
                     </div>
                   </div>
@@ -682,7 +688,9 @@ export function TrueUpCard() {
                           {r.fillNeeded > 0 ? (
                             r.fillShort > 0
                               ? <b className="text-destructive">{r.fillShort} short of {r.fillNeeded}</b>
-                              : <span className="text-emerald-500">+{r.fillNeeded} ready</span>
+                              : r.fillBlocked > 0
+                                ? <b className="text-amber-500">{r.fillBlocked} blocked</b>
+                                : <span className="text-emerald-500">+{r.fillNeeded} ready</span>
                           ) : <span className="text-muted-foreground">—</span>}
                         </span>
                         <span className="text-right tabular-nums">

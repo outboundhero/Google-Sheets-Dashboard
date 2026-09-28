@@ -230,7 +230,14 @@ export async function runExecution(
     let pollError: string | null = null;
     while (inflight.length > 0 && Date.now() < moveDeadline) {
       await sleep(12_000);
-      const pr = await callJson("/api/deliverability/move-domains", { mode: "poll", dryRun: false, inflight, targetInstance: instance });
+      // move-domains validates `domains` before it looks at `mode`; without
+      // it every poll was a 400 "domains required", so every donor move ran
+      // to the deadline and was written off as unverified (cleancraftbuilding
+      // .com, four times, 2026-09-26..28).
+      const pr = await callJson("/api/deliverability/move-domains", {
+        mode: "poll", dryRun: false, inflight, targetInstance: instance,
+        domains: inflight.map((i) => i.domain),
+      });
       const prData = (pr.data || {}) as {
         results?: { domain: string; status: string; landed?: number; expected?: number; detail?: string; error?: string }[];
       };

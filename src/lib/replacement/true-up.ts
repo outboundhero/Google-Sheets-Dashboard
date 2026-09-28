@@ -97,8 +97,18 @@ export interface TrueUpRow {
   fillNeeded: number;
   /** Reserve domains actually available for those adds. */
   fillCandidates: string[];
-  /** fillNeeded − fillCandidates.length. > 0 = no stock for this client. */
+  /**
+   * STOCK gap: a runnable client the instance has nothing left for
+   * (fillNeeded − fillCandidates.length, only when no blocker). This is the
+   * number the cross-instance mover acts on.
+   */
   fillShort: number;
+  /**
+   * fillNeeded for a client that must not be filled at all (no redirect,
+   * dormant). Kept apart from fillShort on purpose: moving stock in for a
+   * blocked client buys nothing.
+   */
+  fillBlocked: number;
   /** Domains to untag back into reserve (staying − cap). */
   trimNeeded: number;
   /** In trim order, already limited to trimNeeded. */
@@ -127,10 +137,11 @@ export interface TrueUpResult {
     fillNeeded: number;
     fillAvailable: number;
     fillShort: number;
+    fillBlocked: number;
     trimNeeded: number;
   };
   /** Per instance, so it's obvious where the stock shortage actually is. */
-  byInstance: Record<string, { fillNeeded: number; fillAvailable: number; fillShort: number; trimNeeded: number }>;
+  byInstance: Record<string, { fillNeeded: number; fillAvailable: number; fillShort: number; fillBlocked: number; trimNeeded: number }>;
   /** Tags skipped and why — internal tags, no tier, no live campaign. */
   skipped: { clientTag: string; instance: string; reason: string }[];
   /**
@@ -369,7 +380,13 @@ export async function computeTrueUp(
     }
     const canFill = fillNeeded > 0 && blockers.length === 0;
     const fillCandidates = canFill ? pool.splice(0, fillNeeded) : [];
-    const fillShort = fillNeeded - fillCandidates.length;
+    // Two different "can't fill"s. A blocked client used to count as SHORT
+    // too, so the cross-instance mover read "FR is 7 short" and pulled
+    // OH→FR every 30 minutes for four days (192 attempts) for GJS — whose
+    // tracker website is N/A and who can never take a domain — while FR sat
+    // on 48 ready reserves (2026-09-29). Short = stock gap; blocked = policy.
+    const fillShort = canFill ? fillNeeded - fillCandidates.length : 0;
+    const fillBlocked = fillNeeded > 0 && !canFill ? fillNeeded : 0;
     if (canFill && fillShort > 0) blockers.push(`no ready ${provider} reserve in this instance`);
 
     // Trim, in Nick's order (2026-08-14): burnt first (replacement already does
@@ -441,7 +458,7 @@ export async function computeTrueUp(
 
     rows.push({
       clientTag, instance, tier, cap, staying, stayingUnproven, burnt: acc.burnt, replacementPulls,
-      fillNeeded, fillCandidates, fillShort,
+      fillNeeded, fillCandidates, fillShort, fillBlocked,
       trimNeeded, trimCandidates, trimUnproven, trimHeld,
       hasActiveCampaign, hasEligibleCampaign, blockers,
       redirectUrl: redirectByTag.get(clientTag) ?? null,
@@ -449,9 +466,9 @@ export async function computeTrueUp(
     });
   }
 
-  const totals = { tagsAtCap: 0, tagsUnderCap: 0, tagsOverCap: 0, fillNeeded: 0, fillAvailable: 0, fillShort: 0, trimNeeded: 0 };
+  const totals = { tagsAtCap: 0, tagsUnderCap: 0, tagsOverCap: 0, fillNeeded: 0, fillAvailable: 0, fillShort: 0, fillBlocked: 0, trimNeeded: 0 };
   const byInstance: TrueUpResult["byInstance"] = {};
-  for (const inst of ALL_INSTANCE_SLUGS) byInstance[inst] = { fillNeeded: 0, fillAvailable: 0, fillShort: 0, trimNeeded: 0 };
+  for (const inst of ALL_INSTANCE_SLUGS) byInstance[inst] = { fillNeeded: 0, fillAvailable: 0, fillShort: 0, fillBlocked: 0, trimNeeded: 0 };
   for (const r of rows) {
     if (r.fillNeeded > 0) totals.tagsUnderCap++;
     else if (r.trimNeeded > 0) totals.tagsOverCap++;
@@ -459,11 +476,13 @@ export async function computeTrueUp(
     totals.fillNeeded += r.fillNeeded;
     totals.fillAvailable += r.fillCandidates.length;
     totals.fillShort += r.fillShort;
+    totals.fillBlocked += r.fillBlocked;
     totals.trimNeeded += r.trimNeeded;
     const b = byInstance[r.instance];
     b.fillNeeded += r.fillNeeded;
     b.fillAvailable += r.fillCandidates.length;
     b.fillShort += r.fillShort;
+    b.fillBlocked += r.fillBlocked;
     b.trimNeeded += r.trimNeeded;
   }
 
