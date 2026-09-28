@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, useCallback } from "react";
 import { Bookmark, ChevronDown, Trash2, Check, X, Loader2, Plus, Star } from "lucide-react";
 import { useDomainSavedSearches, type SavedSearch } from "@/lib/hooks/use-domain-saved-searches";
 
@@ -8,10 +8,15 @@ import { useDomainSavedSearches, type SavedSearch } from "@/lib/hooks/use-domain
 // builder. Server-persisted + team-shared. `snapshot()` serializes the current
 // filter state; `onApply` restores a saved one. The scope's default preset (if
 // any) is auto-applied once when this bar mounts (i.e. on entering the tab).
-export function SavedSearchesBar({ scope, snapshot, onApply }: {
+export function SavedSearchesBar({ scope, snapshot, onApply, activeName: controlledActive, onActiveChange }: {
   scope: "all-domains" | "purchased";
   snapshot: () => Record<string, unknown>;
   onApply: (filter: Record<string, unknown>) => void;
+  // Optional controlled active-preset name. The table owns it when it needs
+  // to say "preset X applied" next to the filtered count, and to drop the
+  // label when its own Clear button wipes the filters.
+  activeName?: string | null;
+  onActiveChange?: (name: string | null) => void;
 }) {
   const { searches, isLoading, mutate } = useDomainSavedSearches(scope);
   const [open, setOpen] = useState(false);
@@ -19,7 +24,9 @@ export function SavedSearchesBar({ scope, snapshot, onApply }: {
   const [name, setName] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [activeName, setActiveName] = useState<string | null>(null);
+  const [internalActive, setInternalActive] = useState<string | null>(null);
+  const activeName = controlledActive !== undefined ? controlledActive : internalActive;
+  const setActiveName = useCallback((n: string | null) => { setInternalActive(n); onActiveChange?.(n); }, [onActiveChange]);
   const wrapRef = useRef<HTMLDivElement>(null);
 
   // Close the dropdown on outside click.
@@ -36,7 +43,7 @@ export function SavedSearchesBar({ scope, snapshot, onApply }: {
     appliedDefaultRef.current = true;
     const def = searches.find((s) => s.isDefault);
     if (def) { onApply(def.filter || {}); setActiveName(def.name); }
-  }, [isLoading, searches, onApply]);
+  }, [isLoading, searches, onApply, setActiveName]);
 
   const apply = (s: SavedSearch) => { onApply(s.filter || {}); setActiveName(s.name); setOpen(false); };
 

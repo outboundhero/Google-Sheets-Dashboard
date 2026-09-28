@@ -57,6 +57,11 @@ export function AllDomainsTable() {
   const [conditions, setConditions] = useState<FilterCondition[]>([]);
   const [filterMode, setFilterMode] = useState<FilterMode>("AND");
   const [hiddenOpen, setHiddenOpen] = useState(false);
+  // Name of the saved search currently shaping the list, if any. A default
+  // preset auto-applies on open, so the count under the table can read like
+  // the whole inventory when it's a 32-condition slice of it — Nick bought 200
+  // domains and saw "92" (2026-09-29). The banner below names the preset.
+  const [activePreset, setActivePreset] = useState<string | null>(null);
 
   // ── Bulk selection (click + drag) ──────────────────────────────────────
   const { runAutoRenew, runHide, runSurbl, runSpamhaus } = useDomainOps();
@@ -154,7 +159,7 @@ export function AllDomainsTable() {
     if (n > 0) setSelected(new Set(matched.slice(0, n).map((r) => r.domain)));
   };
   const selectedList = useMemo(() => Array.from(selected), [selected]);
-  const clearAllFilters = () => { setSearch(""); setSourceFilter("all"); setInUseFilter("all"); setProviderFilter("all"); setConditions([]); setPage(0); };
+  const clearAllFilters = () => { setSearch(""); setSourceFilter("all"); setInUseFilter("all"); setProviderFilter("all"); setConditions([]); setActivePreset(null); setPage(0); };
 
   // Saved-search serialization (full filter state).
   const buildSnapshot = (): Record<string, unknown> => ({ v: 1, search, source: sourceFilter, inUse: inUseFilter, provider: providerFilter, mode: filterMode, conditions });
@@ -237,8 +242,22 @@ export function AllDomainsTable() {
       </div>
 
       {/* Saved searches + advanced filter builder */}
-      {isAdmin && <SavedSearchesBar scope="all-domains" snapshot={buildSnapshot} onApply={applySnapshot} />}
+      {isAdmin && <SavedSearchesBar scope="all-domains" snapshot={buildSnapshot} onApply={applySnapshot} activeName={activePreset} onActiveChange={setActivePreset} />}
       <DomainFilterBuilder fields={filterFields} conditions={conditions} setConditions={(c) => { setConditions(c); setPage(0); }} mode={filterMode} setMode={setFilterMode} />
+
+      {/* Whenever the list is narrowed, say so in one line — filtered count vs
+          the whole inventory, which preset did it, and a way out. */}
+      {!isLoading && rows.length > 0 && matched.length < rows.length && (
+        <div className="flex flex-wrap items-center gap-2 rounded-lg border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-xs">
+          <span>
+            Showing <b>{matched.length.toLocaleString()}</b> of <b>{rows.length.toLocaleString()}</b> domains
+            {activePreset
+              ? <> — preset <b>&ldquo;{activePreset}&rdquo;</b> applied</>
+              : <> — filters applied</>}
+          </span>
+          <button onClick={clearAllFilters} className="ml-auto font-medium text-amber-600 hover:underline">Clear</button>
+        </div>
+      )}
 
       {/* Select first N of the current filtered + sorted set */}
       {isAdmin && matched.length > 0 && (
