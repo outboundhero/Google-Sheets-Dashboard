@@ -69,6 +69,30 @@ export function BuyDomainsPanel() {
 
   // Queue
   const { counts: queueCounts, nextEligibleAt, inWindow, recent: queueRecent, mutate: mutateQueue } = useBuyQueue(12000);
+  const [retrying, setRetrying] = useState(false);
+  const [retryNote, setRetryNote] = useState<string | null>(null);
+
+  // Failed rows are dead weight until something puts them back: the cron only
+  // ever claims `queued`. After the September 2026 Porkbun account block this
+  // took a hand-written SQL update, which is why it is a button now.
+  const retryFailed = async () => {
+    setRetrying(true);
+    setRetryNote(null);
+    try {
+      const res = await fetch("/api/domains/queue", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "retry-failed" }),
+      });
+      const json = await res.json().catch(() => ({}));
+      if (!res.ok || json?.error) throw new Error(json?.error || `HTTP ${res.status}`);
+      setRetryNote(`${json.requeued} back in the queue — buying resumes on the usual drip.`);
+      await mutateQueue();
+    } catch (e) {
+      setRetryNote(e instanceof Error ? e.message : "retry failed");
+    } finally {
+      setRetrying(false);
+    }
+  };
   const { runSurbl, runSpamhaus } = useDomainOps();
   const [enqueuing, setEnqueuing] = useState(false);
   const [enqueueMsg, setEnqueueMsg] = useState<string | null>(null);
@@ -321,12 +345,21 @@ export function BuyDomainsPanel() {
               <h3 className="text-sm font-semibold">Buy queue</h3>
               <span className="text-[11px] text-muted-foreground">max 20 domains / 8 hours · bought automatically on the server</span>
             </div>
-            {inWindow && nextEligibleAt && (
-              <span className="flex items-center gap-1.5 text-[11px] text-amber-500">
-                <Clock className="h-3.5 w-3.5" /> next batch in {formatCountdown(nextEligibleAt)}
-              </span>
-            )}
+            <div className="flex items-center gap-3">
+              {inWindow && nextEligibleAt && (
+                <span className="flex items-center gap-1.5 text-[11px] text-amber-500">
+                  <Clock className="h-3.5 w-3.5" /> next batch in {formatCountdown(nextEligibleAt)}
+                </span>
+              )}
+              {failed > 0 && (
+                <Button size="sm" variant="outline" className="h-7 gap-1.5 text-xs" disabled={retrying} onClick={retryFailed}>
+                  <RefreshCw className={`h-3.5 w-3.5 ${retrying ? "animate-spin" : ""}`} />
+                  {retrying ? "Requeueing…" : `Retry ${failed} failed`}
+                </Button>
+              )}
+            </div>
           </div>
+          {retryNote && <p className="text-[11px] text-muted-foreground">{retryNote}</p>}
           <div className="grid grid-cols-2 sm:grid-cols-5 gap-3 text-xs">
             <Stat label="Queued" value={queued} accent={queued > 0 ? "violet" : undefined} />
             <Stat label="Buying" value={buying} />
@@ -336,6 +369,14 @@ export function BuyDomainsPanel() {
           </div>
           {queueRecent.length > 0 && (
             <div className="space-y-1 max-h-64 overflow-y-auto pt-2 border-t">
+              {/* The API returns the 50 most recently touched rows. Saying so
+                  stops the list reading as the whole story — 153 failed while
+                  only 50 were listed, and the missing ones looked lost. */}
+              {queued + buying + registered + skipped + failed > queueRecent.length && (
+                <p className="text-[11px] text-muted-foreground pb-1">
+                  showing the {queueRecent.length} most recent of {queued + buying + registered + skipped + failed}
+                </p>
+              )}
               {queueRecent.map((r) => <QueueRow key={r.domain} r={r} />)}
             </div>
           )}

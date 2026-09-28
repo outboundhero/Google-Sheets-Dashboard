@@ -10,6 +10,33 @@ const WINDOW_MS = 8 * 60 * 60 * 1000;
 export async function POST(request: Request) {
   try {
     const body = await request.json().catch(() => ({}));
+
+    // { action: "retry-failed" } — put failed rows back in the queue so the
+    // drip cron picks them up again. A failure is usually not the domain's
+    // fault: Porkbun blocked the whole account for three days in September
+    // 2026 and 153 rows failed with "your account is currently unable to
+    // register domain names", then needed a hand-written SQL update to come
+    // back. The cron only ever claims `queued`, so this is the one thing
+    // standing between a cleared outage and buying resuming.
+    //
+    // Domains already taken are left alone — those are `skipped`, not
+    // `failed`, and retrying them would only burn Porkbun calls.
+    if (body?.action === "retry-failed") {
+      const supabase = getSupabaseAdmin();
+      const only: string[] = Array.isArray(body?.domains)
+        ? body.domains.filter((d: unknown): d is string => typeof d === "string").map((d: string) => d.trim().toLowerCase())
+        : [];
+      let q = supabase
+        .from("porkbun_buy_queue")
+        .update({ status: "queued", batch_id: null, last_error: null, updated_at: new Date().toISOString() })
+        .eq("status", "failed");
+      if (only.length > 0) q = q.in("domain", only);
+      const { data, error } = await q.select("domain");
+      if (error) throw new Error(error.message);
+      const requeued = (data || []).map((r) => r.domain as string);
+      return NextResponse.json({ requeued: requeued.length, domains: requeued.slice(0, 50) });
+    }
+
     const raw = Array.isArray(body?.domains) ? body.domains : [];
     const domains: string[] = Array.from(
       new Set(
