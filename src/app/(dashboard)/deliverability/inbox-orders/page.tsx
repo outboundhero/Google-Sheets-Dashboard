@@ -14,6 +14,9 @@ import {
   Upload,
 } from "lucide-react";
 import { BulkCreateInboxOrdersDialog } from "@/components/deliverability/bulk-create-inbox-orders-dialog";
+import { InboxOrderBatches } from "@/components/deliverability/inbox-order-batches";
+import { useInboxOrderBatches } from "@/lib/hooks/use-inbox-order-batches";
+import { plainReason } from "@/lib/inbox-order-batches";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
@@ -74,6 +77,25 @@ function InboxOrdersPageInner() {
   const { orders, isLoading, mutate } = useInboxOrders(60_000, instancesQuery);
   const searchParams = useSearchParams();
   const router = useRouter();
+
+  // "By order" (one row per Create / Bulk Import, the default) or "By domain"
+  // (the original one-row-per-domain table with its actions). Remembered per
+  // browser.
+  const [view, setView] = useState<"orders" | "domains">("orders");
+  useEffect(() => {
+    if (localStorage.getItem("inbox-orders:view") === "domains") setView("domains");
+  }, []);
+  const chooseView = (v: "orders" | "domains") => {
+    setView(v);
+    try { localStorage.setItem("inbox-orders:view", v); } catch { /* private mode */ }
+  };
+  const {
+    batches,
+    isLoading: batchesLoading,
+    error: batchesError,
+    mutate: mutateBatches,
+  } = useInboxOrderBatches(view === "orders" ? instancesQuery : null);
+  const refreshAll = async () => { await Promise.all([mutate(), mutateBatches()]); };
 
   const [createOpen, setCreateOpen] = useState(false);
   const [bulkOpen, setBulkOpen] = useState(false);
@@ -238,7 +260,7 @@ function InboxOrdersPageInner() {
       if (!res.ok) throw new Error(json?.error || "Create failed");
       setCreateOpen(false);
       resetCreateFields();
-      await mutate();
+      await refreshAll();
     } catch (err) {
       setCreateError(err instanceof Error ? err.message : "Create failed");
     } finally {
@@ -350,9 +372,26 @@ function InboxOrdersPageInner() {
         <Button variant="outline" onClick={() => setBulkOpen(true)}>
           <Upload className="mr-1 h-4 w-4" /> Bulk Import
         </Button>
-        <Button variant="outline" onClick={() => mutate()}>
+        <Button variant="outline" onClick={() => refreshAll()}>
           <RefreshCw className="mr-1 h-4 w-4" /> Refresh List
         </Button>
+        <div className="inline-flex rounded-md border p-0.5 text-xs">
+          {(["orders", "domains"] as const).map((v) => (
+            <button
+              key={v}
+              onClick={() => chooseView(v)}
+              className={`rounded px-2.5 py-1 font-medium transition-colors ${
+                view === v ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:text-foreground"
+              }`}
+            >
+              {v === "orders" ? "By order" : "By domain"}
+            </button>
+          ))}
+        </div>
+        {/* Domain-row counts — only meaningful next to the domain table. In the
+            order view they read as contradictions (every retry of a failed
+            domain is another "failed" row). */}
+        {view === "domains" && (
         <div className="ml-auto flex flex-wrap gap-2 text-xs">
           <Badge variant="outline">SM: {grouped.scaledmail}</Badge>
           <Badge variant="outline">MB: {grouped.milkbox}</Badge>
@@ -362,8 +401,14 @@ function InboxOrdersPageInner() {
           {grouped.failed > 0 && <Badge variant="destructive">Failed: {grouped.failed}</Badge>}
           {grouped.flagged > 0 && <Badge variant="destructive">Flagged: {grouped.flagged}</Badge>}
         </div>
+        )}
       </div>
 
+      {view === "orders" && (
+        <InboxOrderBatches batches={batches} isLoading={batchesLoading} error={batchesError} />
+      )}
+
+      {view === "domains" && (
       <div className="rounded-md border overflow-x-auto">
         <table className="w-full text-sm">
           <thead className="bg-muted/40">
@@ -425,8 +470,13 @@ function InboxOrdersPageInner() {
                   {order.setup_stage && (
                     <div className="text-[10px] text-muted-foreground mt-0.5">{order.setup_stage}</div>
                   )}
+                  {/* Red only for a real failure. Inboxing's "Upload will be
+                      available in N" throttle notice stays on the row after the
+                      upload succeeds, and read as an error on live domains. */}
                   {order.failure_reason && (
-                    <div className="text-[10px] text-destructive mt-0.5">{order.failure_reason}</div>
+                    <div className={`text-[10px] mt-0.5 ${order.status === "failed" ? "text-destructive" : "text-muted-foreground"}`}>
+                      {order.status === "failed" ? order.failure_reason : plainReason(order.failure_reason)}
+                    </div>
                   )}
                 </td>
                 <td className="p-2">{order.mailbox_count}</td>
@@ -516,6 +566,7 @@ function InboxOrdersPageInner() {
           </tbody>
         </table>
       </div>
+      )}
 
       {/* Create Order dialog */}
       <Dialog open={createOpen} onOpenChange={setCreateOpen}>
@@ -782,7 +833,7 @@ function InboxOrdersPageInner() {
       <BulkCreateInboxOrdersDialog
         open={bulkOpen}
         onOpenChange={setBulkOpen}
-        onComplete={() => mutate()}
+        onComplete={() => refreshAll()}
         defaultInstance={orderInstance}
         defaultCsv={bulkPrefill}
       />
