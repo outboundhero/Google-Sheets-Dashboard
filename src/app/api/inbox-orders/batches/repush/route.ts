@@ -26,10 +26,13 @@ interface Result {
 //
 // Re-sends a domain's mailboxes from Inboxing to Bison, for domains that
 // landed short (fewer mailboxes in Bison than ordered) or never landed at
-// all. The upload call is the same one the hourly upload cron uses, with
-// skip_verified on, so Inboxing skips mailboxes already uploaded and only the
-// missing ones are sent. Built for the 9/25 order: 90 FacilityReach domains
-// came in with 32–48 of 49 mailboxes after Saturday's bulk upload.
+// all. The upload call is the same one the hourly upload cron uses. Inboxing
+// queues a job for every mailbox on the domain, and the ones already in Bison
+// are skipped, so only the missing ones get added — first live run
+// 2026-09-29: 2 CleaningOutbound domains, 49 jobs each, 48→49 and 47→49 within
+// 15 minutes, no duplicate senders, tags and status unchanged. Built for the
+// 9/25 order: 90 FacilityReach domains came in with 32–48 of 49 mailboxes
+// after Saturday's bulk upload.
 //
 // The target is the instance the domain's mailboxes are in now — not always
 // the one it was ordered for, since domains get moved after they land.

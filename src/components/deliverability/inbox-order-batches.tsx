@@ -208,8 +208,8 @@ function BatchCard({ b, onChanged }: { b: InboxOrderBatch; onChanged?: () => voi
     const where = instanceLabel(b.instance);
     const ok = window.confirm(
       `Re-push the missing inboxes for ${toPush.length} domain${toPush.length === 1 ? "" : "s"} (${where})?\n\n` +
-      `Inboxing skips inboxes that are already in Bison, so only the missing ones are sent. ` +
-      `This is a live action on Inboxing and can take a minute or two.`,
+      `Inboxing re-sends the domain's inboxes and Bison skips the ones it already has, so only the missing ones are added. ` +
+      `This is a live action on Inboxing. The inboxes usually land within 15 minutes.`,
     );
     if (!ok) return;
     setPushing(true);
