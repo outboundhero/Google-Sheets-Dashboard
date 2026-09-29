@@ -1,7 +1,8 @@
 "use client";
 
-import { useState } from "react";
-import { AlertTriangle, CheckCircle2, ChevronDown, ChevronRight, Clock, Loader2 } from "lucide-react";
+import { useEffect, useState } from "react";
+import { AlertTriangle, CheckCircle2, ChevronDown, ChevronRight, Clock, Loader2, Upload } from "lucide-react";
+import { Button } from "@/components/ui/button";
 import { BISON_INSTANCES, isInstanceSlug } from "@/lib/bison-instances";
 import {
   DEFAULT_INBOXING_ACCOUNT,
@@ -86,34 +87,73 @@ function headline(b: InboxOrderBatch): string {
   return parts.join(" · ");
 }
 
-/** The line about talking to the provider and Bison — or nothing when it's all done. */
-function signalLine(b: InboxOrderBatch): { text: string; tone: "muted" | "warn" } | null {
+interface Signal { text: string; tone: "muted" | "warn" }
+
+/** Lines about talking to the provider and Bison — none when it's all done. */
+function signalLines(b: InboxOrderBatch): Signal[] {
   const provider = PROVIDER_LABEL[b.provider] ?? b.provider;
+  const out: Signal[] = [];
   if (b.settingUp > 0) {
     if (b.checkOverdue) {
-      return {
+      out.push({
         text: b.lastCheckedAt
           ? `Last status check with ${provider} was ${ago(b.lastCheckedAt)} — overdue`
           : `No status check with ${provider} yet, ${ago(b.placedAt).replace(" ago", "")} after placing — overdue`,
         tone: "warn",
-      };
+      });
+    } else {
+      out.push({
+        text: b.lastCheckedAt
+          ? `Last status check with ${provider} ${ago(b.lastCheckedAt)} · LeadSync checks every 6 hours`
+          : `Waiting for the first status check · LeadSync checks with ${provider} every 6 hours`,
+        tone: "muted",
+      });
     }
-    return {
-      text: b.lastCheckedAt
-        ? `Last status check with ${provider} ${ago(b.lastCheckedAt)} · LeadSync checks every 6 hours`
-        : `Waiting for the first status check · LeadSync checks with ${provider} every 6 hours`,
-      tone: "muted",
-    };
   }
   if (b.missingMailboxes > 0) {
     const short = b.partial === 1 ? "1 domain" : `${n(b.partial)} domains`;
-    return {
-      text: `${n(b.missingMailboxes)} mailbox${b.missingMailboxes === 1 ? "" : "es"} didn't reach Bison across ${short} — those can be re-pushed from ${provider}`,
+    out.push({
+      text: `${n(b.missingMailboxes)} inbox${b.missingMailboxes === 1 ? "" : "es"} didn't reach Bison across ${short}`,
       tone: "warn",
-    };
+    });
   }
-  return null;
+  if (b.stuck > 0) {
+    out.push({
+      text: `${n(b.stuck)} domain${b.stuck === 1 ? " was" : "s were"} set up at ${provider} but never reached Bison`,
+      tone: "warn",
+    });
+  }
+  return out;
 }
+
+interface RepushResponse {
+  error?: string;
+  sent: number;
+  jobs: number;
+  skipped: number;
+  throttled: number;
+  failed: number;
+  notAttempted: number;
+  results: { outcome: string; domain: string; detail?: string }[];
+}
+
+function describeRepush(r: RepushResponse): { text: string; tone: "ok" | "warn" | "bad" } {
+  const firstDetail = (o: string) => r.results.find((x) => x.outcome === o)?.detail ?? "";
+  const parts: string[] = [];
+  if (r.sent > 0) parts.push(`Sent ${n(r.sent)} domain${r.sent === 1 ? "" : "s"} to Inboxing's upload queue`);
+  if (r.throttled > 0) parts.push(`${n(r.throttled)} in Inboxing's upload cooldown, try again later`);
+  if (r.failed > 0) parts.push(`${n(r.failed)} failed (${firstDetail("failed")})`);
+  if (r.skipped > 0) parts.push(`${n(r.skipped)} skipped (${firstDetail("skipped")})`);
+  if (r.notAttempted > 0) parts.push(`${n(r.notAttempted)} not reached this time, click again`);
+  const tone = r.failed > 0 ? "bad" : r.throttled + r.skipped + r.notAttempted > 0 ? "warn" : "ok";
+  return { text: parts.join(" · ") || "Nothing to send", tone };
+}
+
+/** Domains the re-push can help: short in Bison, or set up but never landed. */
+const repushable = (b: InboxOrderBatch) =>
+  b.provider === "inboxing"
+    ? b.members.filter((m) => m.state === "partial" || m.state === "stuck")
+    : [];
 
 function ProgressBar({ b }: { b: InboxOrderBatch }) {
   const total = Math.max(1, b.domains);
@@ -145,12 +185,56 @@ function MemberRow({ m }: { m: BatchMember }) {
   );
 }
 
-function BatchCard({ b }: { b: InboxOrderBatch }) {
+function BatchCard({ b, onChanged }: { b: InboxOrderBatch; onChanged?: () => void }) {
   const [open, setOpen] = useState(false);
   const [showLive, setShowLive] = useState(false);
   const health = healthOf(b);
   const chip = HEALTH_CHIP[health];
-  const signal = signalLine(b);
+  const signals = signalLines(b);
+  const toPush = repushable(b);
+
+  // A re-push only changes the counts after the next inbox sync, so remember
+  // that it was done — otherwise the card looks untouched and invites a
+  // second click.
+  const storeKey = `inbox-orders:repushed:${b.key}`;
+  const [pushing, setPushing] = useState(false);
+  const [pushResult, setPushResult] = useState<{ text: string; tone: "ok" | "warn" | "bad" } | null>(null);
+  const [lastPushed, setLastPushed] = useState<string | null>(null);
+  useEffect(() => {
+    try { setLastPushed(localStorage.getItem(storeKey)); } catch { /* private mode */ }
+  }, [storeKey]);
+
+  async function repush() {
+    const where = instanceLabel(b.instance);
+    const ok = window.confirm(
+      `Re-push the missing inboxes for ${toPush.length} domain${toPush.length === 1 ? "" : "s"} (${where})?\n\n` +
+      `Inboxing skips inboxes that are already in Bison, so only the missing ones are sent. ` +
+      `This is a live action on Inboxing and can take a minute or two.`,
+    );
+    if (!ok) return;
+    setPushing(true);
+    setPushResult(null);
+    try {
+      const res = await fetch("/api/inbox-orders/batches/repush", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ids: toPush.map((m) => m.id) }),
+      });
+      const json = (await res.json().catch(() => ({}))) as RepushResponse;
+      if (!res.ok || json.error) throw new Error(json.error || `HTTP ${res.status}`);
+      setPushResult(describeRepush(json));
+      if (json.sent > 0) {
+        const at = new Date().toISOString();
+        setLastPushed(at);
+        try { localStorage.setItem(storeKey, at); } catch { /* private mode */ }
+      }
+      onChanged?.();
+    } catch (e) {
+      setPushResult({ text: e instanceof Error ? e.message : "Re-push failed", tone: "bad" });
+    } finally {
+      setPushing(false);
+    }
+  }
   // Everything that isn't simply "live with every mailbox" goes first; the
   // healthy domains sit behind a toggle so a 262-domain order stays readable.
   const flagged = b.members.filter((m) => m.state !== "live");
@@ -159,7 +243,10 @@ function BatchCard({ b }: { b: InboxOrderBatch }) {
 
   return (
     <div className="rounded-lg border bg-card">
-      <button onClick={() => setOpen((v) => !v)} className="w-full px-4 py-3 text-left hover:bg-muted/30 transition-colors">
+      <button
+        onClick={() => setOpen((v) => !v)}
+        className={`w-full px-4 pt-3 text-left hover:bg-muted/30 transition-colors ${signals.length > 0 || toPush.length > 0 ? "pb-1" : "pb-3"}`}
+      >
         <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
           {open ? <ChevronDown className="h-4 w-4 text-muted-foreground shrink-0" /> : <ChevronRight className="h-4 w-4 text-muted-foreground shrink-0" />}
           <span className="text-sm font-semibold">
@@ -191,13 +278,39 @@ function BatchCard({ b }: { b: InboxOrderBatch }) {
           )}
         </div>
 
-        {signal && (
-          <div className={`mt-1 pl-7 flex items-center gap-1.5 text-xs ${signal.tone === "warn" ? "text-amber-600" : "text-muted-foreground"}`}>
-            {signal.tone === "warn" ? <AlertTriangle className="h-3 w-3 shrink-0" /> : <Clock className="h-3 w-3 shrink-0" />}
-            {signal.text}
-          </div>
-        )}
       </button>
+
+      {/* Outside the expand button: this row holds its own button. */}
+      {(signals.length > 0 || toPush.length > 0) && (
+        <div className="space-y-1 px-4 pb-3 pl-11">
+          {signals.map((s, i) => (
+            <div key={i} className={`flex items-center gap-1.5 text-xs ${s.tone === "warn" ? "text-amber-600" : "text-muted-foreground"}`}>
+              {s.tone === "warn" ? <AlertTriangle className="h-3 w-3 shrink-0" /> : <Clock className="h-3 w-3 shrink-0" />}
+              {s.text}
+            </div>
+          ))}
+          {toPush.length > 0 && (
+            <div className="flex flex-wrap items-center gap-2 pt-0.5">
+              <Button size="sm" variant="outline" className="h-7 gap-1.5 text-xs" disabled={pushing} onClick={repush}>
+                {pushing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Upload className="h-3.5 w-3.5" />}
+                {pushing
+                  ? "Re-pushing…"
+                  : `${lastPushed ? "Re-push again" : "Re-push missing inboxes"} (${n(toPush.length)} domain${toPush.length === 1 ? "" : "s"})`}
+              </Button>
+              {lastPushed && !pushResult && (
+                <span className="text-[11px] text-muted-foreground">
+                  Re-pushed {ago(lastPushed)}. Counts update after the next inbox sync (Deliverability → Sync Inboxes, or automatically every 2 days).
+                </span>
+              )}
+            </div>
+          )}
+          {pushResult && (
+            <div className={`text-[11px] ${pushResult.tone === "bad" ? "text-destructive" : pushResult.tone === "warn" ? "text-amber-600" : "text-emerald-600"}`}>
+              {pushResult.text}. Counts update after the next inbox sync (Deliverability → Sync Inboxes, or automatically every 2 days).
+            </div>
+          )}
+        </div>
+      )}
 
       {open && (
         <div className="border-t">
@@ -243,10 +356,12 @@ export function InboxOrderBatches({
   batches,
   isLoading,
   error,
+  onChanged,
 }: {
   batches: InboxOrderBatch[];
   isLoading: boolean;
   error: string | null;
+  onChanged?: () => void;
 }) {
   if (isLoading && batches.length === 0) {
     return (
@@ -277,7 +392,7 @@ export function InboxOrderBatches({
         {inProgress > 0 && <span className="text-sky-600"><b>{inProgress}</b> in progress</span>}
         <span>One row per order as placed; click an order to see its domains.</span>
       </div>
-      {batches.map((b) => <BatchCard key={b.key} b={b} />)}
+      {batches.map((b) => <BatchCard key={b.key} b={b} onChanged={onChanged} />)}
     </div>
   );
 }

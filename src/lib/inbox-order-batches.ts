@@ -201,6 +201,13 @@ export function buildBatches(
         if (state === "partial") note = `${r.mailbox_count - n} mailbox${r.mailbox_count - n === 1 ? "" : "es"} didn't reach Bison`;
         else if (r.status === "failed") note = "Provider reported a failure, but the mailboxes are in Bison";
         if (movedTo) note = note ? `${note} · now on ${movedTo}` : `Moved to ${movedTo}`;
+        // Also present somewhere else: a move that stopped partway, or a
+        // duplicate the cleanup cron hasn't settled yet.
+        const others = places.filter((p) => p !== home);
+        if (others.length > 0) {
+          const also = others.map((p) => `${opts.instanceLabel(p.instance)} (${p.mailboxes})`).join(", ");
+          note = note ? `${note} · also in ${also}` : `Also in ${also}`;
+        }
       } else if (r.status === "failed") {
         state = "failed";
         note = plainReason(r.failure_reason);

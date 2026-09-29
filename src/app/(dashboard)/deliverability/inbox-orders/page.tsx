@@ -405,7 +405,12 @@ function InboxOrdersPageInner() {
       </div>
 
       {view === "orders" && (
-        <InboxOrderBatches batches={batches} isLoading={batchesLoading} error={batchesError} />
+        <InboxOrderBatches
+          batches={batches}
+          isLoading={batchesLoading}
+          error={batchesError}
+          onChanged={() => { void mutateBatches(); }}
+        />
       )}
 
       {view === "domains" && (
