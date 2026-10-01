@@ -97,8 +97,9 @@ export function countBusinessDays(from: Date, to: Date): number {
   return count;
 }
 
-/** Monthly anniversary of `anchor` shifted by `months`, clamped for short months. */
-function anniversary(anchor: Date, months: number): Date {
+/** Monthly anniversary of `anchor` shifted by `months`, clamped for short months.
+ *  Exported so QL pacing (sending-mode/ql-pace.ts) uses the same billing period. */
+export function anniversary(anchor: Date, months: number): Date {
   const y = anchor.getFullYear();
   const m = anchor.getMonth() + months;
   const day = anchor.getDate();
@@ -107,7 +108,7 @@ function anniversary(anchor: Date, months: number): Date {
 }
 
 /** Latest cycle start ≤ now, as a whole number of months after the anchor. */
-function currentCycleStart(anchor: Date, now: Date): { start: Date; index: number } {
+export function currentCycleStart(anchor: Date, now: Date): { start: Date; index: number } {
   let months =
     (now.getFullYear() - anchor.getFullYear()) * 12 + (now.getMonth() - anchor.getMonth());
   if (anniversary(anchor, months) > now) months--;

@@ -235,6 +235,10 @@
     {
       "path": "/api/cron/whitelist-sync",
       "schedule": "30 13 * * *"
+    },
+    {
+      "path": "/api/cron/sending-mode",
+      "schedule": "10 * * * *"
     }
   ]
 }

@@ -145,7 +145,8 @@ function isMeetingReady(l: Lead): boolean {
 
 // QL = status has a "Quality Lead" part (incl. "Quality Lead (Appointment …)"),
 // but NOT "Not a Quality Lead". Status can be a comma-joined compound.
-function isQualityLead(l: Lead): boolean {
+// Exported so QL pacing (sending-mode/ql-pace.ts) counts the same thing.
+export function isQualityLead(l: Lead): boolean {
   const parts = String(l.status || "").toLowerCase().split(",").map((p) => p.trim());
   return parts.some((p) => p === "quality lead" || p.startsWith("quality lead ("));
 }

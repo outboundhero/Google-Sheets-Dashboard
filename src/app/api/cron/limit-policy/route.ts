@@ -5,6 +5,7 @@ import { getHandledDomains, logEvents } from "@/lib/replacement/store";
 import { hasBurntTag } from "@/lib/replacement/burnt-tag";
 import { getKnownClientTags } from "@/lib/replacement/cross-tag-audit";
 import { ALL_INSTANCE_SLUGS, type BisonInstanceSlug } from "@/lib/bison-instances";
+import { clientsWithOpenWindows } from "@/lib/sending-mode/windows";
 import type { NewEvent } from "@/lib/replacement/store";
 
 export const maxDuration = 300;
@@ -80,7 +81,7 @@ export async function GET(request: Request) {
     const dryRun = url.searchParams.get("dry") === "1";
 
     const supabase = getSupabaseAdmin();
-    const [knownTags, handled] = await Promise.all([getKnownClientTags(), getHandledDomains()]);
+    const [knownTags, handled, inWindow] = await Promise.all([getKnownClientTags(), getHandledDomains(), clientsWithOpenWindows()]);
     const knownUpper = new Set([...knownTags].map((t) => t.toUpperCase()));
 
     const doms: DomRow[] = [];
@@ -102,11 +103,16 @@ export async function GET(request: Request) {
 
     const reserveDomains: DomRow[] = [];
     const assignedDomains: (DomRow & { clientTag: string })[] = [];
+    let skippedInWindow = 0;
     for (const d of doms) {
       if (handled.has(`${d.instance}:${d.domain}`) || hasBurntTag(d.tags)) continue;
       if (!hasProviderTag(d.tags)) continue; // Inboxing/MilkBox only per spec
       const tag = clientTagOf(d.tags);
       if (tag === null) reserveDomains.push(d);
+      // A client in a Turbo or throttle window owns its senders' limits until
+      // the window ends — raising them to 5 here would undo a 3/day throttle
+      // the next morning (sending-mode/windows.ts).
+      else if (inWindow.has(tag)) skippedInWindow++;
       else assignedDomains.push({ ...d, clientTag: tag });
     }
 
@@ -193,7 +199,7 @@ export async function GET(request: Request) {
     return NextResponse.json({
       dryRun,
       reserve: { domains: reserveDomains.length, inboxesOffPolicy: reserveTargets.length, processed: reserveWork.length, ...reserveResult },
-      assigned: { eligibleDomains: eligible.length, ripeDomains: ripe.length, inboxesToRaise: assignedTargets.length, processed: assignedWork.length, ...assignedResult },
+      assigned: { eligibleDomains: eligible.length, ripeDomains: ripe.length, inboxesToRaise: assignedTargets.length, processed: assignedWork.length, skippedInWindow, ...assignedResult },
     });
   } catch (e) {
     return NextResponse.json({ error: e instanceof Error ? e.message : "limit-policy failed" }, { status: 500 });

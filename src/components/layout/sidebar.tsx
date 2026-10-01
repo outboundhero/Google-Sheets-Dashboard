@@ -89,6 +89,7 @@ const allNavItems: NavEntry[] = [
     ],
   },
   { href: "/mrl-pacing", label: "MRL Pacing", icon: Gauge, roles: ["admin"] },
+  { href: "/performance", label: "Performance", icon: Gauge, roles: ["admin"] },
   { href: "/settings", label: "Settings", icon: Settings, roles: ["admin"] },
 ];
 
