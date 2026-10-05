@@ -31,6 +31,8 @@ export const maxDuration = 300;
 //      silent side. Both silent → keep the move DESTINATION (the side that is
 //      not first_instance in domain_first_created) and delete the origin —
 //      that is the direction someone intended. Both active → a human call.
+//      The destination comes from the latest recorded move (move_submitted)
+//      first, then the purchase order, then first_instance.
 //   Anything else (3+ instances, conflicting signals, protected roots) is
 //   reported in `needsHuman` and logged, never auto-deleted.
 //
@@ -50,7 +52,11 @@ interface Verdict {
   del: string;
   rule: string;
   clientTag?: string;
+  followMove?: boolean;   // decided by a recorded move → the order follows it
 }
+
+// How far back a recorded move still decides the keeper.
+const MOVE_INTENT_DAYS = 30;
 
 export async function GET(request: Request) {
   try {
@@ -133,6 +139,28 @@ export async function GET(request: Request) {
       }
     }
 
+    // Recorded moves: move-domains logs a move_submitted event per domain it
+    // uploads to another instance. A move is newer intent than the purchase
+    // order — the order is only repointed once every inbox lands inside the
+    // move dialog's 12-minute watch, so a slow Inboxing upload left it naming
+    // the source and this cron deleted the fresh copy (Nick's 12 CCGHWD
+    // domains, B2B 1 → B2B 2, 2026-10-02). Latest move per domain wins.
+    const movedTo = new Map<string, { to: string; at: string }>();
+    const moveSince = new Date(Date.now() - MOVE_INTENT_DAYS * 86_400_000).toISOString();
+    for (let i = 0; i < names.length; i += 100) {
+      const { data } = await supabase
+        .from("replacement_events")
+        .select("domain,instance,created_at")
+        .eq("event_type", "move_submitted")
+        .in("domain", names.slice(i, i + 100))
+        .gte("created_at", moveSince)
+        .order("created_at", { ascending: false });
+      for (const r of (data || []) as { domain: string; instance: string | null; created_at: string }[]) {
+        const k = r.domain.toLowerCase();
+        if (r.instance && !movedTo.has(k)) movedTo.set(k, { to: r.instance, at: r.created_at });
+      }
+    }
+
     // Move direction, for the both-silent untagged case.
     const firstInstance = new Map<string, string>();
     {
@@ -212,9 +240,12 @@ export async function GET(request: Request) {
         // reserve moved FR→OH kept losing its fresh OH copy to its own send
         // history on FR, the mover re-uploaded it, and cleanup deleted it
         // again — urbancorecleaning.co looped 4× from Aug 25 to Sep 6.
-        // Destination = the workspace the domain was ORDERED for when an order
-        // exists and one side is that workspace; otherwise the non-origin side.
-        const intended = orderedFor.get(dup.domain.toLowerCase());
+        // Destination = where the latest recorded move sent it; else the
+        // workspace the domain was ORDERED for when an order exists and one
+        // side is that workspace; otherwise the non-origin side.
+        const move = movedTo.get(dup.domain.toLowerCase());
+        const moveSide = move ? sides.find((s) => s.instance === move.to) : undefined;
+        const intended = moveSide ? moveSide.instance : orderedFor.get(dup.domain.toLowerCase());
         const intendedSide = intended ? sides.find((s) => s.instance === intended) : undefined;
         const origin = intendedSide
           ? sides.find((s) => s !== intendedSide)?.instance
@@ -232,9 +263,11 @@ export async function GET(request: Request) {
             needsHuman.push({ domain: dup.domain, reason: `move to ${destSide.instance} only partially landed (${destRows} of ${originRows} senders)`, sides: sideNames });
             continue;
           }
+          const via = moveSide ? `moved ${move!.at.slice(0, 10)} to` : intendedSide ? "ordered for" : "recorded move to";
           verdicts.push({
             domain: dup.domain, keep: destSide.instance, del: originSide.instance,
-            rule: `${intendedSide ? "ordered for" : "recorded move to"} ${destSide.instance} — landed (${destRows} senders), retiring the ${originSide.instance} copy`,
+            rule: `${via} ${destSide.instance} — landed (${destRows} senders), retiring the ${originSide.instance} copy`,
+            followMove: !!moveSide,
           });
           continue;
         }
@@ -303,6 +336,13 @@ export async function GET(request: Request) {
         toSchedule.map((v) => ({ instance: v.del, domain: v.domain })),
         { source: "duplicate", graceDays: 0 },
       );
+      // A move the dialog stopped watching never repointed its order. Once the
+      // old copy is retired the order must name the surviving one, or stock
+      // counts read it as a domain still arriving on the old instance.
+      for (const v of toSchedule.filter((x) => x.followMove)) {
+        await supabase.from("inbox_orders").update({ instance: v.keep })
+          .eq("domain", v.domain).eq("instance", v.del).in("status", ["active", "pending"]);
+      }
       await logEvents(
         toSchedule.map((v) => ({
           instance: v.del as BisonInstanceSlug,

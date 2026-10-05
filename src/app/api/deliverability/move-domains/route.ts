@@ -15,7 +15,7 @@ import {
   toInboxingAccount,
   type InboxingAccount,
 } from "@/lib/inboxing-accounts";
-import { getHandledDomains } from "@/lib/replacement/store";
+import { getHandledDomains, logEvents, type NewEvent } from "@/lib/replacement/store";
 
 export const maxDuration = 300;
 
@@ -77,6 +77,18 @@ interface SenderEmail {
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const hasInboxingTag = (tags: string[] | null) =>
   (tags || []).some((t) => (t || "").trim().toLowerCase().startsWith("inboxing"));
+
+/** Who asked for the move — the signed-in user, or null for a cron / internal call. */
+async function actorEmail(): Promise<string | null> {
+  try {
+    const { cookies } = await import("next/headers");
+    const { createServerSupabaseClient } = await import("@/lib/supabase");
+    const { data: { user } } = await createServerSupabaseClient(await cookies()).auth.getUser();
+    return user?.email ?? null;
+  } catch {
+    return null;
+  }
+}
 
 /** LeadSync rows for the requested domain names, across all instances. */
 async function loadDomainRows(domains: string[]): Promise<Map<string, DomainRowLite[]>> {
@@ -399,6 +411,7 @@ export async function POST(request: Request) {
         inflight.map((f) => targetSenderCount(target, String(f.domain || "").toLowerCase())),
       );
       let anyArrived = false;
+      const landedEvents: NewEvent[] = [];
       for (let i = 0; i < inflight.length; i++) {
         const f = inflight[i];
         const dom = String(f.domain || "").toLowerCase();
@@ -419,6 +432,7 @@ export async function POST(request: Request) {
               await captureCarryover(f.sourceInstance as BisonInstanceSlug, target, dom);
               await supabase.from("inbox_orders").update({ instance: target }).eq("provider", "inboxing").eq("domain", dom);
               results.push({ domain: dom, status: "done", sourceInstance: f.sourceInstance as BisonInstanceSlug, landed: senders.length, detail: `${senders.length} inboxes now on ${target}` });
+              landedEvents.push({ instance: target, domain: dom, eventType: "move_landed", detail: `move landed: ${senders.length} inboxes on ${target} (from ${f.sourceInstance})` });
               anyArrived = true;
             } else {
               results.push({ domain: dom, status: "uploading", landed: senders.length, expected, detail: probeTimedOut ? "probe timed out — full fetch short" : "finalizing" });
@@ -430,6 +444,7 @@ export async function POST(request: Request) {
           results.push({ domain: dom, status: "uploading", landed: cnt, expected, detail: "landing" });
         }
       }
+      if (landedEvents.length > 0) await logEvents(landedEvents).catch(() => {});
       if (anyArrived) { try { await supabase.rpc("rebuild_domain_stats"); } catch { /* best-effort */ } }
       return NextResponse.json({ results, mode: "poll" });
     }
@@ -509,6 +524,22 @@ export async function POST(request: Request) {
       }
     }
 
+    // Record every submitted move. The duplicate cleanup reads the latest one
+    // per domain as the intended home: without it, it fell back to the
+    // purchase order — still naming the source until every inbox lands — and
+    // deleted the new copy (Nick's 12 CCGHWD domains, B2B 1 → B2B 2,
+    // 2026-10-02). Shows in the domain's History too.
+    if (inFlight.length > 0) {
+      const actor = await actorEmail();
+      await logEvents(inFlight.map((f) => ({
+        instance: target,
+        domain: f.domain,
+        eventType: "move_submitted" as const,
+        detail: `move ${f.source} → ${target} submitted (${f.expected} inbox${f.expected === 1 ? "" : "es"})${actor ? ` by ${actor}` : ""}`,
+        signals: { kind: "move", from: f.source, to: target, expected: f.expected, actor },
+      }))).catch((e) => console.error("[move] could not record move intent:", e instanceof Error ? e.message : e));
+    }
+
     // SUBMIT mode: uploads are queued on Inboxing — hand the in-flight set back
     // to the FE, which polls (mode:"poll") with live progress. No blocking wait.
     if (mode === "submit") {
@@ -564,6 +595,7 @@ export async function POST(request: Request) {
           sourceInstance: f.source,
           detail: `${f.senders!.length} inboxes now on ${target} · still on ${f.source} (remove separately)`,
         });
+        await logEvents([{ instance: target, domain: f.domain, eventType: "move_landed", detail: `move landed: ${f.senders!.length} inboxes on ${target} (from ${f.source})` }]).catch(() => {});
       } catch (e) {
         results.push({ domain: f.domain, status: "failed", stage: "finalize", error: e instanceof Error ? e.message : "failed" });
       }

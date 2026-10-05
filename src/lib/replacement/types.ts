@@ -89,7 +89,11 @@ export type ReplacementEventType =
   | "ramped"
   // observe/confirm/auto flipped on the Replacement page — the audit trail
   // Nick asked for after the silent Aug 17–26 observe window
-  | "mode_changed";
+  | "mode_changed"
+  // cross-instance move: upload submitted to the target / senders landed there.
+  // move_submitted is the intent the duplicate cleanup honours (Nick's CCGHWD
+  // move, 2026-10-02: the cleanup deleted the new copy and kept the old one)
+  | "move_submitted" | "move_landed";
 
 export interface ReplacementEvent {
   id: number;

@@ -3262,7 +3262,10 @@ function DeliverabilityPageInner() {
         <div className="rounded-lg border bg-muted/30 px-4 py-3 space-y-2">
           <div className="flex items-center justify-between text-xs">
             <span className="flex items-center gap-2">
-              {moveProgress.queued
+              {/* Not "finished" while Inboxing is still uploading — Nick read the
+                  old green "Move finished" as done and tagged the domains on the
+                  instance they hadn't reached yet (CCGHWD, 2026-10-02). */}
+              {moveProgress.queued || (!moveProgress.running && moveProgress.counts.uploading > 0)
                 ? <Clock className="h-3.5 w-3.5 text-amber-500" />
                 : moveProgress.running
                 ? <Loader2 className="h-3.5 w-3.5 animate-spin text-primary" />
@@ -3270,6 +3273,8 @@ function DeliverabilityPageInner() {
               <span className="font-medium">
                 {moveProgress.queued
                   ? `Queued — waiting for the previous process… (${moveProgress.total} domains → ${moveProgress.targetLabel})`
+                  : !moveProgress.running && moveProgress.counts.uploading > 0
+                  ? `Still landing — ${moveProgress.counts.done}/${moveProgress.total} domains on ${moveProgress.targetLabel}, ${moveProgress.counts.uploading} still uploading`
                   : `${moveProgress.running ? "Moving" : "Move finished —"} ${moveProgress.done}/${moveProgress.total} domains → ${moveProgress.targetLabel}`}
               </span>
               <span className="text-muted-foreground">via Inboxing “{moveProgress.connectionName}”</span>
@@ -3310,7 +3315,7 @@ function DeliverabilityPageInner() {
           </div>
           {moveProgress.uploading.length > 0 && (
             <div className="rounded-md border border-amber-500/30 bg-amber-950/10 px-3 py-1.5 text-[11px] text-amber-400">
-              Still uploading at Inboxing (re-run Move for these later to finish):{" "}
+              Still uploading at Inboxing — don&apos;t tag these yet; the old copy stays until they land. Click Retry later to pick them up:{" "}
               <span className="text-amber-300">{moveProgress.uploading.join(", ")}</span>
             </div>
           )}
