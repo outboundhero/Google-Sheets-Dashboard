@@ -8,7 +8,7 @@ import { hasBurntTag } from "@/lib/replacement/burnt-tag";
 import { ALL_INSTANCE_SLUGS, type BisonInstanceSlug } from "@/lib/bison-instances";
 import { getOffboardedClientTags, isOffboardedTagName } from "@/lib/offboarded-tags";
 import { deriveStage, deriveSetRole } from "@/lib/campaigns/stage";
-import { recordPipelineAlert, resolveAlertsForClients } from "@/lib/pipeline-alerts";
+import { recordPipelineAlert, resolveAlertsForStep } from "@/lib/pipeline-alerts";
 
 export const maxDuration = 300;
 
@@ -192,15 +192,22 @@ export async function GET(request: Request) {
       // missing sender-wise, and cleared automatically once complete.
       const gaps = incompleteStages(liveAll.filter((c) => !["archived", "completed"].includes(c.status)));
       if (!dryRun) {
+        // One alert per instance. A client-wide resolve let a complete set on
+        // one instance clear the gap on another every pass, so SINY's
+        // archived B2C #2 campaigns showed up and vanished 104 times without
+        // anyone seeing them (Spencer, 2026-10-07).
+        const setStep = `${SET_ALERT_STEP}:${instance}`;
         if (gaps.length > 0) {
           await recordPipelineAlert({
-            source: SET_ALERT_SOURCE, clientTag: tag, step: SET_ALERT_STEP, silent: true,
+            source: SET_ALERT_SOURCE, clientTag: tag, step: setStep, silent: true,
             reason: `${tag} on ${instance}: ${gaps.map((g) => `${g.stage} is missing ${g.missing.join(" + ")}`).join("; ")}. Rechecked every pass.`,
             domains: [],
           }).catch(() => undefined);
         } else {
-          await resolveAlertsForClients(SET_ALERT_SOURCE, [tag]).catch(() => undefined);
+          await resolveAlertsForStep(SET_ALERT_SOURCE, tag, setStep).catch(() => undefined);
         }
+        // Rows written before the per-instance step; the new one replaces them.
+        await resolveAlertsForStep(SET_ALERT_SOURCE, tag, SET_ALERT_STEP).catch(() => undefined);
       }
       if (gaps.length > 0) res.incompleteSets = gaps.map((g) => `${g.stage}: missing ${g.missing.join(" + ")}`);
       if (camps.length === 0) { results.push(res); lastDone = k; continue; }

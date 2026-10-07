@@ -27,10 +27,11 @@ const SOURCE_LABEL: Record<string, string> = {
   "stuck-campaign": "Campaign stuck in Processing",
   "orphan-attach": "Tagged, not yet in campaigns",
   "campaign-set": "Campaign set not fully built",
+  "campaign-archived": "Campaign archived, client still active",
 };
 // Alerts that report an external condition — nothing in LeadSync to retry.
 // They auto-resolve when the condition clears; Dismiss only.
-const NO_RETRY_SOURCES = new Set(["stuck-campaign", "orphan-attach", "campaign-set"]);
+const NO_RETRY_SOURCES = new Set(["stuck-campaign", "orphan-attach", "campaign-set", "campaign-archived"]);
 // Heads-up sources: recorded silently (no Slack), informational, auto-resolve.
 // Rendered apart from real failures so a pre-launch client does not read as
 // a broken pipeline (Spencer, 2026-09-17).
@@ -61,6 +62,9 @@ export function PipelineAlertsBanner() {
   // row with a count, not 22 rows above the fold (Vicky 2026-09-07).
   const [stuckOpen, setStuckOpen] = useState(false);
   const [headsUpOpen, setHeadsUpOpen] = useState(false);
+  // Archived campaigns on active clients are shown open — the point is that
+  // someone notices (SINY sat archived for two weeks, Spencer 2026-10-07).
+  const [archivedOpen, setArchivedOpen] = useState(true);
 
   // Blocked (viewer) or errored fetch → show nothing rather than a broken box.
   if (error || !Array.isArray(data) || data.length === 0) return null;
@@ -106,10 +110,14 @@ export function PipelineAlertsBanner() {
   };
 
   const stuck = data.filter((a) => a.source === "stuck-campaign");
+  const archived = data.filter((a) => a.source === "campaign-archived");
   const headsUp = data.filter((a) => HEADS_UP_SOURCES.has(a.source));
-  const others = data.filter((a) => a.source !== "stuck-campaign" && !HEADS_UP_SOURCES.has(a.source));
+  const others = data.filter(
+    (a) => a.source !== "stuck-campaign" && a.source !== "campaign-archived" && !HEADS_UP_SOURCES.has(a.source),
+  );
   const headline = [
     others.length > 0 ? `${others.length} pipeline ${others.length === 1 ? "failure needs" : "failures need"} attention` : null,
+    archived.length > 0 ? `${archived.length} active client${archived.length === 1 ? " has" : "s have"} archived campaigns` : null,
     stuck.length > 0 ? `${stuck.length} campaign${stuck.length === 1 ? "" : "s"} stuck in Processing` : null,
     headsUp.length > 0 ? `${headsUp.length} heads-up` : null,
   ].filter(Boolean).join(" · ");
@@ -125,6 +133,33 @@ export function PipelineAlertsBanner() {
             : "Dashboard only, nothing was sent to Slack."}
         </span>
       </div>
+      {archived.length > 0 && (
+        <div className="border-b border-destructive/10">
+          <button onClick={() => setArchivedOpen((v) => !v)} className="w-full flex items-center gap-2 px-4 py-2.5 text-left">
+            {archivedOpen ? <ChevronDown className="h-4 w-4 shrink-0 text-destructive" /> : <ChevronRight className="h-4 w-4 shrink-0 text-destructive" />}
+            <span className="text-sm font-medium">Archived campaigns on active clients — {archived.length}</span>
+            <span className="text-[11px] text-muted-foreground">
+              revive in Bison, or dismiss if archived on purpose — clears itself once revived
+            </span>
+            <span className="ml-auto text-[11px] text-muted-foreground">{archivedOpen ? "collapse" : "expand"}</span>
+          </button>
+          {archivedOpen && (
+            <ul className="divide-y divide-destructive/10 border-t border-destructive/10">
+              {archived.map((a) => (
+                <li key={a.id} className="px-4 py-2 flex items-center justify-between gap-3 text-xs">
+                  <div className="min-w-0 flex items-center gap-2 flex-wrap">
+                    {a.client_tag && <span className="font-mono px-1.5 py-0.5 rounded bg-muted text-foreground">{a.client_tag}</span>}
+                    <span className="text-muted-foreground break-words">{a.reason}</span>
+                  </div>
+                  <Button size="sm" variant="ghost" className="gap-1 h-7 text-muted-foreground shrink-0" disabled={!!busy[a.id]} onClick={() => dismiss(a.id)}>
+                    <X className="h-3 w-3" /> Dismiss
+                  </Button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      )}
       {stuck.length > 0 && (
         <div className="border-b border-destructive/10">
           <button onClick={() => setStuckOpen((v) => !v)} className="w-full flex items-center gap-2 px-4 py-2.5 text-left">

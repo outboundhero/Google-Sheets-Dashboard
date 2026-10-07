@@ -149,6 +149,19 @@ export async function resolveAlertsForClients(source: string, clientTags: string
     .in("client_tag", tags);
 }
 
+/** Clears open alerts for ONE (source, client, step) — for checks that record a
+ *  separate step per instance, so clearing one instance can't clear another. */
+export async function resolveAlertsForStep(source: string, clientTag: string, step: string): Promise<void> {
+  const supabase = getSupabaseAdmin();
+  await supabase
+    .from("pipeline_alerts")
+    .update({ status: "resolved", resolved_at: new Date().toISOString() })
+    .eq("source", source)
+    .eq("status", "open")
+    .eq("client_tag", clientTag)
+    .eq("step", step);
+}
+
 export async function resolveAlert(id: string): Promise<void> {
   const supabase = getSupabaseAdmin();
   await supabase
