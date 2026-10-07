@@ -59,8 +59,8 @@ export function ThresholdGroupsEditor() {
   const [sortAZ, setSortAZ] = useState(false);
 
   // Company type (Nick 8/4 doc #6): the four internal tags are the only
-  // non-cleaning segments — same set true-up excludes (INTERNAL_TAGS there;
-  // that lib is server-only, so the list is mirrored here).
+  // non-cleaning segments. This is the display label only — which of them the
+  // true-up skips or never trims lives in true-up.ts (server-only).
   const NON_CLEANING = new Set(["OH", "SC", "DM4PM", "SI"]);
   const segType = (seg: ThresholdSegment): "cleaning" | "non-cleaning" =>
     !seg.isDefault && seg.clientTags.length > 0 && seg.clientTags.every((t) => NON_CLEANING.has(t.toUpperCase()))

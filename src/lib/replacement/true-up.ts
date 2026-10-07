@@ -38,10 +38,20 @@ const WARMUP_DAYS = 21; // matches plan.ts — a domain is usable once it's ≥ 
  * not a customer's. True-up skips them entirely — `OH` alone would otherwise be
  * the single biggest trim in the system.
  *
- * Nick confirmed 2026-08-17: exclude every non-commercial-cleaning tag, which
- * is these four. They are the same four that carry empty threshold segments.
+ * Nick confirmed 2026-08-17: exclude every non-commercial-cleaning tag. OH has
+ * since been brought back in (see NEVER_TRIM_TAGS); the rest still carry
+ * empty threshold segments and stay out until they get groupings of their own.
  */
-export const INTERNAL_TAGS = new Set(["OH", "SC", "DM4PM", "SI"]);
+export const INTERNAL_TAGS = new Set(["SC", "DM4PM", "SI"]);
+
+/**
+ * Tags the true-up tops up to their tier cap but never trims. Spencer
+ * 2026-10-06 (Loom): OH follows the same automation as the cleaning clients —
+ * Tier 2, so 40 B2B / 10 B2C plus reserve — but all 72 of its B2B1 domains
+ * are in use and nothing may be taken away from B2B1. OH was excluded
+ * entirely in August only because the trim would have cut it hardest.
+ */
+export const NEVER_TRIM_TAGS = new Set(["OH"]);
 
 export interface TrimRankingConfig {
   /**
@@ -410,7 +420,11 @@ export async function computeTrueUp(
     // all 13 out of the 18 it has proof on, trading performers for unknowns
     // every cycle. An unproven domain is the cheapest thing to give up — it
     // returns to reserve with its warm-up intact and gets reassigned.
-    const trimNeeded = Math.max(0, staying - cap);
+    const neverTrim = NEVER_TRIM_TAGS.has(clientTag);
+    const trimNeeded = neverTrim ? 0 : Math.max(0, staying - cap);
+    if (neverTrim && staying > cap) {
+      blockers.push(`${staying - cap} over cap — ${clientTag} is never trimmed`);
+    }
     let trimCandidates: TrimCandidate[] = [];
     let trimUnproven = 0;
     let trimHeld = 0;
