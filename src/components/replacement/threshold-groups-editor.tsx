@@ -47,6 +47,45 @@ function condText(c: Condition): string {
   return `${f} ${op} ${c.value ?? "—"}${isPercentField(c.field) ? "%" : ""}`;
 }
 
+/**
+ * Comma-separated list box. Keeps exactly what is typed while focused and
+ * parses on blur / Enter — rebuilding the value from the parsed list on every
+ * keystroke ate spaces and commas as they were typed, so "Cleaning Client" or
+ * "SC, OH" could not be entered at all (Spencer, 2026-10-07).
+ */
+function ListInput({ value, onCommit, upper, placeholder, className }: {
+  value: string[];
+  onCommit: (next: string[]) => void;
+  upper?: boolean;
+  placeholder?: string;
+  className?: string;
+}) {
+  const joined = value.join(", ");
+  // null = not editing, show the saved list; a string = the raw text being typed.
+  const [draft, setDraft] = useState<string | null>(null);
+  const commit = (text: string) => {
+    const next = text.split(",").map((t) => (upper ? t.trim().toUpperCase() : t.trim().toLowerCase())).filter(Boolean);
+    onCommit([...new Set(next)]);
+  };
+  return (
+    <input
+      value={draft ?? joined}
+      onFocus={() => setDraft(joined)}
+      onChange={(e) => setDraft(e.target.value)}
+      onBlur={() => { commit(draft ?? joined); setDraft(null); }}
+      onKeyDown={(e) => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); }}
+      placeholder={placeholder}
+      className={className}
+    />
+  );
+}
+
+interface MembersResponse {
+  activeCount: number;
+  members: Record<string, string[]>;
+  mismatched: { clientTag: string; label: string }[];
+}
+
 export function ThresholdGroupsEditor() {
   const [cfg, setCfg] = useState<ThresholdConfig | null>(null);
   const [saving, setSaving] = useState(false);
@@ -57,19 +96,24 @@ export function ThresholdGroupsEditor() {
   const [typeFilter, setTypeFilter] = useState<"all" | "cleaning" | "non-cleaning">("all");
   const [tagSearch, setTagSearch] = useState("");
   const [sortAZ, setSortAZ] = useState(false);
+  const [members, setMembers] = useState<MembersResponse | null>(null);
+  const [expanded, setExpanded] = useState<Record<string, boolean>>({});
 
   // Company type (Nick 8/4 doc #6): the four internal tags are the only
   // non-cleaning segments. This is the display label only — which of them the
   // true-up skips or never trims lives in true-up.ts (server-only).
   const NON_CLEANING = new Set(["OH", "SC", "DM4PM", "SI"]);
   const segType = (seg: ThresholdSegment): "cleaning" | "non-cleaning" =>
-    !seg.isDefault && seg.clientTags.length > 0 && seg.clientTags.every((t) => NON_CLEANING.has(t.toUpperCase()))
-      ? "non-cleaning" : "cleaning";
+    !seg.isDefault && (
+      /non[-\s]?clean/i.test(seg.name) ||
+      (seg.clientTags.length > 0 && seg.clientTags.every((t) => NON_CLEANING.has(t.toUpperCase())))
+    ) ? "non-cleaning" : "cleaning";
   const visibleSegments = (segments: ThresholdSegment[]): ThresholdSegment[] => {
     const q = tagSearch.trim().toUpperCase();
     let out = segments.filter((s) =>
       (typeFilter === "all" || segType(s) === typeFilter) &&
-      (!q || s.name.toUpperCase().includes(q) || s.clientTags.some((t) => t.toUpperCase().includes(q))));
+      (!q || s.name.toUpperCase().includes(q) || s.clientTags.some((t) => t.toUpperCase().includes(q)) ||
+        (members?.members[s.id] ?? []).some((t) => t.includes(q))));
     if (sortAZ) out = [...out].sort((a, b) => a.name.localeCompare(b.name));
     return out;
   };
@@ -80,6 +124,14 @@ export function ThresholdGroupsEditor() {
       .then((d) => (d?.error ? setError(d.error) : setCfg(d)))
       .catch((e) => setError(String(e)));
   }, []);
+
+  // Which active client tags each saved segment governs. Reloaded after a save.
+  const loadMembers = () =>
+    fetch("/api/replacement/threshold-groups/members")
+      .then((r) => r.json())
+      .then((d) => { if (!d?.error) setMembers(d); })
+      .catch(() => undefined);
+  useEffect(() => { loadMembers(); }, []);
 
   // immutable helpers -------------------------------------------------------
   const patchCfg = (fn: (c: ThresholdConfig) => ThresholdConfig) =>
@@ -164,6 +216,7 @@ export function ThresholdGroupsEditor() {
       const d = await res.json();
       if (d?.error) throw new Error(d.error);
       setCfg(d); setSavedAt(true); setEditing(false); setTimeout(() => setSavedAt(false), 2500);
+      loadMembers();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Save failed");
     } finally {
@@ -209,8 +262,8 @@ export function ThresholdGroupsEditor() {
 
         <p className="text-[11px] text-muted-foreground -mt-1">
           Conditions inside a group are <b>AND</b>ed; groups within a segment are <b>OR</b>ed — any one group triggers replacement.
-          A domain is matched to the first non-default segment that claims one of its tags, otherwise the default (cleaning) segment.
-          Blank metrics are never treated as 0.
+          A domain is matched to the first non-default segment that claims one of its <b>client tags</b>, otherwise the default (cleaning) segment.
+          Campaign names play no part. Blank metrics are never treated as 0.
         </p>
 
         {error && <div className="rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive">{error}</div>}
@@ -234,6 +287,18 @@ export function ThresholdGroupsEditor() {
                 sort A–Z
               </button>
             </div>
+            {members && members.mismatched.length > 0 && (
+              <div className="rounded-lg border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-xs text-amber-600 dark:text-amber-400">
+                In the cleaning default, but their campaigns are labelled otherwise:{" "}
+                <b>{members.mismatched.map((m) => `${m.clientTag} (${m.label})`).join(", ")}</b>.
+                Add them to a segment&apos;s tags if they need different rules.
+              </div>
+            )}
+            {cfg.segments.filter((s) => !s.isDefault && s.clientTags.length === 0 && s.groups.length > 0).map((s) => (
+              <div key={`empty-${s.id}`} className="rounded-lg border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-xs text-amber-600 dark:text-amber-400">
+                <b>{s.name}</b> has rules but no client tags, so it applies to no one yet. Edit groups and add its tags.
+              </div>
+            ))}
             {visibleSegments(cfg.segments).map((seg) => (
               <div key={seg.id} className="rounded-xl border p-3 bg-muted/20 space-y-1">
                 <div className="flex items-center gap-2 flex-wrap">
@@ -252,9 +317,24 @@ export function ThresholdGroupsEditor() {
                     <Copy className="h-3 w-3" /> duplicate
                   </Button>
                 </div>
+                {members && (() => {
+                  const list = members.members[seg.id] ?? [];
+                  const show = expanded[seg.id] || list.length <= 15 ? list : list.slice(0, 15);
+                  return (
+                    <div className="text-[11px] text-muted-foreground">
+                      active clients ({list.length}):{" "}
+                      {list.length === 0 ? <i>none</i> : <span className="text-foreground">{show.join(", ")}</span>}
+                      {list.length > 15 && (
+                        <button className="ml-1 underline" onClick={() => setExpanded((e) => ({ ...e, [seg.id]: !e[seg.id] }))}>
+                          {expanded[seg.id] ? "show less" : `+${list.length - 15} more`}
+                        </button>
+                      )}
+                    </div>
+                  );
+                })()}
                 {((seg.keywordsInclude?.length ?? 0) > 0 || (seg.keywordsExclude?.length ?? 0) > 0) && (
                   <div className="text-[11px] text-muted-foreground">
-                    naming: {(seg.keywordsInclude?.length ?? 0) > 0 && <>has <b>{seg.keywordsInclude!.join(" / ")}</b></>}
+                    replacement domain names: {(seg.keywordsInclude?.length ?? 0) > 0 && <>has <b>{seg.keywordsInclude!.join(" / ")}</b></>}
                     {(seg.keywordsExclude?.length ?? 0) > 0 && <> · never <b>{seg.keywordsExclude!.join(" / ")}</b></>}
                   </div>
                 )}
@@ -290,28 +370,29 @@ export function ThresholdGroupsEditor() {
                   ) : (
                     <label className="flex items-center gap-1.5 text-xs text-muted-foreground">
                       tags
-                      <input
-                        value={seg.clientTags.join(", ")}
-                        onChange={(e) => patchSeg(seg.id, (s) => ({ ...s, clientTags: e.target.value.split(",").map((t) => t.trim().toUpperCase()).filter(Boolean) }))}
+                      <ListInput
+                        value={seg.clientTags}
+                        upper
+                        onCommit={(next) => patchSeg(seg.id, (s) => ({ ...s, clientTags: next }))}
                         placeholder="SC, OH"
                         className="text-sm px-2 py-1 rounded-lg border bg-background w-40"
                       />
                     </label>
                   )}
-                  <label className="flex items-center gap-1.5 text-xs text-muted-foreground" title="Owned-domain suggestions for this category must contain one of these (Spencer Jul-29 §14)">
-                    name has
-                    <input
-                      value={(seg.keywordsInclude ?? []).join(", ")}
-                      onChange={(e) => patchSeg(seg.id, (sg) => ({ ...sg, keywordsInclude: e.target.value.split(",").map((t) => t.trim().toLowerCase()).filter(Boolean) }))}
+                  <label className="flex items-center gap-1.5 text-xs text-muted-foreground" title="Replacement DOMAIN names for this segment must contain one of these (Spencer Jul-29 §14). Not campaign names — which clients a segment covers is set by its tags only.">
+                    domain name has
+                    <ListInput
+                      value={seg.keywordsInclude ?? []}
+                      onCommit={(next) => patchSeg(seg.id, (sg) => ({ ...sg, keywordsInclude: next }))}
                       placeholder="clean, janitorial…"
                       className="text-sm px-2 py-1 rounded-lg border bg-background w-44"
                     />
                   </label>
-                  <label className="flex items-center gap-1.5 text-xs text-muted-foreground" title="Never suggest a domain whose name contains any of these">
-                    never
-                    <input
-                      value={(seg.keywordsExclude ?? []).join(", ")}
-                      onChange={(e) => patchSeg(seg.id, (sg) => ({ ...sg, keywordsExclude: e.target.value.split(",").map((t) => t.trim().toLowerCase()).filter(Boolean) }))}
+                  <label className="flex items-center gap-1.5 text-xs text-muted-foreground" title="Never pick a replacement domain whose name contains any of these">
+                    domain name never
+                    <ListInput
+                      value={seg.keywordsExclude ?? []}
+                      onCommit={(next) => patchSeg(seg.id, (sg) => ({ ...sg, keywordsExclude: next }))}
                       placeholder="satin, window…"
                       className="text-sm px-2 py-1 rounded-lg border bg-background w-40"
                     />
