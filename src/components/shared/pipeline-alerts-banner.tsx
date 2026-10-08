@@ -27,18 +27,19 @@ const SOURCE_LABEL: Record<string, string> = {
   "stuck-campaign": "Campaign stuck in Processing",
   "orphan-attach": "Tagged, not yet in campaigns",
   "campaign-set": "Campaign set not fully built",
+  "whitelist-setup": "No whitelist recipients in ReplyRouter",
   "campaign-archived": "Campaign archived, client still active",
 };
 // Alerts that report an external condition — nothing in LeadSync to retry.
 // They auto-resolve when the condition clears; Dismiss only.
-const NO_RETRY_SOURCES = new Set(["stuck-campaign", "orphan-attach", "campaign-set", "campaign-archived"]);
+const NO_RETRY_SOURCES = new Set(["stuck-campaign", "orphan-attach", "campaign-set", "campaign-archived", "whitelist-setup"]);
 // Heads-up sources: recorded silently (no Slack), informational, auto-resolve.
 // Rendered apart from real failures so a pre-launch client does not read as
 // a broken pipeline (Spencer, 2026-09-17).
 // campaign-set joined them 2026-09-24: a stage missing one of its three send
 // campaigns is something a human builds in Bison, so offering Retry only
 // produced "retry not supported for this alert" (Spencer, 5:20 AM).
-const HEADS_UP_SOURCES = new Set(["orphan-attach", "campaign-set"]);
+const HEADS_UP_SOURCES = new Set(["orphan-attach", "campaign-set", "whitelist-setup"]);
 
 const fetcher = async (url: string): Promise<PipelineAlert[]> => {
   const res = await fetch(url);

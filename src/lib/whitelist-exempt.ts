@@ -13,16 +13,20 @@
 // and no email is composed or sent. Every other replacement step — tagging,
 // redirect, campaign attach, client sheet — is untouched.
 //
+// OH (2026-10-09): OutboundHero's own internal campaigns — there is no client
+// to whitelist us. It has no ReplyRouter recipients and failed "no
+// recipients" every morning, like DM4PM did.
+//
 // Matching is on the BARE tag, so "DM4PM" also covers "DM4PM: Leads".
-// Env override (comma-separated) so a tag can be added without a deploy.
-const DEFAULT_EXEMPT = ["DM4PM"];
+// WHITELIST_EXEMPT_TAGS (comma-separated) adds tags without a deploy.
+const DEFAULT_EXEMPT = ["DM4PM", "OH"];
 
 export function whitelistExemptTags(): Set<string> {
   const fromEnv = (process.env.WHITELIST_EXEMPT_TAGS || "")
     .split(",")
     .map((t) => t.trim().toUpperCase())
     .filter(Boolean);
-  return new Set(fromEnv.length > 0 ? fromEnv : DEFAULT_EXEMPT.map((t) => t.toUpperCase()));
+  return new Set([...DEFAULT_EXEMPT.map((t) => t.toUpperCase()), ...fromEnv]);
 }
 
 /** True when this client tag should skip whitelist emails entirely. */

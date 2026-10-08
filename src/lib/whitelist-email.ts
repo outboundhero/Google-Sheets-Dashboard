@@ -92,17 +92,29 @@ export function buildWhitelistEmail(domains: string[]): { subject: string; text:
   return { subject: SUBJECT, text, html };
 }
 
-/** Fetch a client's CC + BCC contact emails from ReplyRouter. */
+/** Fetch a client's CC + BCC contact emails from ReplyRouter, including the
+ *  contacts on its regional routes (cc_routes). Everyone who receives lead
+ *  hand-offs has to whitelist us; route-only contacts used to be skipped —
+ *  BBS's junior@blumontservices.com never got a whitelist email (2026-10). */
 export async function fetchClientRecipients(clientTag: string): Promise<WhitelistRecipients> {
   const url = `${REPLY_ROUTER_BASE_URL}/api/config/clients/${encodeURIComponent(clientTag)}?secret=${encodeURIComponent(REPLY_ROUTER_SECRET)}`;
   const res = await fetch(url, { headers: { Accept: "application/json" } });
   if (!res.ok) {
     throw new Error(`ReplyRouter ${res.status} for ${clientTag}`);
   }
-  const data = (await res.json()) as { cc?: { email?: string }[]; bcc?: { email?: string }[] };
-  const emails = (list?: { email?: string }[]) =>
-    [...new Set((list || []).map((c) => (c.email || "").trim()).filter(Boolean))];
-  return { cc: emails(data.cc), bcc: emails(data.bcc) };
+  type Contact = { email?: string };
+  const data = (await res.json()) as {
+    cc?: Contact[]; bcc?: Contact[];
+    cc_routes?: { cc?: Contact[]; bcc?: Contact[] }[] | null;
+  };
+  const routes = Array.isArray(data.cc_routes) ? data.cc_routes : [];
+  const emails = (...lists: (Contact[] | undefined)[]) =>
+    [...new Set(lists.flatMap((l) => l || []).map((c) => (c.email || "").trim()).filter(Boolean))];
+  const cc = emails(data.cc, ...routes.map((r) => r.cc));
+  const ccLower = new Set(cc.map((e) => e.toLowerCase()));
+  // Someone on both lists only needs it once, in CC.
+  const bcc = emails(data.bcc, ...routes.map((r) => r.bcc)).filter((e) => !ccLower.has(e.toLowerCase()));
+  return { cc, bcc };
 }
 
 /**

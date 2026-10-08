@@ -231,6 +231,10 @@
     {
       "path": "/api/cron/archived-campaigns",
       "schedule": "50 */6 * * *"
+    },
+    {
+      "path": "/api/cron/whitelist-sync",
+      "schedule": "30 13 * * *"
     }
   ]
 }
