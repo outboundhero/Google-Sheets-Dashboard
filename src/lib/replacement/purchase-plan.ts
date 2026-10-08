@@ -12,6 +12,8 @@ import { getTaggedDomainCounts } from "./upcoming-stock";
 import { getStockCounts } from "./stock-counts";
 import { getActiveAnticipated, groupForStartDate } from "./anticipated-clients";
 import { getActiveCampaignKeys } from "./campaigns";
+import { getWaitingSideKeys } from "./waiting-sides";
+import { INTERNAL_TAGS } from "./true-up";
 import type { BisonGroup, BisonInstanceSlug } from "@/lib/bison-instances";
 import { ALL_INSTANCE_SLUGS, BISON_INSTANCES, getInstance } from "@/lib/bison-instances";
 
@@ -157,6 +159,11 @@ export async function computePurchasePlan(): Promise<PurchasePlanResult> {
     groupSlug.set(i.group, g);
   }
   const activeKeys = await getActiveCampaignKeys().catch(() => new Set<string>());
+  // Waiting sides (live client, campaigns built but no stock — waiting-sides.ts)
+  // are charged like sending sides, so the daily message shows B2C1's real
+  // need (Spencer 2026-10-08). Fail-open to today's count.
+  const waitingKeys = await getWaitingSideKeys({ exclude: INTERNAL_TAGS }).catch(() => new Set<string>());
+  const counts = (k: string) => activeKeys.has(k) || waitingKeys.has(k);
   interface Agg { byInst: Map<string, { staying: number; total: number; capMax: number }>; groupTotal: Map<BisonGroup, number> }
   const byTag = new Map<string, Agg>();
   for (const a of plan.clientAudit) {
@@ -183,7 +190,7 @@ export async function computePurchasePlan(): Promise<PurchasePlanResult> {
     const slugs = groupSlug.get(group)!;
     for (const slug of [slugs.b2b, slugs.b2c]) {
       clientsByInstance.set(slug, (clientsByInstance.get(slug) ?? 0) + 1);
-      if (!activeKeys.has(`${tag.trim().toUpperCase()}:${slug}`)) continue;
+      if (!counts(`${tag.trim().toUpperCase()}:${slug}`)) continue;
       const staying = agg.byInst.get(slug)?.staying ?? 0;
       const capMax = capFor(getInstance(slug).tier, clientTier);
       const short = Math.max(0, capMax - staying);
@@ -198,7 +205,7 @@ export async function computePurchasePlan(): Promise<PurchasePlanResult> {
     const shortClients = (shortByInstance.get(inst) ?? []).sort((a, b) => b.short - a.short);
     let activeClientCount = 0;
     for (const tag of byTag.keys()) {
-      if (activeKeys.has(`${tag.trim().toUpperCase()}:${inst}`)) activeClientCount++;
+      if (counts(`${tag.trim().toUpperCase()}:${inst}`)) activeClientCount++;
     }
 
     const capDeficit = shortClients.reduce((s, c) => s + c.short, 0);
@@ -221,7 +228,7 @@ export async function computePurchasePlan(): Promise<PurchasePlanResult> {
     // dormant sides and read 88 on CO against 12.
     let reserveFloor = anticipated.buffer;
     for (const tag of byTag.keys()) {
-      if (!activeKeys.has(`${tag.trim().toUpperCase()}:${inst}`)) continue;
+      if (!counts(`${tag.trim().toUpperCase()}:${inst}`)) continue;
       const t = tiers.get(tag.trim().toUpperCase());
       reserveFloor += t ? reserveBufferFor(tier, t) : fallback;
     }

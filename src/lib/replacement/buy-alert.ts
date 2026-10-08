@@ -8,6 +8,8 @@
 import { buildReplacementPlan } from "./plan";
 import { getThresholdConfig } from "./threshold-groups-store";
 import { getActiveCampaignKeys } from "./campaigns";
+import { getWaitingSideKeys } from "./waiting-sides";
+import { INTERNAL_TAGS } from "./true-up";
 import { capFor, reserveBufferFor, getClientTiers, type ClientTier } from "./client-tiers";
 import { getGoingLiveForecast } from "./going-live";
 import { getTaggedDomainCounts } from "./upcoming-stock";
@@ -79,11 +81,15 @@ function channelId(): string | undefined {
 export async function runBuyAlert(opts: { force?: boolean; dryRun?: boolean } = {}): Promise<BuyAlertResult> {
   const cfg = await getThresholdConfig();
   const useGroups = cfg.enabled;
-  const [plan, tiers, activeKeys] = await Promise.all([
+  const [plan, tiers, activeKeys, waitingKeys] = await Promise.all([
     buildReplacementPlan(useGroups ? { burntSource: "groups", groupConfig: cfg, infoMigration: false } : { infoMigration: false }),
     getClientTiers(),
     getActiveCampaignKeys(),
+    // A live client's B2C side waiting for stock counts like a sending side
+    // (Spencer 2026-10-08); fail-open to today's count.
+    getWaitingSideKeys({ exclude: INTERNAL_TAGS }).catch(() => new Set<string>()),
   ]);
+  const counts = (k: string) => activeKeys.has(k) || waitingKeys.has(k);
 
   // ── per-instance shortfall (mirrors /api/replacement/shortfall `byInstance`) ──
   // group → its b2b + b2c instance slug
@@ -123,7 +129,7 @@ export async function runBuyAlert(opts: { force?: boolean; dryRun?: boolean } = 
       const liveCap = capFor(getInstance(slug).tier, tier);
       // Dormant side (no actively-sending campaign for this tag here) never
       // triggers buying — Nick 2026-08-11. Mirrors the shortfall route exactly.
-      const active = activeKeys.has(`${tag.trim().toUpperCase()}:${slug}`);
+      const active = counts(`${tag.trim().toUpperCase()}:${slug}`);
       return { instance: slug, short: active ? Math.max(0, liveCap - have) : 0 };
     };
     rows.push({ b2b: build(slugs.b2b), b2c: build(slugs.b2c) });
@@ -210,7 +216,7 @@ export async function runBuyAlert(opts: { force?: boolean; dryRun?: boolean } = 
     let clientsActive = 0;
     let bufferFloor = 0;
     for (const tag of byTag.keys()) {
-      if (!activeKeys.has(`${tag.trim().toUpperCase()}:${slug}`)) continue;
+      if (!counts(`${tag.trim().toUpperCase()}:${slug}`)) continue;
       clientsActive++;
       bufferFloor += reserveBufferFor(tier, tiers.get(tag.trim().toUpperCase()) ?? "1");
     }

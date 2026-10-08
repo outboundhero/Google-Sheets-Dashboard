@@ -30,6 +30,7 @@ import { getThresholdConfig } from "./threshold-groups-store";
 import { loadRedirectsByTag } from "./redirect-audit";
 import { loadTrailingRates } from "./trailing-rates";
 import { getChurnBlackoutMap } from "./churn-guard";
+import { getWaitingSideKeys } from "./waiting-sides";
 
 const WARMUP_DAYS = 21; // matches plan.ts — a domain is usable once it's ≥ 21d old
 
@@ -120,6 +121,15 @@ export interface TrueUpRow {
    * blocked client buys nothing.
    */
   fillBlocked: number;
+  /**
+   * A waiting side (live client, campaigns built here but not sending — see
+   * waiting-sides.ts) is filled from this instance's own reserve only. What
+   * that reserve can't cover waits for stock here instead of being counted as
+   * fillShort, so the cross-instance mover never drains another instance's
+   * reserve for it (Spencer 2026-10-08: keep other instances' reserves).
+   */
+  waitingSide?: boolean;
+  awaitingStock?: number;
   /** Domains to untag back into reserve (staying − cap). */
   trimNeeded: number;
   /** In trim order, already limited to trimNeeded. */
@@ -225,6 +235,11 @@ export async function computeTrueUp(
   const activeKeys = await getActiveCampaignKeys();
   const campaignMap = await deriveCampaignMap();
   const churnMap = await getChurnBlackoutMap();
+  // Fail closed: a read failure means no waiting sides, i.e. today's behaviour.
+  const waitingKeys = await getWaitingSideKeys({ exclude: INTERNAL_TAGS }).catch((e) => {
+    console.error("[true-up] waiting-sides read failed (skipping them this run):", e);
+    return new Set<string>();
+  });
 
   // A tag only counts as a client tag if something else in the system knows it
   // — same rule the plan uses, so the two agree on what a "client" is.
@@ -328,6 +343,11 @@ export async function computeTrueUp(
     a.staying.push(e);
     if (e.provider === "outlook") a.outlook++; else if (e.provider === "google") a.google++;
   }
+  // A waiting side with no domains at all has no group yet — JPNYC on B2C1
+  // (2026-10-08). Without a row it could never be filled or reported.
+  for (const k of waitingKeys) {
+    if (!groups.has(k)) groups.set(k, { staying: [], burnt: 0, outlook: 0, google: 0 });
+  }
 
   // 6) evaluate each group. Fill allocation walks the groups in a fixed order
   //    and consumes a shared pool, so two clients never claim the same reserve
@@ -364,6 +384,7 @@ export async function computeTrueUp(
     }
     const hasEligibleCampaign = eligibleKeys.has(key);
     const hasActiveCampaign = activeKeys.has(key);
+    const waiting = waitingKeys.has(key);
     if (!hasEligibleCampaign) {
       skipped.push({ clientTag, instance, reason: "no live campaign in this instance" });
       continue;
@@ -372,7 +393,9 @@ export async function computeTrueUp(
     // not launched — its initial domains are added by hand until the
     // onboarding automation exists. Filling a not-live client also loaded
     // CGCWP with 25 domains nobody asked for. Live clients keep topping up.
-    if (!hasActiveCampaign) {
+    // A live client's waiting side is filled even though nothing sends there
+    // yet; a client that hasn't launched anywhere still isn't (waiting-sides.ts).
+    if (!hasActiveCampaign && !waiting) {
       skipped.push({ clientTag, instance, reason: "client not live yet (no sending campaign) — initial fill is manual" });
       continue;
     }
@@ -399,7 +422,7 @@ export async function computeTrueUp(
     const blockers: string[] = [];
     if (fillNeeded > 0) {
       if (!redirectByTag.get(clientTag)) blockers.push("no redirect URL for tag");
-      if (!hasActiveCampaign) blockers.push("no actively-sending campaign (dormant)");
+      if (!hasActiveCampaign && !waiting) blockers.push("no actively-sending campaign (dormant)");
     }
     const canFill = fillNeeded > 0 && blockers.length === 0;
     const fillCandidates = canFill ? pool.splice(0, fillNeeded) : [];
@@ -408,9 +431,15 @@ export async function computeTrueUp(
     // OH→FR every 30 minutes for four days (192 attempts) for GJS — whose
     // tracker website is N/A and who can never take a domain — while FR sat
     // on 48 ready reserves (2026-09-29). Short = stock gap; blocked = policy.
-    const fillShort = canFill ? fillNeeded - fillCandidates.length : 0;
+    const stockGap = canFill ? fillNeeded - fillCandidates.length : 0;
+    const fillShort = waiting ? 0 : stockGap;
+    const awaitingStock = waiting ? stockGap : 0;
     const fillBlocked = fillNeeded > 0 && !canFill ? fillNeeded : 0;
-    if (canFill && fillShort > 0) blockers.push(`no ready ${provider} reserve in this instance`);
+    if (canFill && stockGap > 0) {
+      blockers.push(waiting
+        ? `waiting for ${stockGap} more ready ${provider} reserve in this instance — not moved in from other instances`
+        : `no ready ${provider} reserve in this instance`);
+    }
 
     // Trim, in Nick's order (2026-08-14): burnt first (replacement already does
     // that), then UNPROVEN domains, then the worst-replying proven ones.
@@ -486,6 +515,7 @@ export async function computeTrueUp(
     rows.push({
       clientTag, instance, tier, cap, staying, stayingUnproven, burnt: acc.burnt, replacementPulls,
       fillNeeded, fillCandidates, fillShort, fillBlocked,
+      ...(waiting ? { waitingSide: true, awaitingStock } : {}),
       trimNeeded, trimCandidates, trimUnproven, trimHeld,
       hasActiveCampaign, hasEligibleCampaign, blockers,
       redirectUrl: redirectByTag.get(clientTag) ?? null,
