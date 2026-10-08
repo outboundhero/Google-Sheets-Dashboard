@@ -19,6 +19,9 @@ export const maxDuration = 300;
 //               the hourly lead sync) — or any run with ?throttle=1
 //
 // ?dry=1 reports what it would do without touching Bison.
+// The throttle pass only reports until SENDING_MODE_THROTTLE_ENABLED=true —
+// it changes limits with nobody clicking, so it stays off until Nick signs off
+// on the thresholds. Turbo is a manual button and isn't gated.
 // Slack is muted until SENDING_MODE_SLACK_ENABLED=true (log rows always write).
 
 const BUDGET_MS = 240_000;
@@ -94,15 +97,18 @@ export async function GET(request: Request) {
     // 5) Daily throttle pass.
     const throttleDue = forceThrottle || now.getUTCHours() === THROTTLE_HOUR_UTC;
     if (throttleDue) {
-      const r = await runThrottlePass(rows, settings, { dry, budgetMs: perWindowBudget(), deadline });
+      const throttleEnabled = process.env.SENDING_MODE_THROTTLE_ENABLED === "true";
+      const throttleDry = dry || !throttleEnabled;
+      const r = await runThrottlePass(rows, settings, { dry: throttleDry, budgetMs: perWindowBudget(), deadline });
       summary.throttle = {
+        enabled: throttleEnabled,
         throttled: r.throttled,
         released: r.released,
         errors: r.errors,
         wouldThrottle: r.decisions.filter((d) => d.action === "throttle").map((d) => `${d.clientTag} (${d.reason})`),
         wouldRelease: r.decisions.filter((d) => d.action === "release").map((d) => `${d.clientTag} (${d.reason})`),
       };
-      if (!dry && process.env.SENDING_MODE_SLACK_ENABLED === "true" && (r.throttled.length || r.released.length)) {
+      if (!throttleDry && process.env.SENDING_MODE_SLACK_ENABLED === "true" && (r.throttled.length || r.released.length)) {
         const lines = [
           ...r.throttled.map((t) => `• throttled *${t.clientTag}* — ${t.accounts} account(s)${t.failed ? `, ${t.failed} failed` : ""}`),
           ...r.released.map((t) => `• released *${t.clientTag}* — ${t.reverted} restored (${t.reason})${t.failed ? `, ${t.failed} failed` : ""}`),
