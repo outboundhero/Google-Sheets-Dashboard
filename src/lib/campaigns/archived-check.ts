@@ -14,13 +14,18 @@
 //     its campaigns is not archived), so this is a hole in a running set,
 //     not an old set someone retired on purpose
 //   • no other, non-archived campaign covers that role in that stage
+//   • the instance is in the client's allocated group (allocation sheet).
+//     A client moved to the other group leaves its old instance's
+//     campaigns archived on purpose — 7 of the first 11 flags (Oct 9) were
+//     exactly that. Unallocated clients are checked everywhere.
 //   • Bison still reports it archived right now (the mirror is up to 6 h old;
 //     SINY was revived by hand before this ran for the first time)
 // When several archived campaigns cover the same missing role, only the
 // newest is reported.
 import { getSupabaseAdmin } from "@/lib/supabase";
 import { bisonFetch } from "@/lib/bison";
-import { isInstanceSlug, type BisonInstanceSlug } from "@/lib/bison-instances";
+import { getInstance, isInstanceSlug, type BisonInstanceSlug } from "@/lib/bison-instances";
+import { getAllocations } from "@/lib/client-tag-allocations";
 import { getClientTierMap, resolveTier } from "@/lib/cron/client-reports";
 import { getChurnBlackoutMap } from "@/lib/replacement/churn-guard";
 import { deriveSetRole, deriveStage, setRoleLabel } from "./stage";
@@ -75,7 +80,7 @@ export async function findArchivedCampaigns(): Promise<ArchivedCheckResult> {
     if (!data || data.length < 1000) break;
   }
 
-  const [tiers, churn] = await Promise.all([getClientTierMap(), getChurnBlackoutMap()]);
+  const [tiers, churn, { map: alloc }] = await Promise.all([getClientTierMap(), getChurnBlackoutMap(), getAllocations()]);
 
   const byKey = new Map<string, CampaignRow[]>();
   for (const r of rows) {
@@ -94,6 +99,8 @@ export async function findArchivedCampaigns(): Promise<ArchivedCheckResult> {
     const c = churn.get(clientTag);
     if (c?.daysUntil != null && c.daysUntil <= 0) continue;
     activeClients.add(clientTag);
+    const group = alloc[clientTag];
+    if (group != null && getInstance(instance).group !== group) continue;
 
     // stage → roles still covered by a non-archived campaign
     const liveRoles = new Map<string, Set<string>>();
