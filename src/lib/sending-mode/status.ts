@@ -23,6 +23,11 @@ import type { Lead } from "@/types/lead";
 import { evaluateQlPace, type QlPace, type QlPaceStatus } from "./ql-pace";
 import { getSendingModeSettings, type SendingModeSettings } from "./config";
 import { endWindow, listOpenWindows, startWindow, type SendingWindow } from "./windows";
+import { sendCapacity } from "./capacity";
+
+// What an assigned account normally sends (limit-policy ASSIGNED_LIMIT) — the
+// fallback for the under-target check when real capacity is unknown.
+const NORMAL_DAILY_LIMIT = 5;
 
 export interface ClientSendingStatus extends QlPace {
   clientTag: string;
@@ -172,14 +177,30 @@ export interface ThrottleDecision {
   reason: string;
   pace: number | null;
   status: QlPaceStatus;
+  /** Throttle candidates: projected QLs if throttled to the period's end. */
+  projectedIfThrottled?: number;
 }
 
-/** Pure: what the throttle pass would do for each client. */
+/**
+ * Projected QLs at the end of the period if the client sends only `keepRatio`
+ * of today's volume from now on: QLs already delivered stay; the rest of the
+ * projection shrinks with sending. Used for "never throttle a client under
+ * target" (Vicky 2026-10-09 — the first preview had SBTB going 16 → ~7 on a
+ * 10 target, and the release rule would only notice after the QLs were lost).
+ */
+export function projectedIfThrottled(r: Pick<ClientSendingStatus, "qlsDelivered" | "projected">, keepRatio: number): number {
+  return Math.round(r.qlsDelivered + Math.max(0, r.projected - r.qlsDelivered) * keepRatio);
+}
+
+/** Pure: what the throttle pass would do for each client. `keepRatio` per tag
+ *  (from capacity.ts) feeds the under-target check; a missing tag falls back
+ *  to throttle ÷ the normal 5/day. */
 export function decideThrottles(
   rows: ClientSendingStatus[],
   open: SendingWindow[],
   paused: Set<string>,
   s: SendingModeSettings,
+  keepRatio: Map<string, number> = new Map(),
 ): ThrottleDecision[] {
   const openByTag = new Map<string, SendingWindow>();
   for (const w of open) openByTag.set(w.client_tag.toUpperCase(), w);
@@ -203,10 +224,30 @@ export function decideThrottles(
     if (r.status === "grace") { out.push({ ...base, action: "none", reason: "grace period" }); continue; }
     if (r.status === "no_data") { out.push({ ...base, action: "none", reason: "no status data" }); continue; }
     if (r.pace !== null && r.pace >= s.throttleOnPace && r.projected >= r.guarantee) {
-      out.push({ ...base, action: "throttle", reason: `pace ${Math.round(r.pace * 100)}% ≥ ${Math.round(s.throttleOnPace * 100)}%` });
+      const after = projectedIfThrottled(r, keepRatio.get(r.clientTag) ?? s.throttleDailyLimit / NORMAL_DAILY_LIMIT);
+      if (after < r.guarantee) {
+        out.push({ ...base, action: "none", projectedIfThrottled: after, reason: `would drop under target (≈${after} of ${r.guarantee})` });
+      } else {
+        out.push({ ...base, action: "throttle", projectedIfThrottled: after, reason: `pace ${Math.round(r.pace * 100)}% ≥ ${Math.round(s.throttleOnPace * 100)}%` });
+      }
     } else out.push({ ...base, action: "none", reason: `pace ${r.pace ?? "—"}` });
   }
   return out;
+}
+
+/** decideThrottles with each candidate's real send capacity behind the
+ *  under-target check — what both the pass and its preview run. */
+export async function decideThrottlesWithCapacity(
+  rows: ClientSendingStatus[],
+  open: SendingWindow[],
+  paused: Set<string>,
+  s: SendingModeSettings,
+): Promise<ThrottleDecision[]> {
+  const first = decideThrottles(rows, open, paused, s);
+  const candidates = first.filter((d) => d.projectedIfThrottled !== undefined).map((d) => d.clientTag);
+  if (candidates.length === 0) return first;
+  const cap = await sendCapacity(candidates, s.throttleDailyLimit);
+  return decideThrottles(rows, open, paused, s, new Map([...cap].map(([t, c]) => [t, c.keepRatio])));
 }
 
 export interface ThrottlePassResult {
@@ -223,7 +264,7 @@ export async function runThrottlePass(
   opts: { dry?: boolean; budgetMs?: number; deadline?: number } = {},
 ): Promise<ThrottlePassResult> {
   const [open, paused] = await Promise.all([listOpenWindows(), getThrottlePausedSet()]);
-  const decisions = decideThrottles(rows, open, paused, s);
+  const decisions = await decideThrottlesWithCapacity(rows, open, paused, s);
   const result: ThrottlePassResult = { throttled: [], released: [], errors: [], decisions };
   if (opts.dry) return result;
 

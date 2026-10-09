@@ -422,7 +422,8 @@ function ThrottlePreviewCard() {
           A client at {Math.round(p.settings.throttleOnPace * 100)}%+ of its QL pace (and still projected to hit its target) has its accounts
           lowered to <strong>{p.settings.throttleDailyLimit} sends/day</strong>, so it doesn&apos;t burn through leads and domains faster than it needs.
           It goes back to normal by itself when pace drops below {Math.round(p.settings.throttleOffPace * 100)}%, the projection falls under target,
-          a new billing month starts, or the client is leaving. Accounts already at {p.settings.throttleDailyLimit}/day or less aren&apos;t touched.
+          a new billing month starts, or the client is leaving. Accounts already at {p.settings.throttleDailyLimit}/day or less aren&apos;t touched,
+          and a client is never throttled if the estimate says it would end the month under target.
         </p>
       )}
 
@@ -455,10 +456,8 @@ function ThrottlePreviewCard() {
                       <td className="px-2 py-1.5 tabular-nums">{r.projected}</td>
                       <td className="px-2 py-1.5 tabular-nums">{n(r.lowered)} of {n(r.accounts)}</td>
                       <td className="px-2 py-1.5 tabular-nums whitespace-nowrap">{n(r.perDayNow)} → {n(r.perDayThrottled)} <span className="text-muted-foreground">(−{n(r.fewerPerDay)})</span></td>
-                      <td className="px-2 py-1.5 tabular-nums">{r.qlsGivenUp === null ? "—" : `≈ ${r.qlsGivenUp}`}</td>
-                      <td className={`px-2 py-1.5 tabular-nums ${r.projectedAfter !== null && r.projectedAfter < r.guarantee ? "text-amber-600 dark:text-amber-400" : ""}`}>
-                        {r.projectedAfter === null ? "—" : r.projectedAfter}
-                      </td>
+                      <td className="px-2 py-1.5 tabular-nums">≈ {r.qlsGivenUp}</td>
+                      <td className="px-2 py-1.5 tabular-nums">{r.projectedAfter}</td>
                     </tr>
                   ))}
                 </tbody>
@@ -472,8 +471,8 @@ function ThrottlePreviewCard() {
             <p className="text-xs text-muted-foreground"><strong>Over the line but left alone:</strong> {p.leftAlone.map((r) => `${r.clientTag} (${r.reason})`).join(", ")}</p>
           )}
           <p className="text-[11px] text-muted-foreground">
-            &quot;QLs given up&quot; assumes the throttle stays on until the end of the billing month, using each client&apos;s own emails-per-QL history — a rough guide.
-            If it would push a client under target, the throttle comes off by itself. Account numbers come from the dashboard&apos;s copy of Bison; the real run reads Bison live.
+            &quot;QLs given up&quot; assumes the throttle stays on to the end of the billing month and the QLs still to come shrink with sending — a rough guide.
+            Account numbers come from the dashboard&apos;s copy of Bison; the run applies the limits to Bison live.
           </p>
         </>
       )}
