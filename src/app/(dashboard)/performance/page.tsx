@@ -11,14 +11,14 @@
 import { useMemo, useState } from "react";
 import Link from "next/link";
 import { toast } from "sonner";
-import { Download, Gauge, Rocket, Pause, Play, RotateCcw, Ban, AlertTriangle, Loader2 } from "lucide-react";
+import { Download, Gauge, Rocket, Pause, Play, RotateCcw, Ban, AlertTriangle, Loader2, ChevronsDown } from "lucide-react";
 import { PageHeader } from "@/components/shared/page-header";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
   Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle,
 } from "@/components/ui/dialog";
-import { usePerformance, type PerformanceClient, type SendingWindow, type TurboPreview } from "@/lib/hooks/use-performance";
+import { usePerformance, useThrottlePreview, type PerformanceClient, type SendingWindow, type TurboPreview } from "@/lib/hooks/use-performance";
 
 type View = "under" | "over" | "nodata" | "all";
 
@@ -177,6 +177,8 @@ export default function PerformancePage() {
           </Button>
         ))}
       </div>
+
+      {view === "over" && <ThrottlePreviewCard />}
 
       {isLoading ? (
         <Skeleton className="h-64 rounded-xl" />
@@ -394,6 +396,87 @@ function TurboPreviewBody({ p }: { p: TurboPreview }) {
       <p className="text-xs text-muted-foreground">
         On {fmtDate(p.endsAt)} every account goes back to exactly the limits it has today, automatically. You can cancel Turbo any time.
       </p>
+    </div>
+  );
+}
+
+function ThrottlePreviewCard() {
+  const { preview: p, error, isLoading } = useThrottlePreview(true);
+  const n = (v: number) => v.toLocaleString();
+  const nextPass = p
+    ? new Date(p.nextPassAt).toLocaleString(undefined, { weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })
+    : "";
+  return (
+    <div className="rounded-xl border bg-card p-4 space-y-3">
+      <div className="flex flex-wrap items-center gap-2">
+        <ChevronsDown className="h-4 w-4 text-sky-600 dark:text-sky-400" />
+        <h2 className="text-sm font-semibold">Auto-throttle preview</h2>
+        {p && (
+          p.enabled
+            ? <span className="rounded-full border border-sky-500/40 bg-sky-500/15 px-2 py-0.5 text-[10px] font-semibold text-sky-700 dark:text-sky-300">ON · next run {nextPass}</span>
+            : <span className="rounded-full border border-zinc-400/40 bg-zinc-500/10 px-2 py-0.5 text-[10px] font-semibold text-zinc-600 dark:text-zinc-300">OFF · preview only, nothing changes</span>
+        )}
+      </div>
+      {p && (
+        <p className="text-xs text-muted-foreground">
+          A client at {Math.round(p.settings.throttleOnPace * 100)}%+ of its QL pace (and still projected to hit its target) has its accounts
+          lowered to <strong>{p.settings.throttleDailyLimit} sends/day</strong>, so it doesn&apos;t burn through leads and domains faster than it needs.
+          It goes back to normal by itself when pace drops below {Math.round(p.settings.throttleOffPace * 100)}%, the projection falls under target,
+          a new billing month starts, or the client is leaving. Accounts already at {p.settings.throttleDailyLimit}/day or less aren&apos;t touched.
+        </p>
+      )}
+
+      {isLoading && !p && <div className="flex items-center gap-2 text-xs text-muted-foreground"><Loader2 className="h-3.5 w-3.5 animate-spin" /> Working out what it would do…</div>}
+      {error && <p className="text-xs text-red-600 dark:text-red-400">{error.message}</p>}
+
+      {p && (
+        <>
+          <p className="text-sm">
+            {p.throttle.length === 0
+              ? "The next run would throttle no one."
+              : <>The next run would throttle <strong>{p.throttle.length}</strong> client(s), <strong>{n(p.throttle.reduce((s, r) => s + r.fewerPerDay, 0))}</strong> fewer emails/day in total.</>}
+          </p>
+          {p.throttle.length > 0 && (
+            <div className="overflow-x-auto">
+              <table className="w-full text-xs">
+                <thead className="text-[11px] uppercase tracking-wide text-muted-foreground border-b">
+                  <tr>
+                    {["Client", "QLs / target", "Pace", "Projected", "Accounts lowered", "Sends / day", "QLs given up (est.)", "Projected after"].map((h) => (
+                      <th key={h} className="text-left font-medium px-2 py-1.5 whitespace-nowrap">{h}</th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {p.throttle.map((r) => (
+                    <tr key={r.clientTag} className="border-b last:border-0">
+                      <td className="px-2 py-1.5 font-semibold whitespace-nowrap">{r.clientTag}</td>
+                      <td className="px-2 py-1.5 tabular-nums">{r.qlsDelivered} / {r.guarantee}</td>
+                      <td className="px-2 py-1.5 tabular-nums">{pct(r.pace)}</td>
+                      <td className="px-2 py-1.5 tabular-nums">{r.projected}</td>
+                      <td className="px-2 py-1.5 tabular-nums">{n(r.lowered)} of {n(r.accounts)}</td>
+                      <td className="px-2 py-1.5 tabular-nums whitespace-nowrap">{n(r.perDayNow)} → {n(r.perDayThrottled)} <span className="text-muted-foreground">(−{n(r.fewerPerDay)})</span></td>
+                      <td className="px-2 py-1.5 tabular-nums">{r.qlsGivenUp === null ? "—" : `≈ ${r.qlsGivenUp}`}</td>
+                      <td className={`px-2 py-1.5 tabular-nums ${r.projectedAfter !== null && r.projectedAfter < r.guarantee ? "text-amber-600 dark:text-amber-400" : ""}`}>
+                        {r.projectedAfter === null ? "—" : r.projectedAfter}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+          {p.release.length > 0 && (
+            <p className="text-xs"><strong>Back to normal:</strong> {p.release.map((r) => `${r.clientTag} (${r.reason.replaceAll("_", " ")})`).join(", ")}</p>
+          )}
+          {p.leftAlone.length > 0 && (
+            <p className="text-xs text-muted-foreground"><strong>Over the line but left alone:</strong> {p.leftAlone.map((r) => `${r.clientTag} (${r.reason})`).join(", ")}</p>
+          )}
+          <p className="text-[11px] text-muted-foreground">
+            &quot;QLs given up&quot; assumes the throttle stays on until the end of the billing month, using each client&apos;s own emails-per-QL history — a rough guide.
+            If it would push a client under target, the throttle comes off by itself. Account numbers come from the dashboard&apos;s copy of Bison; the real run reads Bison live.
+          </p>
+        </>
+      )}
     </div>
   );
 }

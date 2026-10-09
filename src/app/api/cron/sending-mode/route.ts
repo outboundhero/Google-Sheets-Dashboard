@@ -4,6 +4,7 @@ import { pipelineAlertChannel } from "@/lib/pipeline-alerts";
 import { getSendingModeSettings } from "@/lib/sending-mode/config";
 import { continueApply, endWindow, listOpenWindows } from "@/lib/sending-mode/windows";
 import { evaluateAllClients, runThrottlePass, saveClientStatuses } from "@/lib/sending-mode/status";
+import { THROTTLE_HOUR_UTC } from "@/lib/sending-mode/throttle-preview";
 
 export const maxDuration = 300;
 
@@ -25,7 +26,6 @@ export const maxDuration = 300;
 // Slack is muted until SENDING_MODE_SLACK_ENABLED=true (log rows always write).
 
 const BUDGET_MS = 240_000;
-const THROTTLE_HOUR_UTC = 17;
 
 export async function GET(request: Request) {
   const t0 = Date.now();
