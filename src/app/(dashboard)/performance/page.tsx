@@ -49,8 +49,10 @@ const BAND_LABEL: Record<string, string> = {
   credit_50: "50% credit",
   credit_100: "100% credit",
 };
+// The app's PST is a fixed UTC-8 (date-utils); America/Los_Angeles would show
+// the 5 PM cut-off as 6 PM through daylight time.
 const fmtCutoff = (iso: string) =>
-  new Date(iso).toLocaleString(undefined, { weekday: "short", month: "short", day: "numeric", hour: "numeric", timeZone: "America/Los_Angeles" });
+  new Date(iso).toLocaleString(undefined, { weekday: "short", month: "short", day: "numeric", hour: "numeric", timeZone: "Etc/GMT+8" });
 
 const fmtDate = (iso: string | null | undefined) => (iso ? iso.slice(0, 10) : "—");
 const pct = (p: number | null) => (p === null ? "—" : `${Math.round(p * 100)}%`);
@@ -178,7 +180,18 @@ export default function PerformancePage() {
         ))}
       </div>
 
-      {view === "over" && <ThrottlePreviewCard />}
+      {view === "over" ? (
+        <ThrottlePreviewCard />
+      ) : settings && (
+        <div className="flex flex-wrap items-center gap-2 rounded-lg border bg-muted/30 px-3 py-2 text-xs">
+          <ChevronsDown className="h-3.5 w-3.5 text-sky-600 dark:text-sky-400" />
+          <span>
+            Auto-throttle is <strong>{settings.autoThrottleEnabled ? "ON" : "OFF"}</strong> — its preview and on/off switch are in the Overperforming view.
+          </span>
+          <Button size="xs" variant="outline" onClick={() => setView("over")}>Open</Button>
+          <span className="text-muted-foreground sm:ml-auto">Turbo: press <Rocket className="inline h-3 w-3" /> Turbo on a client&apos;s row — it shows a preview first.</span>
+        </div>
+      )}
 
       {isLoading ? (
         <Skeleton className="h-64 rounded-xl" />
