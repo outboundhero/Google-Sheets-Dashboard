@@ -4,6 +4,7 @@ import useSWR from "swr";
 import type { PerformanceClient } from "@/app/api/performance/route";
 import type { SendingWindow } from "@/lib/sending-mode/windows";
 import type { SendingModeSettings } from "@/lib/sending-mode/config";
+import type { TurboPreview } from "@/lib/sending-mode/turbo-preview";
 
 const fetcher = (url: string) => fetch(url).then((r) => r.json());
 
@@ -12,10 +13,11 @@ interface PerformanceResponse {
   windows: SendingWindow[];
   settings: SendingModeSettings;
   evaluatedAt: string | null;
+  judgedAt: string | null;
   error?: string;
 }
 
-export type { PerformanceClient, SendingWindow, SendingModeSettings };
+export type { PerformanceClient, SendingWindow, SendingModeSettings, TurboPreview };
 
 export function usePerformance() {
   const { data, error, isLoading, mutate } = useSWR<PerformanceResponse>("/api/performance", fetcher, {
@@ -28,6 +30,7 @@ export function usePerformance() {
     windows: data?.windows ?? [],
     settings: data?.settings ?? null,
     evaluatedAt: data?.evaluatedAt ?? null,
+    judgedAt: data?.judgedAt ?? null,
     error: error || (data?.error ? new Error(data.error) : null),
     isLoading,
     mutate,

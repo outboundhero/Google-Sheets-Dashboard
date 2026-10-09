@@ -1,14 +1,14 @@
 import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
 import { createServerSupabaseClient, getSupabaseAdmin } from "@/lib/supabase";
-import { endWindow, getOpenWindow, loadClientAccounts, startWindow } from "@/lib/sending-mode/windows";
-import { getSendingModeSettings } from "@/lib/sending-mode/config";
+import { endWindow, getOpenWindow, startWindow } from "@/lib/sending-mode/windows";
+import { buildTurboPreview } from "@/lib/sending-mode/turbo-preview";
 
 export const maxDuration = 300;
 
 // POST /api/performance/turbo  { clientTag, action: "preview" | "activate" | "cancel" }
 //
-//   preview   account count + end date for the confirmation prompt (no changes)
+//   preview   what Turbo would change and a rough impact estimate (no changes)
 //   activate  open a Turbo window — snapshot, apply 5 warm-up / 8 sending, 15 days
 //   cancel    end it now; every account goes back to what it had
 //
@@ -25,15 +25,7 @@ export async function POST(request: Request) {
     const { data: { user } } = await createServerSupabaseClient(await cookies()).auth.getUser();
     const actor = user?.email ?? "unknown user";
 
-    if (action === "preview") {
-      const [settings, accounts, open] = await Promise.all([
-        getSendingModeSettings(), loadClientAccounts(clientTag, false), getOpenWindow(clientTag),
-      ]);
-      const endsAt = new Date(Date.now() + settings.turboDays * 86_400_000).toISOString();
-      const byInstance: Record<string, number> = {};
-      for (const s of accounts.senders) byInstance[s.instance] = (byInstance[s.instance] ?? 0) + 1;
-      return NextResponse.json({ clientTag, accounts: accounts.senders.length, byInstance, endsAt, settings, open });
-    }
+    if (action === "preview") return NextResponse.json(await buildTurboPreview(clientTag));
 
     if (action === "activate") {
       // Status/pace at activation from the cron's last evaluation — the log

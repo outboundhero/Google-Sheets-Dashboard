@@ -61,11 +61,20 @@ export async function evaluateAllClients(settings?: SendingModeSettings, now = n
   const s = settings ?? (await getSendingModeSettings());
   const [leads, tracker, tierMap] = await Promise.all([getStoredLeads(), getClientTrackerData(), getClientTierMap()]);
 
+  // One row per client tag (Spencer 2026-10-10: "each client tag is judged
+  // independently"). A sheet tagged "CCGDA: Leads" is CCGDA — the suffix isn't
+  // part of the Bison tag, so keeping it also broke Turbo's account lookup. An
+  // old combined sheet ("CVJLEX / CVJLOU / CVJORL") is dropped when every tag
+  // in it has its own sheet; otherwise it's the only source and stays.
   const leadsByTag = new Map<string, Lead[]>();
   for (const lead of leads) {
-    const tag = (lead.sheetClientTag || lead.clientTag || "").trim();
+    const tag = (lead.sheetClientTag || lead.clientTag || "").split(":")[0].trim().toUpperCase();
     if (!tag) continue;
     leadsByTag.set(tag, [...(leadsByTag.get(tag) ?? []), lead]);
+  }
+  for (const tag of [...leadsByTag.keys()]) {
+    const parts = tag.split("/").map((p) => p.trim()).filter(Boolean);
+    if (parts.length > 1 && parts.every((p) => leadsByTag.has(p))) leadsByTag.delete(tag);
   }
   const trackerByAbbr = new Map<string, (typeof tracker)[number]>();
   for (const row of tracker) {
@@ -106,7 +115,7 @@ export async function evaluateAllClients(settings?: SendingModeSettings, now = n
     });
     out.push({
       ...pace,
-      clientTag: clientTag.trim().toUpperCase(),
+      clientTag,
       companyName: trackerRow?.companyName || clientTag,
       plan: tier.plan,
       trackerStatus: tier.status,
@@ -192,6 +201,7 @@ export function decideThrottles(
     if (r.gone || r.leavingOn) { out.push({ ...base, action: "none", reason: r.gone ?? `leaving ${r.leavingOn}` }); continue; }
     if (paused.has(r.clientTag)) { out.push({ ...base, action: "none", reason: "auto-throttle paused" }); continue; }
     if (r.status === "grace") { out.push({ ...base, action: "none", reason: "grace period" }); continue; }
+    if (r.status === "no_data") { out.push({ ...base, action: "none", reason: "no status data" }); continue; }
     if (r.pace !== null && r.pace >= s.throttleOnPace && r.projected >= r.guarantee) {
       out.push({ ...base, action: "throttle", reason: `pace ${Math.round(r.pace * 100)}% ≥ ${Math.round(s.throttleOnPace * 100)}%` });
     } else out.push({ ...base, action: "none", reason: `pace ${r.pace ?? "—"}` });

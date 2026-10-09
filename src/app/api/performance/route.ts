@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { getSupabaseAdmin } from "@/lib/supabase";
 import { getSendingModeSettings } from "@/lib/sending-mode/config";
 import { listWindows, type SendingWindow } from "@/lib/sending-mode/windows";
+import { lastStatusCutoff } from "@/lib/sending-mode/ql-pace";
 
 // GET /api/performance — everything the Performance tab needs in one read:
 // the per-client QL pace rows the hourly sending-mode cron wrote, each
@@ -82,7 +83,9 @@ export async function GET() {
     });
 
     const evaluatedAt = clients.reduce<string | null>((m, c) => (!m || c.evaluatedAt > m ? c.evaluatedAt : m), null);
-    return NextResponse.json({ clients, windows, settings, evaluatedAt });
+    // QL numbers are counted up to the Friday 5 PM PST cut-off (ql-pace.ts).
+    const judgedAt = evaluatedAt ? lastStatusCutoff(new Date(evaluatedAt)).toISOString() : null;
+    return NextResponse.json({ clients, windows, settings, evaluatedAt, judgedAt });
   } catch (e) {
     return NextResponse.json({ error: e instanceof Error ? e.message : "Failed" }, { status: 500 });
   }

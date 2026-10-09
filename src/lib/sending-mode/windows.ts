@@ -287,22 +287,30 @@ export async function continueApply(windowId: string, budgetMs = 200_000): Promi
     if (Date.now() - t0 > budgetMs) { outOfTime = true; break; }
     const ids = list.map((a) => a.inbox_id);
 
-    const daily = await setLimit(instance, "daily", ids, limits.daily);
-    let okIds = daily.ok;
+    // Turbo only ever raises sending and throttle only ever lowers it: an
+    // account already at 10/day must not drop to Turbo's 8, and one at 2/day
+    // must not climb to the throttle's 3. Warm-up only comes down. Accounts
+    // with nothing to change still count as applied — the revert puts back the
+    // recorded limits, which for them is a no-op.
+    const changesDaily = (a: AccountRow) => a.prev_daily_limit === null
+      || (window.kind === "turbo" ? a.prev_daily_limit < limits.daily : a.prev_daily_limit > limits.daily);
+    const daily = await setLimit(instance, "daily", list.filter(changesDaily).map((a) => a.inbox_id), limits.daily);
+    const failedIds = new Set(daily.failed);
     if (limits.warmup !== null) {
       // Only accounts whose warm-up limit we could read get a warm-up change —
       // otherwise there's nothing to put back.
-      const readable = new Set(list.filter((a) => a.prev_warmup_limit !== null).map((a) => a.inbox_id));
-      const warm = await setLimit(instance, "warmup", okIds.filter((id) => readable.has(id)), limits.warmup);
-      const warmFailed = new Set(warm.failed);
-      okIds = okIds.filter((id) => !warmFailed.has(id));
+      const warmIds = list
+        .filter((a) => a.prev_warmup_limit !== null && a.prev_warmup_limit > limits.warmup! && !failedIds.has(a.inbox_id))
+        .map((a) => a.inbox_id);
+      const warm = await setLimit(instance, "warmup", warmIds, limits.warmup);
+      for (const id of warm.failed) failedIds.add(id);
       if (warm.ok.length) await mirrorLimits(instance, warm.ok, "warmup_daily_limit", limits.warmup);
-      daily.failed.push(...warm.failed);
     }
-    if (okIds.length) {
-      await flagAccounts(windowId, instance, okIds, { applied: true, last_error: null });
-      await mirrorLimits(instance, okIds, "daily_limit", limits.daily);
-    }
+    const okIds = ids.filter((id) => !failedIds.has(id));
+    daily.failed = [...failedIds];
+    if (okIds.length) await flagAccounts(windowId, instance, okIds, { applied: true, last_error: null });
+    const raisedOrLowered = daily.ok.filter((id) => !failedIds.has(id));
+    if (raisedOrLowered.length) await mirrorLimits(instance, raisedOrLowered, "daily_limit", limits.daily);
     if (daily.failed.length) await flagAccounts(windowId, instance, daily.failed, { last_error: "Bison rejected the limit change" });
     applied += okIds.length;
     failed += daily.failed.length;

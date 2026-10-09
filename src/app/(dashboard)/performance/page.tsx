@@ -11,16 +11,16 @@
 import { useMemo, useState } from "react";
 import Link from "next/link";
 import { toast } from "sonner";
-import { Download, Gauge, Rocket, Pause, Play, RotateCcw, Ban } from "lucide-react";
+import { Download, Gauge, Rocket, Pause, Play, RotateCcw, Ban, AlertTriangle, Loader2 } from "lucide-react";
 import { PageHeader } from "@/components/shared/page-header";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
   Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle,
 } from "@/components/ui/dialog";
-import { usePerformance, type PerformanceClient, type SendingWindow } from "@/lib/hooks/use-performance";
+import { usePerformance, type PerformanceClient, type SendingWindow, type TurboPreview } from "@/lib/hooks/use-performance";
 
-type View = "under" | "over" | "all";
+type View = "under" | "over" | "nodata" | "all";
 
 const STATUS_META: Record<string, { label: string; cls: string }> = {
   critical: { label: "Critical", cls: "bg-red-500/15 text-red-700 dark:text-red-300 border-red-500/40" },
@@ -28,7 +28,29 @@ const STATUS_META: Record<string, { label: string; cls: string }> = {
   on_track: { label: "On Track", cls: "bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 border-emerald-500/40" },
   overperforming: { label: "Overperforming", cls: "bg-sky-500/15 text-sky-700 dark:text-sky-300 border-sky-500/40" },
   grace: { label: "Grace", cls: "bg-zinc-500/10 text-zinc-600 dark:text-zinc-300 border-zinc-400/40" },
+  no_data: { label: "No status data", cls: "bg-zinc-500/10 text-zinc-600 dark:text-zinc-300 border-dashed border-zinc-400/60" },
 };
+
+// days_elapsed is counted to the Friday cut-off; the live day of the period
+// is what the Days column shows.
+const liveDay = (c: PerformanceClient) => c.cycleLength - c.daysRemaining;
+
+/** "Grace" past the period's first days means no Friday cut-off has landed in
+ *  this period yet — say so rather than calling it grace. */
+function statusMeta(c: PerformanceClient, graceDays: number) {
+  if (c.status === "grace" && liveDay(c) > graceDays) {
+    return { label: "Waiting for Friday", cls: STATUS_META.grace.cls };
+  }
+  return STATUS_META[c.status] ?? STATUS_META.grace;
+}
+
+const BAND_LABEL: Record<string, string> = {
+  target_met: "target met",
+  credit_50: "50% credit",
+  credit_100: "100% credit",
+};
+const fmtCutoff = (iso: string) =>
+  new Date(iso).toLocaleString(undefined, { weekday: "short", month: "short", day: "numeric", hour: "numeric", timeZone: "America/Los_Angeles" });
 
 const fmtDate = (iso: string | null | undefined) => (iso ? iso.slice(0, 10) : "—");
 const pct = (p: number | null) => (p === null ? "—" : `${Math.round(p * 100)}%`);
@@ -49,18 +71,19 @@ async function post(url: string, body: Record<string, unknown>) {
 }
 
 export default function PerformancePage() {
-  const { clients, windows, settings, evaluatedAt, isLoading, mutate } = usePerformance();
+  const { clients, windows, settings, evaluatedAt, judgedAt, isLoading, mutate } = usePerformance();
   const [view, setView] = useState<View>("under");
   const [busy, setBusy] = useState<string | null>(null);
-  const [confirm, setConfirm] = useState<{ client: PerformanceClient; accounts: number; byInstance: Record<string, number>; endsAt: string } | null>(null);
+  const [confirm, setConfirm] = useState<{ client: PerformanceClient; preview: TurboPreview | null } | null>(null);
 
   const rows = useMemo(() => {
     const list = clients.filter((c) => {
       if (view === "under") return c.status === "at_risk" || c.status === "critical";
       if (view === "over") return c.status === "overperforming" || c.throttle;
+      if (view === "nodata") return c.status === "no_data";
       return true;
     });
-    const rank: Record<string, number> = { critical: 0, at_risk: 1, overperforming: 2, on_track: 3, grace: 4 };
+    const rank: Record<string, number> = { critical: 0, at_risk: 1, overperforming: 2, on_track: 3, no_data: 4, grace: 5 };
     return list.sort((a, b) =>
       (rank[a.status] ?? 9) - (rank[b.status] ?? 9)
       || (a.projected - a.guarantee) - (b.projected - b.guarantee)
@@ -71,6 +94,7 @@ export default function PerformancePage() {
   const counts = useMemo(() => ({
     under: clients.filter((c) => c.status === "at_risk" || c.status === "critical").length,
     over: clients.filter((c) => c.status === "overperforming" || c.throttle).length,
+    nodata: clients.filter((c) => c.status === "no_data").length,
     all: clients.length,
   }), [clients]);
 
@@ -81,11 +105,20 @@ export default function PerformancePage() {
     finally { setBusy(null); }
   };
 
-  const previewTurbo = (c: PerformanceClient) => run(`preview:${c.clientTag}`, async () => {
-    const p = await post("/api/performance/turbo", { clientTag: c.clientTag, action: "preview" });
-    if (p.accounts === 0) throw new Error(`${c.clientTag}: no connected accounts carry this tag`);
-    setConfirm({ client: c, accounts: p.accounts, byInstance: p.byInstance, endsAt: p.endsAt });
-  });
+  // Opens straight away and fills in — the preview reads every account live
+  // from Bison, which takes a few seconds on big clients.
+  const previewTurbo = (c: PerformanceClient) => {
+    setConfirm({ client: c, preview: null });
+    return run(`preview:${c.clientTag}`, async () => {
+      try {
+        const p = (await post("/api/performance/turbo", { clientTag: c.clientTag, action: "preview" })) as TurboPreview;
+        setConfirm((cur) => (cur?.client.clientTag === c.clientTag ? { client: c, preview: p } : cur));
+      } catch (e) {
+        setConfirm(null);
+        throw e;
+      }
+    });
+  };
 
   const activateTurbo = () => {
     if (!confirm) return;
@@ -121,6 +154,14 @@ export default function PerformancePage() {
         )}
       </PageHeader>
 
+      {judgedAt && (
+        <p className="text-xs text-muted-foreground">
+          QLs are counted up to <strong>{fmtCutoff(judgedAt)} PST</strong>, the last Friday 5 PM — the team fills the Status
+          column by then, so mid-week numbers would read behind. &quot;No status data&quot; = most of this period&apos;s replies still
+          have no Status, so the client can&apos;t be judged.
+        </p>
+      )}
+
       {settings && (
         <p className="text-xs text-muted-foreground">
           Turbo: {settings.turboWarmupLimit} warm-up / {settings.turboDailyLimit} sending for {settings.turboDays} days ·
@@ -130,7 +171,7 @@ export default function PerformancePage() {
       )}
 
       <div className="flex items-center gap-2">
-        {([["under", "Underperforming"], ["over", "Overperforming"], ["all", "Overview"]] as [View, string][]).map(([v, label]) => (
+        {([["under", "Underperforming"], ["over", "Overperforming"], ["nodata", "No status data"], ["all", "Overview"]] as [View, string][]).map(([v, label]) => (
           <Button key={v} size="sm" variant={view === v ? "default" : "outline"} onClick={() => setView(v)}>
             {label} <span className="ml-1 tabular-nums opacity-70">{counts[v]}</span>
           </Button>
@@ -157,7 +198,7 @@ export default function PerformancePage() {
             </thead>
             <tbody>
               {rows.map((c) => {
-                const meta = STATUS_META[c.status] ?? STATUS_META.grace;
+                const meta = statusMeta(c, settings?.graceDays ?? 5);
                 const k = c.clientTag;
                 const isBusy = busy?.endsWith(`:${k}`) ?? false;
                 return (
@@ -167,11 +208,11 @@ export default function PerformancePage() {
                       {c.plan && <span className="text-muted-foreground"> · {c.plan}</span>}
                     </td>
                     <td className="px-3 py-2 whitespace-nowrap tabular-nums">{c.cycleStart} → {c.cycleEnd}</td>
-                    <td className="px-3 py-2 whitespace-nowrap tabular-nums">{c.daysElapsed} / {c.daysRemaining} left</td>
+                    <td className="px-3 py-2 whitespace-nowrap tabular-nums">day {liveDay(c)} · {c.daysRemaining} left</td>
                     <td className="px-3 py-2 tabular-nums">{c.guarantee}</td>
                     <td className="px-3 py-2 tabular-nums"><strong>{c.qlsDelivered}</strong> <span className="text-muted-foreground">/ {c.expectedToDate} exp.</span></td>
                     <td className="px-3 py-2 tabular-nums">{pct(c.pace)}</td>
-                    <td className={`px-3 py-2 tabular-nums ${c.projected >= c.guarantee ? "text-emerald-600 dark:text-emerald-400" : ""}`}>{c.status === "grace" ? "—" : c.projected}</td>
+                    <td className={`px-3 py-2 tabular-nums ${c.projected >= c.guarantee ? "text-emerald-600 dark:text-emerald-400" : ""}`}>{c.status === "grace" || c.status === "no_data" ? "—" : c.projected}</td>
                     <td className="px-3 py-2"><span className={`inline-block rounded-full border px-2 py-0.5 text-[10px] font-semibold ${meta.cls}`}>{meta.label}</span></td>
                     <td className="px-3 py-2 whitespace-nowrap">{c.leavingOn ? <span className="text-amber-600 dark:text-amber-400">Yes · {c.leavingKind} {c.leavingOn}</span> : "No"}</td>
                     <td className="px-3 py-2 whitespace-nowrap tabular-nums">
@@ -185,7 +226,7 @@ export default function PerformancePage() {
                         {c.turbo ? (
                           <Button size="xs" variant="outline" disabled={isBusy} onClick={() => cancelTurbo(c)} title="End Turbo now and restore every account"><Ban className="h-3 w-3" /> Cancel Turbo</Button>
                         ) : (
-                          <Button size="xs" variant="outline" disabled={isBusy || !!c.leavingOn} onClick={() => previewTurbo(c)} title={c.leavingOn ? "Client is leaving" : "Shift warm-up toward sending for 15 days"}><Rocket className="h-3 w-3" /> Turbo</Button>
+                          <Button size="xs" variant="outline" disabled={isBusy || !!c.leavingOn} onClick={() => previewTurbo(c)} title={c.leavingOn ? "Client is leaving" : "See what Turbo would change before turning it on"}><Rocket className="h-3 w-3" /> Turbo</Button>
                         )}
                         {c.throttle && (
                           <Button size="xs" variant="outline" disabled={isBusy} onClick={() => throttle(c, "release")} title="Release the throttle now"><RotateCcw className="h-3 w-3" /> Release</Button>
@@ -250,27 +291,109 @@ export default function PerformancePage() {
       </div>
 
       <Dialog open={!!confirm} onOpenChange={(o) => { if (!o) setConfirm(null); }}>
-        <DialogContent>
+        <DialogContent className="sm:max-w-xl">
           <DialogHeader>
-            <DialogTitle>Activate Turbo for {confirm?.client.clientTag}?</DialogTitle>
-            <DialogDescription>
-              {confirm && (
-                <>
-                  {confirm.accounts} connected account(s) across{" "}
-                  {Object.entries(confirm.byInstance).map(([i, n]) => `${i} (${n})`).join(", ")} go to{" "}
-                  {settings?.turboWarmupLimit} warm-up / {settings?.turboDailyLimit} sending per day until{" "}
-                  <strong>{fmtDate(confirm.endsAt)}</strong>, then back to exactly what each has now.
-                  {confirm.client.throttle && " The active throttle is released first."}
-                </>
-              )}
-            </DialogDescription>
+            <DialogTitle>Turbo preview: {confirm?.client.clientTag}</DialogTitle>
+            <DialogDescription>Nothing changes until you press Activate.</DialogDescription>
           </DialogHeader>
+          {confirm && !confirm.preview && (
+            <div className="flex items-center gap-2 py-8 justify-center text-sm text-muted-foreground">
+              <Loader2 className="h-4 w-4 animate-spin" /> Reading accounts and campaigns…
+            </div>
+          )}
+          {confirm?.preview && <TurboPreviewBody p={confirm.preview} />}
           <DialogFooter>
             <Button variant="outline" onClick={() => setConfirm(null)}>Cancel</Button>
-            <Button onClick={activateTurbo}><Rocket className="h-3.5 w-3.5" /> Activate Turbo</Button>
+            <Button
+              onClick={activateTurbo}
+              disabled={!confirm?.preview || confirm.preview.accounts.total === 0 || confirm.preview.open?.kind === "turbo"}
+            >
+              <Rocket className="h-3.5 w-3.5" /> Activate Turbo
+            </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
+    </div>
+  );
+}
+
+function TurboPreviewBody({ p }: { p: TurboPreview }) {
+  const { standing, accounts, perDay, estimate, settings } = p;
+  const n = (v: number) => v.toLocaleString();
+  return (
+    <div className="space-y-4 text-sm">
+      {standing && (
+        <section>
+          <h3 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground mb-1">Where they stand</h3>
+          <p>
+            <strong>{standing.qlsDelivered} of {standing.guarantee}</strong> QLs so far (counted to {fmtCutoff(standing.judgedAt)} PST).
+            {standing.status === "no_data" ? (
+              <> Most replies have no Status yet, so the real number isn&apos;t known.</>
+            ) : (
+              <> On this pace: <strong>{standing.projected}</strong> by {standing.cycleEnd} → <strong>{BAND_LABEL[standing.band]}</strong>.</>
+            )}
+          </p>
+        </section>
+      )}
+
+      <section>
+        <h3 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground mb-1">
+          What changes for {settings.turboDays} days (until {fmtDate(p.endsAt)})
+        </h3>
+        <ul className="list-disc pl-5 space-y-0.5">
+          <li><strong>{n(accounts.raised)}</strong> account(s) go up to <strong>{settings.turboDailyLimit} sends/day</strong>.</li>
+          {accounts.unchanged > 0 && <li>{n(accounts.unchanged)} already send {settings.turboDailyLimit}+/day and stay as they are.</li>}
+          <li>Warm-up comes down to {settings.turboWarmupLimit}/day, so more of each account goes to real sending.</li>
+          <li className="text-muted-foreground">{accounts.byInstance.map((b) => `${b.label} (${n(b.count)})`).join(" · ") || "No connected accounts"}</li>
+        </ul>
+      </section>
+
+      <section>
+        <h3 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground mb-1">Impact (rough estimate)</h3>
+        <div className="grid grid-cols-3 gap-2">
+          <div className="rounded-lg border px-3 py-2">
+            <div className="text-[11px] text-muted-foreground">Sends per day</div>
+            <div className="tabular-nums font-semibold">{n(perDay.now)} → {n(perDay.turbo)}</div>
+            <div className="text-[11px] text-emerald-600 dark:text-emerald-400 tabular-nums">+{n(perDay.extra)}/day</div>
+          </div>
+          <div className="rounded-lg border px-3 py-2">
+            <div className="text-[11px] text-muted-foreground">Extra emails this period</div>
+            <div className="tabular-nums font-semibold">+{n(estimate.extraEmailsInPeriod)}</div>
+            <div className="text-[11px] text-muted-foreground">{estimate.turboDaysInPeriod} Turbo day(s) left in it</div>
+          </div>
+          <div className="rounded-lg border px-3 py-2">
+            <div className="text-[11px] text-muted-foreground">Extra QLs</div>
+            <div className="tabular-nums font-semibold">{estimate.extraQls === null ? "—" : `≈ +${estimate.extraQls}`}</div>
+            <div className="text-[11px] text-muted-foreground">
+              {estimate.projectedWithTurbo !== null && estimate.bandWithTurbo
+                ? `→ ${estimate.projectedWithTurbo} · ${BAND_LABEL[estimate.bandWithTurbo]}`
+                : "not enough history"}
+            </div>
+          </div>
+        </div>
+        <p className="text-[11px] text-muted-foreground mt-1.5">
+          {estimate.emailsPerQl
+            ? `From this client's history: about 1 QL per ${n(estimate.emailsPerQl)} emails. `
+            : ""}
+          Sends per day = what the connected accounts allow, within the {perDay.activeCampaigns} sending campaign(s)&apos; daily caps.
+          Replies arrive days after the send, so treat the QL number as a rough guide.
+        </p>
+      </section>
+
+      {p.warnings.length > 0 && (
+        <section className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2">
+          <h3 className="text-xs font-semibold text-amber-700 dark:text-amber-300 flex items-center gap-1 mb-1">
+            <AlertTriangle className="h-3.5 w-3.5" /> Watch out
+          </h3>
+          <ul className="list-disc pl-5 space-y-0.5 text-xs">
+            {p.warnings.map((w) => <li key={w}>{w}</li>)}
+          </ul>
+        </section>
+      )}
+
+      <p className="text-xs text-muted-foreground">
+        On {fmtDate(p.endsAt)} every account goes back to exactly the limits it has today, automatically. You can cancel Turbo any time.
+      </p>
     </div>
   );
 }
