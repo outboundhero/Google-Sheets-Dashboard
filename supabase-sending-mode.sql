@@ -103,3 +103,9 @@ alter table sending_windows           enable row level security;
 alter table sending_window_accounts   enable row level security;
 alter table client_sending_prefs      enable row level security;
 alter table client_sending_status     enable row level security;
+
+-- Auto-throttle on/off switch (Performance tab, 2026-10-09). Ships OFF.
+alter table sending_mode_settings
+  add column if not exists auto_throttle_enabled    boolean not null default false,
+  add column if not exists auto_throttle_updated_by text,
+  add column if not exists auto_throttle_updated_at timestamptz;

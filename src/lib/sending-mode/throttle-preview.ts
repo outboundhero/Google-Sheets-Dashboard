@@ -127,7 +127,7 @@ export async function buildThrottlePreview(opts: { rows?: ClientSendingStatus[] 
 
   const judgedAt = rows.reduce<string | null>((m, r) => (!m || r.judgedAt > m ? r.judgedAt : m), null);
   return {
-    enabled: process.env.SENDING_MODE_THROTTLE_ENABLED === "true",
+    enabled: settings.autoThrottleEnabled,
     nextPassAt: nextPass().toISOString(),
     judgedAt,
     settings,

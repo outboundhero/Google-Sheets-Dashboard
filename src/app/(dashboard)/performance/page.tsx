@@ -401,8 +401,27 @@ function TurboPreviewBody({ p }: { p: TurboPreview }) {
 }
 
 function ThrottlePreviewCard() {
-  const { preview: p, error, isLoading } = useThrottlePreview(true);
+  const { preview: p, error, isLoading, mutate } = useThrottlePreview(true);
+  const [confirmSwitch, setConfirmSwitch] = useState<boolean | null>(null); // target state being confirmed
+  const [switching, setSwitching] = useState(false);
   const n = (v: number) => v.toLocaleString();
+
+  const flip = async (enabled: boolean) => {
+    setSwitching(true);
+    try {
+      await post("/api/performance/auto-throttle", { enabled });
+      toast.success(enabled ? "Auto-throttle is ON — it acts at the next daily run" : "Auto-throttle is OFF — nobody new will be throttled");
+      setConfirmSwitch(null);
+      await mutate();
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Failed");
+    } finally {
+      setSwitching(false);
+    }
+  };
+  const changedBy = p?.settings.autoThrottleUpdatedBy
+    ? `${p.settings.autoThrottleEnabled ? "Turned on" : "Turned off"} by ${p.settings.autoThrottleUpdatedBy}${p.settings.autoThrottleUpdatedAt ? ` · ${fmtDate(p.settings.autoThrottleUpdatedAt)}` : ""}`
+    : null;
   const nextPass = p
     ? new Date(p.nextPassAt).toLocaleString(undefined, { weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })
     : "";
@@ -415,6 +434,18 @@ function ThrottlePreviewCard() {
           p.enabled
             ? <span className="rounded-full border border-sky-500/40 bg-sky-500/15 px-2 py-0.5 text-[10px] font-semibold text-sky-700 dark:text-sky-300">ON · next run {nextPass}</span>
             : <span className="rounded-full border border-zinc-400/40 bg-zinc-500/10 px-2 py-0.5 text-[10px] font-semibold text-zinc-600 dark:text-zinc-300">OFF · preview only, nothing changes</span>
+        )}
+        {changedBy && <span className="text-[11px] text-muted-foreground">{changedBy}</span>}
+        {p && (
+          <Button
+            size="sm"
+            variant={p.enabled ? "outline" : "default"}
+            className="ml-auto"
+            disabled={switching}
+            onClick={() => setConfirmSwitch(!p.enabled)}
+          >
+            {p.enabled ? "Turn auto-throttle off" : "Turn auto-throttle on"}
+          </Button>
         )}
       </div>
       {p && (
@@ -476,6 +507,35 @@ function ThrottlePreviewCard() {
           </p>
         </>
       )}
+
+      <Dialog open={confirmSwitch !== null} onOpenChange={(o) => { if (!o) setConfirmSwitch(null); }}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>{confirmSwitch ? "Turn auto-throttle on?" : "Turn auto-throttle off?"}</DialogTitle>
+            <DialogDescription>
+              {confirmSwitch
+                ? <>From the next daily run ({nextPass}) it lowers over-pacing clients to {p?.settings.throttleDailyLimit} sends/day by itself, and puts them back when they&apos;re near target.</>
+                : <>Nobody new gets throttled. Clients already throttled stay that way until the normal rules release them, or you press Release on their row.</>}
+            </DialogDescription>
+          </DialogHeader>
+          {confirmSwitch && p && (
+            <div className="text-sm">
+              {p.throttle.length === 0
+                ? <p>Right now it would throttle no one.</p>
+                : <>
+                    <p className="mb-1">If it ran now, it would throttle <strong>{p.throttle.length}</strong> client(s) (−{n(p.throttle.reduce((s2, r) => s2 + r.fewerPerDay, 0))} emails/day):</p>
+                    <p className="text-xs text-muted-foreground">{p.throttle.map((r) => `${r.clientTag} (${pct(r.pace)})`).join(", ")}</p>
+                  </>}
+            </div>
+          )}
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setConfirmSwitch(null)}>Cancel</Button>
+            <Button disabled={switching} onClick={() => confirmSwitch !== null && flip(confirmSwitch)}>
+              {switching && <Loader2 className="h-3.5 w-3.5 animate-spin" />} {confirmSwitch ? "Turn on" : "Turn off"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

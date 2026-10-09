@@ -22,7 +22,7 @@ export type { PerformanceClient, SendingWindow, SendingModeSettings, TurboPrevie
 
 /** What the next auto-throttle pass would do. Fetched only while `enabled`. */
 export function useThrottlePreview(enabled: boolean) {
-  const { data, error, isLoading } = useSWR<ThrottlePreview & { error?: string }>(
+  const { data, error, isLoading, mutate } = useSWR<ThrottlePreview & { error?: string }>(
     enabled ? "/api/performance/throttle-preview" : null,
     fetcher,
     { revalidateOnFocus: false, dedupingInterval: 60000, keepPreviousData: true },
@@ -31,6 +31,7 @@ export function useThrottlePreview(enabled: boolean) {
     preview: data && !data.error ? data : null,
     error: error || (data?.error ? new Error(data.error) : null),
     isLoading,
+    mutate,
   };
 }
 

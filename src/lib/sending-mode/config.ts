@@ -15,6 +15,11 @@ export interface SendingModeSettings {
   graceDays: number;            // no status / no throttle for the first N days of a period
   turboWindowDays: number;      // Critical when projected < guarantee with ≤ N days left
   fullCreditFraction: number;   // projected ≤ guarantee × this = 100%-credit band
+  /** The auto-throttle on/off switch on the Performance tab. Off by default —
+   *  the daily pass only reports until an admin turns it on. */
+  autoThrottleEnabled: boolean;
+  autoThrottleUpdatedBy: string | null;
+  autoThrottleUpdatedAt: string | null;
 }
 
 export const DEFAULT_SENDING_MODE_SETTINGS: SendingModeSettings = {
@@ -27,6 +32,9 @@ export const DEFAULT_SENDING_MODE_SETTINGS: SendingModeSettings = {
   graceDays: 5,
   turboWindowDays: 15,
   fullCreditFraction: 0.5,
+  autoThrottleEnabled: false,
+  autoThrottleUpdatedBy: null,
+  autoThrottleUpdatedAt: null,
 };
 
 const num = (v: unknown, fallback: number) => {
@@ -53,8 +61,25 @@ export async function getSendingModeSettings(): Promise<SendingModeSettings> {
       graceDays: num(data.grace_days, d.graceDays),
       turboWindowDays: num(data.turbo_window_days, d.turboWindowDays),
       fullCreditFraction: num(data.full_credit_fraction, d.fullCreditFraction),
+      autoThrottleEnabled: data.auto_throttle_enabled === true,
+      autoThrottleUpdatedBy: (data.auto_throttle_updated_by as string | null) ?? null,
+      autoThrottleUpdatedAt: (data.auto_throttle_updated_at as string | null) ?? null,
     };
   } catch {
     return { ...d };
   }
+}
+
+/** Flip the auto-throttle switch. Needs the auto_throttle_* columns
+ *  (supabase-sending-mode.sql); throws a clear error until they exist. */
+export async function setAutoThrottleEnabled(enabled: boolean, actor: string): Promise<SendingModeSettings> {
+  const { error } = await getSupabaseAdmin()
+    .from("sending_mode_settings")
+    .update({ auto_throttle_enabled: enabled, auto_throttle_updated_by: actor, auto_throttle_updated_at: new Date().toISOString() })
+    .eq("id", 1);
+  if (error) {
+    if (/auto_throttle/i.test(error.message)) throw new Error("The auto-throttle switch needs its database columns first (see supabase-sending-mode.sql).");
+    throw new Error(error.message);
+  }
+  return getSendingModeSettings();
 }

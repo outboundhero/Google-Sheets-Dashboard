@@ -261,7 +261,9 @@ export interface ThrottlePassResult {
 export async function runThrottlePass(
   rows: ClientSendingStatus[],
   s: SendingModeSettings,
-  opts: { dry?: boolean; budgetMs?: number; deadline?: number } = {},
+  /** allowNew false (switch off): releases still run — a throttle opened
+   *  while the switch was on must still come off — but nobody new is throttled. */
+  opts: { dry?: boolean; allowNew?: boolean; budgetMs?: number; deadline?: number } = {},
 ): Promise<ThrottlePassResult> {
   const [open, paused] = await Promise.all([listOpenWindows(), getThrottlePausedSet()]);
   const decisions = await decideThrottlesWithCapacity(rows, open, paused, s);
@@ -272,6 +274,7 @@ export async function runThrottlePass(
   const openByTag = new Map(open.map((w) => [w.client_tag.toUpperCase(), w]));
   for (const d of decisions) {
     if (d.action === "none") continue;
+    if (d.action === "throttle" && opts.allowNew === false) continue;
     if (opts.deadline && Date.now() > opts.deadline) break;
     const r = byTag.get(d.clientTag)!;
     try {
