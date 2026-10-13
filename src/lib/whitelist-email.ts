@@ -118,6 +118,16 @@ export async function fetchClientRecipients(clientTag: string): Promise<Whitelis
 }
 
 /**
+ * Who a whitelist email for this client goes out as and to — the same values
+ * sendWhitelistEmail uses below, for a preview that sends nothing. `to` is the
+ * client's CC list from ReplyRouter (fetchClientRecipients).
+ */
+export function whitelistEnvelope(clientTag: string, to: string[]): { from: string; to: string[]; cc: string[] } {
+  const extraTo = EXTRA_TO_BY_CLIENT[clientTag.trim().toUpperCase()] || [];
+  return { from: FROM_EMAIL, to: Array.from(new Set([...to, ...extraTo])), cc: [...INTERNAL_CC] };
+}
+
+/**
  * Send the whitelist email via the n8n webhook (Gmail node sends as From).
  * No-ops gracefully (returns sent:false) until N8N_WHITELIST_WEBHOOK_URL is set,
  * mirroring sendClientReport.
