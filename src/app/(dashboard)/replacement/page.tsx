@@ -353,7 +353,7 @@ export default function ReplacementPage() {
 
   return (
     <div className="space-y-5">
-      <PageHeader title="Domain Replacement" description="Detection guardrails & observe-only preview">
+      <PageHeader title="Domain Replacement" description="Detect burnt domains, replace them, and keep every client at cap">
         <Badge variant="outline" className={`gap-1 ${settings?.mode === "observe" ? "border-emerald-500/30 text-emerald-500" : "border-amber-500/30 text-amber-500"}`}>
           {settings?.mode === "observe" ? <Eye className="h-3 w-3" /> : <ShieldAlert className="h-3 w-3" />}
           mode: {settings?.mode ?? "…"}
@@ -364,6 +364,12 @@ export default function ReplacementPage() {
         <div className="flex items-center gap-2 rounded-lg border border-emerald-500/30 bg-emerald-500/5 px-4 py-2.5 text-sm text-emerald-600 dark:text-emerald-400">
           <Eye className="h-4 w-4 shrink-0" />
           Observe-only — detection runs but takes no action. Nothing is tagged, moved, removed, or cancelled.
+        </div>
+      )}
+      {settings?.mode === "auto" && (
+        <div className="flex items-center gap-2 rounded-lg border border-amber-500/30 bg-amber-500/5 px-4 py-2.5 text-sm text-amber-600 dark:text-amber-400">
+          <ShieldAlert className="h-4 w-4 shrink-0" />
+          Auto — the cron executes the replacement plan every 30 minutes, one client per run. Skip a domain below to keep it out.
         </div>
       )}
       {error && (
@@ -501,7 +507,7 @@ export default function ReplacementPage() {
           <div className="flex items-center justify-between">
             <div>
               <div className="text-sm font-medium">Replacement plan — what would happen to each burnt domain</div>
-              <div className="text-[11px] text-muted-foreground">Observe-only — pull reserve → tag → set redirect → attach to campaigns → remove burnt. Nothing executes.</div>
+              <div className="text-[11px] text-muted-foreground">Pull reserve → tag → set redirect → attach to campaigns → remove burnt. Execute runs it for one client now; in auto mode the cron works through the same plan.</div>
             </div>
             <div className="flex items-center gap-3">
               <label className="flex items-center gap-1.5 text-xs text-muted-foreground">

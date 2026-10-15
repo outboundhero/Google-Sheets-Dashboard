@@ -57,7 +57,7 @@ export function PurchasePlanCard() {
               <ShoppingCart className="h-4 w-4" /> Purchase calculator — buy X more domains
             </div>
             <div className="text-[11px] text-muted-foreground">
-              Per instance: bring every client to cap (20 B2B / 5 B2C) + keep a reserve buffer. Buy = cap shortfall + floor − reserve on hand. Observe-only.
+              Per instance: bring every client to its tier cap (20/40 B2B · 5/10 B2C) + keep a reserve buffer. Buy = cap shortfall + floor − reserve on hand. Nothing is bought here — Purchase proposals does the buying.
             </div>
           </div>
           <Button size="sm" variant="outline" onClick={load} disabled={loading} className="gap-2">

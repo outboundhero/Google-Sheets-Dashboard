@@ -112,11 +112,10 @@ export function GroupPlanCard() {
             <div className="flex items-center gap-2 text-sm font-medium">
               <Layers className="h-4 w-4" />
               Group-driven replacement plan
-              <Badge variant="outline" className="border-sky-500/30 text-sky-500">observe</Badge>
             </div>
             <div className="text-[11px] text-muted-foreground">
               Burnt detection uses the threshold <b>groups</b> (SURBL/Spamhaus ignored), not the flat guardrails.
-              Same downstream plan (pull reserve → tag → redirect → attach → remove). Nothing executes.
+              Same downstream plan (pull reserve → tag → redirect → attach → remove) — the one the auto-runner executes.
             </div>
           </div>
           <div className="flex items-center gap-2">

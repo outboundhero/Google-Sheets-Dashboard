@@ -294,12 +294,11 @@ export function TrueUpCard() {
             <div className="flex items-center gap-2 text-sm font-medium">
               <Scale className="h-4 w-4" />
               True-up — hold every client at its tier cap
-              <Badge variant="outline" className="border-sky-500/30 text-sky-500">observe</Badge>
             </div>
             <div className="text-[11px] text-muted-foreground">
               Tier 0.5/1 = 20 B2B · 5 B2C, Tier 2 = 40 · 10. Under cap → pull reserves in (on top of what replacement
               already does for burnt domains); over cap → untag the worst back to reserve. Reserve is shared, so
-              &ldquo;short&rdquo; means the stock isn&rsquo;t there. Reports only — nothing runs.
+              &ldquo;short&rdquo; means the stock isn&rsquo;t there. Run it acts on Bison now; the true-up cron also runs these on its own.
             </div>
           </div>
           <div className="flex items-center gap-2">

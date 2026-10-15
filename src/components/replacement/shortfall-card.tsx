@@ -64,7 +64,6 @@ export function ShortfallCard() {
             <div className="flex items-center gap-2 text-sm font-medium">
               <Target className="h-4 w-4" />
               Domains short — buy per instance
-              <Badge variant="outline" className="border-sky-500/30 text-sky-500">observe</Badge>
             </div>
             <div className="text-[11px] text-muted-foreground">
               Non-flagged domains that remain vs the tier live cap (20/40 B2B · 5/10 B2C), per client tag, per b2b/b2c
