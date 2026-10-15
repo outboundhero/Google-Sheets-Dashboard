@@ -26,8 +26,10 @@ const COLUMNS = [
   "redirect_checked_at",
   "blacklisted",
   "blacklist_checked_at",
+  "blacklist_listed_since",
   "spamhaus_dbl",
   "spamhaus_checked_at",
+  "spamhaus_listed_since",
 ].join(", ");
 
 export async function GET(request: Request) {

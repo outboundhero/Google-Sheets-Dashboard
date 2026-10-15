@@ -91,8 +91,12 @@ interface DomainRow {
   redirect_checked_at?: string | null;
   blacklisted?: boolean | null;
   blacklist_checked_at?: string | null;
+  // When the current listing was first seen; null if not listed or listed
+  // before we started recording (supabase-blacklist-listed-since.sql)
+  blacklist_listed_since?: string | null;
   spamhaus_dbl?: boolean | null;
   spamhaus_checked_at?: string | null;
+  spamhaus_listed_since?: string | null;
   // Trailing reply/bounce rates (%), null until enough snapshot history exists
   reply_10?: number | null;
   reply_15?: number | null;
@@ -620,6 +624,9 @@ function DeliverabilityPageInner() {
   const [domains, setDomains] = useState<DomainRow[]>([]);
   // Days of snapshot history collected (drives the trailing-rate warm-up note)
   const [trailingDaysCollected, setTrailingDaysCollected] = useState(0);
+  // Whether the trailing rates reached the rows. They load best-effort, so a
+  // failed fetch used to leave every rate blank with nothing to say why.
+  const [trailingState, setTrailingState] = useState<"loading" | "ready" | "failed">("loading");
   const [loading, setLoading] = useState(true);
   const [syncing, setSyncing] = useState(false);
   const [syncProgresses, setSyncProgresses] = useState<InstanceSyncProgress[] | null>(null);
@@ -1196,6 +1203,7 @@ function DeliverabilityPageInner() {
       // (a heavier ~2-3s snapshot scan) merge in a moment later instead of
       // blocking first paint. Both fetched in parallel; trailing best-effort.
       const domainsP = fetch(`/api/deliverability/domains?${instancesQuery}`, { cache: "no-store" }).then((r) => r.json());
+      setTrailingState("loading");
       const trailingP = fetch(`/api/deliverability/trailing?${instancesQuery}`, { cache: "no-store" })
         .then((r) => (r.ok ? r.json() : null))
         .catch(() => null);
@@ -1208,17 +1216,21 @@ function DeliverabilityPageInner() {
 
       // Fold trailing rates in when they land (does not block the table).
       trailingP.then((t) => {
-        if (seq !== domainsSeqRef.current || !t) return;
-        const byDomain = new Map<string, { reply_10: number | null; reply_15: number | null; reply_30: number | null; bounce_10: number | null; bounce_15: number | null; bounce_30: number | null }>();
-        for (const r of (t?.rates || []) as { domain: string; reply_10: number | null; reply_15: number | null; reply_30: number | null; bounce_10: number | null; bounce_15: number | null; bounce_30: number | null }[]) {
-          byDomain.set(r.domain, { reply_10: r.reply_10, reply_15: r.reply_15, reply_30: r.reply_30 ?? null, bounce_10: r.bounce_10, bounce_15: r.bounce_15, bounce_30: r.bounce_30 ?? null });
+        if (seq !== domainsSeqRef.current) return;
+        if (!t) { setTrailingState("failed"); return; }
+        // Keyed by instance too: a domain moved between instances keeps a
+        // stale row on its old instance, whose rates are blank.
+        const byKey = new Map<string, { reply_10: number | null; reply_15: number | null; reply_30: number | null; bounce_10: number | null; bounce_15: number | null; bounce_30: number | null }>();
+        for (const r of (t?.rates || []) as { instance: string; domain: string; reply_10: number | null; reply_15: number | null; reply_30: number | null; bounce_10: number | null; bounce_15: number | null; bounce_30: number | null }[]) {
+          byKey.set(`${r.instance}:${r.domain}`, { reply_10: r.reply_10, reply_15: r.reply_15, reply_30: r.reply_30 ?? null, bounce_10: r.bounce_10, bounce_15: r.bounce_15, bounce_30: r.bounce_30 ?? null });
         }
         setTrailingDaysCollected(typeof t?.daysCollected === "number" ? t.daysCollected : 0);
         setDomains((prev) => prev.map((d) => {
-          const tr = byDomain.get(d.domain);
+          const tr = byKey.get(`${d.instance}:${d.domain}`);
           return tr ? { ...d, ...tr } : d;
         }));
-      }).catch(() => { /* trailing best-effort */ });
+        setTrailingState("ready");
+      }).catch(() => { if (seq === domainsSeqRef.current) setTrailingState("failed"); });
     } catch {
       if (seq === domainsSeqRef.current) setLoading(false);
     }
@@ -2413,18 +2425,28 @@ function DeliverabilityPageInner() {
     const selected = domains.filter((d) => selectedDomains.has(d.domain));
     let csv: string;
     if (withStats) {
-      const header = "Domain,Date Added,Inboxes,Sent,Replied,Bounced,Reply Rate 10d,Reply Rate 15d,Reply Rate 30d,Bounce Rate 10d,Bounce Rate 15d,Bounce Rate 30d,Daily Limit,Tags";
+      if (
+        trailingState !== "ready" &&
+        !window.confirm(
+          trailingState === "loading"
+            ? "The 10/15/30-day reply and bounce rates are still loading, so those columns would be blank. Download anyway?"
+            : "The 10/15/30-day reply and bounce rates failed to load, so those columns would be blank. Download anyway?",
+        )
+      ) return;
+      const header = "Domain,Date Added,Inboxes,Sent,Replied,Bounced,Reply Rate 10d,Reply Rate 15d,Reply Rate 30d,Bounce Rate 10d,Bounce Rate 15d,Bounce Rate 30d,Daily Limit,SURBL Listed,SURBL Last Checked,SURBL Listed Since,Spamhaus Listed,Spamhaus Last Checked,Spamhaus Listed Since,Tags";
       const pct = (v: number | null | undefined) => (v != null ? `${v}%` : "");
-      const rows = selected.map((d) => {
-        let dateAdded = "";
-        if (d.domain_created_at) {
-          const dt = new Date(d.domain_created_at);
-          const mm = String(dt.getMonth() + 1).padStart(2, "0");
-          const dd = String(dt.getDate()).padStart(2, "0");
-          dateAdded = `${mm}-${dd}-${dt.getFullYear()}`;
-        }
-        return `${d.domain},${dateAdded},${d.inbox_count},${d.total_sent || 0},${d.total_replied || 0},${d.total_bounced || 0},${pct(d.reply_10)},${pct(d.reply_15)},${pct(d.reply_30)},${pct(d.bounce_10)},${pct(d.bounce_15)},${pct(d.bounce_30)},${d.daily_limit_total || 0},"${(d.tags || []).join(", ")}"`;
-      });
+      const date = (iso: string | null | undefined) => {
+        if (!iso) return "";
+        const dt = new Date(iso);
+        const mm = String(dt.getMonth() + 1).padStart(2, "0");
+        const dd = String(dt.getDate()).padStart(2, "0");
+        return `${mm}-${dd}-${dt.getFullYear()}`;
+      };
+      // Never-checked stays "Not checked", never "No": an unchecked domain isn't clean.
+      const listed = (v: boolean | null | undefined) => (v == null ? "Not checked" : v ? "Yes" : "No");
+      const rows = selected.map((d) =>
+        `${d.domain},${date(d.domain_created_at)},${d.inbox_count},${d.total_sent || 0},${d.total_replied || 0},${d.total_bounced || 0},${pct(d.reply_10)},${pct(d.reply_15)},${pct(d.reply_30)},${pct(d.bounce_10)},${pct(d.bounce_15)},${pct(d.bounce_30)},${d.daily_limit_total || 0},${listed(d.blacklisted)},${date(d.blacklist_checked_at)},${date(d.blacklist_listed_since)},${listed(d.spamhaus_dbl)},${date(d.spamhaus_checked_at)},${date(d.spamhaus_listed_since)},"${(d.tags || []).join(", ")}"`,
+      );
       csv = [header, ...rows].join("\n");
     } else {
       csv = ["Domain", ...selected.map((d) => d.domain)].join("\n");
@@ -2435,7 +2457,7 @@ function DeliverabilityPageInner() {
     a.download = `domains-${selectedDomains.size}${withStats ? "-stats" : ""}.csv`;
     a.click();
     setShowExportMenu(false);
-  }, [domains, selectedDomains]);
+  }, [domains, selectedDomains, trailingState]);
 
   const copyDomainsToClipboard = useCallback(() => {
     navigator.clipboard.writeText(Array.from(selectedDomains).join("\n"));
@@ -4255,6 +4277,11 @@ function DeliverabilityPageInner() {
             {trailingDaysCollected > 0 && trailingDaysCollected < 30 && (
               <span className="text-[11px] text-muted-foreground self-center">
                 Trailing rates warming up — day {trailingDaysCollected}/30
+              </span>
+            )}
+            {trailingState === "failed" && (
+              <span className="text-[11px] text-destructive self-center">
+                10/15/30-day rates failed to load — reload to retry
               </span>
             )}
 
