@@ -51,13 +51,21 @@ function sanitizeSegment(raw: unknown, i: number): ThresholdSegment | null {
   const groups = Array.isArray(r.groups)
     ? (r.groups.map(sanitizeGroup).filter(Boolean) as ConditionGroup[])
     : [];
-  return {
+  const seg: ThresholdSegment = {
     id: typeof r.id === "string" && r.id ? r.id : `seg-${Date.now()}-${i}`,
     name: typeof r.name === "string" ? r.name : `Segment ${i + 1}`,
     clientTags,
     isDefault: Boolean(r.isDefault),
     groups,
   };
+  // "domain name has / never" words. These were dropped here, so whatever was
+  // typed into those editor boxes vanished on save. Kept only when sent, so a
+  // segment that never had them still falls back to the seeded words.
+  const words = (v: unknown) => (Array.isArray(v) ? v.map((w) => String(w).trim()).filter(Boolean) : undefined);
+  const include = words(r.keywordsInclude), exclude = words(r.keywordsExclude);
+  if (include) seg.keywordsInclude = include;
+  if (exclude) seg.keywordsExclude = exclude;
+  return seg;
 }
 
 export async function GET(request: Request) {
