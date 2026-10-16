@@ -16,6 +16,7 @@ import {
   type InboxingAccount,
 } from "@/lib/inboxing-accounts";
 import { getHandledDomains, logEvents, type NewEvent } from "@/lib/replacement/store";
+import { rememberFirstSeen } from "@/lib/deliverability/first-seen";
 
 export const maxDuration = 300;
 
@@ -55,6 +56,7 @@ interface DomainRowLite {
   domain: string;
   tags: string[] | null;
   inbox_count: number | null;
+  domain_created_at: string | null;
 }
 
 interface SenderEmail {
@@ -98,7 +100,7 @@ async function loadDomainRows(domains: string[]): Promise<Map<string, DomainRowL
     const batch = domains.slice(i, i + 100);
     const { data, error } = await supabase
       .from("deliverability_domains")
-      .select("instance, domain, tags, inbox_count")
+      .select("instance, domain, tags, inbox_count, domain_created_at")
       .in("domain", batch);
     if (error) throw new Error(`deliverability_domains read: ${error.message}`);
     for (const r of (data || []) as DomainRowLite[]) {
@@ -538,6 +540,13 @@ export async function POST(request: Request) {
         detail: `move ${f.source} → ${target} submitted (${f.expected} inbox${f.expected === 1 ? "" : "es"})${actor ? ` by ${actor}` : ""}`,
         signals: { kind: "move", from: f.source, to: target, expected: f.expected, actor },
       }))).catch((e) => console.error("[move] could not record move intent:", e instanceof Error ? e.message : e));
+      // Save the warmup start now, while the source row still exists — the
+      // carryover at landing skips a domain whose source is already gone.
+      await rememberFirstSeen(inFlight.map((f) => ({
+        domain: f.domain,
+        createdAt: rowsByName.get(f.domain)?.find((r) => r.instance === f.source)?.domain_created_at,
+        instance: f.source,
+      })));
     }
 
     // SUBMIT mode: uploads are queued on Inboxing — hand the in-flight set back

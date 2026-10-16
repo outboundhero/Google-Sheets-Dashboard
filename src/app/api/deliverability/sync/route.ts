@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { getSupabaseAdmin } from "@/lib/supabase";
 import { bisonFetch, resolveInstance } from "@/lib/bison";
 import { isInstanceSlug, type BisonInstanceSlug } from "@/lib/bison-instances";
+import { rememberFirstSeen } from "@/lib/deliverability/first-seen";
 
 // Give the chunk room to walk a lot of cursor pages before the platform kills
 // it. Cursor pagination is inherently sequential so raw throughput is lower
@@ -208,6 +209,7 @@ export async function POST(request: Request) {
         .upsert(batch, { onConflict: "instance,domain", ignoreDuplicates: true });
       if (domErr) console.error(`[SYNC:${instance}] Domain insert error:`, domErr);
     }
+    await rememberFirstSeen(Array.from(domainSet.entries()).map(([domain, createdAt]) => ({ domain, createdAt, instance })));
 
     for (let i = 0; i < inboxRows.length; i += 500) {
       const batch = inboxRows.slice(i, i + 500);

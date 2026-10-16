@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { getSupabaseAdmin } from "@/lib/supabase";
 import { bisonFetch, resolveInstance } from "@/lib/bison";
+import { rememberFirstSeen } from "@/lib/deliverability/first-seen";
 
 interface SenderEmail {
   id: number;
@@ -92,6 +93,7 @@ export async function POST(request: Request) {
     await supabase
       .from("deliverability_domains")
       .upsert(domainRows, { onConflict: "instance,domain", ignoreDuplicates: true });
+    await rememberFirstSeen(Array.from(domainSet.entries()).map(([domain, createdAt]) => ({ domain, createdAt, instance })));
 
     // Upsert inboxes
     const inboxRows = allInboxes.map((inbox) => ({
