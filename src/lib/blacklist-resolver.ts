@@ -3,6 +3,14 @@ import { promises as dns } from "node:dns";
 // SURBL multi zone. NXDOMAIN = clean. 127.0.0.X = listed (last byte is a
 // bitmask of which categories). 127.0.0.255 specifically signals the resolver
 // has been rate-limited by SURBL — treat as inconclusive, not as "clean".
+// Any other answer without a list bit (e.g. 127.0.0.1, which SURBL uses to
+// refuse a querier) is inconclusive too, never "listed".
+//
+// Nick 2026-10-17 asked whether a refused lookup was being counted as listed:
+// from Oct 9 nearly every check came back listed. It wasn't — SURBL's own TXT
+// record reads "on lists [abuse]" for our domains (127.0.0.64), the same via
+// Google, Quad9 and an ISP resolver, while servicemaster.com, abm.com and
+// google.com come back clean through the same servers.
 const SURBL_ZONE = "multi.surbl.org";
 const TOTAL_BUDGET_MS = 5000;
 // Pin to resolvers known to answer RBL queries (Cloudflare 1.1.1.1 silently
@@ -21,12 +29,15 @@ export interface BlacklistResult {
   error: string | null;
 }
 
+// Bit positions from surbl.org/lists ("127.0.0.64 means it's listed on ABUSE").
 function decodeBits(lastByte: number): string[] {
   const flags: string[] = [];
+  if (lastByte & 4) flags.push("DM");
   if (lastByte & 8) flags.push("PHISH");
   if (lastByte & 16) flags.push("MALWARE");
-  if (lastByte & 32) flags.push("ABUSE");
-  if (lastByte & 64) flags.push("CRACKED");
+  if (lastByte & 32) flags.push("CT");
+  if (lastByte & 64) flags.push("ABUSE");
+  if (lastByte & 128) flags.push("CRACKED");
   return flags;
 }
 
@@ -51,6 +62,7 @@ export async function checkBlacklist(rawDomain: string): Promise<BlacklistResult
       return { domain, blacklisted: false, lists: [], error: null };
     }
     const lastBytes = ips
+      .filter((ip) => ip.startsWith("127.0.0."))
       .map((ip) => Number(ip.split(".").pop()))
       .filter((n) => Number.isFinite(n));
     if (lastBytes.some((b) => b === 255)) {
@@ -63,6 +75,14 @@ export async function checkBlacklist(rawDomain: string): Promise<BlacklistResult
     }
     const set = new Set<string>();
     for (const b of lastBytes) for (const f of decodeBits(b)) set.add(f);
+    if (set.size === 0) {
+      return {
+        domain,
+        blacklisted: null,
+        lists: [],
+        error: `SURBL answered ${ips.join(", ")} — no list code (refused or unexpected)`,
+      };
+    }
     return { domain, blacklisted: true, lists: Array.from(set), error: null };
   } catch (e) {
     const code = (e as NodeJS.ErrnoException)?.code;
