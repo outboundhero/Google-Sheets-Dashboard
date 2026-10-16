@@ -10,7 +10,7 @@ import { pstDateString } from "@/lib/date-utils";
 import { getSettings, getHandledDomains } from "./store";
 import { loadFirstCreated, effectiveCreatedAt } from "./domain-age";
 import { evaluateDomain, type DomainSignals } from "./detect";
-import { evaluateSegments, type ThresholdConfig, type DomainMetrics } from "./threshold-groups";
+import { evaluateSegments, segmentForTags, defaultThresholdConfig, type ThresholdConfig, type DomainMetrics } from "./threshold-groups";
 import { deriveCampaignMap, getActiveCampaignKeys, type CampaignRef } from "./campaigns";
 import { capFor, getClientTiers } from "./client-tiers";
 import { getSkipSet, skipKey } from "./skips";
@@ -355,6 +355,36 @@ export async function buildReplacementPlan(
       || a.localeCompare(b));
   }
 
+  // Naming rule on the reserve pull (Spencer's §14 keywords, Jul-29): a client
+  // whose segment has "domain name has" words only takes a reserve containing
+  // one of them, and the segment's "never" words are always refused. Without
+  // it, the first non-cleaning segments with rules (SI, SC) were handed
+  // cleaning-named reserves (2026-10-16 dry run). Cleaning (default) clients
+  // use only the "never" list, so their pool loses nothing but other clients'
+  // brands. Configs saved before the keyword fields existed fall back to the
+  // seed; with no group config (flat guardrails) nothing changes.
+  const seedById = new Map(defaultThresholdConfig().segments.map((sg) => [sg.id, sg]));
+  const nameRuleByTag = new Map<string, { include: string[]; exclude: string[] }>();
+  const nameRuleFor = (tag: string) => {
+    let rule = nameRuleByTag.get(tag);
+    if (!rule) {
+      const seg = groupConfig ? segmentForTags(new Set([tag]), groupConfig.segments) : null;
+      const src = seg && seg.keywordsInclude === undefined && seg.keywordsExclude === undefined
+        ? seedById.get(seg.id) ?? seg : seg;
+      rule = {
+        include: seg?.isDefault ? [] : (src?.keywordsInclude ?? []).map((k) => k.toLowerCase()),
+        exclude: (src?.keywordsExclude ?? []).map((k) => k.toLowerCase()),
+      };
+      nameRuleByTag.set(tag, rule);
+    }
+    return rule;
+  };
+  const nameFits = (tag: string, dom: string) => {
+    const { include, exclude } = nameRuleFor(tag);
+    const n = dom.toLowerCase();
+    return !exclude.some((k) => n.includes(k)) && (include.length === 0 || include.some((k) => n.includes(k)));
+  };
+
   // Broader "total reserve" per instance — untagged + ≥ 21 days old, nothing
   // else. Doesn't affect what replacement pulls; only shown alongside the
   // per-provider counts so it's obvious how many warmed-up untagged domains
@@ -459,7 +489,8 @@ export async function buildReplacementPlan(
       // top-up slot: pull a like-for-like reserve (same instance + provider)
       const pool = (provider === "outlook" || provider === "google")
         ? reservePool.get(`${d.instance}:${provider}`) : undefined;
-      replacementDomain = pool && pool.length > 0 ? pool.shift()! : null;
+      const at = pool ? pool.findIndex((dom) => nameFits(tag, dom)) : -1;
+      replacementDomain = pool && at >= 0 ? pool.splice(at, 1)[0] : null;
       if (replacementDomain) replacementFrom = d.instance;
       // Cross-instance donor pull (Nick Aug-10): a B2C instance with an empty
       // local pool borrows an INBOXING-movable reserve from B2B#2
@@ -468,7 +499,7 @@ export async function buildReplacementPlan(
           && getInstance(d.instance).tier === "b2c" && d.instance !== CROSS_DONOR) {
         const donor = reservePool.get(`${CROSS_DONOR}:${provider}`);
         if (donor) {
-          const idx = donor.findIndex((dom) => inboxingMovable.has(`${CROSS_DONOR}:${dom}`));
+          const idx = donor.findIndex((dom) => inboxingMovable.has(`${CROSS_DONOR}:${dom}`) && nameFits(tag, dom));
           if (idx >= 0) {
             replacementDomain = donor.splice(idx, 1)[0];
             replacementFrom = CROSS_DONOR;
@@ -483,7 +514,11 @@ export async function buildReplacementPlan(
       // client that is not sending yet.
       else if (!activeKeys.has(groupKey)) blockers.push("client not live yet (no sending campaign) — initial fill is manual");
       if (provider === "mixed" || provider === "unknown") blockers.push(`${provider}-provider domain (manual)`);
-      else if (!replacementDomain) blockers.push(`no ready ${provider} reserve in this instance${getInstance(d.instance).tier === "b2c" ? " (and no Inboxing-movable B2B#2 donor)" : ""}`);
+      else if (!replacementDomain) {
+        const { include } = nameRuleFor(tag);
+        const named = include.length > 0 ? ` with "${include.join("\" / \"")}" in the name` : "";
+        blockers.push(`no ready ${provider} reserve${named} in this instance${getInstance(d.instance).tier === "b2c" ? " (and no Inboxing-movable B2B#2 donor)" : ""}`);
+      }
     } else {
       // client already at/over cap → remove the burnt domain, add NO replacement.
       // (Never remove excess healthy; just don't over-fill.)
