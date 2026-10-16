@@ -1,14 +1,16 @@
 // Per-client QL pace + the auto-throttle decision.
 //
 // evaluateAllClients() builds the row the Performance tab shows for each
-// active, tiered client (billing period, guarantee, QLs, pace, projected,
-// status, leaving) and writes it to client_sending_status. The throttle pass
-// reads those rows and opens/releases throttle windows per the spec:
+// active, tiered client (billing period, guarantee + target, MRLs, QL rate,
+// QLs, pace, projected, status, leaving) and writes it to
+// client_sending_status. The throttle pass reads those rows and opens/releases
+// throttle windows per the spec:
 //
 //   on   pace ≥ throttleOnPace after the grace days, client not in Turbo,
-//        not leaving, auto-throttle not paused for them
-//   off  pace < throttleOffPace · new billing period · projected < guarantee
-//        (a throttle must never put the guarantee at risk) · client now
+//        not leaving, auto-throttle not paused for them, and still projected
+//        to reach the operational target once throttled
+//   off  pace < throttleOffPace · new billing period · projected < target
+//        (a throttle must never cost the client its target) · client now
 //        leaving / in Turbo / paused
 //
 // Inputs are the stores the MRL pacing cron already uses: leads-store Redis +
@@ -20,7 +22,7 @@ import { getClientTierMap, resolveTier, TARGETS } from "@/lib/cron/client-report
 import { getSupabaseAdmin } from "@/lib/supabase";
 import { pstDateString } from "@/lib/date-utils";
 import type { Lead } from "@/types/lead";
-import { evaluateQlPace, type QlPace, type QlPaceStatus } from "./ql-pace";
+import { evaluateQlPace, lastStatusCutoff, operationalTarget, type QlPace, type QlPaceStatus } from "./ql-pace";
 import { getSendingModeSettings, type SendingModeSettings } from "./config";
 import { endWindow, listOpenWindows, startWindow, type SendingWindow } from "./windows";
 import { sendCapacity } from "./capacity";
@@ -132,11 +134,15 @@ export async function evaluateAllClients(settings?: SendingModeSettings, now = n
   return out;
 }
 
+// Performance v2 columns (supabase-sending-mode.sql). Until they exist the
+// save falls back to the original columns so the hourly job keeps running.
+const V2_MISSING = /column|schema cache|type integer/i;
+
 export async function saveClientStatuses(rows: ClientSendingStatus[]): Promise<void> {
   const supabase = getSupabaseAdmin();
   const nowIso = new Date().toISOString();
   const live = rows.filter((r) => r.gone === null);
-  const upserts = live.map((r) => ({
+  const base = live.map((r) => ({
     client_tag: r.clientTag,
     company_name: r.companyName,
     plan: r.plan,
@@ -149,21 +155,81 @@ export async function saveClientStatuses(rows: ClientSendingStatus[]): Promise<v
     qls_delivered: r.qlsDelivered,
     expected_to_date: r.expectedToDate,
     pace: r.pace,
-    projected: r.projected,
+    projected: Math.round(r.projected),
     status: r.status,
     leaving_on: r.leavingOn,
     leaving_kind: r.leavingKind,
     tracker_status: r.trackerStatus,
     evaluated_at: nowIso,
   }));
-  for (let i = 0; i < upserts.length; i += 500) {
-    const { error } = await supabase.from("client_sending_status").upsert(upserts.slice(i, i + 500), { onConflict: "client_tag" });
+  const full = live.map((r, i) => ({
+    ...base[i],
+    projected: r.projected,
+    target: r.target,
+    mrls_delivered: r.mrlsDelivered,
+    mrls_pending: r.mrlsPending,
+    qls_30d: r.qls30d,
+    nqls_30d: r.nqls30d,
+    dups_30d: r.dups30d,
+    actual_rate: r.actualRate,
+    blended_rate: r.blendedRate,
+    mrl_pace: r.mrlPace,
+    mrls_needed: r.mrlsNeeded,
+  }));
+  let v2 = true;
+  for (let i = 0; i < live.length; i += 500) {
+    const upsert = (batch: object[]) => supabase.from("client_sending_status").upsert(batch, { onConflict: "client_tag" });
+    let { error } = v2 ? await upsert(full.slice(i, i + 500)) : await upsert(base.slice(i, i + 500));
+    if (error && v2 && V2_MISSING.test(error.message)) {
+      v2 = false;
+      ({ error } = await upsert(base.slice(i, i + 500)));
+    }
     if (error) throw new Error(`client_sending_status upsert: ${error.message}`);
   }
   const keep = new Set(live.map((r) => r.clientTag));
   const { data: existing } = await supabase.from("client_sending_status").select("client_tag");
   const stale = ((existing || []) as { client_tag: string }[]).map((r) => r.client_tag).filter((t) => !keep.has(t));
   if (stale.length) await supabase.from("client_sending_status").delete().in("client_tag", stale);
+}
+
+/** A stored client_sending_status row back as a ClientSendingStatus. Rows
+ *  written before the v2 columns existed read as zero / the prior rate. */
+export function statusFromRow(r: Record<string, unknown>): ClientSendingStatus {
+  const n = (v: unknown, fallback = 0) => (v === null || v === undefined ? fallback : Number(v));
+  const guarantee = Number(r.guarantee);
+  return {
+    clientTag: String(r.client_tag).toUpperCase(),
+    companyName: (r.company_name as string | null) ?? "",
+    plan: (r.plan as string | null) ?? "",
+    trackerStatus: (r.tracker_status as string | null) ?? "",
+    leavingOn: (r.leaving_on as string | null) ?? null,
+    leavingKind: (r.leaving_kind as "churn" | "pause" | null) ?? null,
+    gone: null,
+    guarantee,
+    target: n(r.target, operationalTarget(guarantee)),
+    cycleStart: String(r.cycle_start),
+    cycleEnd: String(r.cycle_end),
+    cycleLength: Number(r.cycle_length),
+    daysElapsed: Number(r.days_elapsed),
+    daysRemaining: Number(r.days_remaining),
+    mrlsDelivered: n(r.mrls_delivered),
+    mrlsPending: n(r.mrls_pending),
+    qlsDelivered: Number(r.qls_delivered),
+    qls30d: n(r.qls_30d),
+    nqls30d: n(r.nqls_30d),
+    dups30d: n(r.dups_30d),
+    actualRate: r.actual_rate === null || r.actual_rate === undefined ? null : Number(r.actual_rate),
+    blendedRate: n(r.blended_rate),
+    mrlPace: n(r.mrl_pace),
+    mrlsNeeded: r.mrls_needed === null || r.mrls_needed === undefined ? null : Number(r.mrls_needed),
+    projected: n(r.projected),
+    expectedToDate: Number(r.expected_to_date),
+    pace: r.pace === null || r.pace === undefined ? null : Number(r.pace),
+    status: String(r.status) as QlPaceStatus,
+    judgedAt: lastStatusCutoff(new Date(String(r.evaluated_at))).toISOString(),
+    repliesToDate: 0,
+    blankStatusToDate: 0,
+  };
 }
 
 export async function getThrottlePausedSet(): Promise<Set<string>> {
@@ -183,13 +249,18 @@ export interface ThrottleDecision {
 
 /**
  * Projected QLs at the end of the period if the client sends only `keepRatio`
- * of today's volume from now on: QLs already delivered stay; the rest of the
- * projection shrinks with sending. Used for "never throttle a client under
- * target" (Vicky 2026-10-09 — the first preview had SBTB going 16 → ~7 on a
- * 10 target, and the release rule would only notice after the QLs were lost).
+ * of today's volume from now on: confirmed QLs and the leads already delivered
+ * stay; only the leads still to come (rate × MRL pace × days left) shrink with
+ * sending. Used for "never throttle a client under target" (Vicky 2026-10-09 —
+ * the first preview had SBTB going 16 → ~7, and the release rule would only
+ * notice after the QLs were lost). Target = the operational target since v2.
  */
-export function projectedIfThrottled(r: Pick<ClientSendingStatus, "qlsDelivered" | "projected">, keepRatio: number): number {
-  return Math.round(r.qlsDelivered + Math.max(0, r.projected - r.qlsDelivered) * keepRatio);
+export function projectedIfThrottled(
+  r: Pick<ClientSendingStatus, "projected" | "blendedRate" | "mrlPace" | "daysRemaining">,
+  keepRatio: number,
+): number {
+  const toCome = r.blendedRate * r.mrlPace * r.daysRemaining;
+  return Math.round((r.projected - toCome * (1 - keepRatio)) * 10) / 10;
 }
 
 /** Pure: what the throttle pass would do for each client. `keepRatio` per tag
@@ -212,7 +283,7 @@ export function decideThrottles(
       if (r.gone) out.push({ ...base, action: "release", reason: r.gone });
       else if (r.leavingOn) out.push({ ...base, action: "release", reason: `leaving ${r.leavingOn}` });
       else if (w.started_at.slice(0, 10) < r.cycleStart) out.push({ ...base, action: "release", reason: "new_period" });
-      else if (r.projected < r.guarantee) out.push({ ...base, action: "release", reason: "guarantee_at_risk" });
+      else if (r.projected < r.target) out.push({ ...base, action: "release", reason: "below_target" });
       else if (r.pace !== null && r.pace < s.throttleOffPace) out.push({ ...base, action: "release", reason: "pace_below_off" });
       else if (paused.has(r.clientTag)) out.push({ ...base, action: "release", reason: "auto_throttle_paused" });
       else out.push({ ...base, action: "none", reason: `throttled, pace ${r.pace}` });
@@ -225,8 +296,8 @@ export function decideThrottles(
     if (r.status === "no_data") { out.push({ ...base, action: "none", reason: "no status data" }); continue; }
     if (r.pace !== null && r.pace >= s.throttleOnPace && r.projected >= r.guarantee) {
       const after = projectedIfThrottled(r, keepRatio.get(r.clientTag) ?? s.throttleDailyLimit / NORMAL_DAILY_LIMIT);
-      if (after < r.guarantee) {
-        out.push({ ...base, action: "none", projectedIfThrottled: after, reason: `would drop under target (≈${after} of ${r.guarantee})` });
+      if (after < r.target) {
+        out.push({ ...base, action: "none", projectedIfThrottled: after, reason: `would drop under target (≈${after} of ${r.target})` });
       } else {
         out.push({ ...base, action: "throttle", projectedIfThrottled: after, reason: `pace ${Math.round(r.pace * 100)}% ≥ ${Math.round(s.throttleOnPace * 100)}%` });
       }

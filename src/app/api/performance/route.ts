@@ -3,34 +3,19 @@ import { getSupabaseAdmin } from "@/lib/supabase";
 import { getSendingModeSettings } from "@/lib/sending-mode/config";
 import { listWindows, type SendingWindow } from "@/lib/sending-mode/windows";
 import { lastStatusCutoff } from "@/lib/sending-mode/ql-pace";
+import { statusFromRow, type ClientSendingStatus } from "@/lib/sending-mode/status";
 
 // GET /api/performance — everything the Performance tab needs in one read:
-// the per-client QL pace rows the hourly sending-mode cron wrote, each
+// the per-client QL forecast rows the hourly sending-mode cron wrote, each
 // client's open Turbo/throttle window, the auto-throttle pause switch, the
 // window log, and the current tunables.
 
-export interface PerformanceClient {
-  clientTag: string;
-  companyName: string | null;
-  plan: string | null;
-  guarantee: number;
-  cycleStart: string;
-  cycleEnd: string;
-  cycleLength: number;
-  daysElapsed: number;
-  daysRemaining: number;
-  qlsDelivered: number;
-  expectedToDate: number;
-  pace: number | null;
-  projected: number;
-  status: string;
-  leavingOn: string | null;
-  leavingKind: string | null;
+export type PerformanceClient = ClientSendingStatus & {
   evaluatedAt: string;
   turbo: SendingWindow | null;
   throttle: SendingWindow | null;
   autoThrottlePaused: boolean;
-}
+};
 
 export async function GET() {
   try {
@@ -58,23 +43,10 @@ export async function GET() {
     const clients: PerformanceClient[] = ((statusRows || []) as Record<string, unknown>[]).map((r) => {
       const tag = String(r.client_tag).toUpperCase();
       const open = openByTag.get(tag) ?? { turbo: null, throttle: null };
+      const row = statusFromRow(r);
       return {
-        clientTag: tag,
-        companyName: (r.company_name as string | null) ?? null,
-        plan: (r.plan as string | null) ?? null,
-        guarantee: Number(r.guarantee),
-        cycleStart: String(r.cycle_start),
-        cycleEnd: String(r.cycle_end),
-        cycleLength: Number(r.cycle_length),
-        daysElapsed: Number(r.days_elapsed),
-        daysRemaining: Number(r.days_remaining),
-        qlsDelivered: Number(r.qls_delivered),
-        expectedToDate: Number(r.expected_to_date),
-        pace: r.pace === null || r.pace === undefined ? null : Number(r.pace),
-        projected: Number(r.projected ?? 0),
-        status: String(r.status),
-        leavingOn: (r.leaving_on as string | null) ?? null,
-        leavingKind: (r.leaving_kind as string | null) ?? null,
+        ...row,
+        companyName: row.companyName || tag,
         evaluatedAt: String(r.evaluated_at),
         turbo: open.turbo,
         throttle: open.throttle,
@@ -83,7 +55,7 @@ export async function GET() {
     });
 
     const evaluatedAt = clients.reduce<string | null>((m, c) => (!m || c.evaluatedAt > m ? c.evaluatedAt : m), null);
-    // QL numbers are counted up to the Friday 5 PM PST cut-off (ql-pace.ts).
+    // Pace and the no-data check are counted to the Friday 5 PM PST cut-off (ql-pace.ts).
     const judgedAt = evaluatedAt ? lastStatusCutoff(new Date(evaluatedAt)).toISOString() : null;
     return NextResponse.json({ clients, windows, settings, evaluatedAt, judgedAt });
   } catch (e) {

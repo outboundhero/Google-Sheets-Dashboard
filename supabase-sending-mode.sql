@@ -109,3 +109,25 @@ alter table sending_mode_settings
   add column if not exists auto_throttle_enabled    boolean not null default false,
   add column if not exists auto_throttle_updated_by text,
   add column if not exists auto_throttle_updated_at timestamptz;
+
+-- Performance v2, points 1 + 2 (2026-10-16): QL rate, forecast, operational
+-- target. The forecast has decimals now (7.5 QLs is a real line). New
+-- throttle end_reason: below_target (forecast under the operational target).
+alter table client_sending_status
+  alter column projected type numeric,
+  add column if not exists target         int,
+  add column if not exists mrls_delivered int,
+  add column if not exists mrls_pending   int,
+  add column if not exists qls_30d        int,
+  add column if not exists nqls_30d       int,
+  add column if not exists dups_30d       int,
+  add column if not exists actual_rate    numeric,
+  add column if not exists blended_rate   numeric,
+  add column if not exists mrl_pace       numeric,
+  add column if not exists mrls_needed    int;
+
+alter table sending_mode_settings
+  add column if not exists rate_days         int     not null default 30,
+  add column if not exists mrl_pace_days     int     not null default 14,
+  add column if not exists blend_prior_qls   numeric not null default 4,
+  add column if not exists blend_prior_leads numeric not null default 10;

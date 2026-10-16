@@ -2,8 +2,9 @@
 // rough read on whether it would move the needle, so whoever clicks sees it
 // before anything touches Bison. Read-only: nothing here writes.
 //
-//   where it stands   the last evaluation (as of the Friday cut-off) and the
-//                     credit band the period is heading for
+//   where it stands   the last evaluation (confirmed QLs, leads still
+//                     unchecked, the forecast) and the credit band the
+//                     period is heading for
 //   what changes      connected accounts per instance, how many get raised to
 //                     the Turbo limit and how many are already at/above it
 //                     (those are left alone — windows.ts only raises)
@@ -19,7 +20,7 @@ import { getStoredLeads } from "@/lib/leads-store";
 import { getInstance, isInstanceSlug } from "@/lib/bison-instances";
 import { isQualityLead } from "@/lib/cron/client-reports";
 import { getSendingModeSettings, type SendingModeSettings } from "./config";
-import { lastStatusCutoff } from "./ql-pace";
+import { operationalTarget } from "./ql-pace";
 import { getOpenWindow, loadClientAccounts, type SendingWindow } from "./windows";
 
 export type CreditBand = "target_met" | "credit_50" | "credit_100";
@@ -32,9 +33,11 @@ export interface TurboPreview {
   open: SendingWindow | null;
   standing: {
     status: string;
-    judgedAt: string;
     qlsDelivered: number;
+    mrlsPending: number;
+    blendedRate: number | null;
     guarantee: number;
+    target: number;
     projected: number;
     band: CreditBand;
     cycleEnd: string;
@@ -114,9 +117,11 @@ export async function buildTurboPreview(clientTag: string): Promise<TurboPreview
   const standing = st
     ? {
         status: String(st.status),
-        judgedAt: lastStatusCutoff(new Date(String(st.evaluated_at))).toISOString(),
         qlsDelivered: Number(st.qls_delivered),
+        mrlsPending: Number(st.mrls_pending ?? 0),
+        blendedRate: st.blended_rate === null || st.blended_rate === undefined ? null : Number(st.blended_rate),
         guarantee: Number(st.guarantee),
+        target: Number(st.target ?? operationalTarget(Number(st.guarantee))),
         projected: Number(st.projected ?? 0),
         band: creditBand(Number(st.projected ?? 0), Number(st.guarantee), settings.fullCreditFraction),
         cycleEnd: String(st.cycle_end),
@@ -132,7 +137,7 @@ export async function buildTurboPreview(clientTag: string): Promise<TurboPreview
   const turboDaysInPeriod = standing ? Math.min(settings.turboDays, standing.daysRemaining) : settings.turboDays;
   const extraEmailsInPeriod = extraPerDay * turboDaysInPeriod;
   const extraQls = emailsPerQl ? Math.round((extraEmailsInPeriod / emailsPerQl) * 10) / 10 : null;
-  const projectedWithTurbo = standing && extraQls !== null ? Math.round(standing.projected + extraQls) : null;
+  const projectedWithTurbo = standing && extraQls !== null ? Math.round((standing.projected + extraQls) * 10) / 10 : null;
 
   // ── watch-outs ──────────────────────────────────────────────────────────
   const warnings: string[] = [];

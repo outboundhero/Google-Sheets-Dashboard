@@ -2,8 +2,9 @@
 
 // Performance — beta base layer (Nick's Performance & Turbo Mode spec).
 //
-// One row per active tiered client: billing period, QL guarantee, QLs
-// delivered, pace, projected, status, leaving, Turbo, throttle, actions.
+// One row per active tiered client: billing period, QL guarantee + target,
+// MRLs, confirmed QLs, QL rate, forecast, pace, status, leaving, Turbo,
+// throttle, actions.
 // Underperforming / Overperforming / Overview views are filters over the same
 // rows. The Turbo + throttle log sits below with a CSV export. Numbers come
 // from the hourly sending-mode cron; actions hit /api/performance/*.
@@ -25,24 +26,17 @@ type View = "under" | "over" | "nodata" | "all";
 const STATUS_META: Record<string, { label: string; cls: string }> = {
   critical: { label: "Critical", cls: "bg-red-500/15 text-red-700 dark:text-red-300 border-red-500/40" },
   at_risk: { label: "At Risk", cls: "bg-amber-500/15 text-amber-700 dark:text-amber-300 border-amber-500/40" },
+  below_target: { label: "Below Target", cls: "bg-yellow-500/15 text-yellow-700 dark:text-yellow-300 border-yellow-500/40" },
   on_track: { label: "On Track", cls: "bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 border-emerald-500/40" },
   overperforming: { label: "Overperforming", cls: "bg-sky-500/15 text-sky-700 dark:text-sky-300 border-sky-500/40" },
   grace: { label: "Grace", cls: "bg-zinc-500/10 text-zinc-600 dark:text-zinc-300 border-zinc-400/40" },
   no_data: { label: "No status data", cls: "bg-zinc-500/10 text-zinc-600 dark:text-zinc-300 border-dashed border-zinc-400/60" },
 };
 
-// days_elapsed is counted to the Friday cut-off; the live day of the period
-// is what the Days column shows.
-const liveDay = (c: PerformanceClient) => c.cycleLength - c.daysRemaining;
-
-/** "Grace" past the period's first days means no Friday cut-off has landed in
- *  this period yet — say so rather than calling it grace. */
-function statusMeta(c: PerformanceClient, graceDays: number) {
-  if (c.status === "grace" && liveDay(c) > graceDays) {
-    return { label: "Waiting for Friday", cls: STATUS_META.grace.cls };
-  }
-  return STATUS_META[c.status] ?? STATUS_META.grace;
-}
+/** The sum behind a client's forecast, for its tooltip. */
+const forecastSum = (c: PerformanceClient) =>
+  `${c.qlsDelivered} confirmed + ${pct(c.blendedRate)} × ${c.mrlsPending} not checked yet`
+  + ` + ${pct(c.blendedRate)} × ${c.mrlPace} MRLs/day × ${c.daysRemaining} days left = ${c.projected}`;
 
 const BAND_LABEL: Record<string, string> = {
   target_met: "target met",
@@ -85,7 +79,7 @@ export default function PerformancePage() {
       if (view === "nodata") return c.status === "no_data";
       return true;
     });
-    const rank: Record<string, number> = { critical: 0, at_risk: 1, overperforming: 2, on_track: 3, no_data: 4, grace: 5 };
+    const rank: Record<string, number> = { critical: 0, at_risk: 1, below_target: 2, overperforming: 3, on_track: 4, no_data: 5, grace: 6 };
     return list.sort((a, b) =>
       (rank[a.status] ?? 9) - (rank[b.status] ?? 9)
       || (a.projected - a.guarantee) - (b.projected - b.guarantee)
@@ -146,7 +140,7 @@ export default function PerformancePage() {
     <div className="space-y-6">
       <PageHeader
         title="Performance"
-        description="QL pace against each client's guarantee for their current billing period — Turbo Mode and auto-throttle"
+        description="QL forecast against each client's guarantee and target for their current billing period — Turbo Mode and auto-throttle"
       >
         {evaluatedAt && (
           <span className="text-xs text-muted-foreground flex items-center gap-1.5">
@@ -156,11 +150,14 @@ export default function PerformancePage() {
         )}
       </PageHeader>
 
-      {judgedAt && (
+      {settings && (
         <p className="text-xs text-muted-foreground">
-          QLs are counted up to <strong>{fmtCutoff(judgedAt)} PST</strong>, the last Friday 5 PM — the team fills the Status
-          column by then, so mid-week numbers would read behind. &quot;No status data&quot; = most of this period&apos;s replies still
-          have no Status, so the client can&apos;t be judged.
+          <strong>Forecast</strong> = confirmed QLs + QL rate × leads not checked yet + QL rate × MRLs still to come (last{" "}
+          {settings.mrlPaceDays} days&apos; pace × days left) — hover a forecast to see its sum. <strong>QL rate</strong> = good ÷
+          checked over the last {settings.rateDays} days, Meeting-Ready leads only, starting from {settings.blendPriorQls} good out
+          of {settings.blendPriorLeads} so a few leads don&apos;t swing it (the real rate is next to it). Under the guarantee is At Risk
+          or Critical; between the guarantee and the target is Below Target.
+          {judgedAt && <> Pace and &quot;No status data&quot; still go by the last Friday 5 PM (<strong>{fmtCutoff(judgedAt)} PST</strong>), when the team has filled the week&apos;s statuses.</>}
         </p>
       )}
 
@@ -206,14 +203,16 @@ export default function PerformancePage() {
           <table className="w-full text-xs">
             <thead className="text-[11px] uppercase tracking-wide text-muted-foreground border-b">
               <tr>
-                {["Client", "Billing period", "Days", "Guarantee", "QLs", "Pace", "Projected", "Status", "Leaving", "Turbo", "Throttle", "Action"].map((h) => (
+                {["Client", "Billing period", "Days", "Guarantee / target", "MRLs", "QLs", "QL rate", "Forecast", "Pace", "Status", "Leaving", "Turbo", "Throttle", "Action"].map((h) => (
                   <th key={h} className="text-left font-medium px-3 py-2 whitespace-nowrap">{h}</th>
                 ))}
               </tr>
             </thead>
             <tbody>
               {rows.map((c) => {
-                const meta = statusMeta(c, settings?.graceDays ?? 5);
+                const meta = STATUS_META[c.status] ?? STATUS_META.grace;
+                const reviewed = c.qls30d + c.nqls30d + c.dups30d;
+                const judged = c.status !== "grace" && c.status !== "no_data";
                 const k = c.clientTag;
                 const isBusy = busy?.endsWith(`:${k}`) ?? false;
                 return (
@@ -223,11 +222,28 @@ export default function PerformancePage() {
                       {c.plan && <span className="text-muted-foreground"> · {c.plan}</span>}
                     </td>
                     <td className="px-3 py-2 whitespace-nowrap tabular-nums">{c.cycleStart} → {c.cycleEnd}</td>
-                    <td className="px-3 py-2 whitespace-nowrap tabular-nums">day {liveDay(c)} · {c.daysRemaining} left</td>
-                    <td className="px-3 py-2 tabular-nums">{c.guarantee}</td>
-                    <td className="px-3 py-2 tabular-nums"><strong>{c.qlsDelivered}</strong> <span className="text-muted-foreground">/ {c.expectedToDate} exp.</span></td>
-                    <td className="px-3 py-2 tabular-nums">{pct(c.pace)}</td>
-                    <td className={`px-3 py-2 tabular-nums ${c.projected >= c.guarantee ? "text-emerald-600 dark:text-emerald-400" : ""}`}>{c.status === "grace" || c.status === "no_data" ? "—" : c.projected}</td>
+                    <td className="px-3 py-2 whitespace-nowrap tabular-nums">day {c.daysElapsed} · {c.daysRemaining} left</td>
+                    <td className="px-3 py-2 tabular-nums">{c.guarantee} / {c.target}</td>
+                    <td className="px-3 py-2 whitespace-nowrap tabular-nums" title={`${c.mrlPace} MRLs a day over the last ${settings?.mrlPaceDays ?? 14} days${c.mrlsNeeded !== null ? ` · about ${c.mrlsNeeded} needed for ${c.guarantee} QLs at ${pct(c.blendedRate)}` : ""}`}>
+                      <strong>{c.mrlsDelivered}</strong>
+                      {c.mrlsNeeded !== null && <span className="text-muted-foreground"> of ~{c.mrlsNeeded}</span>}
+                    </td>
+                    <td className="px-3 py-2 whitespace-nowrap tabular-nums">
+                      <strong>{c.qlsDelivered}</strong>
+                      {c.mrlsPending > 0 && <span className="text-muted-foreground"> · {c.mrlsPending} unchecked</span>}
+                    </td>
+                    <td className="px-3 py-2 whitespace-nowrap tabular-nums" title={`Last ${settings?.rateDays ?? 30} days: ${c.qls30d} QL, ${c.nqls30d} NQL, ${c.dups30d} duplicate`}>
+                      {pct(c.blendedRate)} <span className="text-muted-foreground">(real {pct(c.actualRate)} · {reviewed} checked)</span>
+                    </td>
+                    <td className="px-3 py-2 whitespace-nowrap tabular-nums" title={judged ? forecastSum(c) : undefined}>
+                      {judged ? (
+                        <>
+                          <span className={c.projected >= c.target ? "text-emerald-600 dark:text-emerald-400" : ""}>{c.projected}</span>
+                          {c.projected < c.guarantee && <span className="text-red-600 dark:text-red-400"> ({Math.round((c.guarantee - c.projected) * 10) / 10} short)</span>}
+                        </>
+                      ) : "—"}
+                    </td>
+                    <td className="px-3 py-2 tabular-nums" title="QLs by last Friday 5 PM against a straight line to the guarantee — what auto-throttle switches on for now">{pct(c.pace)}</td>
                     <td className="px-3 py-2"><span className={`inline-block rounded-full border px-2 py-0.5 text-[10px] font-semibold ${meta.cls}`}>{meta.label}</span></td>
                     <td className="px-3 py-2 whitespace-nowrap">{c.leavingOn ? <span className="text-amber-600 dark:text-amber-400">Yes · {c.leavingKind} {c.leavingOn}</span> : "No"}</td>
                     <td className="px-3 py-2 whitespace-nowrap tabular-nums">
@@ -257,7 +273,7 @@ export default function PerformancePage() {
                 );
               })}
               {rows.length === 0 && (
-                <tr><td colSpan={12} className="px-3 py-6 text-center text-muted-foreground">No clients in this view.</td></tr>
+                <tr><td colSpan={14} className="px-3 py-6 text-center text-muted-foreground">No clients in this view.</td></tr>
               )}
             </tbody>
           </table>
@@ -341,11 +357,12 @@ function TurboPreviewBody({ p }: { p: TurboPreview }) {
         <section>
           <h3 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground mb-1">Where they stand</h3>
           <p>
-            <strong>{standing.qlsDelivered} of {standing.guarantee}</strong> QLs so far (counted to {fmtCutoff(standing.judgedAt)} PST).
+            <strong>{standing.qlsDelivered}</strong> confirmed QLs so far, {standing.mrlsPending} lead(s) not checked yet ·
+            guarantee {standing.guarantee}, target {standing.target}.
             {standing.status === "no_data" ? (
-              <> Most replies have no Status yet, so the real number isn&apos;t known.</>
+              <> Most leads have no Status yet, so the real number isn&apos;t known.</>
             ) : (
-              <> On this pace: <strong>{standing.projected}</strong> by {standing.cycleEnd} → <strong>{BAND_LABEL[standing.band]}</strong>.</>
+              <> Forecast: <strong>{standing.projected}</strong> by {standing.cycleEnd} → <strong>{BAND_LABEL[standing.band]}</strong>.</>
             )}
           </p>
         </section>
@@ -463,11 +480,11 @@ function ThrottlePreviewCard() {
       </div>
       {p && (
         <p className="text-xs text-muted-foreground">
-          A client at {Math.round(p.settings.throttleOnPace * 100)}%+ of its QL pace (and still projected to hit its target) has its accounts
-          lowered to <strong>{p.settings.throttleDailyLimit} sends/day</strong>, so it doesn&apos;t burn through leads and domains faster than it needs.
-          It goes back to normal by itself when pace drops below {Math.round(p.settings.throttleOffPace * 100)}%, the projection falls under target,
-          a new billing month starts, or the client is leaving. Accounts already at {p.settings.throttleDailyLimit}/day or less aren&apos;t touched,
-          and a client is never throttled if the estimate says it would end the month under target.
+          A client at {Math.round(p.settings.throttleOnPace * 100)}%+ of its QL pace has its accounts lowered to{" "}
+          <strong>{p.settings.throttleDailyLimit} sends/day</strong>, so it doesn&apos;t burn through leads and domains faster than it needs —
+          but only if the forecast says it still reaches its target (8 / 16 / 31) after slowing down. It goes back to normal by itself when
+          pace drops below {Math.round(p.settings.throttleOffPace * 100)}%, the forecast falls under the target, a new billing month starts,
+          or the client is leaving. Accounts already at {p.settings.throttleDailyLimit}/day or less aren&apos;t touched.
         </p>
       )}
 
@@ -495,7 +512,7 @@ function ThrottlePreviewCard() {
                   {p.throttle.map((r) => (
                     <tr key={r.clientTag} className="border-b last:border-0">
                       <td className="px-2 py-1.5 font-semibold whitespace-nowrap">{r.clientTag}</td>
-                      <td className="px-2 py-1.5 tabular-nums">{r.qlsDelivered} / {r.guarantee}</td>
+                      <td className="px-2 py-1.5 tabular-nums">{r.qlsDelivered} / {r.target}</td>
                       <td className="px-2 py-1.5 tabular-nums">{pct(r.pace)}</td>
                       <td className="px-2 py-1.5 tabular-nums">{r.projected}</td>
                       <td className="px-2 py-1.5 tabular-nums">{n(r.lowered)} of {n(r.accounts)}</td>

@@ -15,6 +15,10 @@ export interface SendingModeSettings {
   graceDays: number;            // no status / no throttle for the first N days of a period
   turboWindowDays: number;      // Critical when projected < guarantee with ≤ N days left
   fullCreditFraction: number;   // projected ≤ guarantee × this = 100%-credit band
+  rateDays: number;             // QL rate looks back this many days (30)
+  mrlPaceDays: number;          // "recent daily MRL pace" window (14)
+  blendPriorQls: number;        // blended rate = (QLs + this) ÷ (reviewed + blendPriorLeads)
+  blendPriorLeads: number;
   /** The auto-throttle on/off switch on the Performance tab. Off by default —
    *  the daily pass only reports until an admin turns it on. */
   autoThrottleEnabled: boolean;
@@ -32,6 +36,12 @@ export const DEFAULT_SENDING_MODE_SETTINGS: SendingModeSettings = {
   graceDays: 5,
   turboWindowDays: 15,
   fullCreditFraction: 0.5,
+  // Nick 2026-10-16: start every client at 4 good out of 10 (the fleet's real
+  // Meeting-Ready rate was 43%; his first draft said 8 of 10).
+  rateDays: 30,
+  mrlPaceDays: 14,
+  blendPriorQls: 4,
+  blendPriorLeads: 10,
   autoThrottleEnabled: false,
   autoThrottleUpdatedBy: null,
   autoThrottleUpdatedAt: null,
@@ -61,6 +71,10 @@ export async function getSendingModeSettings(): Promise<SendingModeSettings> {
       graceDays: num(data.grace_days, d.graceDays),
       turboWindowDays: num(data.turbo_window_days, d.turboWindowDays),
       fullCreditFraction: num(data.full_credit_fraction, d.fullCreditFraction),
+      rateDays: num(data.rate_days, d.rateDays),
+      mrlPaceDays: num(data.mrl_pace_days, d.mrlPaceDays),
+      blendPriorQls: num(data.blend_prior_qls, d.blendPriorQls),
+      blendPriorLeads: num(data.blend_prior_leads, d.blendPriorLeads),
       autoThrottleEnabled: data.auto_throttle_enabled === true,
       autoThrottleUpdatedBy: (data.auto_throttle_updated_by as string | null) ?? null,
       autoThrottleUpdatedAt: (data.auto_throttle_updated_at as string | null) ?? null,

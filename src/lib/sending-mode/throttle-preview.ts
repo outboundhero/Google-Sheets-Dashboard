@@ -13,8 +13,7 @@
 // QLs still to come.
 import { getSupabaseAdmin } from "@/lib/supabase";
 import { getSendingModeSettings, type SendingModeSettings } from "./config";
-import { lastStatusCutoff, type QlPaceStatus } from "./ql-pace";
-import { decideThrottlesWithCapacity, getThrottlePausedSet, projectedIfThrottled, type ClientSendingStatus } from "./status";
+import { decideThrottlesWithCapacity, getThrottlePausedSet, projectedIfThrottled, statusFromRow, type ClientSendingStatus } from "./status";
 import { sendCapacity } from "./capacity";
 import { listOpenWindows } from "./windows";
 
@@ -27,6 +26,7 @@ export interface ThrottlePreviewRow {
   pace: number | null;
   qlsDelivered: number;
   guarantee: number;
+  target: number;
   projected: number;
   daysRemaining: number;
   accounts: number;
@@ -66,29 +66,8 @@ export async function buildThrottlePreview(opts: { rows?: ClientSendingStatus[] 
   ]);
   if (error) throw new Error(error.message);
 
-  const rows: ClientSendingStatus[] = opts.rows?.filter((r) => r.gone === null) ?? ((statusRows || []) as Record<string, unknown>[]).map((r) => ({
-    clientTag: String(r.client_tag).toUpperCase(),
-    companyName: (r.company_name as string | null) ?? "",
-    plan: (r.plan as string | null) ?? "",
-    trackerStatus: (r.tracker_status as string | null) ?? "",
-    leavingOn: (r.leaving_on as string | null) ?? null,
-    leavingKind: (r.leaving_kind as "churn" | "pause" | null) ?? null,
-    gone: null,
-    guarantee: Number(r.guarantee),
-    cycleStart: String(r.cycle_start),
-    cycleEnd: String(r.cycle_end),
-    cycleLength: Number(r.cycle_length),
-    daysElapsed: Number(r.days_elapsed),
-    daysRemaining: Number(r.days_remaining),
-    qlsDelivered: Number(r.qls_delivered),
-    expectedToDate: Number(r.expected_to_date),
-    pace: r.pace === null || r.pace === undefined ? null : Number(r.pace),
-    projected: Number(r.projected ?? 0),
-    status: String(r.status) as QlPaceStatus,
-    judgedAt: lastStatusCutoff(new Date(String(r.evaluated_at))).toISOString(),
-    repliesToDate: 0,
-    blankStatusToDate: 0,
-  }));
+  const rows: ClientSendingStatus[] = opts.rows?.filter((r) => r.gone === null)
+    ?? ((statusRows || []) as Record<string, unknown>[]).map(statusFromRow);
   const byTag = new Map(rows.map((r) => [r.clientTag, r]));
   const decisions = await decideThrottlesWithCapacity(rows, open, paused, settings);
 
@@ -96,7 +75,7 @@ export async function buildThrottlePreview(opts: { rows?: ClientSendingStatus[] 
   const release = decisions.filter((d) => d.action === "release").map((d) => ({ clientTag: d.clientTag, reason: d.reason }));
   // Over the line but the pass leaves them alone — say why, so nobody wonders.
   const leftAlone = decisions
-    .filter((d) => d.action === "none" && d.status === "overperforming")
+    .filter((d) => d.action === "none" && (d.status === "overperforming" || d.projectedIfThrottled !== undefined))
     .map((d) => ({ clientTag: d.clientTag, reason: d.reason }));
 
   const cap = await sendCapacity(toThrottle.map((d) => d.clientTag), settings.throttleDailyLimit);
@@ -112,6 +91,7 @@ export async function buildThrottlePreview(opts: { rows?: ClientSendingStatus[] 
       pace: r.pace,
       qlsDelivered: r.qlsDelivered,
       guarantee: r.guarantee,
+      target: r.target,
       projected: r.projected,
       daysRemaining: r.daysRemaining,
       accounts: c.accounts,
@@ -119,7 +99,7 @@ export async function buildThrottlePreview(opts: { rows?: ClientSendingStatus[] 
       perDayNow: c.perDayNow,
       perDayThrottled: c.perDayThrottled,
       fewerPerDay: Math.max(0, c.perDayNow - c.perDayThrottled),
-      qlsGivenUp: Math.max(0, r.projected - after),
+      qlsGivenUp: Math.max(0, Math.round((r.projected - after) * 10) / 10),
       projectedAfter: after,
     });
   }
