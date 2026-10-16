@@ -19,9 +19,20 @@ export async function getThresholdConfig(): Promise<ThresholdConfig> {
   // No row yet → hand back Spencer's default seed (staged, enabled:false) so the
   // UI shows the cleaning defaults ready to review + save + turn on.
   if (!data) return defaultThresholdConfig();
+  // Segments saved before the "domain name has / never" fields existed get the
+  // seeded words — the ones domain-inventory and the plan already fall back
+  // to — so the editor shows the words in force and a save keeps them instead
+  // of writing back the empty boxes it used to display.
+  const seed = new Map(defaultThresholdConfig().segments.map((sg) => [sg.id, sg]));
+  const segments = ((data.segments as ThresholdSegment[] | null) ?? []).map((sg) => {
+    const fill = seed.get(sg.id);
+    return fill && sg.keywordsInclude === undefined && sg.keywordsExclude === undefined
+      ? { ...sg, keywordsInclude: fill.keywordsInclude ?? [], keywordsExclude: fill.keywordsExclude ?? [] }
+      : sg;
+  });
   return {
     enabled: Boolean(data.enabled),
-    segments: (data.segments as ThresholdSegment[] | null) ?? [],
+    segments,
     updatedAt: data.updated_at ?? undefined,
   };
 }
