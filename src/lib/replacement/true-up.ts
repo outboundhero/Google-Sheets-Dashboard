@@ -32,7 +32,7 @@ import { loadTrailingRates } from "./trailing-rates";
 import { getChurnBlackoutMap } from "./churn-guard";
 import { getWaitingSideKeys } from "./waiting-sides";
 
-const WARMUP_DAYS = 21; // matches plan.ts — a domain is usable once it's ≥ 21d old
+export const WARMUP_DAYS = 21; // matches plan.ts — a domain is usable once it's ≥ 21d old
 
 /**
  * Tags that look like clients (they carry a tier and campaigns) but are ours,
@@ -172,6 +172,14 @@ export interface TrueUpResult {
    * the cross-instance move reads to find donors.
    */
   reserveLeft: Record<string, string[]>;
+  /**
+   * Only with `includeWarming`: domains that pass every reserve rule except
+   * age — still inside the 21-day warm-up — keyed like reserveLeft, oldest
+   * first. Never part of the reserve: no fill, trim or move sees them. The
+   * onboarding allocation reads them for a client whose go-live is near
+   * (OutboundHero 2026-10-19: 0–4 warm-up days left at go-live is fine).
+   */
+  warmingLeft?: Record<string, { domain: string; ageDays: number; surbl: boolean }[]>;
 }
 
 interface DomRow {
@@ -209,7 +217,7 @@ const ageDays = (created: string | null, nowMs: number) =>
   created ? Math.floor((nowMs - new Date(created).getTime()) / 86_400_000) : 0;
 
 export async function computeTrueUp(
-  opts: { ranking?: Partial<TrimRankingConfig>; groupConfig?: ThresholdConfig } = {},
+  opts: { ranking?: Partial<TrimRankingConfig>; groupConfig?: ThresholdConfig; includeWarming?: boolean } = {},
 ): Promise<TrueUpResult> {
   const ranking: TrimRankingConfig = { ...DEFAULT_TRIM_RANKING, ...opts.ranking };
   const supabase = getSupabaseAdmin();
@@ -311,20 +319,30 @@ export async function computeTrueUp(
 
   // 4) reserve pools, gated exactly like plan.ts so the counts agree
   const reservePool = new Map<string, string[]>(); // `${instance}:${provider}`
+  const warmingPool = new Map<string, { domain: string; ageDays: number; surbl: boolean }[]>(); // only with includeWarming
   for (const e of enriched) {
     if (e.tag !== null) continue;
     if (hasBurntTag(e.d.tags)) continue;              // human "Burnt" verdict outranks metrics
     if (e.provider !== "outlook" && e.provider !== "google") continue;
     if (!cfg.allowInfoReserves && isInfo(e.d.domain)) continue;
-    if (ageDays(effectiveCreatedAt(e.d.domain, e.d.domain_created_at, firstCreated), nowMs) < WARMUP_DAYS) continue;
+    const age = ageDays(effectiveCreatedAt(e.d.domain, e.d.domain_created_at, firstCreated), nowMs);
+    const warming = age < WARMUP_DAYS;
+    if (warming && !opts.includeWarming) continue;
     if (e.d.spamhaus_dbl === true) continue;
     if (!cfg.allowSurblReserves && e.d.blacklisted === true) continue;
     if (e.burnt || e.skipped) continue;
     const key = `${e.d.instance}:${e.provider}`;
+    // Still warming: kept apart, never reserve.
+    if (warming) {
+      if (!warmingPool.has(key)) warmingPool.set(key, []);
+      warmingPool.get(key)!.push({ domain: e.d.domain, ageDays: age, surbl: e.d.blacklisted === true });
+      continue;
+    }
     if (!reservePool.has(key)) reservePool.set(key, []);
     reservePool.get(key)!.push(e.d.domain);
   }
   for (const list of reservePool.values()) list.sort();
+  for (const list of warmingPool.values()) list.sort((a, b) => b.ageDays - a.ageDays || a.domain.localeCompare(b.domain));
 
   // 5) group the tagged, staying domains per (tag, instance)
   interface Acc {
@@ -552,6 +570,7 @@ export async function computeTrueUp(
   // genuinely unspent after every client in that instance took its share.
   const reserveLeft: Record<string, string[]> = {};
   for (const [key, list] of reservePool) if (list.length > 0) reserveLeft[key] = [...list];
+  const warmingLeft = opts.includeWarming ? Object.fromEntries(warmingPool) : undefined;
 
-  return { generatedFor: today, ranking, rows, totals, byInstance, skipped, reserveLeft };
+  return { generatedFor: today, ranking, rows, totals, byInstance, skipped, reserveLeft, ...(warmingLeft ? { warmingLeft } : {}) };
 }

@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { computeTrueUp } from "@/lib/replacement/true-up";
+import { computeTrueUp, WARMUP_DAYS } from "@/lib/replacement/true-up";
 import { capFor, getClientTiers, type ClientTier } from "@/lib/replacement/client-tiers";
 import { instancesInGroup, parseGroup, type BisonGroup, type BisonInstance } from "@/lib/bison-instances";
 import { getGroupForClientTag } from "@/lib/client-tag-allocations";
@@ -58,6 +58,16 @@ import { runSecretProblem, withLock } from "@/lib/onboarding-run";
 // blacklisted — i.e. what is still unspent AFTER every live client's fill has
 // earmarked its share. Caps are the tier caps (client-tiers.ts).
 //
+// With a goLiveDate (OutboundHero 2026-10-19), a domain still in its warm-up
+// is offered too when it has at most MAX_WARMUP_LEFT_AT_GO_LIVE days of it
+// left on that date — after every fully warmed one, closest to done first,
+// any on SURBL after the clean ones.
+// Same rules otherwise (true-up warmingLeft). No fill ever takes a domain
+// under 21 days, so these can't be another client's earmark. A date more than
+// MAX_DAYS_TO_GO_LIVE ahead is not used (a mistyped year must not unlock
+// week-old domains); a date already past counts as today. Without a date the
+// plan is exactly what it was.
+//
 // Stricter than the true-up, because this plan is acted on for a client nobody
 // has seen run yet:
 //   • the client's own domains are counted from a full read of the group's
@@ -67,20 +77,26 @@ import { runSecretProblem, withLock } from "@/lib/onboarding-run";
 //   • a candidate carrying ANY Client Tracker tag, or the client's own, is set
 //     aside (the true-up only knows clients with a website or campaigns).
 //
-// Body:  { clientTag, group: 1 | 2, tier?: "0.5" | "1" | "2", dryRun: true }
+// Body:  { clientTag, group: 1 | 2, tier?: "0.5" | "1" | "2", goLiveDate?: "YYYY-MM-DD", dryRun: true }
 //        tier defaults to the Client Tracker's, else "1" (same default as
 //        normalizeTier — the low cap, so a missing tier never over-allocates).
 // 200:   { dryRun, clientTag, group, tier, tierSource, generatedFor,
 //          allocationGroup, groupMismatch, groupReadFailed,
 //          inTracker, knownRedirect, sheetTag, runBlockers,
+//          warmup: { goLiveDate, daysToGoLive, minAgeDays, applied, reason },
 //          instances: [{ instance, label, side, cap, alreadyTagged, need,
-//                        reserveAvailable, setAside, picking, short, note }] }
+//                        reserveAvailable, warming, setAside, picking,
+//                        warmupLeftAtGoLive, surblListed, short, note }] }
 //        allocationGroup = the group the allocation sheet has this tag in
 //        (null if it isn't there yet); groupMismatch = it differs from `group`.
 //        runBlockers = why a run would be refused right now (empty = it wouldn't).
+//        warming = how many of reserveAvailable are still warming up;
+//        warmupLeftAtGoLive = picked domain → warm-up days left on go-live;
+//        surblListed = warming picks on SURBL (they come after every clean one).
 //
-// Run:   { clientTag, group, tier?, dryRun: false, instance, domains[],
+// Run:   { clientTag, group, tier?, goLiveDate?, dryRun: false, instance, domains[],
 //          redirectUrl, campaignIds[], dailyLimit? (default 3) }
+//        goLiveDate must be the one the plan was made with.
 // 200:   { ok, clientTag, instance, added, steps: [{ label, state, note }],
 //          limit: { updated, failed, total } | { error },
 //          checks: { tagged, attach: [{ campaignId, matched, problem? }] },
@@ -99,11 +115,17 @@ const DEFAULT_DAILY_LIMIT = 3;
 const LOCK_SECONDS = 330;
 /** The true-up's reasons for leaving a client that isn't sending yet to "manual" — true of every new client, and exactly what this route is for. */
 const NOT_LIVE_YET = /no live campaign|not live yet|initial fill is manual/i;
+/** OutboundHero 2026-10-19: "anywhere from 0-4 days left in warmup from when they go live". */
+const MAX_WARMUP_LEFT_AT_GO_LIVE = 4;
+/** A go-live further out than this is not used for the warm-up window. */
+const MAX_DAYS_TO_GO_LIVE = 14;
+const DAY_MS = 86_400_000;
 
 interface Body {
   clientTag?: string;
   group?: unknown;
   tier?: unknown;
+  goLiveDate?: unknown;
   dryRun?: boolean;
   instance?: string;
   domains?: unknown;
@@ -120,16 +142,33 @@ interface Side {
   alreadyTagged: number;
   need: number;
   reserveAvailable: number;
+  /** Of reserveAvailable, still inside the 21-day warm-up (only with a go-live date). */
+  warming: number;
   setAside: number;
   picking: string[];
+  /** Picked domains still warming up → warm-up days left on the go-live date. */
+  warmupLeftAtGoLive: Record<string, number>;
+  /** Of the picked domains still warming up, the ones on SURBL (taken only once no clean one is left). */
+  surblListed: string[];
   short: number;
   note: string | null;
+}
+
+interface Warmup {
+  goLiveDate: string | null;
+  daysToGoLive: number | null;
+  /** Youngest domain offered, in days old today (21 = fully warmed only). */
+  minAgeDays: number;
+  applied: boolean;
+  /** Why the window isn't applied, when it isn't. */
+  reason: string | null;
 }
 
 interface Plan {
   tier: ClientTier;
   tierSource: string;
   generatedFor: string;
+  warmup: Warmup;
   allocationGroup: BisonGroup | null;
   groupReadFailed: boolean;
   inTracker: boolean;
@@ -154,7 +193,26 @@ function siteKey(url: string): string | null {
   }
 }
 
-async function buildPlan(clientTag: string, group: BisonGroup, instances: BisonInstance[], askedTier: ClientTier | null): Promise<Plan> {
+/** "2026-10-23" → itself; anything that isn't a real calendar date → null. */
+function isoDate(raw: string): string | null {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(raw);
+  if (!m) return null;
+  const d = new Date(Date.UTC(+m[1], +m[2] - 1, +m[3]));
+  return d.getUTCFullYear() === +m[1] && d.getUTCMonth() === +m[2] - 1 && d.getUTCDate() === +m[3] ? raw : null;
+}
+
+/** The warm-up window for a go-live date, counted from the plan's own day (the true-up's PST date, the day its ages are measured on). */
+function warmupWindow(goLiveDate: string | null, today: string): Warmup {
+  if (!goLiveDate) return { goLiveDate, daysToGoLive: null, minAgeDays: WARMUP_DAYS, applied: false, reason: "no go-live date — only fully warmed domains" };
+  const days = Math.round((Date.parse(`${goLiveDate}T00:00:00Z`) - Date.parse(`${today}T00:00:00Z`)) / DAY_MS);
+  if (days > MAX_DAYS_TO_GO_LIVE) {
+    return { goLiveDate, daysToGoLive: days, minAgeDays: WARMUP_DAYS, applied: false, reason: `go-live is ${days} days away (more than ${MAX_DAYS_TO_GO_LIVE}) — only fully warmed domains` };
+  }
+  const daysToGoLive = Math.max(0, days);
+  return { goLiveDate, daysToGoLive, minAgeDays: WARMUP_DAYS - MAX_WARMUP_LEFT_AT_GO_LIVE - daysToGoLive, applied: true, reason: null };
+}
+
+async function buildPlan(clientTag: string, group: BisonGroup, instances: BisonInstance[], askedTier: ClientTier | null, goLiveDate: string | null): Promise<Plan> {
   const supabase = getSupabaseAdmin();
   // One read at a time on purpose: the true-up pages every domain row, and
   // stacking the other reads on top of it is what tips a busy database into
@@ -203,10 +261,11 @@ async function buildPlan(clientTag: string, group: BisonGroup, instances: BisonI
     config.sheets.find((s) => (s.clientTag || "").split(":")[0].trim().toUpperCase() === clientTag);
   const sheetTag = tracked?.clientTag ?? null;
 
-  const trueUp = await computeTrueUp();
+  const trueUp = await computeTrueUp({ includeWarming: goLiveDate !== null });
   const trackerTier = tiers.get(clientTag) ?? null;
   const tier: ClientTier = askedTier ?? trackerTier ?? "1";
   const tierSource = askedTier ? "request" : trackerTier ? "client tracker" : "default";
+  const warmup = warmupWindow(goLiveDate, trueUp.generatedFor);
 
   const sides: Side[] = [];
   for (const inst of instances) {
@@ -214,7 +273,17 @@ async function buildPlan(clientTag: string, group: BisonGroup, instances: BisonI
     const alreadyTagged = (own.get(inst.slug) ?? []).length;
     const need = Math.max(0, cap - alreadyTagged);
     // New launches take Outlook stock — the tiers are sold as Outlook domains.
-    const pool = trueUp.reserveLeft[`${inst.slug}:outlook`] ?? [];
+    // Fully warmed first; then, inside the warm-up window, the ones closest to done — any on
+    // SURBL last (allowed as reserve by the settings, but a new client shouldn't start on one
+    // while a clean domain is spare). The sort is stable, so age order holds within each.
+    const warmingOk = warmup.applied
+      ? (trueUp.warmingLeft?.[`${inst.slug}:outlook`] ?? [])
+          .filter((w) => w.ageDays >= warmup.minAgeDays)
+          .sort((a, b) => Number(a.surbl) - Number(b.surbl))
+      : [];
+    const ageOf = new Map(warmingOk.map((w) => [w.domain, w.ageDays]));
+    const surblOf = new Set(warmingOk.filter((w) => w.surbl).map((w) => w.domain));
+    const pool = [...(trueUp.reserveLeft[`${inst.slug}:outlook`] ?? []), ...warmingOk.map((w) => w.domain)];
     // Look a little past what is needed, so set-aside domains can be replaced.
     const candidates = pool.slice(0, need + 40);
     // Not spare after all: it carries a Client Tracker tag (a client the
@@ -240,8 +309,13 @@ async function buildPlan(clientTag: string, group: BisonGroup, instances: BisonI
       alreadyTagged,
       need,
       reserveAvailable: pool.length - spoken.size,
+      warming: warmingOk.filter((w) => !spoken.has(w.domain)).length,
       setAside: spoken.size,
       picking,
+      warmupLeftAtGoLive: Object.fromEntries(
+        picking.filter((d) => ageOf.has(d)).map((d) => [d, Math.max(0, WARMUP_DAYS - ageOf.get(d)! - (warmup.daysToGoLive ?? 0))]),
+      ),
+      surblListed: picking.filter((d) => surblOf.has(d)),
       short: need - picking.length,
       note: said && !NOT_LIVE_YET.test(said) ? said : null,
     });
@@ -255,7 +329,7 @@ async function buildPlan(clientTag: string, group: BisonGroup, instances: BisonI
   if (groupReadFailed) runBlockers.push("the allocation sheet couldn't be read, so the group can't be confirmed");
   else if (allocationGroup !== null && allocationGroup !== group) runBlockers.push(`the allocation sheet has ${clientTag} in group ${allocationGroup}, not group ${group}`);
 
-  return { tier, tierSource, generatedFor: trueUp.generatedFor, allocationGroup, groupReadFailed, inTracker, knownRedirect, sheetTag, runBlockers, sides, own };
+  return { tier, tierSource, generatedFor: trueUp.generatedFor, warmup, allocationGroup, groupReadFailed, inTracker, knownRedirect, sheetTag, runBlockers, sides, own };
 }
 
 /** Set the daily limit on every sender of these domains (one bulk call per instance). */
@@ -296,11 +370,14 @@ export async function POST(request: Request) {
     if (!clientTag || /[\/:&,\s]/.test(clientTag) || !group) return bad("clientTag (one client tag) and group (1 or 2) are required");
     const askedTier = body.tier == null || body.tier === "" ? null : String(body.tier).trim();
     if (askedTier !== null && !TIERS.includes(askedTier as ClientTier)) return bad('tier must be "0.5", "1" or "2"');
+    const askedGoLive = body.goLiveDate == null || body.goLiveDate === "" ? null : String(body.goLiveDate).trim();
+    const goLiveDate = askedGoLive === null ? null : isoDate(askedGoLive);
+    if (askedGoLive !== null && !goLiveDate) return bad('goLiveDate must be a date like "2026-10-23"');
 
     const instances = instancesInGroup(group);
 
     if (!run) {
-      const p = await buildPlan(clientTag, group, instances, askedTier as ClientTier | null);
+      const p = await buildPlan(clientTag, group, instances, askedTier as ClientTier | null, goLiveDate);
       return NextResponse.json({
         dryRun: true,
         clientTag,
@@ -308,6 +385,7 @@ export async function POST(request: Request) {
         tier: p.tier,
         tierSource: p.tierSource,
         generatedFor: p.generatedFor,
+        warmup: p.warmup,
         allocationGroup: p.allocationGroup,
         groupMismatch: p.allocationGroup !== null && p.allocationGroup !== group,
         groupReadFailed: p.groupReadFailed,
@@ -342,7 +420,7 @@ export async function POST(request: Request) {
     // spare list is sorted, so two plans built side by side offer the same
     // first domains — and the second batch would tag what the first just took.
     const outcome = await withLock(`allocate:${slug}`, clientTag, LOCK_SECONDS, async () => {
-      const p = await buildPlan(clientTag, group, instances, askedTier as ClientTier | null);
+      const p = await buildPlan(clientTag, group, instances, askedTier as ClientTier | null, goLiveDate);
       if (p.runBlockers.length > 0) return bad(p.runBlockers.join("; "), 409);
       const side = p.sides.find((s) => s.instance === slug)!;
       const redirectUrl = p.knownRedirect!;
@@ -383,11 +461,13 @@ export async function POST(request: Request) {
 
       // Marker first, so a run that dies mid-way still leaves a trace (same
       // contract as the true-up fill).
+      const warmingNow = domains.filter((d) => d in side.warmupLeftAtGoLive);
       await logEvents([{
         instance: inst.slug,
         clientTag,
         eventType: "proposed",
-        detail: `onboarding: adding ${domains.length} domain(s) to a new client (${side.alreadyTagged} of ${side.cap} before)`,
+        detail: `onboarding: adding ${domains.length} domain(s) to a new client (${side.alreadyTagged} of ${side.cap} before)`
+          + (warmingNow.length ? `; still warming, days left at go-live ${p.warmup.goLiveDate}: ${warmingNow.map((d) => `${d} ${side.warmupLeftAtGoLive[d]}d`).join(", ")}` : ""),
       }]).catch(() => {});
 
       let steps: ExecStep[] = [];
