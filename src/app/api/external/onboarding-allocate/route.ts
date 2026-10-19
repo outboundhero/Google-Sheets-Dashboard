@@ -12,7 +12,7 @@ import { loadRedirectsByTag } from "@/lib/replacement/redirect-audit";
 import { getConfig } from "@/lib/sheets-config";
 import { POST as bulkLimits } from "@/app/api/deliverability/bulk-limits/route";
 import { POST as attachDomains } from "@/app/api/deliverability/attach-domains-to-campaign/route";
-import { runSecretProblem, withLock } from "@/lib/onboarding-run";
+import { runSecretProblem, withLock, batchProgress } from "@/lib/onboarding-run";
 
 // POST /api/external/onboarding-allocate   (Bearer EXTERNAL_API_TOKEN, middleware-exempt)
 //
@@ -453,6 +453,11 @@ export async function POST(request: Request) {
         targetCampaigns.push({ id, name });
       }
 
+      // What this batch is doing, step by step, for Reply Router's checklist to
+      // show while it runs (best-effort — nothing here waits on it).
+      const live = batchProgress({ clientTag, instance: slug, domains });
+      live.update({ phase: "running" });
+
       // Put right what an earlier batch may have left: a batch cut off after
       // tagging never reached its daily limit, and the plan won't offer its
       // domains again. Cheap (one bulk call) and the same value every time.
@@ -473,9 +478,10 @@ export async function POST(request: Request) {
       let steps: ExecStep[] = [];
       const { ok } = await runExecution(
         { clientTag, instance: slug, instancesQuery: `instances=${slug}`, redirectUrl, targetCampaigns, replacementDomains: [...domains], removeDomains: [] },
-        (s) => { steps = s; },
+        (s) => { steps = s; live.update({ steps: s.map((x) => ({ label: x.label, state: x.state, ...(x.note ? { note: x.note } : {}) })) }); },
         { fetchImpl: internalFetch },
       );
+      live.update({ phase: "checking" });
 
       // ── Checked, not trusted ───────────────────────────────────────────────
       // The runner's "ok" only means no step FAILED: a degraded step, a step
@@ -535,6 +541,8 @@ export async function POST(request: Request) {
       if (problems.length > 0) {
         await logEvents([{ instance: inst.slug, clientTag, eventType: "error", detail: `onboarding batch incomplete — ${problems.join("; ").slice(0, 900)}` }]).catch(() => {});
       }
+      live.update(problems.length > 0 ? { phase: "problems", problems } : { phase: "done" });
+      await live.flush();
       return NextResponse.json({
         ok: ok && problems.length === 0,
         clientTag,

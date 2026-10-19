@@ -61,3 +61,56 @@ export async function withLock<T>(name: string, holder: string, ttlSeconds: numb
     if (current === token) await redis.del(key).catch(() => undefined);
   }
 }
+
+// ── Live progress of an onboarding batch ─────────────────────────────────────
+// Reply Router's checklist shows what a batch is doing while it runs — the
+// runner's steps (tag, redirect, each campaign, the sheet, the whitelist
+// queue), then the checks and the daily limit — so whoever pressed Run can see
+// it working. Best-effort: a write that fails is skipped, and nothing in the
+// run waits on or depends on it. Kept an hour after the batch.
+
+export interface BatchProgress {
+  clientTag: string;
+  instance: string;
+  domains: string[];
+  startedAt: string;
+  updatedAt: string;
+  /** running = the runner's steps; checking = the checks and daily limit after them; then done, or problems. */
+  phase: "running" | "checking" | "done" | "problems";
+  steps: { label: string; state: string; note?: string }[];
+  problems?: string[];
+}
+
+const progressKey = (clientTag: string) => `onboarding-progress:${clientTag}`;
+
+/** A writer for one batch's progress: update() never throws or waits; flush() waits for the writes queued so far. */
+export function batchProgress(base: { clientTag: string; instance: string; domains: string[] }): {
+  update: (patch: Partial<Pick<BatchProgress, "phase" | "steps" | "problems">>) => void;
+  flush: () => Promise<void>;
+} {
+  const redis = redisOrNull();
+  let current: BatchProgress = { ...base, startedAt: new Date().toISOString(), updatedAt: new Date().toISOString(), phase: "running", steps: [] };
+  // One write at a time, in order — a slow early write must not land after a later one.
+  let chain: Promise<unknown> = Promise.resolve();
+  return {
+    update(patch) {
+      current = { ...current, ...patch, updatedAt: new Date().toISOString() };
+      if (!redis) return;
+      const snapshot = current;
+      chain = chain.then(() => redis.set(progressKey(base.clientTag), snapshot, { ex: 3600 })).catch(() => undefined);
+    },
+    // Never more than 3 s: a slow store must not hold up the run's answer.
+    flush: () => Promise.race([chain.then(() => undefined, () => undefined), new Promise<void>((r) => setTimeout(r, 3000))]),
+  };
+}
+
+export async function getBatchProgress(clientTag: string): Promise<BatchProgress | null> {
+  const redis = redisOrNull();
+  if (!redis) return null;
+  try {
+    const raw = await redis.get<unknown>(progressKey(clientTag));
+    return (typeof raw === "string" ? JSON.parse(raw) : raw) as BatchProgress | null;
+  } catch {
+    return null;
+  }
+}
