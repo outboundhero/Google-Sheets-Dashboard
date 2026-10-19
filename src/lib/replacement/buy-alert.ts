@@ -15,6 +15,7 @@ import { getGoingLiveForecast } from "./going-live";
 import { getTaggedDomainCounts } from "./upcoming-stock";
 import { getActiveAnticipated, groupForStartDate } from "./anticipated-clients";
 import { getStockCounts } from "./stock-counts";
+import { getWeeklyBurn, BURN_WINDOW_WEEKS } from "./burn-rate";
 import { postSlackMessage } from "@/lib/slack";
 import {
   ALL_INSTANCE_SLUGS, getInstance, INSTANCE_SHORT_LABELS,
@@ -22,6 +23,9 @@ import {
 } from "@/lib/bison-instances";
 
 const MAILBOXES_PER_DOMAIN = 49; // Inboxing standard order size (matches purchase-proposal.ts)
+/** Weeks of burn the list buys ahead for: a domain bought today is about three
+ *  weeks of warm-up away from replacing anything (Nick 2026-10-19). */
+const BURN_COVER_WEEKS = Math.max(0, Number(process.env.BUY_BURN_COVER_WEEKS ?? 3));
 
 export interface BuyInstanceLine {
   instance: BisonInstanceSlug;
@@ -48,7 +52,11 @@ export interface BuyInstanceLine {
   clientsActive: number;
   /** max(0, domains − reserve − inflight − warming): what fills every cap once stock on hand matures. */
   buyFill: number;
-  /** buyFill plus rebuilding the per-client reserve buffer (3 b2b / 2 b2c). */
+  /** Average burnt domains per week on this instance over the last 4 weeks. */
+  burnPerWeek: number;
+  /** burnPerWeek × BURN_COVER_WEEKS, rounded up: what burns before new stock is warm. */
+  burnCover: number;
+  /** buyFill plus rebuilding the per-client reserve buffer (3 b2b / 2 b2c) plus burnCover. */
   buyWithBuffer: number;
 }
 export interface BuyAlertResult {
@@ -197,6 +205,12 @@ export async function runBuyAlert(opts: { force?: boolean; dryRun?: boolean } = 
   // used to be a flat 3/2, which under-bought for every tier-2 client.
   const knownTagsUpper = new Set([...byTag.keys()].map((t) => t.toUpperCase()));
   const stock = await getStockCounts(knownTagsUpper);
+  // Burn cover (Nick 2026-10-19: "cutting it too close"): the gaps and buffers
+  // above are today's picture, but anything bought today is still warming for
+  // ~3 weeks while clients keep burning domains. Sized from each instance's own
+  // recent burn so it grows by itself as the replacement rules tighten — a flat
+  // % would be zero exactly when nobody is short yet.
+  const burn = await getWeeklyBurn();
 
   const byInstance: BuyInstanceLine[] = ALL_INSTANCE_SLUGS.map((slug) => {
     const tier = getInstance(slug).tier;
@@ -234,15 +248,18 @@ export async function runBuyAlert(opts: { force?: boolean; dryRun?: boolean } = 
     const warming = stock.warming[slug] ?? 0;
     const warmingReady7 = stock.warmingReady7[slug] ?? 0;
     const onHand = usableReserve + inflight + warming;
+    const burnPerWeek = burn?.[slug] ?? 0;
+    const burnCover = Math.ceil(burnPerWeek * BURN_COVER_WEEKS);
     const buyFill = Math.max(0, domains - onHand);
-    const buyWithBuffer = Math.max(0, domains + bufferFloor - onHand);
+    const buyWithBuffer = Math.max(0, domains + bufferFloor + burnCover - onHand);
 
     return {
       instance: slug, label: INSTANCE_SHORT_LABELS[slug], tier, clientsShort,
       domains, inboxes: domains * MAILBOXES_PER_DOMAIN,
       upcomingDomains, upcomingClients: upcoming.length,
       anticipatedDomains: anticipated.need, anticipatedClients: anticipated.clients,
-      usableReserve, inflight, warming, warmingReady7, clientsActive, buyFill, buyWithBuffer,
+      usableReserve, inflight, warming, warmingReady7, clientsActive, buyFill,
+      burnPerWeek, burnCover, buyWithBuffer,
     };
   });
 
@@ -256,12 +273,13 @@ export async function runBuyAlert(opts: { force?: boolean; dryRun?: boolean } = 
   const base = { checkedAt, detector, tierSource, totalDomains, totalInboxes, byInstance };
 
   if (opts.dryRun) return { ...base, alerted: false, slackReason: "dry run" };
-  if (totalDomains === 0 && !opts.force) return { ...base, alerted: false };
+  // Burn cover can call for a buy while every client is still at cap.
+  if (totalDomains === 0 && totalBuyWithBuffer === 0 && !opts.force) return { ...base, alerted: false };
 
   const mentions = mentionPrefix();
   const lines: string[] = [`*🛒 Weekly domain buy list — LeadSync*${mentions ? ` ${mentions}` : ""}`];
-  if (totalDomains === 0) {
-    lines.push("✅ Every client is at its live cap — nothing to buy this week.");
+  if (totalBuyWithBuffer === 0) {
+    lines.push("✅ What we hold and have on order covers every client — nothing to buy this week.");
   } else {
     // Nick 2026-09-16: "just tell us how much to buy per instance" — one number
     // per workspace, no jargon. The headline is the buffered figure because
@@ -274,6 +292,18 @@ export async function runBuyAlert(opts: { force?: boolean; dryRun?: boolean } = 
     }
     lines.push(`*Total: ${totalBuyWithBuffer}*`);
     if (anticipatedNotes.length > 0) lines.push(`Includes anticipated clients: ${anticipatedNotes.join("; ")}.`);
+    if (burn === null) {
+      lines.push(`⚠️ Couldn't read recent burns — these numbers have no spare for domains that burn during warm-up.`);
+    } else if (BURN_COVER_WEEKS > 0) {
+      const paces = byInstance.filter((i) => i.burnCover > 0)
+        .map((i) => `${i.label} ~${Math.round(i.burnPerWeek)}/week`);
+      if (paces.length > 0) {
+        lines.push(
+          `Includes spare for domains that will burn while new ones warm up: ` +
+          `${BURN_COVER_WEEKS} weeks at the last ${BURN_WINDOW_WEEKS} weeks' pace (${paces.join(", ")}).`,
+        );
+      }
+    }
     const warmingTotal = byInstance.reduce((s, i) => s + i.warming, 0);
     const ready7Total = byInstance.reduce((s, i) => s + i.warmingReady7, 0);
     if (warmingTotal > 0) {
