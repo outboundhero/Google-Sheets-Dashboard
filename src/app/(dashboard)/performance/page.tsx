@@ -29,7 +29,7 @@ const STATUS_META: Record<string, { label: string; cls: string }> = {
   below_target: { label: "Below Target", cls: "bg-yellow-500/15 text-yellow-700 dark:text-yellow-300 border-yellow-500/40" },
   on_track: { label: "On Track", cls: "bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 border-emerald-500/40" },
   overperforming: { label: "Overperforming", cls: "bg-sky-500/15 text-sky-700 dark:text-sky-300 border-sky-500/40" },
-  grace: { label: "Grace", cls: "bg-zinc-500/10 text-zinc-600 dark:text-zinc-300 border-zinc-400/40" },
+  new_client: { label: "New Client", cls: "bg-indigo-500/10 text-indigo-700 dark:text-indigo-300 border-indigo-500/40" },
   no_data: { label: "No status data", cls: "bg-zinc-500/10 text-zinc-600 dark:text-zinc-300 border-dashed border-zinc-400/60" },
 };
 
@@ -79,7 +79,7 @@ export default function PerformancePage() {
       if (view === "nodata") return c.status === "no_data";
       return true;
     });
-    const rank: Record<string, number> = { critical: 0, at_risk: 1, below_target: 2, overperforming: 3, on_track: 4, no_data: 5, grace: 6 };
+    const rank: Record<string, number> = { critical: 0, at_risk: 1, below_target: 2, overperforming: 3, on_track: 4, no_data: 5, new_client: 6 };
     return list.sort((a, b) =>
       (rank[a.status] ?? 9) - (rank[b.status] ?? 9)
       || (a.projected - a.guarantee) - (b.projected - b.guarantee)
@@ -156,7 +156,8 @@ export default function PerformancePage() {
           {settings.mrlPaceDays} days&apos; pace × days left) — hover a forecast to see its sum. <strong>QL rate</strong> = good ÷
           checked over the last {settings.rateDays} days, Meeting-Ready leads only, starting from {settings.blendPriorQls} good out
           of {settings.blendPriorLeads} so a few leads don&apos;t swing it (the real rate is next to it). Under the guarantee is At Risk
-          or Critical; between the guarantee and the target is Below Target.
+          or Critical; between the guarantee and the target is Below Target. <strong>New Client</strong> = the first{" "}
+          {settings.newClientDays} days from the client&apos;s Start Date: tracked, but not flagged unless it&apos;s overperforming.
           {judgedAt && <> Pace and &quot;No status data&quot; still go by the last Friday 5 PM (<strong>{fmtCutoff(judgedAt)} PST</strong>), when the team has filled the week&apos;s statuses.</>}
         </p>
       )}
@@ -165,7 +166,7 @@ export default function PerformancePage() {
         <p className="text-xs text-muted-foreground">
           Turbo: {settings.turboWarmupLimit} warm-up / {settings.turboDailyLimit} sending for {settings.turboDays} days ·
           Throttle: {settings.throttleDailyLimit} sending, on at {Math.round(settings.throttleOnPace * 100)}% pace, off below {Math.round(settings.throttleOffPace * 100)}% ·
-          first {settings.graceDays} days of a period are not flagged
+          throttle waits until {settings.minPaceDays} days of a billing period have passed
         </p>
       )}
 
@@ -210,9 +211,10 @@ export default function PerformancePage() {
             </thead>
             <tbody>
               {rows.map((c) => {
-                const meta = STATUS_META[c.status] ?? STATUS_META.grace;
+                const meta = STATUS_META[c.status] ?? { label: c.status, cls: STATUS_META.new_client.cls };
                 const reviewed = c.qls30d + c.nqls30d + c.dups30d;
-                const judged = c.status !== "grace" && c.status !== "no_data";
+                const judged = c.status !== "no_data";
+                const isNew = c.status === "new_client";
                 const k = c.clientTag;
                 const isBusy = busy?.endsWith(`:${k}`) ?? false;
                 return (
@@ -239,12 +241,19 @@ export default function PerformancePage() {
                       {judged ? (
                         <>
                           <span className={c.projected >= c.target ? "text-emerald-600 dark:text-emerald-400" : ""}>{c.projected}</span>
-                          {c.projected < c.guarantee && <span className="text-red-600 dark:text-red-400"> ({Math.round((c.guarantee - c.projected) * 10) / 10} short)</span>}
+                          {c.projected < c.guarantee && !isNew && <span className="text-red-600 dark:text-red-400"> ({Math.round((c.guarantee - c.projected) * 10) / 10} short)</span>}
                         </>
                       ) : "—"}
                     </td>
                     <td className="px-3 py-2 tabular-nums" title="QLs by last Friday 5 PM against a straight line to the guarantee — what auto-throttle switches on for now">{pct(c.pace)}</td>
-                    <td className="px-3 py-2"><span className={`inline-block rounded-full border px-2 py-0.5 text-[10px] font-semibold ${meta.cls}`}>{meta.label}</span></td>
+                    <td className="px-3 py-2">
+                      <span
+                        className={`inline-block rounded-full border px-2 py-0.5 text-[10px] font-semibold ${meta.cls}`}
+                        title={isNew ? `Day ${c.daysElapsed} of ${settings?.newClientDays ?? 19} since the start (${c.cycleStart}) — judged from day ${(settings?.newClientDays ?? 19) + 1}` : undefined}
+                      >
+                        {meta.label}{isNew && <span className="font-normal opacity-70"> · day {c.daysElapsed}</span>}
+                      </span>
+                    </td>
                     <td className="px-3 py-2 whitespace-nowrap">{c.leavingOn ? <span className="text-amber-600 dark:text-amber-400">Yes · {c.leavingKind} {c.leavingOn}</span> : "No"}</td>
                     <td className="px-3 py-2 whitespace-nowrap tabular-nums">
                       {c.turbo ? <span className="text-violet-600 dark:text-violet-400">Active {fmtDate(c.turbo.started_at)} → {fmtDate(c.turbo.ends_at)} {windowLabel(c.turbo)}</span> : "—"}

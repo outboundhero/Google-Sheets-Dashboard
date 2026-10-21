@@ -12,7 +12,8 @@ export interface SendingModeSettings {
   throttleDailyLimit: number;   // campaign sends/day while throttled (normal 5)
   throttleOnPace: number;       // throttle at pace ≥ this (1.25 = 125%)
   throttleOffPace: number;      // release at pace < this (1.10)
-  graceDays: number;            // no status / no throttle for the first N days of a period
+  newClientDays: number;        // "New Client" for the first N days from the Start Date (19)
+  minPaceDays: number;          // pace (the throttle trigger) waits for N days of the period
   turboWindowDays: number;      // Critical when projected < guarantee with ≤ N days left
   fullCreditFraction: number;   // projected ≤ guarantee × this = 100%-credit band
   rateDays: number;             // QL rate looks back this many days (30)
@@ -33,7 +34,12 @@ export const DEFAULT_SENDING_MODE_SETTINGS: SendingModeSettings = {
   throttleDailyLimit: 3,
   throttleOnPace: 1.25,
   throttleOffPace: 1.1,
-  graceDays: 5,
+  // Nick 2026-10-14: a client is a New Client for days 1–19 from its Start
+  // Date, first month only — the old 5-day grace at the start of every
+  // period is gone. minPaceDays keeps one or two early QLs from reading as a
+  // huge pace (and switching the throttle on) on day 2 of a period.
+  newClientDays: 19,
+  minPaceDays: 5,
   turboWindowDays: 15,
   fullCreditFraction: 0.5,
   // Nick 2026-10-16: start every client at 4 good out of 10 (the fleet's real
@@ -68,7 +74,8 @@ export async function getSendingModeSettings(): Promise<SendingModeSettings> {
       throttleDailyLimit: num(data.throttle_daily_limit, d.throttleDailyLimit),
       throttleOnPace: num(data.throttle_on_pace, d.throttleOnPace),
       throttleOffPace: num(data.throttle_off_pace, d.throttleOffPace),
-      graceDays: num(data.grace_days, d.graceDays),
+      newClientDays: num(data.new_client_days, d.newClientDays),
+      minPaceDays: num(data.grace_days, d.minPaceDays),   // the old grace_days column
       turboWindowDays: num(data.turbo_window_days, d.turboWindowDays),
       fullCreditFraction: num(data.full_credit_fraction, d.fullCreditFraction),
       rateDays: num(data.rate_days, d.rateDays),

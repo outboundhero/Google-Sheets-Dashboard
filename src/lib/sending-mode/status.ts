@@ -6,9 +6,10 @@
 // client_sending_status. The throttle pass reads those rows and opens/releases
 // throttle windows per the spec:
 //
-//   on   pace ≥ throttleOnPace after the grace days, client not in Turbo,
-//        not leaving, auto-throttle not paused for them, and still projected
-//        to reach the operational target once throttled
+//   on   status Overperforming (pace ≥ throttleOnPace, forecast meets the
+//        target — new clients included), client not in Turbo, not leaving,
+//        auto-throttle not paused for them, and still projected to reach the
+//        operational target once throttled
 //   off  pace < throttleOffPace · new billing period · projected < target
 //        (a throttle must never cost the client its target) · client now
 //        leaving / in Turbo / paused
@@ -292,9 +293,8 @@ export function decideThrottles(
     if (w) { out.push({ ...base, action: "none", reason: "in turbo" }); continue; }
     if (r.gone || r.leavingOn) { out.push({ ...base, action: "none", reason: r.gone ?? `leaving ${r.leavingOn}` }); continue; }
     if (paused.has(r.clientTag)) { out.push({ ...base, action: "none", reason: "auto-throttle paused" }); continue; }
-    if (r.status === "grace") { out.push({ ...base, action: "none", reason: "grace period" }); continue; }
     if (r.status === "no_data") { out.push({ ...base, action: "none", reason: "no status data" }); continue; }
-    if (r.pace !== null && r.pace >= s.throttleOnPace && r.projected >= r.guarantee) {
+    if (r.status === "overperforming" && r.pace !== null) {
       const after = projectedIfThrottled(r, keepRatio.get(r.clientTag) ?? s.throttleDailyLimit / NORMAL_DAILY_LIMIT);
       if (after < r.target) {
         out.push({ ...base, action: "none", projectedIfThrottled: after, reason: `would drop under target (≈${after} of ${r.target})` });

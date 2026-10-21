@@ -23,7 +23,10 @@
 //   Below Target   projected meets the guarantee but not the operational target
 //   On Track       projected meets the operational target (8 / 16 / 31)
 //   Overperforming pace ≥ throttleOnPace (125%) and projected meets the target
-//   grace          first graceDays of the period — nothing is flagged
+//   new_client     days 1–newClientDays (19) from the client's Start Date: still
+//                  tracked and forecast, never At Risk / Critical / Below
+//                  Target / No status data. Overperforming still shows, so an
+//                  over-delivering new client can be throttled (Nick 2026-10-14)
 //   no_data        the team isn't filling the Status column for this client
 //                  (see below)
 //
@@ -43,7 +46,7 @@ import { anniversary, currentCycleStart } from "@/lib/mrl-pace";
 import { isQualityLead } from "@/lib/cron/client-reports";
 import type { SendingModeSettings } from "./config";
 
-export type QlPaceStatus = "grace" | "on_track" | "below_target" | "at_risk" | "critical" | "overperforming" | "no_data";
+export type QlPaceStatus = "new_client" | "on_track" | "below_target" | "at_risk" | "critical" | "overperforming" | "no_data";
 
 export interface QlPace {
   guarantee: number;
@@ -197,17 +200,19 @@ export function evaluateQlPace(input: {
   const mrlPace = paceMrls / Math.max(1, Math.min(s.mrlPaceDays, daysSinceStart));
   const projected = qlsDelivered + blendedRate * mrlsPending + blendedRate * mrlPace * daysRemaining;
 
-  // Pace, at the Friday cut-off. No Friday yet this period → no pace.
+  // Pace, at the Friday cut-off. No pace until the cut-off is minPaceDays into
+  // the period.
   const cutoffDays = cutoff < cycleStart
     ? 0
     : Math.min(cycleLength, Math.floor((cutoff.getTime() - cycleStart.getTime()) / DAY_MS) + 1);
   const expectedToDate = input.guarantee * (cutoffDays / cycleLength);
-  const pace = expectedToDate > 0 ? qlsAtCutoff / expectedToDate : null;
+  const pace = expectedToDate > 0 && cutoffDays >= s.minPaceDays ? qlsAtCutoff / expectedToDate : null;
+  const newClient = daysSinceStart <= s.newClientDays;
 
   let status: QlPaceStatus;
-  if (daysElapsed <= s.graceDays) status = "grace";
-  else if (noData) status = "no_data";
+  if (noData) status = newClient ? "new_client" : "no_data";
   else if (pace !== null && pace >= s.throttleOnPace && projected >= target) status = "overperforming";
+  else if (newClient) status = "new_client";
   else if (projected <= input.guarantee * s.fullCreditFraction) status = "critical";
   else if (projected < input.guarantee && daysRemaining <= s.turboWindowDays) status = "critical";
   else if (projected < input.guarantee) status = "at_risk";
