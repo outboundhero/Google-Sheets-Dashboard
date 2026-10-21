@@ -183,15 +183,15 @@ export default function PerformancePage() {
           of {settings.blendPriorLeads} so a few leads don&apos;t swing it (the real rate is next to it). Under the guarantee is At Risk
           or Critical; between the guarantee and the target is Below Target. <strong>New Client</strong> = the first{" "}
           {settings.newClientDays} days from the client&apos;s Start Date: tracked, but not flagged unless it&apos;s overperforming.
-          {judgedAt && <> Pace and &quot;Awaiting Client Reporting&quot; still go by the last Friday 5 PM (<strong>{fmtCutoff(judgedAt)} PST</strong>), when the team has filled the week&apos;s statuses.</>}
+          {judgedAt && <> &quot;Awaiting Client Reporting&quot; goes by the last Friday 5 PM (<strong>{fmtCutoff(judgedAt)} PST</strong>), when the team has filled the week&apos;s statuses.</>}
         </p>
       )}
 
       {settings && (
         <p className="text-xs text-muted-foreground">
           Turbo: {settings.turboWarmupLimit} warm-up / {settings.turboDailyLimit} sending for {settings.turboDays} days ·
-          Throttle: {settings.throttleDailyLimit} sending, on at {Math.round(settings.throttleOnPace * 100)}% pace, off below {Math.round(settings.throttleOffPace * 100)}% ·
-          throttle waits until {settings.minPaceDays} days of a billing period have passed
+          Throttle: {settings.throttleWarmupLimit} warm-up / {settings.throttleDailyLimit} sending, on at a forecast of{" "}
+          {Math.round(settings.throttleAtGuarantee * 100)}% of the guarantee, off when it drops under the target
         </p>
       )}
 
@@ -229,7 +229,7 @@ export default function PerformancePage() {
           <table className="w-full text-xs">
             <thead className="text-[11px] uppercase tracking-wide text-muted-foreground border-b">
               <tr>
-                {["Client", "Billing period", "Days", "Guarantee / target", "MRLs", "QLs", "QL rate", "Forecast", "Pace", "Status", "Leaving", "Turbo", "Throttle", "Action"].map((h) => (
+                {["Client", "Billing period", "Days", "Guarantee / target", "MRLs", "QLs", "QL rate", "Forecast", "Status", "Leaving", "Turbo", "Throttle", "Action"].map((h) => (
                   <th key={h} className="text-left font-medium px-3 py-2 whitespace-nowrap">{h}</th>
                 ))}
               </tr>
@@ -272,7 +272,6 @@ export default function PerformancePage() {
                         </>
                       )}
                     </td>
-                    <td className="px-3 py-2 tabular-nums" title="QLs by last Friday 5 PM against a straight line to the guarantee — what auto-throttle switches on for now">{pct(c.pace)}</td>
                     <td className="px-3 py-2">
                       <span
                         className={`inline-block rounded-full border px-2 py-0.5 text-[10px] font-semibold ${meta.cls}`}
@@ -516,11 +515,14 @@ function ThrottlePreviewCard() {
       </div>
       {p && (
         <p className="text-xs text-muted-foreground">
-          A client at {Math.round(p.settings.throttleOnPace * 100)}%+ of its QL pace has its accounts lowered to{" "}
-          <strong>{p.settings.throttleDailyLimit} sends/day</strong>, so it doesn&apos;t burn through leads and domains faster than it needs —
-          but only if the forecast says it still reaches its target (8 / 16 / 31) after slowing down. It goes back to normal by itself when
-          pace drops below {Math.round(p.settings.throttleOffPace * 100)}%, the forecast falls under the target, a new billing month starts,
-          or the client is leaving. Accounts already at {p.settings.throttleDailyLimit}/day or less aren&apos;t touched.
+          A client forecast at <strong>{Math.round(p.settings.throttleAtGuarantee * 100)}% of its guarantee</strong> or more (7.5 / 15 / 30) has
+          its accounts lowered to <strong>{p.settings.throttleDailyLimit} sends/day</strong> with warm-up raised to{" "}
+          <strong>{p.settings.throttleWarmupLimit}/day</strong>, so it doesn&apos;t burn through leads and domains faster than it needs.
+          Campaigns are never paused. Only when the numbers are solid: {p.settings.throttleMinReviewed}+ leads checked in the last{" "}
+          {p.settings.rateDays} days, {p.settings.throttleMinQls}+ confirmed QLs this month, {p.settings.throttleMinDays}+ days into the
+          month — and the forecast still reaches the target (8 / 16 / 31) after slowing down. It goes back to normal by itself when the
+          forecast falls under the target, a new billing month starts, or the client is leaving. Every account gets back exactly the
+          limits it had.
         </p>
       )}
 
@@ -539,7 +541,7 @@ function ThrottlePreviewCard() {
               <table className="w-full text-xs">
                 <thead className="text-[11px] uppercase tracking-wide text-muted-foreground border-b">
                   <tr>
-                    {["Client", "QLs / target", "Pace", "Projected", "Accounts lowered", "Sends / day", "QLs given up (est.)", "Projected after"].map((h) => (
+                    {["Client", "QLs / target", "Forecast", "Accounts lowered", "Sends / day", "QLs given up (est.)", "Forecast after"].map((h) => (
                       <th key={h} className="text-left font-medium px-2 py-1.5 whitespace-nowrap">{h}</th>
                     ))}
                   </tr>
@@ -549,7 +551,6 @@ function ThrottlePreviewCard() {
                     <tr key={r.clientTag} className="border-b last:border-0">
                       <td className="px-2 py-1.5 font-semibold whitespace-nowrap">{r.clientTag}</td>
                       <td className="px-2 py-1.5 tabular-nums">{r.qlsDelivered} / {r.target}</td>
-                      <td className="px-2 py-1.5 tabular-nums">{pct(r.pace)}</td>
                       <td className="px-2 py-1.5 tabular-nums">{r.projected}</td>
                       <td className="px-2 py-1.5 tabular-nums">{n(r.lowered)} of {n(r.accounts)}</td>
                       <td className="px-2 py-1.5 tabular-nums whitespace-nowrap">{n(r.perDayNow)} → {n(r.perDayThrottled)} <span className="text-muted-foreground">(−{n(r.fewerPerDay)})</span></td>
@@ -590,7 +591,7 @@ function ThrottlePreviewCard() {
                 ? <p>Right now it would throttle no one.</p>
                 : <>
                     <p className="mb-1">If it ran now, it would throttle <strong>{p.throttle.length}</strong> client(s) (−{n(p.throttle.reduce((s2, r) => s2 + r.fewerPerDay, 0))} emails/day):</p>
-                    <p className="text-xs text-muted-foreground">{p.throttle.map((r) => `${r.clientTag} (${pct(r.pace)})`).join(", ")}</p>
+                    <p className="text-xs text-muted-foreground">{p.throttle.map((r) => `${r.clientTag} (forecast ${r.projected})`).join(", ")}</p>
                   </>}
             </div>
           )}

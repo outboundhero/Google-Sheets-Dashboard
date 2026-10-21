@@ -10,8 +10,11 @@ export interface SendingModeSettings {
   turboWarmupLimit: number;     // warm-up/day in Turbo (normal 8)
   turboDailyLimit: number;      // campaign sends/day in Turbo (normal 5)
   throttleDailyLimit: number;   // campaign sends/day while throttled (normal 5)
-  throttleOnPace: number;       // throttle at pace ≥ this (1.25 = 125%)
-  throttleOffPace: number;      // release at pace < this (1.10)
+  throttleWarmupLimit: number;  // warm-up/day while throttled — only raised to it
+  throttleAtGuarantee: number;  // throttle at forecast ≥ guarantee × this (1.5)
+  throttleMinReviewed: number;  // …with at least this many reviewed MRLs in the rate window
+  throttleMinQls: number;       // …and this many confirmed QLs this period
+  throttleMinDays: number;      // …and this many days into the period
   newClientDays: number;        // "New Client" for the first N days from the Start Date (19)
   minPaceDays: number;          // pace (the throttle trigger) waits for N days of the period
   turboWindowDays: number;      // Critical when projected < guarantee with ≤ N days left
@@ -32,8 +35,13 @@ export const DEFAULT_SENDING_MODE_SETTINGS: SendingModeSettings = {
   turboWarmupLimit: 5,
   turboDailyLimit: 8,
   throttleDailyLimit: 3,
-  throttleOnPace: 1.25,
-  throttleOffPace: 1.1,
+  // Nick 2026-10-14 (#3): throttle at 150% of the guarantee on the forecast,
+  // 3 sending + 8 warm-up, never on thin data. The minimums are ours.
+  throttleWarmupLimit: 8,
+  throttleAtGuarantee: 1.5,
+  throttleMinReviewed: 10,
+  throttleMinQls: 3,
+  throttleMinDays: 7,
   // Nick 2026-10-14: a client is a New Client for days 1–19 from its Start
   // Date, first month only — the old 5-day grace at the start of every
   // period is gone. minPaceDays keeps one or two early QLs from reading as a
@@ -72,8 +80,11 @@ export async function getSendingModeSettings(): Promise<SendingModeSettings> {
       turboWarmupLimit: num(data.turbo_warmup_limit, d.turboWarmupLimit),
       turboDailyLimit: num(data.turbo_daily_limit, d.turboDailyLimit),
       throttleDailyLimit: num(data.throttle_daily_limit, d.throttleDailyLimit),
-      throttleOnPace: num(data.throttle_on_pace, d.throttleOnPace),
-      throttleOffPace: num(data.throttle_off_pace, d.throttleOffPace),
+      throttleWarmupLimit: num(data.throttle_warmup_limit, d.throttleWarmupLimit),
+      throttleAtGuarantee: num(data.throttle_at_guarantee, d.throttleAtGuarantee),
+      throttleMinReviewed: num(data.throttle_min_reviewed, d.throttleMinReviewed),
+      throttleMinQls: num(data.throttle_min_qls, d.throttleMinQls),
+      throttleMinDays: num(data.throttle_min_days, d.throttleMinDays),
       newClientDays: num(data.new_client_days, d.newClientDays),
       minPaceDays: num(data.grace_days, d.minPaceDays),   // the old grace_days column
       turboWindowDays: num(data.turbo_window_days, d.turboWindowDays),

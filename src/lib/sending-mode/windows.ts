@@ -7,7 +7,9 @@
 // Turbo window intact.
 //
 //   turbo     warm-up → turboWarmupLimit (5), daily → turboDailyLimit (8), for turboDays
-//   throttle  daily → throttleDailyLimit (3); warm-up untouched
+//   throttle  daily → throttleDailyLimit (3), warm-up → throttleWarmupLimit (8)
+//             (only raised to it — Nick 2026-10-14). Throttles opened before
+//             that have applied_limits.warmup null and leave warm-up alone.
 //
 // Every path out (expiry, Cancel click, churn, pause, inactive, throttle
 // release) goes through endWindow → the same revert routine. Apply and revert
@@ -220,12 +222,12 @@ export async function startWindow(input: StartWindowInput): Promise<StartWindowR
     }
   }
 
-  const accounts = await loadClientAccounts(clientTag, input.kind === "turbo");
+  const accounts = await loadClientAccounts(clientTag, true);
   if (accounts.senders.length === 0) throw new Error(`${clientTag}: no connected sender accounts carry this tag on any instance`);
 
   const limits = {
     daily: input.kind === "turbo" ? settings.turboDailyLimit : settings.throttleDailyLimit,
-    warmup: input.kind === "turbo" ? settings.turboWarmupLimit : null,
+    warmup: input.kind === "turbo" ? settings.turboWarmupLimit : settings.throttleWarmupLimit,
   };
   const startedAt = new Date();
   const endsAt = input.kind === "turbo" ? new Date(startedAt.getTime() + settings.turboDays * 86_400_000) : null;
@@ -289,7 +291,9 @@ export async function continueApply(windowId: string, budgetMs = 200_000): Promi
 
     // Turbo only ever raises sending and throttle only ever lowers it: an
     // account already at 10/day must not drop to Turbo's 8, and one at 2/day
-    // must not climb to the throttle's 3. Warm-up only comes down. Accounts
+    // must not climb to the throttle's 3. Warm-up goes the other way: Turbo
+    // only lowers it (more of the account to real sending), the throttle only
+    // raises it (more warm-up while sending less). Accounts
     // with nothing to change still count as applied — the revert puts back the
     // recorded limits, which for them is a no-op.
     const changesDaily = (a: AccountRow) => a.prev_daily_limit === null
@@ -300,7 +304,8 @@ export async function continueApply(windowId: string, budgetMs = 200_000): Promi
       // Only accounts whose warm-up limit we could read get a warm-up change —
       // otherwise there's nothing to put back.
       const warmIds = list
-        .filter((a) => a.prev_warmup_limit !== null && a.prev_warmup_limit > limits.warmup! && !failedIds.has(a.inbox_id))
+        .filter((a) => a.prev_warmup_limit !== null && !failedIds.has(a.inbox_id)
+          && (window.kind === "turbo" ? a.prev_warmup_limit > limits.warmup! : a.prev_warmup_limit < limits.warmup!))
         .map((a) => a.inbox_id);
       const warm = await setLimit(instance, "warmup", warmIds, limits.warmup);
       for (const id of warm.failed) failedIds.add(id);
@@ -365,6 +370,9 @@ export async function endWindow(
   }
   await patchWindow(windowId, { revert_attempts: (window.revert_attempts ?? 0) + 1, status: "reverting" });
 
+  // Warm-up goes back only if this window changed it (old throttles didn't).
+  const touchedWarmup = window.applied_limits?.warmup !== null && window.applied_limits?.warmup !== undefined;
+
   // Accounts that were never applied have nothing to revert.
   const pending = (await getAccounts(windowId)).filter((a) => a.applied && !a.reverted);
   const byInstance = new Map<string, AccountRow[]>();
@@ -382,7 +390,7 @@ export async function endWindow(
     for (const a of list) {
       const d = a.prev_daily_limit ?? 5;
       byDaily.set(d, [...(byDaily.get(d) ?? []), a.inbox_id]);
-      if (window.kind === "turbo" && a.prev_warmup_limit !== null) {
+      if (touchedWarmup && a.prev_warmup_limit !== null) {
         byWarm.set(a.prev_warmup_limit, [...(byWarm.get(a.prev_warmup_limit) ?? []), a.inbox_id]);
       }
     }
@@ -407,7 +415,7 @@ export async function endWindow(
     if (tagId !== undefined) {
       try {
         const live = new Map((await listClientSenders(instance, tagId)).map((s) => [s.id, s.dailyLimit]));
-        const liveWarm = window.kind === "turbo" ? await listClientWarmupLimits(instance, tagId) : new Map<number, number>();
+        const liveWarm = touchedWarmup ? await listClientWarmupLimits(instance, tagId) : new Map<number, number>();
         const want = new Map(list.map((a) => [a.inbox_id, a]));
         verifiedIds = okIds.filter((id) => {
           const a = want.get(id)!;
@@ -416,7 +424,7 @@ export async function endWindow(
           // verified — count it reverted (removed cleanly, per the spec).
           if (d === undefined) return true;
           if (d !== (a.prev_daily_limit ?? d)) return false;
-          if (window.kind === "turbo" && a.prev_warmup_limit !== null) {
+          if (touchedWarmup && a.prev_warmup_limit !== null) {
             const w = liveWarm.get(id);
             if (w !== undefined && w !== a.prev_warmup_limit) return false;
           }

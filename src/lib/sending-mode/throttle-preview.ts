@@ -13,7 +13,8 @@
 // QLs still to come.
 import { getSupabaseAdmin } from "@/lib/supabase";
 import { getSendingModeSettings, type SendingModeSettings } from "./config";
-import { decideThrottlesWithCapacity, getThrottlePausedSet, projectedIfThrottled, statusFromRow, type ClientSendingStatus } from "./status";
+import { decideThrottlesWithCapacity, getThrottlePausedSet, statusFromRow, type ClientSendingStatus } from "./status";
+import { projectedIfThrottled } from "./ql-pace";
 import { sendCapacity } from "./capacity";
 import { listOpenWindows } from "./windows";
 
@@ -103,7 +104,7 @@ export async function buildThrottlePreview(opts: { rows?: ClientSendingStatus[] 
       projectedAfter: after,
     });
   }
-  out.sort((a, b) => (b.pace ?? 0) - (a.pace ?? 0));
+  out.sort((a, b) => b.projected / b.guarantee - a.projected / a.guarantee);
 
   const judgedAt = rows.reduce<string | null>((m, r) => (!m || r.judgedAt > m ? r.judgedAt : m), null);
   return {

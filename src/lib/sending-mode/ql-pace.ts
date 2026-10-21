@@ -22,7 +22,10 @@
 //   At Risk        projected below the guarantee with more days left than that
 //   Below Target   projected meets the guarantee but not the operational target
 //   On Track       projected meets the operational target (8 / 16 / 31)
-//   Overperforming pace ≥ throttleOnPace (125%) and projected meets the target
+//   Overperforming the auto-throttle would slow it down: forecast ≥ 150% of the
+//                  guarantee, still at/above the target if throttled, enough
+//                  data (≥ 10 reviewed MRLs in the rate window, ≥ 3 confirmed
+//                  QLs, ≥ 7 days into the period), statuses being filled
 //   new_client     days 1–newClientDays (19) from the client's Start Date: still
 //                  tracked and forecast, never At Risk / Critical / Below
 //                  Target / No status data. Overperforming still shows, so an
@@ -37,10 +40,10 @@
 //   insufficient_data  < MIN_MRLS leads this period — too few to forecast
 //
 // Counts and the forecast are live — pending leads are in the forecast at the
-// client's rate, so a blank mid-week Status no longer reads as behind. Pace
-// (what auto-throttle switches on) and the no-data check still go by the last
-// Friday 5 PM PST, when the team has filled the week's statuses (Spencer
-// 2026-10-10), until the throttle rules move to the forecast.
+// client's rate, so a blank mid-week Status no longer reads as behind. The
+// awaiting-reporting check still goes by the last Friday 5 PM PST, when the
+// team has filled the week's statuses (Spencer 2026-10-10). Pace (QLs at the
+// cut-off against a straight line) is kept for the window log only.
 //
 // Billing period = monthly anniversary of the Client Tracker Start Date
 // (fallback Go Live), the same anchor MRL pacing uses. A lead's date is its
@@ -104,6 +107,26 @@ export function lastStatusCutoff(now = new Date()): Date {
   const d = new Date(Date.UTC(pstNow.getUTCFullYear(), pstNow.getUTCMonth(), pstNow.getUTCDate(), 17));
   while (d.getUTCDay() !== 5 || d.getTime() > pstNow.getTime()) d.setUTCDate(d.getUTCDate() - 1);
   return new Date(d.getTime() + PST_MS);
+}
+
+// What an assigned account normally sends (limit-policy ASSIGNED_LIMIT) — the
+// fallback for the under-target check when real capacity is unknown.
+export const NORMAL_DAILY_LIMIT = 5;
+
+/**
+ * Projected QLs at the end of the period if the client sends only `keepRatio`
+ * of today's volume from now on: confirmed QLs and the leads already delivered
+ * stay; only the leads still to come (rate × MRL pace × days left) shrink with
+ * sending. Used for "never throttle a client under target" (Vicky 2026-10-09 —
+ * the first preview had SBTB going 16 → ~7, and the release rule would only
+ * notice after the QLs were lost). Target = the operational target since v2.
+ */
+export function projectedIfThrottled(
+  r: Pick<QlPace, "projected" | "blendedRate" | "mrlPace" | "daysRemaining">,
+  keepRatio: number,
+): number {
+  const toCome = r.blendedRate * r.mrlPace * r.daysRemaining;
+  return Math.round((r.projected - toCome * (1 - keepRatio)) * 10) / 10;
 }
 
 /** Operational target for a QL guarantee (Nick 2026-10-14: 5 → 8, 10 → 16,
@@ -228,9 +251,16 @@ export function evaluateQlPace(input: {
   const newClient = daysSinceStart <= s.newClientDays;
   const syncStale = !!input.syncedAt && now.getTime() - new Date(input.syncedAt).getTime() > SYNC_STALE_DAYS * DAY_MS;
 
+  const throttleReady = !noData
+    && projected >= input.guarantee * s.throttleAtGuarantee
+    && reviewed >= s.throttleMinReviewed
+    && qlsDelivered >= s.throttleMinQls
+    && daysElapsed >= s.throttleMinDays
+    && projectedIfThrottled({ projected, blendedRate, mrlPace, daysRemaining }, s.throttleDailyLimit / NORMAL_DAILY_LIMIT) >= target;
+
   let status: QlPaceStatus;
   if (syncStale) status = "sync_error";
-  else if (!noData && pace !== null && pace >= s.throttleOnPace && projected >= target) status = "overperforming";
+  else if (throttleReady) status = "overperforming";
   else if (newClient) status = "new_client";
   else if (mrlsDelivered === 0) status = daysElapsed <= NEW_PERIOD_DAYS ? "new_period" : "no_mrls";
   else if (daysElapsed <= NEW_PERIOD_DAYS && mrlsDelivered < MIN_MRLS) status = "new_period";

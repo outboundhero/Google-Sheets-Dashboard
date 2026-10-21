@@ -6,11 +6,11 @@
 // client_sending_status. The throttle pass reads those rows and opens/releases
 // throttle windows per the spec:
 //
-//   on   status Overperforming (pace ≥ throttleOnPace, forecast meets the
-//        target — new clients included), client not in Turbo, not leaving,
-//        auto-throttle not paused for them, and still projected to reach the
-//        operational target once throttled
-//   off  pace < throttleOffPace · new billing period · projected < target
+//   on   status Overperforming (forecast ≥ 150% of the guarantee with enough
+//        data — new clients included, see ql-pace.ts), client not in Turbo,
+//        not leaving, auto-throttle not paused for them, and still projected
+//        to reach the operational target once throttled
+//   off  new billing period · forecast < target
 //        (a throttle must never cost the client its target) · client now
 //        leaving / in Turbo / paused
 //
@@ -23,14 +23,14 @@ import { getClientTierMap, resolveTier, TARGETS } from "@/lib/cron/client-report
 import { getSupabaseAdmin } from "@/lib/supabase";
 import { pstDateString } from "@/lib/date-utils";
 import type { Lead } from "@/types/lead";
-import { evaluateQlPace, lastStatusCutoff, operationalTarget, type QlPace, type QlPaceStatus } from "./ql-pace";
+import {
+  evaluateQlPace, lastStatusCutoff, NORMAL_DAILY_LIMIT, operationalTarget, projectedIfThrottled,
+  type QlPace, type QlPaceStatus,
+} from "./ql-pace";
 import { getSendingModeSettings, type SendingModeSettings } from "./config";
 import { endWindow, listOpenWindows, startWindow, type SendingWindow } from "./windows";
 import { sendCapacity } from "./capacity";
 
-// What an assigned account normally sends (limit-policy ASSIGNED_LIMIT) — the
-// fallback for the under-target check when real capacity is unknown.
-const NORMAL_DAILY_LIMIT = 5;
 
 export interface ClientSendingStatus extends QlPace {
   clientTag: string;
@@ -258,22 +258,6 @@ export interface ThrottleDecision {
   projectedIfThrottled?: number;
 }
 
-/**
- * Projected QLs at the end of the period if the client sends only `keepRatio`
- * of today's volume from now on: confirmed QLs and the leads already delivered
- * stay; only the leads still to come (rate × MRL pace × days left) shrink with
- * sending. Used for "never throttle a client under target" (Vicky 2026-10-09 —
- * the first preview had SBTB going 16 → ~7, and the release rule would only
- * notice after the QLs were lost). Target = the operational target since v2.
- */
-export function projectedIfThrottled(
-  r: Pick<ClientSendingStatus, "projected" | "blendedRate" | "mrlPace" | "daysRemaining">,
-  keepRatio: number,
-): number {
-  const toCome = r.blendedRate * r.mrlPace * r.daysRemaining;
-  return Math.round((r.projected - toCome * (1 - keepRatio)) * 10) / 10;
-}
-
 /** Pure: what the throttle pass would do for each client. `keepRatio` per tag
  *  (from capacity.ts) feeds the under-target check; a missing tag falls back
  *  to throttle ÷ the normal 5/day. */
@@ -295,22 +279,21 @@ export function decideThrottles(
       else if (r.leavingOn) out.push({ ...base, action: "release", reason: `leaving ${r.leavingOn}` });
       else if (w.started_at.slice(0, 10) < r.cycleStart) out.push({ ...base, action: "release", reason: "new_period" });
       else if (r.projected < r.target) out.push({ ...base, action: "release", reason: "below_target" });
-      else if (r.pace !== null && r.pace < s.throttleOffPace) out.push({ ...base, action: "release", reason: "pace_below_off" });
       else if (paused.has(r.clientTag)) out.push({ ...base, action: "release", reason: "auto_throttle_paused" });
-      else out.push({ ...base, action: "none", reason: `throttled, pace ${r.pace}` });
+      else out.push({ ...base, action: "none", reason: `throttled, forecast ${r.projected}` });
       continue;
     }
     if (w) { out.push({ ...base, action: "none", reason: "in turbo" }); continue; }
     if (r.gone || r.leavingOn) { out.push({ ...base, action: "none", reason: r.gone ?? `leaving ${r.leavingOn}` }); continue; }
     if (paused.has(r.clientTag)) { out.push({ ...base, action: "none", reason: "auto-throttle paused" }); continue; }
-    if (r.status === "overperforming" && r.pace !== null) {
+    if (r.status === "overperforming") {
       const after = projectedIfThrottled(r, keepRatio.get(r.clientTag) ?? s.throttleDailyLimit / NORMAL_DAILY_LIMIT);
       if (after < r.target) {
         out.push({ ...base, action: "none", projectedIfThrottled: after, reason: `would drop under target (≈${after} of ${r.target})` });
       } else {
-        out.push({ ...base, action: "throttle", projectedIfThrottled: after, reason: `pace ${Math.round(r.pace * 100)}% ≥ ${Math.round(s.throttleOnPace * 100)}%` });
+        out.push({ ...base, action: "throttle", projectedIfThrottled: after, reason: `forecast ${r.projected} ≥ ${r.guarantee * s.throttleAtGuarantee} (${Math.round(s.throttleAtGuarantee * 100)}% of ${r.guarantee})` });
       }
-    } else out.push({ ...base, action: "none", reason: `pace ${r.pace ?? "—"}` });
+    } else out.push({ ...base, action: "none", reason: `forecast ${r.projected}` });
   }
   return out;
 }
