@@ -30,8 +30,33 @@ const STATUS_META: Record<string, { label: string; cls: string }> = {
   on_track: { label: "On Track", cls: "bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 border-emerald-500/40" },
   overperforming: { label: "Overperforming", cls: "bg-sky-500/15 text-sky-700 dark:text-sky-300 border-sky-500/40" },
   new_client: { label: "New Client", cls: "bg-indigo-500/10 text-indigo-700 dark:text-indigo-300 border-indigo-500/40" },
-  no_data: { label: "No status data", cls: "bg-zinc-500/10 text-zinc-600 dark:text-zinc-300 border-dashed border-zinc-400/60" },
+  sync_error: { label: "Sync Error", cls: "bg-red-500/15 text-red-700 dark:text-red-300 border-dashed border-red-500/50" },
+  no_mrls: { label: "No MRLs Delivered", cls: "bg-orange-500/15 text-orange-700 dark:text-orange-300 border-orange-500/40" },
+  awaiting_reporting: { label: "Awaiting Client Reporting", cls: "bg-zinc-500/10 text-zinc-600 dark:text-zinc-300 border-dashed border-zinc-400/60" },
+  insufficient_data: { label: "Insufficient Data", cls: "bg-zinc-500/10 text-zinc-600 dark:text-zinc-300 border-dashed border-zinc-400/60" },
+  new_period: { label: "New Billing Period", cls: "bg-zinc-500/10 text-zinc-600 dark:text-zinc-300 border-zinc-400/40" },
 };
+
+// Statuses that need someone to act, and the ones we can't judge yet (Nick #8).
+const UNDER = new Set(["critical", "at_risk", "no_mrls", "sync_error"]);
+const UNJUDGED = new Set(["awaiting_reporting", "new_period", "insufficient_data"]);
+
+/** What a client's status badge says when hovered, and the short note after it. */
+function statusNote(c: PerformanceClient, newClientDays: number): { title?: string; note?: string } {
+  if (c.status === "new_client") {
+    return { title: `Day ${c.daysElapsed} of ${newClientDays} since the start (${c.cycleStart}) — judged from day ${newClientDays + 1}`, note: `day ${c.daysElapsed}` };
+  }
+  if (c.status === "awaiting_reporting") {
+    return c.lastStatusAt
+      ? { title: `Most of this period's leads have no Status. The newest lead the client has marked was delivered ${c.lastStatusAt}.`, note: `marked up to ${c.lastStatusAt.slice(5)}` }
+      : { title: "The client has never marked a lead in the sheet's Status column.", note: "never marked" };
+  }
+  if (c.status === "sync_error") return { title: "This client's lead sheet hasn't synced in over 2 days — check the sheet is still shared and the link works." };
+  if (c.status === "no_mrls") return { title: "No Meeting-Ready leads delivered in this billing period yet." };
+  if (c.status === "new_period") return { title: "First week of the billing period with fewer than 3 leads — judged once there's more." };
+  if (c.status === "insufficient_data") return { title: "Fewer than 3 Meeting-Ready leads this period — too few for a reliable forecast." };
+  return {};
+}
 
 /** The sum behind a client's forecast, for its tooltip. */
 const forecastSum = (c: PerformanceClient) =>
@@ -74,12 +99,12 @@ export default function PerformancePage() {
 
   const rows = useMemo(() => {
     const list = clients.filter((c) => {
-      if (view === "under") return c.status === "at_risk" || c.status === "critical";
+      if (view === "under") return UNDER.has(c.status);
       if (view === "over") return c.status === "overperforming" || c.throttle;
-      if (view === "nodata") return c.status === "no_data";
+      if (view === "nodata") return UNJUDGED.has(c.status);
       return true;
     });
-    const rank: Record<string, number> = { critical: 0, at_risk: 1, below_target: 2, overperforming: 3, on_track: 4, no_data: 5, new_client: 6 };
+    const rank: Record<string, number> = { critical: 0, at_risk: 1, below_target: 2, overperforming: 3, on_track: 4, no_mrls: 0, sync_error: 0, awaiting_reporting: 5, insufficient_data: 5, new_period: 6, new_client: 6 };
     return list.sort((a, b) =>
       (rank[a.status] ?? 9) - (rank[b.status] ?? 9)
       || (a.projected - a.guarantee) - (b.projected - b.guarantee)
@@ -88,9 +113,9 @@ export default function PerformancePage() {
   }, [clients, view]);
 
   const counts = useMemo(() => ({
-    under: clients.filter((c) => c.status === "at_risk" || c.status === "critical").length,
+    under: clients.filter((c) => UNDER.has(c.status)).length,
     over: clients.filter((c) => c.status === "overperforming" || c.throttle).length,
-    nodata: clients.filter((c) => c.status === "no_data").length,
+    nodata: clients.filter((c) => UNJUDGED.has(c.status)).length,
     all: clients.length,
   }), [clients]);
 
@@ -158,7 +183,7 @@ export default function PerformancePage() {
           of {settings.blendPriorLeads} so a few leads don&apos;t swing it (the real rate is next to it). Under the guarantee is At Risk
           or Critical; between the guarantee and the target is Below Target. <strong>New Client</strong> = the first{" "}
           {settings.newClientDays} days from the client&apos;s Start Date: tracked, but not flagged unless it&apos;s overperforming.
-          {judgedAt && <> Pace and &quot;No status data&quot; still go by the last Friday 5 PM (<strong>{fmtCutoff(judgedAt)} PST</strong>), when the team has filled the week&apos;s statuses.</>}
+          {judgedAt && <> Pace and &quot;Awaiting Client Reporting&quot; still go by the last Friday 5 PM (<strong>{fmtCutoff(judgedAt)} PST</strong>), when the team has filled the week&apos;s statuses.</>}
         </p>
       )}
 
@@ -171,7 +196,7 @@ export default function PerformancePage() {
       )}
 
       <div className="flex items-center gap-2">
-        {([["under", "Underperforming"], ["over", "Overperforming"], ["nodata", "No status data"], ["all", "Overview"]] as [View, string][]).map(([v, label]) => (
+        {([["under", "Underperforming"], ["over", "Overperforming"], ["nodata", "Can't judge yet"], ["all", "Overview"]] as [View, string][]).map(([v, label]) => (
           <Button key={v} size="sm" variant={view === v ? "default" : "outline"} onClick={() => setView(v)}>
             {label} <span className="ml-1 tabular-nums opacity-70">{counts[v]}</span>
           </Button>
@@ -213,8 +238,8 @@ export default function PerformancePage() {
               {rows.map((c) => {
                 const meta = STATUS_META[c.status] ?? { label: c.status, cls: STATUS_META.new_client.cls };
                 const reviewed = c.qls30d + c.nqls30d + c.dups30d;
-                const judged = c.status !== "no_data";
-                const isNew = c.status === "new_client";
+                const rough = UNJUDGED.has(c.status) || c.status === "new_client";
+                const note = statusNote(c, settings?.newClientDays ?? 19);
                 const k = c.clientTag;
                 const isBusy = busy?.endsWith(`:${k}`) ?? false;
                 return (
@@ -237,21 +262,23 @@ export default function PerformancePage() {
                     <td className="px-3 py-2 whitespace-nowrap tabular-nums" title={`Last ${settings?.rateDays ?? 30} days: ${c.qls30d} QL, ${c.nqls30d} NQL, ${c.dups30d} duplicate`}>
                       {pct(c.blendedRate)} <span className="text-muted-foreground">(real {pct(c.actualRate)} · {reviewed} checked)</span>
                     </td>
-                    <td className="px-3 py-2 whitespace-nowrap tabular-nums" title={judged ? forecastSum(c) : undefined}>
-                      {judged ? (
+                    <td className="px-3 py-2 whitespace-nowrap tabular-nums" title={`${forecastSum(c)}${rough ? " — rough: too few leads checked to rely on" : ""}`}>
+                      {c.status === "sync_error" ? "—" : rough ? (
+                        <span className="text-muted-foreground">~{c.projected}</span>
+                      ) : (
                         <>
                           <span className={c.projected >= c.target ? "text-emerald-600 dark:text-emerald-400" : ""}>{c.projected}</span>
-                          {c.projected < c.guarantee && !isNew && <span className="text-red-600 dark:text-red-400"> ({Math.round((c.guarantee - c.projected) * 10) / 10} short)</span>}
+                          {c.projected < c.guarantee && <span className="text-red-600 dark:text-red-400"> ({Math.round((c.guarantee - c.projected) * 10) / 10} short)</span>}
                         </>
-                      ) : "—"}
+                      )}
                     </td>
                     <td className="px-3 py-2 tabular-nums" title="QLs by last Friday 5 PM against a straight line to the guarantee — what auto-throttle switches on for now">{pct(c.pace)}</td>
                     <td className="px-3 py-2">
                       <span
                         className={`inline-block rounded-full border px-2 py-0.5 text-[10px] font-semibold ${meta.cls}`}
-                        title={isNew ? `Day ${c.daysElapsed} of ${settings?.newClientDays ?? 19} since the start (${c.cycleStart}) — judged from day ${(settings?.newClientDays ?? 19) + 1}` : undefined}
+                        title={note.title}
                       >
-                        {meta.label}{isNew && <span className="font-normal opacity-70"> · day {c.daysElapsed}</span>}
+                        {meta.label}{note.note && <span className="font-normal opacity-70"> · {note.note}</span>}
                       </span>
                     </td>
                     <td className="px-3 py-2 whitespace-nowrap">{c.leavingOn ? <span className="text-amber-600 dark:text-amber-400">Yes · {c.leavingKind} {c.leavingOn}</span> : "No"}</td>
@@ -368,8 +395,8 @@ function TurboPreviewBody({ p }: { p: TurboPreview }) {
           <p>
             <strong>{standing.qlsDelivered}</strong> confirmed QLs so far, {standing.mrlsPending} lead(s) not checked yet ·
             guarantee {standing.guarantee}, target {standing.target}.
-            {standing.status === "no_data" ? (
-              <> Most leads have no Status yet, so the real number isn&apos;t known.</>
+            {standing.status === "awaiting_reporting" ? (
+              <> The client isn&apos;t marking its leads, so the real number isn&apos;t known.</>
             ) : (
               <> Forecast: <strong>{standing.projected}</strong> by {standing.cycleEnd} → <strong>{BAND_LABEL[standing.band]}</strong>.</>
             )}

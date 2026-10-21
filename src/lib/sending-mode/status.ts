@@ -17,7 +17,7 @@
 // Inputs are the stores the MRL pacing cron already uses: leads-store Redis +
 // the Client Tracker (tier → QL guarantee, Start Date → billing anchor,
 // churn/pause dates → leaving).
-import { getStoredLeads } from "@/lib/leads-store";
+import { getStoredLeadsWithFreshness } from "@/lib/leads-store";
 import { getClientTrackerData } from "@/lib/google-sheets";
 import { getClientTierMap, resolveTier, TARGETS } from "@/lib/cron/client-reports";
 import { getSupabaseAdmin } from "@/lib/supabase";
@@ -67,7 +67,14 @@ function sheetDate(cell: string | null | undefined): string | null {
 /** Every active, tiered client with a billing anchor — same gate MRL pacing uses. */
 export async function evaluateAllClients(settings?: SendingModeSettings, now = new Date()): Promise<ClientSendingStatus[]> {
   const s = settings ?? (await getSendingModeSettings());
-  const [leads, tracker, tierMap] = await Promise.all([getStoredLeads(), getClientTrackerData(), getClientTierMap()]);
+  const [{ leads, syncedAtByClient }, tracker, tierMap] = await Promise.all([getStoredLeadsWithFreshness(), getClientTrackerData(), getClientTierMap()]);
+  // Sheet tags carry suffixes ("CCGDA: Leads") — key by the client tag, stalest sheet wins.
+  const syncedAt = new Map<string, string>();
+  for (const [sheetTag, at] of Object.entries(syncedAtByClient)) {
+    const tag = sheetTag.split(":")[0].trim().toUpperCase();
+    const prev = syncedAt.get(tag);
+    if (!prev || at < prev) syncedAt.set(tag, at);
+  }
 
   // One row per client tag (Spencer 2026-10-10: "each client tag is judged
   // independently"). A sheet tagged "CCGDA: Leads" is CCGDA — the suffix isn't
@@ -119,6 +126,7 @@ export async function evaluateAllClients(settings?: SendingModeSettings, now = n
       cycleAnchor: anchor,
       leads: clientLeads,
       settings: s,
+      syncedAt: syncedAt.get(clientTag) ?? null,
       now,
     });
     out.push({
@@ -176,6 +184,7 @@ export async function saveClientStatuses(rows: ClientSendingStatus[]): Promise<v
     blended_rate: r.blendedRate,
     mrl_pace: r.mrlPace,
     mrls_needed: r.mrlsNeeded,
+    last_status_at: r.lastStatusAt,
   }));
   let v2 = true;
   for (let i = 0; i < live.length; i += 500) {
@@ -227,6 +236,7 @@ export function statusFromRow(r: Record<string, unknown>): ClientSendingStatus {
     expectedToDate: Number(r.expected_to_date),
     pace: r.pace === null || r.pace === undefined ? null : Number(r.pace),
     status: String(r.status) as QlPaceStatus,
+    lastStatusAt: (r.last_status_at as string | null) ?? null,
     judgedAt: lastStatusCutoff(new Date(String(r.evaluated_at))).toISOString(),
     repliesToDate: 0,
     blankStatusToDate: 0,
@@ -293,7 +303,6 @@ export function decideThrottles(
     if (w) { out.push({ ...base, action: "none", reason: "in turbo" }); continue; }
     if (r.gone || r.leavingOn) { out.push({ ...base, action: "none", reason: r.gone ?? `leaving ${r.leavingOn}` }); continue; }
     if (paused.has(r.clientTag)) { out.push({ ...base, action: "none", reason: "auto-throttle paused" }); continue; }
-    if (r.status === "no_data") { out.push({ ...base, action: "none", reason: "no status data" }); continue; }
     if (r.status === "overperforming" && r.pace !== null) {
       const after = projectedIfThrottled(r, keepRatio.get(r.clientTag) ?? s.throttleDailyLimit / NORMAL_DAILY_LIMIT);
       if (after < r.target) {

@@ -27,8 +27,14 @@
 //                  tracked and forecast, never At Risk / Critical / Below
 //                  Target / No status data. Overperforming still shows, so an
 //                  over-delivering new client can be throttled (Nick 2026-10-14)
-//   no_data        the team isn't filling the Status column for this client
-//                  (see below)
+//
+// Clients that can't be judged get the reason instead (Nick 2026-10-14, #8):
+//   sync_error         the client's lead sheet hasn't synced in SYNC_STALE_DAYS
+//   no_mrls            no Meeting-Ready leads this period, past the first week
+//   new_period         first NEW_PERIOD_DAYS of the period, < MIN_MRLS leads
+//   awaiting_reporting the client isn't filling the Status column (see below);
+//                      lastStatusAt says how far their marking has got
+//   insufficient_data  < MIN_MRLS leads this period — too few to forecast
 //
 // Counts and the forecast are live — pending leads are in the forecast at the
 // client's rate, so a blank mid-week Status no longer reads as behind. Pace
@@ -46,7 +52,9 @@ import { anniversary, currentCycleStart } from "@/lib/mrl-pace";
 import { isQualityLead } from "@/lib/cron/client-reports";
 import type { SendingModeSettings } from "./config";
 
-export type QlPaceStatus = "new_client" | "on_track" | "below_target" | "at_risk" | "critical" | "overperforming" | "no_data";
+export type QlPaceStatus =
+  | "new_client" | "on_track" | "below_target" | "at_risk" | "critical" | "overperforming"
+  | "sync_error" | "no_mrls" | "new_period" | "awaiting_reporting" | "insufficient_data";
 
 export interface QlPace {
   guarantee: number;
@@ -75,6 +83,9 @@ export interface QlPace {
   expectedToDate: number;
   pace: number | null;     // null while expected is 0 — treated as on pace
   status: QlPaceStatus;
+  /** Delivery date of the newest lead with a Status (yyyy-mm-dd) — how far
+   *  the client's marking has got. */
+  lastStatusAt: string | null;
   /** The Friday 5 PM PST cut-off pace and the no-data check are counted to. */
   judgedAt: string;
   /** MRLs before the cut-off this period, and how many have no Status. */
@@ -113,14 +124,17 @@ function verdict(lead: Lead): Verdict {
   return "pending";
 }
 
-// "No status data": over half of this period's MRLs (min 3) still have no
-// Status after the Friday cut-off, or the client has 20+ MRLs and has never
-// had a single one marked (BAJFI, OH, SC… on 2026-10-10). Such a client isn't
-// behind — we just can't see its QLs — so it is never Critical and never
+// "Awaiting Client Reporting": over half of this period's MRLs (min 3) still
+// have no Status after the Friday cut-off, or the client has 20+ MRLs and has
+// never had a single one marked (BAJFI, OH, SC… on 2026-10-10). Such a client
+// isn't behind — we just can't see its QLs — so it is never Critical and never
 // throttled.
 const NO_DATA_MIN_REPLIES = 3;
 const NO_DATA_BLANK_SHARE = 0.5;
 const NEVER_MARKED_MIN_LEADS = 20;
+const SYNC_STALE_DAYS = 2;     // the lead sync runs hourly
+const NEW_PERIOD_DAYS = 7;
+const MIN_MRLS = 3;
 const hasStatus = (l: Lead) => String(l.status || "").trim() !== "";
 
 /** The client's Meeting-Ready leads, each record once. A client whose sheet
@@ -147,6 +161,8 @@ export function evaluateQlPace(input: {
   cycleAnchor: Date;
   leads: Lead[];
   settings: SendingModeSettings;
+  /** When the client's lead sheet last synced (the stalest of its sheets). */
+  syncedAt?: string | null;
   now?: Date;
 }): QlPace {
   const now = input.now ?? new Date();
@@ -166,11 +182,13 @@ export function evaluateQlPace(input: {
   let mrlsDelivered = 0, mrlsPending = 0, qlsDelivered = 0;
   let qls30d = 0, nqls30d = 0, dups30d = 0, paceMrls = 0;
   let qlsAtCutoff = 0, repliesToDate = 0, blankStatusToDate = 0, everMarked = 0;
+  let lastStatus: Date | null = null;
   for (const lead of mrls) {
     const v = verdict(lead);
     if (v === "ql") everMarked++;
     const d = parseDate(lead.timeWeGotReply) || parseDate(lead.replyTime);
     if (!d || d > now) continue;
+    if (hasStatus(lead) && (!lastStatus || d > lastStatus)) lastStatus = d;
     const t = d.getTime();
     if (t >= rateFrom) {
       if (v === "ql") qls30d++;
@@ -208,11 +226,16 @@ export function evaluateQlPace(input: {
   const expectedToDate = input.guarantee * (cutoffDays / cycleLength);
   const pace = expectedToDate > 0 && cutoffDays >= s.minPaceDays ? qlsAtCutoff / expectedToDate : null;
   const newClient = daysSinceStart <= s.newClientDays;
+  const syncStale = !!input.syncedAt && now.getTime() - new Date(input.syncedAt).getTime() > SYNC_STALE_DAYS * DAY_MS;
 
   let status: QlPaceStatus;
-  if (noData) status = newClient ? "new_client" : "no_data";
-  else if (pace !== null && pace >= s.throttleOnPace && projected >= target) status = "overperforming";
+  if (syncStale) status = "sync_error";
+  else if (!noData && pace !== null && pace >= s.throttleOnPace && projected >= target) status = "overperforming";
   else if (newClient) status = "new_client";
+  else if (mrlsDelivered === 0) status = daysElapsed <= NEW_PERIOD_DAYS ? "new_period" : "no_mrls";
+  else if (daysElapsed <= NEW_PERIOD_DAYS && mrlsDelivered < MIN_MRLS) status = "new_period";
+  else if (noData) status = "awaiting_reporting";
+  else if (mrlsDelivered < MIN_MRLS) status = "insufficient_data";
   else if (projected <= input.guarantee * s.fullCreditFraction) status = "critical";
   else if (projected < input.guarantee && daysRemaining <= s.turboWindowDays) status = "critical";
   else if (projected < input.guarantee) status = "at_risk";
@@ -241,6 +264,7 @@ export function evaluateQlPace(input: {
     expectedToDate: round(expectedToDate, 1),
     pace: pace === null ? null : round(pace, 2),
     status,
+    lastStatusAt: lastStatus ? isoDate(lastStatus) : null,
     judgedAt: cutoff.toISOString(),
     repliesToDate,
     blankStatusToDate,

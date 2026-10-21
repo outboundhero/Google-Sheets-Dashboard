@@ -143,8 +143,8 @@ export async function buildTurboPreview(clientTag: string): Promise<TurboPreview
   const warnings: string[] = [];
   if (accounts.senders.length === 0) warnings.push("No connected accounts carry this tag — Turbo has nothing to change.");
   if (active.length === 0) warnings.push("No campaign is sending for this client — Turbo changes nothing until one is.");
-  if (standing?.status === "no_data") warnings.push("The Status column is mostly blank for this client, so its QLs can't be counted — the QL estimate below is a guess.");
-  if (emailsPerQl === null && standing?.status !== "no_data") warnings.push("Not enough QL history to estimate extra QLs.");
+  if (standing?.status === "awaiting_reporting") warnings.push("The client isn't marking its leads, so its QLs can't be counted — the QL estimate below is a guess.");
+  if (emailsPerQl === null && standing?.status !== "awaiting_reporting") warnings.push("Not enough QL history to estimate extra QLs.");
   if (active.length && campaignCap !== null && campaignCap <= nowCapacity) warnings.push(`The campaigns' daily caps (${campaignCap.toLocaleString()}/day) are already the limit — Turbo won't add emails unless the caps are raised.`);
   if (extraPerDay > 0 && uncontactedLeads < extraPerDay * settings.turboDays) warnings.push(`Only ${uncontactedLeads.toLocaleString()} uncontacted leads left in sending campaigns — the extra emails may run them out before Turbo ends.`);
   if (raised === 0 && accounts.senders.length > 0) warnings.push(`Every account is already at ${T}/day or more — only the warm-up change applies.`);
