@@ -25,8 +25,31 @@ export const maxDuration = 300;
 //   { all: true }            run every fillable client, up to `maxClients`
 //   { dryRun: true }         report what it would do and stop
 //   { maxClients }           bound a bulk run (default 5)
+//   { deadlineAt }           epoch ms the caller's function dies at (minus a
+//                            margin) — no client is started that can't finish
 
 const DEFAULT_MAX_CLIENTS = 5;
+// Our own ceiling when called directly (maxDuration minus a margin).
+const OWN_BUDGET_MS = 270_000;
+
+// How long one client's run takes, from the 2026-10-18 FacilityReach runs
+// (~49 inboxes/domain): tagging ~2.5s per domain, each campaign attach ~8s
+// + ~2.2s per domain, ~20s fixed (churn guard, redirect, sheet, whitelist).
+// Errs high: HS 15 domains × 5 campaigns estimates 263s, took 240s.
+const FIXED_MS = 20_000;
+const TAG_MS_PER_DOMAIN = 2_500;
+const ATTACH_MS = 8_000;
+const ATTACH_MS_PER_DOMAIN = 2_200;
+
+function estimateRunMs(domains: number, campaigns: number): number {
+  return FIXED_MS + domains * TAG_MS_PER_DOMAIN + campaigns * (ATTACH_MS + domains * ATTACH_MS_PER_DOMAIN);
+}
+
+/** Most domains whose run still ends before `msLeft` runs out (0 = none). */
+function domainsThatFit(msLeft: number, campaigns: number): number {
+  const perDomain = TAG_MS_PER_DOMAIN + campaigns * ATTACH_MS_PER_DOMAIN;
+  return Math.max(0, Math.floor((msLeft - FIXED_MS - campaigns * ATTACH_MS) / perDomain));
+}
 
 interface Body {
   clientTag?: string;
@@ -34,13 +57,20 @@ interface Body {
   all?: boolean;
   dryRun?: boolean;
   maxClients?: number;
+  deadlineAt?: number;
 }
 
 export async function POST(request: Request) {
+  const startedAt = Date.now();
   try {
     const body = (await request.json().catch(() => ({}))) as Body;
     const dryRun = body.dryRun === true;
     const maxClients = Math.max(1, Math.min(20, body.maxClients ?? DEFAULT_MAX_CLIENTS));
+    // A run killed mid-tag is what put HS and JPC&A on 14 CVJ/CCGW domains
+    // (2026-10-18): the cron started HS with under a minute left, Vercel cut
+    // it off inside bulk-tags, and the tagged domains still read as reserve.
+    // The cron passes its own (longer) deadline; a direct call has ours.
+    const deadlineAt = typeof body.deadlineAt === "number" ? body.deadlineAt : startedAt + OWN_BUDGET_MS;
 
     const trueUp = await computeTrueUp();
 
@@ -104,15 +134,34 @@ export async function POST(request: Request) {
       added: number;
       steps: { label: string; state: string; note?: string }[];
     }[] = [];
+    // Clients left for the next run because the time left couldn't fit them.
+    const deferred: { clientTag: string; instance: string; domains: number; estimateMs: number }[] = [];
 
     for (const r of targets) {
+      // Only start what can finish: cut the batch down to what fits in the
+      // time left, and leave the client for the next run if nothing does.
+      // The domains left out stay in reserve and the next run picks them up.
+      const msLeft = deadlineAt - Date.now();
+      const fits = domainsThatFit(msLeft, r.targetCampaigns.length);
+      if (fits === 0) {
+        deferred.push({
+          clientTag: r.clientTag,
+          instance: r.instance,
+          domains: r.fillCandidates.length,
+          estimateMs: estimateRunMs(r.fillCandidates.length, r.targetCampaigns.length),
+        });
+        continue;
+      }
+      const domains = r.fillCandidates.slice(0, fits);
+      const cut = domains.length < r.fillCandidates.length;
+
       const inputs: ExecuteInputs = {
         clientTag: r.clientTag,
         instance: r.instance,
         instancesQuery: `instances=${r.instance}`,
         redirectUrl: r.redirectUrl,
         targetCampaigns: r.targetCampaigns.map((c) => ({ id: c.id, name: c.name })),
-        replacementDomains: r.fillCandidates,
+        replacementDomains: domains,
         removeDomains: [], // fill never removes — that is the trim's job
       };
 
@@ -123,7 +172,9 @@ export async function POST(request: Request) {
           instance: r.instance as BisonInstanceSlug,
           clientTag: r.clientTag,
           eventType: "proposed",
-          detail: `true-up fill: adding ${r.fillCandidates.length} to reach cap ${r.cap} (had ${r.staying})`,
+          detail: cut
+            ? `true-up fill: adding ${domains.length} of ${r.fillCandidates.length} (rest next run — time limit) to reach cap ${r.cap} (had ${r.staying})`
+            : `true-up fill: adding ${domains.length} to reach cap ${r.cap} (had ${r.staying})`,
         },
       ]).catch(() => {});
 
@@ -136,7 +187,7 @@ export async function POST(request: Request) {
         clientTag: r.clientTag,
         instance: r.instance,
         ok,
-        added: r.fillCandidates.length,
+        added: domains.length,
         steps: lastSteps.map((s) => ({ label: s.label, state: s.state, note: s.note })),
       });
     }
@@ -145,6 +196,7 @@ export async function POST(request: Request) {
       executed,
       ranClients: executed.length,
       addedTotal: executed.reduce((s, e) => s + (e.ok ? e.added : 0), 0),
+      deferred,
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : "fill failed";

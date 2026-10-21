@@ -3,7 +3,11 @@ import { POST as moveFill } from "@/app/api/replacement/true-up/move-fill/route"
 import { POST as fill } from "@/app/api/replacement/true-up/fill/route";
 import { POST as trim } from "@/app/api/replacement/true-up/trim/route";
 
-export const maxDuration = 300;
+// 800 like the auto-runner: one 15-domain fill takes ~4 min, so 300s could
+// not fit the 3 clients a tick may run (HS was killed mid-tag, 2026-10-18).
+export const maxDuration = 800;
+// What the fill may plan into — maxDuration minus a margin for the response.
+const BUDGET_MS = 770_000;
 
 // GET /api/cron/true-up-move — every 30 minutes: one trim round, one
 // cross-instance move round, then an incremental fill.
@@ -40,6 +44,7 @@ const call = async (
 };
 
 export async function GET(request: Request) {
+  const startedAt = Date.now();
   try {
     // ?tag=&instance= runs ONE targeted trim and stops — the bulk queue is
     // ordered by overage, so a specific client someone is waiting on could
@@ -69,7 +74,9 @@ export async function GET(request: Request) {
 
     // Then top up short clients from whatever reserve is registered by now —
     // small increments; the next tick picks up where this one stopped.
-    const filled = await call(fill, { all: true, maxClients: 3, dryRun });
+    // deadlineAt: the fill never starts a client this invocation can't finish
+    // (HS/JPC&A, 2026-10-18 — killed mid-tag at the old 300s limit).
+    const filled = await call(fill, { all: true, maxClients: 3, dryRun, deadlineAt: startedAt + BUDGET_MS });
 
     return NextResponse.json({
       dryRun,

@@ -65,13 +65,43 @@ async function createTagInInstance(instance: BisonInstanceSlug, name: string): P
   return { id: tag.id, name: tag.name };
 }
 
+// Rebuild one domain's tag rollup from its inbox rows (per-instance).
+async function rollupDomainTags(
+  supabase: ReturnType<typeof getSupabaseAdmin>,
+  instance: BisonInstanceSlug,
+  domain: string,
+): Promise<void> {
+  const { data: domainInboxes } = await supabase
+    .from("deliverability_inboxes")
+    .select("tags")
+    .eq("instance", instance)
+    .eq("domain", domain);
+
+  const tagSet = new Set<string>();
+  for (const inbox of domainInboxes || []) {
+    const tags: Tag[] = Array.isArray(inbox.tags) ? inbox.tags : [];
+    for (const t of tags) {
+      if (t.name) tagSet.add(t.name);
+    }
+  }
+
+  await supabase
+    .from("deliverability_domains")
+    .update({ tags: Array.from(tagSet).sort() })
+    .eq("instance", instance)
+    .eq("domain", domain);
+}
+
 // Attach/remove a set of tag IDs to a set of inbox IDs within ONE instance.
 // Batched (50) with 422 sub-batch + single-id fallback to isolate dead inboxes.
+// `onSuccess` runs after every batch Bison accepts, so the caller can mirror it
+// locally before the next batch goes out.
 async function applyTagsToInboxes(
   instance: BisonInstanceSlug,
   endpoint: string,
   tagIds: number[],
-  inboxIds: number[]
+  inboxIds: number[],
+  onSuccess: (ids: number[]) => Promise<void> = async () => {},
 ): Promise<{ updated: number; successIds: Set<number>; failReasons: Map<number, string> }> {
   const BATCH = 50;
   let updated = 0;
@@ -94,6 +124,7 @@ async function applyTagsToInboxes(
       if (res.ok) {
         updated += batch.length;
         for (const id of batch) successIds.add(id);
+        await onSuccess(batch);
       } else if (res.status === 422) {
         // Invalid IDs in batch — fall back to sub-batches of 10
         console.warn(`[BULK-TAGS:${instance}] Batch ${i}-${i + batch.length} got 422, retrying in sub-batches`);
@@ -108,6 +139,7 @@ async function applyTagsToInboxes(
             if (subRes.ok) {
               updated += sub.length;
               for (const id of sub) successIds.add(id);
+              await onSuccess(sub);
             } else {
               // Try one by one to isolate bad IDs
               for (const id of sub) {
@@ -117,7 +149,7 @@ async function applyTagsToInboxes(
                     headers: { "Content-Type": "application/json" },
                     body: JSON.stringify({ tag_ids: tagIds, sender_email_ids: [id] }),
                   });
-                  if (singleRes.ok) { updated++; successIds.add(id); }
+                  if (singleRes.ok) { updated++; successIds.add(id); await onSuccess([id]); }
                   else {
                     const sErr = await singleRes.text().catch(() => "");
                     markFailed([id], `Bison ${singleRes.status}: ${sErr || "rejected (likely disconnected / no longer exists)"}`);
@@ -332,11 +364,44 @@ export async function POST(request: Request) {
       const resolvedIds = resolvedTags.map((t) => t.id);
       if (resolvedIds.length === 0) continue;
 
-      const { updated, successIds, failReasons } = await applyTagsToInboxes(
+      // 3. Mirror each accepted batch into Supabase straight away, domain
+      //    rollup included. This used to run once after ALL Bison calls, so a
+      //    caller killed mid-way (true-up-move cron at its 300s limit, HS +
+      //    JPC&A on 2026-10-18) left tags in Bison the DB never saw — those
+      //    domains still read as free reserve and went to a second client.
+      const saveBatch = async (ids: number[]) => {
+        const touched = new Set<string>();
+        for (const id of ids) {
+          const inbox = inboxById.get(id);
+          if (!inbox) continue;
+          const currentTags: Tag[] = Array.isArray(inbox.tags) ? inbox.tags : [];
+          let updatedTags: Tag[];
+          if (action === "add") {
+            const existingIds = new Set(currentTags.map((t) => t.id));
+            updatedTags = [
+              ...currentTags,
+              ...resolvedTags.filter((t) => !existingIds.has(t.id)),
+            ];
+          } else {
+            const removeIds = new Set(resolvedIds);
+            updatedTags = currentTags.filter((t) => !removeIds.has(t.id));
+          }
+          await supabase
+            .from("deliverability_inboxes")
+            .update({ tags: updatedTags })
+            .eq("instance", instance)
+            .eq("id", inbox.id);
+          touched.add(inbox.domain);
+        }
+        for (const domain of touched) await rollupDomainTags(supabase, instance, domain);
+      };
+
+      const { updated, failReasons } = await applyTagsToInboxes(
         instance,
         endpoint,
         resolvedIds,
-        inboxIds
+        inboxIds,
+        saveBatch,
       );
       totalUpdated += updated;
 
@@ -351,55 +416,16 @@ export async function POST(request: Request) {
         });
       }
 
-      // 3. Update local Supabase inbox tags for successfully-updated inboxes.
-      const inboxesToUpdate = inboxes.filter((i) => successIds.has(i.id));
-      for (const inbox of inboxesToUpdate) {
-        const currentTags: Tag[] = Array.isArray(inbox.tags) ? inbox.tags : [];
-        let updatedTags: Tag[];
-        if (action === "add") {
-          const existingIds = new Set(currentTags.map((t) => t.id));
-          updatedTags = [
-            ...currentTags,
-            ...resolvedTags.filter((t) => !existingIds.has(t.id)),
-          ];
-        } else {
-          const removeIds = new Set(resolvedIds);
-          updatedTags = currentTags.filter((t) => !removeIds.has(t.id));
-        }
-        await supabase
-          .from("deliverability_inboxes")
-          .update({ tags: updatedTags })
-          .eq("instance", instance)
-          .eq("id", inbox.id);
-      }
-
       const domainsTouched = affectedByInstance.get(instance) ?? new Set<string>();
       for (const i of inboxes) domainsTouched.add(i.domain);
       affectedByInstance.set(instance, domainsTouched);
     }
 
-    // 4. Re-aggregate domain tags from inboxes (per-instance, per-domain).
+    // 4. Final re-aggregation of every touched domain (covers domains whose
+    //    batches all failed, which saveBatch never saw).
     for (const [instance, domainsTouched] of affectedByInstance) {
       for (const domain of domainsTouched) {
-        const { data: domainInboxes } = await supabase
-          .from("deliverability_inboxes")
-          .select("tags")
-          .eq("instance", instance)
-          .eq("domain", domain);
-
-        const tagSet = new Set<string>();
-        for (const inbox of domainInboxes || []) {
-          const tags: Tag[] = Array.isArray(inbox.tags) ? inbox.tags : [];
-          for (const t of tags) {
-            if (t.name) tagSet.add(t.name);
-          }
-        }
-
-        await supabase
-          .from("deliverability_domains")
-          .update({ tags: Array.from(tagSet).sort() })
-          .eq("instance", instance)
-          .eq("domain", domain);
+        await rollupDomainTags(supabase, instance, domain);
       }
     }
 
