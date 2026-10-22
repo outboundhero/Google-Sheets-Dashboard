@@ -226,7 +226,7 @@
     },
     {
       "path": "/api/cron/revive-completed",
-      "schedule": "0 15 * * *"
+      "schedule": "42 * * * *"
     },
     {
       "path": "/api/cron/archived-campaigns",
