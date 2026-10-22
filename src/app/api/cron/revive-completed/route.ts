@@ -83,17 +83,28 @@ function getRedis(): Redis | null {
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-/** GET with a short retry on 429 / 5xx; null when Bison never answered OK. */
+// Bison allows 3,000 calls a minute per instance, shared with every other job
+// and tool — B2B #1 ran out on 2026-10-22 and the first live dry run lost its
+// whole campaign list after 12s of retries. Wait out the window instead.
+const RATE_WAIT_MS = 65_000;
+
+/** GET that waits out 429 / 5xx (honoring Retry-After, ≤65s in total); null
+ *  when Bison never answered OK. */
 async function bisonGet(instance: BisonInstanceSlug, path: string): Promise<Response | null> {
-  for (let attempt = 0; attempt < 3; attempt++) {
+  let waited = 0;
+  for (let attempt = 0; ; attempt++) {
+    let wait = Math.min(15_000, 2_000 * 2 ** attempt);
     try {
       const res = await bisonFetch(instance, path);
       if (res.ok) return res;
       if (res.status !== 429 && res.status < 500) return null;
+      const ra = parseInt(res.headers.get("retry-after") || "", 10);
+      if (Number.isFinite(ra) && ra > 0) wait = ra * 1000;
     } catch { /* network — retry */ }
-    await sleep(2_000 * (attempt + 1));
+    if (waited + wait > RATE_WAIT_MS) return null;
+    await sleep(wait);
+    waited += wait;
   }
-  return null;
 }
 
 /** Every campaign on the instance, live — the mirror is up to 6 hours old. */
@@ -203,8 +214,10 @@ export async function GET(request: Request) {
         }
         // Woken within the last day and Bison finished it again without a
         // single email going out — another wake would only repeat that.
+        // More leads due than at that wake means new leads were added (the
+        // continuous list pull into Main, Spencer 2026-10-23) — wake again.
         const prev = woken[key];
-        if (prev && Date.now() - Date.parse(prev.at) < RETRY_WAKE_MS && c.emailsSent <= prev.emailsSent) {
+        if (prev && Date.now() - Date.parse(prev.at) < RETRY_WAKE_MS && c.emailsSent <= prev.emailsSent && due <= prev.due) {
           wontSend.push({ ...c, due, wokenAt: prev.at });
           results.push({ ...row, action: "wont-send", detail: `${due} leads due, but completed again after the wake at ${prev.at} without sending`, leadsDue: due });
           continue;
