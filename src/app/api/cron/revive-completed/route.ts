@@ -85,12 +85,14 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 // Bison allows 3,000 calls a minute per instance, shared with every other job
 // and tool — B2B #1 ran out on 2026-10-22 and the first live dry run lost its
-// whole campaign list after 12s of retries. Wait out the window instead.
+// whole campaign list after 12s of retries. Wait out the window instead, but
+// never past the run's deadline: waiting page after page on a busy B2B #1 ran
+// the whole job into Vercel's 300s kill (504, nothing written).
 const RATE_WAIT_MS = 65_000;
 
-/** GET that waits out 429 / 5xx (honoring Retry-After, ≤65s in total); null
- *  when Bison never answered OK. */
-async function bisonGet(instance: BisonInstanceSlug, path: string): Promise<Response | null> {
+/** GET that waits out 429 / 5xx (honoring Retry-After, ≤65s in total, never
+ *  past `deadline`); null when Bison never answered OK. */
+async function bisonGet(instance: BisonInstanceSlug, path: string, deadline: number): Promise<Response | null> {
   let waited = 0;
   for (let attempt = 0; ; attempt++) {
     let wait = Math.min(15_000, 2_000 * 2 ** attempt);
@@ -101,17 +103,17 @@ async function bisonGet(instance: BisonInstanceSlug, path: string): Promise<Resp
       const ra = parseInt(res.headers.get("retry-after") || "", 10);
       if (Number.isFinite(ra) && ra > 0) wait = ra * 1000;
     } catch { /* network — retry */ }
-    if (waited + wait > RATE_WAIT_MS) return null;
+    if (waited + wait > RATE_WAIT_MS || Date.now() + wait > deadline) return null;
     await sleep(wait);
     waited += wait;
   }
 }
 
 /** Every campaign on the instance, live — the mirror is up to 6 hours old. */
-async function listCampaigns(instance: BisonInstanceSlug): Promise<LiveCampaign[] | null> {
+async function listCampaigns(instance: BisonInstanceSlug, deadline: number): Promise<LiveCampaign[] | null> {
   const all: LiveCampaign[] = [];
   for (let page = 1, last = 1; page <= last; page++) {
-    const res = await bisonGet(instance, `/campaigns?page=${page}&per_page=100`);
+    const res = await bisonGet(instance, `/campaigns?page=${page}&per_page=100`, deadline);
     if (!res) return null;
     const json = (await res.json().catch(() => null)) as { data?: LiveCampaign[]; meta?: { last_page?: number } } | null;
     if (!json) return null;
@@ -121,16 +123,16 @@ async function listCampaigns(instance: BisonInstanceSlug): Promise<LiveCampaign[
   return all;
 }
 
-async function liveStatus(instance: BisonInstanceSlug, id: number): Promise<string> {
-  const res = await bisonGet(instance, `/campaigns/${id}`);
+async function liveStatus(instance: BisonInstanceSlug, id: number, deadline: number): Promise<string> {
+  const res = await bisonGet(instance, `/campaigns/${id}`, deadline);
   const json = res ? ((await res.json().catch(() => null)) as { data?: { status?: string } } | null) : null;
   return String(json?.data?.status || "").toLowerCase();
 }
 
 /** Leads Bison still has an email queued for — mid-sequence or not started
  *  yet, which is where newly added leads land. Stopped leads are not counted. */
-async function dueLeads(instance: BisonInstanceSlug, id: number): Promise<number | null> {
-  const res = await bisonGet(instance, `/campaigns/${id}/leads?per_page=1&filters%5Blead_campaign_status%5D=in_sequence`);
+async function dueLeads(instance: BisonInstanceSlug, id: number, deadline: number): Promise<number | null> {
+  const res = await bisonGet(instance, `/campaigns/${id}/leads?per_page=1&filters%5Blead_campaign_status%5D=in_sequence`, deadline);
   if (!res) return null;
   const json = (await res.json().catch(() => null)) as { meta?: { total?: number } } | null;
   return typeof json?.meta?.total === "number" ? json.meta.total : null;
@@ -138,6 +140,7 @@ async function dueLeads(instance: BisonInstanceSlug, id: number): Promise<number
 
 export async function GET(request: Request) {
   const startedAt = Date.now();
+  const deadline = startedAt + BUDGET_MS;
   try {
     const params = new URL(request.url).searchParams;
     const dryRun = params.get("dry") === "1";
@@ -158,8 +161,11 @@ export async function GET(request: Request) {
 
     const candidates: Candidate[] = [];
     const listFailed: BisonInstanceSlug[] = [];
-    for (const instance of ALL_INSTANCE_SLUGS) {
-      const list = await listCampaigns(instance);
+    // Instances have separate rate limits, so list them side by side.
+    const lists = await Promise.all(ALL_INSTANCE_SLUGS.map((i) => listCampaigns(i, deadline)));
+    for (let n = 0; n < ALL_INSTANCE_SLUGS.length; n++) {
+      const instance = ALL_INSTANCE_SLUGS[n];
+      const list = lists[n];
       if (!list) { listFailed.push(instance); continue; }
       for (const c of list) {
         const name = c.name || "";
@@ -188,8 +194,14 @@ export async function GET(request: Request) {
     let revived = 0;
     let budgetHit = false;
 
-    for (const c of candidates) {
-      if (Date.now() - startedAt > BUDGET_MS) { budgetHit = true; break; }
+    // Take turns between instances, so a busy one (B2B #1 has ~1,400
+    // campaigns) cannot use up the budget before the others are looked at.
+    const perInstance = ALL_INSTANCE_SLUGS.map((i) => candidates.filter((c) => c.instance === i));
+    const queue: Candidate[] = [];
+    for (let n = 0; queue.length < candidates.length; n++) for (const list of perInstance) if (list[n]) queue.push(list[n]);
+
+    for (const c of queue) {
+      if (Date.now() > deadline) { budgetHit = true; break; }
       const key = `${c.instance}:${c.id}`;
       const row = { instance: c.instance, id: c.id, name: c.name, tag: c.tag };
 
@@ -200,7 +212,7 @@ export async function GET(request: Request) {
       }
 
       const ours = c.status === "paused";
-      const due = ours ? null : await dueLeads(c.instance, c.id);
+      const due = ours ? null : await dueLeads(c.instance, c.id, deadline);
       if (!ours) {
         if (due === null) {
           uncounted.add(c.instance);
@@ -257,11 +269,11 @@ export async function GET(request: Request) {
       // Wait for the queue to settle before calling it a failure.
       let afterStatus = "";
       if (r.ok) {
-        const deadline = Date.now() + RESUME_VERIFY_MS;
+        const verifyBy = Date.now() + RESUME_VERIFY_MS;
         for (;;) {
-          afterStatus = await liveStatus(c.instance, c.id);
+          afterStatus = await liveStatus(c.instance, c.id, Math.min(verifyBy, deadline + 30_000));
           if (afterStatus === "active" || !IN_PROGRESS.has(afterStatus)) break;
-          if (Date.now() >= deadline) break;
+          if (Date.now() >= verifyBy) break;
           await sleep(RESUME_POLL_MS);
         }
       }
