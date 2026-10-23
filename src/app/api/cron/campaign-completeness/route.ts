@@ -5,9 +5,9 @@ import { fetchCampaignSenderEmails, mapConcurrent } from "@/lib/attach-campaigns
 import { Redis } from "@upstash/redis";
 import { getHandledDomains, logEvents } from "@/lib/replacement/store";
 import { hasBurntTag } from "@/lib/replacement/burnt-tag";
-import { ALL_INSTANCE_SLUGS, type BisonInstanceSlug } from "@/lib/bison-instances";
+import { ALL_INSTANCE_SLUGS, BISON_INSTANCES, type BisonInstanceSlug } from "@/lib/bison-instances";
 import { getOffboardedClientTags, isOffboardedTagName } from "@/lib/offboarded-tags";
-import { deriveStage, deriveSetRole } from "@/lib/campaigns/stage";
+import { deriveStage, deriveSetRole, setRoleLabel } from "@/lib/campaigns/stage";
 import { recordPipelineAlert, resolveAlertsForStep } from "@/lib/pipeline-alerts";
 
 export const maxDuration = 300;
@@ -80,19 +80,27 @@ async function liveCampaignsForTag(instance: BisonInstanceSlug, tag: string): Pr
   return out;
 }
 
-/** Stages that are missing one of the three send roles. */
+/** Stages that are missing one of the three send roles. A campaign in any
+ *  status counts as built: completed ones are reported by revive-completed
+ *  and archived ones by archived-campaigns, so counting them as missing here
+ *  only repeated those as "Main is missing segs" — 33 of 35 such alerts on
+ *  2026-10-23 (Spencer: "if we don't have to do anything, it's unnecessary").
+ *  A stage whose campaigns are all archived is retired, not half-built. */
 function incompleteStages(campaigns: LiveCampaign[]): { stage: string; have: string[]; missing: string[] }[] {
   const ROLES = ["google_custom", "outlook", "segs"] as const;
   const byStage = new Map<string, Set<string>>();
+  const liveStages = new Set<string>();
   for (const c of campaigns) {
     const role = deriveSetRole(c.name);
     if (!role) continue;
     const stage = deriveStage(c.name);
     if (!byStage.has(stage)) byStage.set(stage, new Set());
     byStage.get(stage)!.add(role);
+    if (c.status !== "archived") liveStages.add(stage);
   }
   const out: { stage: string; have: string[]; missing: string[] }[] = [];
   for (const [stage, roles] of byStage) {
+    if (!liveStages.has(stage)) continue;
     const missing = ROLES.filter((r) => !roles.has(r));
     // Zero roles present means the stage does not exist for this client at all
     // — not our business. One or two means a set was left half-built.
@@ -190,7 +198,7 @@ export async function GET(request: Request) {
 
       // Half-built set (Spencer's ask) — reported whether or not anything is
       // missing sender-wise, and cleared automatically once complete.
-      const gaps = incompleteStages(liveAll.filter((c) => !["archived", "completed"].includes(c.status)));
+      const gaps = incompleteStages(liveAll);
       if (!dryRun) {
         // One alert per instance. A client-wide resolve let a complete set on
         // one instance clear the gap on another every pass, so SINY's
@@ -200,7 +208,7 @@ export async function GET(request: Request) {
         if (gaps.length > 0) {
           await recordPipelineAlert({
             source: SET_ALERT_SOURCE, clientTag: tag, step: setStep, silent: true,
-            reason: `${tag} on ${instance}: ${gaps.map((g) => `${g.stage} is missing ${g.missing.join(" + ")}`).join("; ")}. Rechecked every pass.`,
+            reason: `${tag} on ${BISON_INSTANCES[instance].label}: ${gaps.map((g) => `${g.stage} has no ${g.missing.map(setRoleLabel).join(" or ")} campaign`).join("; ")}. Build it in Bison, or dismiss if that's on purpose.`,
             domains: [],
           }).catch(() => undefined);
         } else {

@@ -56,6 +56,8 @@ const normDomains = (domains?: string[]) =>
  * existing row instead of stacking duplicates. Slack fires on a NEW alert or when
  * the reason changes — a persistent-but-unchanged failure won't spam daily.
  */
+const DISMISS_HOLD_MS = 2 * 86_400_000;
+
 export async function recordPipelineAlert(input: AlertInput): Promise<void> {
   const supabase = getSupabaseAdmin();
   const clientTag = input.clientTag ?? null;
@@ -71,6 +73,26 @@ export async function recordPipelineAlert(input: AlertInput): Promise<void> {
   q = clientTag === null ? q.is("client_tag", null) : q.eq("client_tag", clientTag);
   const { data: rows } = await q.limit(1);
   const existing = (rows?.[0] as { id: string; reason: string } | undefined) ?? null;
+
+  // A dashboard-only alert that someone dismissed stays dismissed while the
+  // same issue keeps being seen — before, the next check (every 30 min for
+  // campaign sets) simply opened a fresh row. It shows again if the issue
+  // changes, or goes away for DISMISS_HOLD_MS and comes back.
+  if (!existing && input.silent) {
+    let dq = supabase
+      .from("pipeline_alerts")
+      .select("id, reason, status, updated_at, resolved_at")
+      .eq("source", input.source)
+      .eq("step", input.step);
+    dq = clientTag === null ? dq.is("client_tag", null) : dq.eq("client_tag", clientTag);
+    const { data: last } = await dq.order("created_at", { ascending: false }).limit(1);
+    const prev = last?.[0] as { id: string; reason: string; status: string; updated_at: string | null; resolved_at: string | null } | undefined;
+    const seenAt = Math.max(Date.parse(prev?.updated_at ?? "") || 0, Date.parse(prev?.resolved_at ?? "") || 0);
+    if (prev?.status === "dismissed" && prev.reason === input.reason && Date.now() - seenAt < DISMISS_HOLD_MS) {
+      await supabase.from("pipeline_alerts").update({ updated_at: now }).eq("id", prev.id);
+      return;
+    }
+  }
 
   let isNew = false;
   let reasonChanged = false;

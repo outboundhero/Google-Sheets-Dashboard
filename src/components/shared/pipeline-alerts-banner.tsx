@@ -41,6 +41,10 @@ const NO_RETRY_SOURCES = new Set(["stuck-campaign", "orphan-attach", "campaign-s
 // campaigns is something a human builds in Bison, so offering Retry only
 // produced "retry not supported for this alert" (Spencer, 5:20 AM).
 const HEADS_UP_SOURCES = new Set(["orphan-attach", "campaign-set", "whitelist-setup"]);
+// Recorded but not shown: young tagged domains waiting out warm-up before
+// they join campaigns. Nobody has to do anything, so the row was only noise
+// (Spencer 2026-10-23).
+const HIDDEN_SOURCES = new Set(["orphan-attach"]);
 
 const fetcher = async (url: string): Promise<PipelineAlert[]> => {
   const res = await fetch(url);
@@ -72,7 +76,9 @@ export function PipelineAlertsBanner() {
   const [completedOpen, setCompletedOpen] = useState(false);
 
   // Blocked (viewer) or errored fetch → show nothing rather than a broken box.
-  if (error || !Array.isArray(data) || data.length === 0) return null;
+  if (error || !Array.isArray(data)) return null;
+  const alerts = data.filter((a) => !HIDDEN_SOURCES.has(a.source));
+  if (alerts.length === 0) return null;
 
   const retry = async (id: string) => {
     setBusy((b) => ({ ...b, [id]: "retry" }));
@@ -114,11 +120,11 @@ export function PipelineAlertsBanner() {
     }
   };
 
-  const stuck = data.filter((a) => a.source === "stuck-campaign");
-  const archived = data.filter((a) => a.source === "campaign-archived");
-  const completed = data.filter((a) => a.source === "campaign-completed");
-  const headsUp = data.filter((a) => HEADS_UP_SOURCES.has(a.source));
-  const others = data.filter(
+  const stuck = alerts.filter((a) => a.source === "stuck-campaign");
+  const archived = alerts.filter((a) => a.source === "campaign-archived");
+  const completed = alerts.filter((a) => a.source === "campaign-completed");
+  const headsUp = alerts.filter((a) => HEADS_UP_SOURCES.has(a.source));
+  const others = alerts.filter(
     (a) => a.source !== "stuck-campaign" && a.source !== "campaign-archived" && a.source !== "campaign-completed" && !HEADS_UP_SOURCES.has(a.source),
   );
   const headline = [
@@ -126,7 +132,7 @@ export function PipelineAlertsBanner() {
     archived.length > 0 ? `${archived.length} active client${archived.length === 1 ? " has" : "s have"} archived campaigns` : null,
     completed.length > 0 ? `${completed.length} active client${completed.length === 1 ? " has" : "s have"} completed campaigns` : null,
     stuck.length > 0 ? `${stuck.length} campaign${stuck.length === 1 ? "" : "s"} stuck in Processing` : null,
-    headsUp.length > 0 ? `${headsUp.length} heads-up` : null,
+    headsUp.length > 0 ? `${headsUp.length} to do` : null,
   ].filter(Boolean).join(" · ");
 
   return (
@@ -225,9 +231,9 @@ export function PipelineAlertsBanner() {
         <div className="border-b border-destructive/10">
           <button onClick={() => setHeadsUpOpen((v) => !v)} className="w-full flex items-center gap-2 px-4 py-2.5 text-left">
             {headsUpOpen ? <ChevronDown className="h-4 w-4 shrink-0 text-amber-500" /> : <ChevronRight className="h-4 w-4 shrink-0 text-amber-500" />}
-            <span className="text-sm font-medium">Needs a look, nothing failed — {headsUp.length} client{headsUp.length === 1 ? "" : "s"}</span>
+            <span className="text-sm font-medium">To do — {headsUp.length}</span>
             <span className="text-[11px] text-muted-foreground">
-              heads-up, not a failure — these clear themselves once the campaign is built or the domains finish warming; dashboard only
+              not failures — each one needs someone to do the step shown and clears itself once done; dismiss if it is on purpose
             </span>
             <span className="ml-auto text-[11px] text-muted-foreground">{headsUpOpen ? "collapse" : "expand"}</span>
           </button>
