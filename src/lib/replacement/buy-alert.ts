@@ -1,10 +1,11 @@
-// Weekly "buy this many domains per instance" Slack digest (Spencer/Nick,
-// 2026-08-05). Purchasing stays MANUAL — this only tells Nick how many domains
+// Daily "buy this many domains per instance" Slack digest (Spencer/Nick,
+// 2026-08-05; daily since Spencer 2026-10-23, it was Mondays only). Purchasing stays MANUAL — this only tells Nick how many domains
 // (and inboxes) to order per instance so nobody has to open the dashboard.
 // Mirrors the tier-aware numbers on the /replacement "Domains short" card exactly
 // (live caps 20/40 B2B · 5/10 B2C from Client Tracker col K). READ-ONLY: buys
-// nothing. Fires weekly by cron; ?dry returns the numbers WITHOUT posting to
-// Slack, ?force posts even when nothing is short.
+// nothing. Fires daily by cron and posts every run, "nothing to buy" included,
+// so a missing day means the job broke; ?dry returns the numbers WITHOUT
+// posting to Slack.
 import { buildReplacementPlan } from "./plan";
 import { getThresholdConfig } from "./threshold-groups-store";
 import { getActiveCampaignKeys } from "./campaigns";
@@ -86,7 +87,7 @@ function channelId(): string | undefined {
     || "C0B84LMSVMH";
 }
 
-export async function runBuyAlert(opts: { force?: boolean; dryRun?: boolean } = {}): Promise<BuyAlertResult> {
+export async function runBuyAlert(opts: { dryRun?: boolean } = {}): Promise<BuyAlertResult> {
   const cfg = await getThresholdConfig();
   const useGroups = cfg.enabled;
   const [plan, tiers, activeKeys, waitingKeys] = await Promise.all([
@@ -273,13 +274,11 @@ export async function runBuyAlert(opts: { force?: boolean; dryRun?: boolean } = 
   const base = { checkedAt, detector, tierSource, totalDomains, totalInboxes, byInstance };
 
   if (opts.dryRun) return { ...base, alerted: false, slackReason: "dry run" };
-  // Burn cover can call for a buy while every client is still at cap.
-  if (totalDomains === 0 && totalBuyWithBuffer === 0 && !opts.force) return { ...base, alerted: false };
 
   const mentions = mentionPrefix();
-  const lines: string[] = [`*🛒 Weekly domain buy list — LeadSync*${mentions ? ` ${mentions}` : ""}`];
+  const lines: string[] = [`*🛒 Daily domain buy list — LeadSync*${mentions ? ` ${mentions}` : ""}`];
   if (totalBuyWithBuffer === 0) {
-    lines.push("✅ What we hold and have on order covers every client — nothing to buy this week.");
+    lines.push("✅ What we hold and have on order covers every client — nothing to buy today.");
   } else {
     // Nick 2026-09-16: "just tell us how much to buy per instance" — one number
     // per workspace, no jargon. The headline is the buffered figure because

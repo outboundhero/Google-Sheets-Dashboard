@@ -106,7 +106,7 @@
     },
     {
       "path": "/api/cron/buy-alert",
-      "schedule": "0 16 * * 1"
+      "schedule": "0 16 * * *"
     },
     {
       "path": "/api/cron/attach-queue",
