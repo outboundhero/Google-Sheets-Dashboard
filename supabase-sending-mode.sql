@@ -131,3 +131,8 @@ alter table sending_mode_settings
   add column if not exists mrl_pace_days     int     not null default 14,
   add column if not exists blend_prior_qls   numeric not null default 4,
   add column if not exists blend_prior_leads numeric not null default 10;
+
+-- Performance v2, point 8 (2026-10-21): how far a client's lead marking has
+-- got — delivery date of the newest lead with a Status (Awaiting Client
+-- Reporting shows it). Run in prod 2026-10-21.
+alter table client_sending_status add column if not exists last_status_at date;

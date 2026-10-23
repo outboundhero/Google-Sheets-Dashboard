@@ -53,6 +53,7 @@ src/
       deliverability/inbox-orders/page.tsx → /deliverability/inbox-orders
       campaigns/page.tsx                → /campaigns
       domains/page.tsx                  → /domains   (admin-only domain buyer)
+      performance/page.tsx              → /performance  (QL forecast, Turbo, auto-throttle — see "Performance tab")
       settings/page.tsx                 → /settings
     login/page.tsx                      → /login
     api/                  see "API routes"
@@ -72,6 +73,7 @@ src/
     sync-leads.ts         chunked Google Sheets lead sync
     cron/sync-deliverability.ts shared per-instance Bison crawl + prune (used by 4 deliverability crons)
     cron/sync-campaigns.ts      shared per-instance campaign sync
+    sending-mode/         Performance tab engine: QL forecast, statuses, Turbo + throttle windows (see "Performance tab")
     client-tag-allocations.ts   client tag → instance mapping cron + reads
     analytics.ts          computeAnalytics()
     constants.ts          column maps, status colors, status enum
@@ -100,6 +102,7 @@ Repo-root SQL files (`supabase-*.sql`) are **stale** in places — they predate 
 - **Campaigns**: list/create/get/update/[id]/status, failed
 - **Domain buyer**: `POST /api/domains/generate` (OpenAI), `POST /api/domains/check` (Porkbun → `porkbun_domains`), `GET /api/domains/list`, `POST /api/domains/register-one`, `POST /api/domains/append-to-sheet`, `POST /api/domains/delete`
 - **Inbox orders**: `GET /api/inbox-orders`, `POST /api/inbox-orders/...` (per provider)
+- **Performance**: `GET /api/performance`, `POST /api/performance/turbo` `{clientTag, action: preview|activate|cancel}`, `POST /api/performance/throttle` `{clientTag, action: pause|resume|release}`, `GET /api/performance/throttle-preview`, `POST /api/performance/auto-throttle` `{enabled}`, `GET /api/performance/windows?csv=1`
 - **Reconnect log**: `GET /api/reconnect-log` (tag restore events surfaced in Settings)
 - **Webhooks**: `POST /api/webhooks/bison-reconnect` (Bison → restores tags; URL itself is the secret)
 - **External (token-auth)**: `GET/POST /api/external/tracked-sheets` — exempt from session middleware; uses `Authorization: Bearer ${EXTERNAL_API_TOKEN}` (fallback `outboundhero2024`)
@@ -109,12 +112,15 @@ Repo-root SQL files (`supabase-*.sql`) are **stale** in places — they predate 
 
 | Path | Schedule | Notes |
 |---|---|---|
-| `/api/cron/sync` | `0 0 */2 * *` | Google Sheets lead chunks + tracked-sheets mirror |
+| `/api/cron/sync` | `0 * * * *` | **Hourly** — Google Sheets lead chunks + tracked-sheets mirror |
+| `/api/cron/sending-mode` | `10 * * * *` | Performance tab: re-evaluates every client, finishes/reverts Turbo + throttle windows; the throttle pass runs only on the 17:00 UTC run |
 | `/api/cron/redirect-check` | `0 * * * *` | **Hourly** — oldest-checked first, cycles ~4k domains/day |
 | `/api/cron/inbox-orders-poll` | `0 */6 * * *` | Polls provider status |
 | `/api/cron/client-tag-allocations` | `0 8 * * *` | Mirrors client → instance mapping from sheet |
 | `/api/cron/campaigns-{slug}` ×4 | daily, staggered 15m | One per instance |
 | `/api/cron/deliverability-{slug}` ×4 | every 2 days, staggered 30m | Cursor-based per-instance inbox + domain crawl; prunes stale rows on each clean full pass |
+
+This table lists the main jobs only — [vercel.json](vercel.json) has the full list (replacement, true-up, limit-policy, buy-alert, revive-completed, …).
 
 ## Auth & roles
 
@@ -150,6 +156,60 @@ The cron crawls only added/updated rows — until recently it never deleted, so 
 - Rate-limited (429) passes never count as complete and never prune.
 
 The manual **Sync Inboxes** button does the same end-to-end via `POST /api/deliverability/prune` (with a 45% cap), but only when run as a clean full crawl from page 1 (a resumed sync skips the prune). `GET /api/deliverability/data-audit` shows real (Bison) vs stored (Supabase) inbox counts per instance — quick sanity check for stale buildup.
+
+## Performance tab — QL forecast, Turbo, auto-throttle (`/performance`)
+
+Per-client view of how each client is doing against its QL guarantee this billing month, plus **Turbo** (manual: send more for 15 days) and **auto-throttle** (automatic: send less when a client is well ahead). Built from Nick's "Performance & Turbo Mode" spec (2026-09-23, v1 live Oct 9), then reworked to Nick + Spencer's **v2 list** (Slack, 2026-10-14, 14 points; answers 2026-10-16) — progress table below.
+
+**Where things live**
+- [src/lib/sending-mode/](src/lib/sending-mode/): `ql-pace.ts` (the forecast + status rules — start here), `status.ts` (`evaluateAllClients` → `client_sending_status`, `decideThrottles`, `runThrottlePass`), `windows.ts` (Turbo/throttle windows: snapshot every account's limits → apply → verify → revert), `config.ts` (tunables: `sending_mode_settings` row `id = 1`, code defaults when a column is missing), `capacity.ts`, `throttle-preview.ts`, `turbo-preview.ts`, `bison.ts`.
+- Page [performance/page.tsx](src/app/(dashboard)/performance/page.tsx), hook `src/lib/hooks/use-performance.ts`, routes under `src/app/api/performance/`.
+- Cron `/api/cron/sending-mode` (hourly at :10). `?dry=1` changes nothing; `?throttle=1` forces the throttle pass. The page reads the rows this cron writes, so new numbers appear up to an hour after a deploy.
+- Tables: `sending_mode_settings`, `sending_windows`, `sending_window_accounts`, `client_sending_prefs`, `client_sending_status`. Everything in [supabase-sending-mode.sql](supabase-sending-mode.sql) **has been run in prod** (incl. the v2 columns and `last_status_at`).
+
+**The numbers** ([ql-pace.ts](src/lib/sending-mode/ql-pace.ts))
+- **MRL** = Meeting-Ready lead (lead sheet "Current Lead Category"). A client whose sheet never fills the category counts every lead. "Lead Not Received" still counts as delivered.
+- **Reviewed** = Quality Lead / Not a Quality Lead / Duplicate (any "duplicat…"/"redundant" wording). **Pending** = blank or Undetermined. Lead Not Received is neither.
+- **Actual rate** = QLs ÷ reviewed, over MRLs delivered in the last 30 days (dated by delivery date — the sheets don't record when a status was filled).
+- **Blended rate** = (QLs + 4) ÷ (reviewed + 10). Drives the forecast and the throttle; the actual rate is shown beside it. Nick's draft said +8 (80%); the fleet's real rate is ~45%, and Nick answered "Yes" to starting at 4 of 10 (read from the reply, not restated — worth a one-line confirm). Tunable: `blend_prior_qls` / `blend_prior_leads`.
+- **MRL pace** = MRLs a day over the last 14 days.
+- **Forecast** = confirmed QLs + blended × pending MRLs this period + blended × MRL pace × days left.
+- **Guarantee / operational target**: Tier 0.5 = 5 / 8, Tier 1 = 10 / 16, Tier 2 = 20 / 31 (`operationalTarget()`; tier from Client Tracker col K via `TARGETS` in `client-reports.ts`; PPQL/PPQM skipped). Billing period = monthly anniversary of the tracker Start Date (fallback Go Live).
+
+**Statuses**, first match wins: `sync_error` (lead sheet not synced for 2+ days) → `overperforming` (throttle-ready, below) → `new_client` (days 1–19 from Start Date, first month only) → `no_mrls` / `new_period` (no MRLs this period; first 7 days = new_period) → `new_period` (first 7 days, < 3 MRLs) → `awaiting_reporting` (over half this period's MRLs still blank at the last Friday 5 PM PST cut-off, or 20+ MRLs never marked; shows how far marking has got) → `insufficient_data` (< 3 MRLs) → `critical` (forecast ≤ half the guarantee, or under it with ≤ 15 days left) → `at_risk` (under the guarantee) → `below_target` (under the target) → `on_track`. There is no per-month grace any more.
+
+**Auto-throttle** — switch `sending_mode_settings.auto_throttle_enabled`, button on the page's Overperforming view (admins). **ON since 2026-10-12** (Nick). Off = releases still run, nobody new is throttled.
+- Throttles a client when `overperforming`: forecast ≥ 150% of the guarantee (7.5 / 15 / 30), ≥ 10 reviewed MRLs in 30 days, ≥ 3 confirmed QLs this period, ≥ 7 days into the period, statuses being filled, and the forecast **still reaches the target once throttled** (re-checked with real send capacity from the inbox mirror, `capacity.ts`).
+- Throttle = 3 sends/day (only ever lowers) + warm-up 8 (only ever raises). **Never pauses campaigns.**
+- Released when the forecast drops under the target, a new billing period starts, the client is leaving / churned / paused / inactive, or auto-throttle is paused for that client.
+- Revert puts back each account's recorded limits, verifies by re-reading Bison, retries up to 3× → `revert_failed` + pipeline alert. Throttles opened before 2026-10-21 never touched warm-up (`applied_limits.warmup` null) and only restore sending limits.
+- The `limit-policy` cron skips clients with an open window so it doesn't undo them overnight.
+
+**Turbo** — manual button with a preview first: 8 sends/day (only raises) + warm-up 5 (only lowers) for 15 days, then everything goes back automatically. A Turbo releases an open throttle first; the two never overlap.
+
+**Gotchas**
+- Slack for this feature is **muted** until `SENDING_MODE_SLACK_ENABLED=true`; window log rows and `pipeline_alerts` are always written.
+- Pace (QLs by the Friday cut-off against a straight line) is still computed but only logged on windows — it no longer drives anything.
+- Clients without a tier or a past Start Date/Go Live are left off the tab (point 7 below wants every client visible).
+- Locally the Google Sheets key is stale, so `evaluateAllClients()` can't read the Client Tracker. To check rule changes on real data, run `evaluateQlPace()` over stored leads + the stored `client_sending_status` rows (read-only), or use `?dry=1` on prod.
+
+**v2 progress** (Nick + Spencer, 2026-10-14). Points 1–11 are this tab. Point 12 (onboarding / task tracker — their #1 priority) and point 13 (project board — the separate "outreachify pms task bot" app) are **not in this repo**. Point 14 asks for an implementation breakdown.
+
+| # | Ask | State |
+|---|---|---|
+| 1 | QL rate, blended rate, forecast, MRLs needed | ✅ live (f9c9c7f) |
+| 2 | Guarantee vs operational target, Below Target | ✅ live (f9c9c7f) |
+| 3 | Auto-throttle on the forecast: 150%, 3 sending + 8 warm-up, data minimums | ✅ live (0d75159) |
+| 4 | MRL-based fallback throttle for clients not marking leads: upper MRL threshold × 1.4, rounded up to even, actual MRLs only; "reporting unreliable" rules; back to QL forecast once reliable | ⬜ next. Open: which "upper MRL threshold" — closest existing is the tier MRL targets 15 / 20 / 40 (`TARGETS`); Nick's 40 → 56 example matches Tier 2 |
+| 5 | Turbo recommendations for clients forecast to miss the guarantee; continue across periods; usage tracking (extra MRLs, vs previous pace); low QL rate → Manual Review instead | ⬜ (manual Turbo itself is live) |
+| 6 | New Client days 1–19 from Start Date; grace only in the first month | ✅ live (5430cd6) |
+| 7 | Start Date, Go-Live, period start/end, days left for every client | ⬜ (period + days left already shown) |
+| 8 | A reason instead of "No status data" | ✅ live (d3aa531) |
+| 9 | Clickable summary cards, Action Required (assign / acknowledge / resolve / snooze, owner, days open), days since last MRL, shortfall, forecast confidence, search + filters, history + trends, sync health, notes, show the calculation everywhere | ⬜ biggest chunk |
+| 10 | Alerts only on meaningful change, auto-resolve with history: Critical, throttle on, Turbo recommended / expiring, MRL or QL-rate drops, missed reporting, shortfall with 7 days left, sync errors, new client reaching day 20 | ⬜ |
+| 11 | Overperforming rows show Throttle, not Turbo; keep the low-uncontacted-leads warning (in `turbo-preview.ts`); faster page load; auto-Turbo later | ⬜ |
+
+Calls we made ourselves (Nick can change any): Lead Not Received counts as delivered but not in the rate; the throttle's "still reaches target" check uses the operational target; data minimums 10 / 3 / 7; New Billing Period = first 7 days; an overperforming new client shows Overperforming (so it can be throttled).
 
 ## Conventions and gotchas
 
